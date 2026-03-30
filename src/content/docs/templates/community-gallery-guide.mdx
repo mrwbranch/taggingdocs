@@ -1,6 +1,175 @@
 ---
-title: "Community Gallery Guide"
-description: "Navigating, evaluating, and using the Community Template Gallery."
+title: "Community Template Gallery Guide"
+description: "How to find, evaluate, install, and maintain templates from the GTM Community Template Gallery — including which templates are actually worth using, how to audit permissions, and how updates work."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The Community Template Gallery is GTM's marketplace for pre-built tags, variables, and clients. It contains hundreds of templates from analytics vendors, advertising platforms, development tools, and the broader GTM practitioner community.
+
+The Gallery saves significant time. A LinkedIn Insight Tag template replaces hours of custom HTML debugging. But it also introduces third-party code into your production site with real security implications. Knowing how to evaluate a template before deploying it is as important as knowing how to find one.
+
+## Finding templates
+
+Access the Gallery via:
+- **Tags → New → Discover more tag types in the Community Template Gallery**
+- **Templates → Tag Templates → Search Gallery**
+
+Search by:
+- Vendor name ("Facebook", "TikTok", "LinkedIn")
+- Category ("Analytics", "Advertising", "Consent", "Utilities")
+- Keyword ("cookie", "core web vitals", "hashing")
+
+The Gallery shows templates with:
+- Author name (often the vendor themselves)
+- Star rating and usage count
+- Last update date
+- Brief description
+
+## Evaluating a template before installing
+
+Never install a template without reviewing it. Here is the evaluation checklist:
+
+<Steps>
+1. **Check the last update date.** Templates not updated in 12+ months may be abandoned. Check whether the vendor still maintains it actively.
+
+2. **Click "More Info" to open the template details.** This shows the full description, documentation link, and often a GitHub link.
+
+3. **Click the GitHub link** (if present) and review: when was the last commit, are there open security issues, is the Apache 2.0 license present?
+
+4. **Click "Add to Workspace" to preview the template.** Before adding to your container, you can see the Fields, Code, and Permissions.
+
+5. **Go to the Permissions tab.** Review every permission. Ask: does each permission make sense for what this template claims to do?
+
+6. **Review the Code tab.** You don't need to understand every line, but scan for: Base64-encoded strings (suspicious), hex-encoded strings (suspicious), `eval()` calls (should not be possible but look anyway), network requests to domains not declared in permissions (also should not be possible).
+</Steps>
+
+<Aside type="caution">
+The Community Template Gallery applies a review process, but it is not a security certification. A template that passed review at the time of submission may have been subsequently updated with different code. Always review before deploying.
+</Aside>
+
+## Recommended templates
+
+These are genuinely useful, well-maintained templates worth knowing:
+
+### Analytics and measurement
+
+**Core Web Vitals** (by Simo Ahava / Google)
+- What it does: Measures LCP, INP, and CLS using the `web-vitals` library and sends to GA4
+- Why it's good: Maintained by the author of the web-vitals library integration, regularly updated
+- Permissions: `inject_script` for unpkg.com (CDN for web-vitals library), `sendPixel`
+
+**Value Hasher** (various authors)
+- What it does: SHA-256 hashes user data (email, phone) for Enhanced Conversions
+- Why it's good: Standardizes hashing across all Enhanced Conversion tags in your container
+- Permissions: `access_globals` for reading user data, `read_data_layer`
+
+### Advertising
+
+**Meta Pixel** (by Facebook/Meta)
+- What it does: Implements the Facebook Pixel with proper queue initialization
+- Official: Meta maintains this template
+- Permissions: `inject_script` for connect.facebook.net, `access_globals` for fbq
+
+**Google Consent Mode** (various CMPs)
+- Multiple templates: Cookiebot, OneTrust, Usercentrics, CookieYes
+- What they do: Set Consent Mode defaults and update when user makes a choice
+- Why use them: Maintained by CMP vendors who keep them in sync with API changes
+
+### Utilities
+
+**Cookie Writer** (by Simo Ahava)
+- What it does: Creates a custom HTML tag type for writing first-party cookies with full control over all cookie attributes
+- Why it's good: Much more flexible than GTM's native cookie handling
+- Permissions: `set_cookies` for declared cookie names
+
+**URL Parameter Extractor** (various)
+- What it does: Variable template that extracts URL parameters with fallback handling
+- Why use it: More reliable than DIY Custom JS for URL parameter reading
+
+**localStorage Variable** (by various)
+- What it does: Variable template that reads from localStorage
+- Permissions: `access_globals` for localStorage
+
+## How template updates work
+
+Gallery templates use a commit SHA mechanism. When you install a template:
+- GTM records the exact GitHub commit SHA of the version you installed
+- When the template author publishes a new commit, GTM detects the difference
+- GTM shows an "Update available" notification in your template list
+
+To update:
+1. Go to **Templates → Tag Templates**
+2. Templates with available updates show an "Update" indicator
+3. Click the template → "Check for Updates"
+4. Review the changes (what changed in the new version)
+5. Accept the update
+
+**Critical**: updating a Community Gallery template overwrites any customizations you made to the template. If you modified the template code or permissions, those changes are lost on update. This is by design — it maintains the integrity of the template chain from the original author.
+
+## When to modify a Gallery template vs. build custom
+
+<table>
+  <thead>
+    <tr>
+      <th>Scenario</th>
+      <th>Recommendation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Template does 90% of what you need, missing one small feature</td>
+      <td>Build a Custom HTML tag for the missing 10%; keep the Gallery template for the base functionality</td>
+    </tr>
+    <tr>
+      <td>Template permissions are too broad for your security requirements</td>
+      <td>Fork the template (add manually, modify permissions) — you own it going forward</td>
+    </tr>
+    <tr>
+      <td>Template is outdated but you need the vendor integration</td>
+      <td>Check if the vendor has a newer template; if not, build your own from the vendor's documentation</td>
+    </tr>
+    <tr>
+      <td>Template exists but you want full control and tests</td>
+      <td>Use the Gallery template as reference; build your own with your organization's standards</td>
+    </tr>
+  </tbody>
+</table>
+
+## Gallery vs. GitHub import
+
+You can import templates directly from a GitHub repository URL without going through the Gallery review process:
+
+**Templates → Tag Templates → New → Import from GitHub (or import .tpl file)**
+
+Use this when:
+- A template isn't in the Gallery yet but is available on GitHub
+- You have a private organization template that shouldn't be in the Gallery
+- You want to use a specific commit version rather than the latest published version
+
+Direct GitHub imports do not get the automatic "update available" notification that Gallery templates get. You must manually check for updates.
+
+## Submitting to the Gallery
+
+If you have built a template that would be useful to others, submit it. The Gallery needs:
+- A GitHub repository with your `.tpl` file, `metadata.yaml`, and Apache 2.0 `LICENSE`
+- Working tests that pass (required for submission)
+- Documentation explaining the fields and setup process
+- No hardcoded credentials or account-specific values
+
+See [Template Publishing](/templates/template-publishing/) for the complete submission walkthrough.
+
+## The most common Gallery mistake
+
+The most common mistake with Gallery templates: **deploying without reviewing permissions**. Security-minded practitioners never deploy a template without checking the Permissions tab. But time pressure and trust in the Gallery review process cause many teams to skip this step.
+
+The Gallery review is a minimum bar, not a certification. Real-world template abuses have passed review before being caught. Your permissions review is your own checkpoint before code runs on your production site.
+
+The check takes two minutes. Do it every time.
+
+---
+
+<CardGrid>
+  <LinkCard title="Template Permissions and Security" href="/templates/template-permissions-security/" description="What each permission type controls and how to evaluate whether a template's permissions are appropriate." />
+  <LinkCard title="Template Publishing" href="/templates/template-publishing/" description="How to submit your own templates to the Community Gallery." />
+</CardGrid>

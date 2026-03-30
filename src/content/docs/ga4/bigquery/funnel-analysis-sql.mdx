@@ -1,6 +1,262 @@
 ---
-title: "Funnel Analysis SQL"
-description: "Building conversion funnels with SQL in BigQuery."
+title: "Funnel Analysis in SQL"
+description: "Build conversion funnels in BigQuery — unsampled, flexible, and extensible beyond what GA4's built-in funnel exploration supports."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+BigQuery funnel analysis gives you unsampled data, unlimited funnel complexity, custom time windows, and the ability to join funnel data with external datasets. The GA4 Explore funnel is convenient for quick analysis, but for production reporting and large date ranges, SQL is the right tool.
+
+## Funnel logic fundamentals
+
+A funnel measures what percentage of users complete each step in a defined sequence. In SQL, you implement this by:
+
+1. For each user/session, check whether they completed each step
+2. Enforce the order (did step 2 happen after step 1?)
+3. Aggregate across all users/sessions to get completion counts
+
+## Simple session-level funnel
+
+The basic pattern checks event presence within a session:
+
+```sql
+-- E-commerce purchase funnel (session-level)
+WITH session_events AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    COUNTIF(event_name = 'view_item') AS viewed_item,
+    COUNTIF(event_name = 'add_to_cart') AS added_to_cart,
+    COUNTIF(event_name = 'begin_checkout') AS began_checkout,
+    COUNTIF(event_name = 'purchase') AS purchased
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name IN ('view_item', 'add_to_cart', 'begin_checkout', 'purchase')
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  GROUP BY user_pseudo_id, session_id
+)
+
+SELECT
+  COUNT(*) AS total_sessions,
+  COUNTIF(viewed_item > 0) AS step1_view_item,
+  COUNTIF(viewed_item > 0 AND added_to_cart > 0) AS step2_add_to_cart,
+  COUNTIF(viewed_item > 0 AND added_to_cart > 0 AND began_checkout > 0) AS step3_begin_checkout,
+  COUNTIF(viewed_item > 0 AND added_to_cart > 0 AND began_checkout > 0 AND purchased > 0) AS step4_purchase,
+
+  -- Drop-off rates
+  ROUND(COUNTIF(viewed_item > 0) / COUNT(*) * 100, 1) AS pct_to_step1,
+  ROUND(COUNTIF(viewed_item > 0 AND added_to_cart > 0) / NULLIF(COUNTIF(viewed_item > 0), 0) * 100, 1) AS pct_step1_to_step2,
+  ROUND(COUNTIF(viewed_item > 0 AND added_to_cart > 0 AND began_checkout > 0) / NULLIF(COUNTIF(viewed_item > 0 AND added_to_cart > 0), 0) * 100, 1) AS pct_step2_to_step3,
+  ROUND(COUNTIF(viewed_item > 0 AND added_to_cart > 0 AND began_checkout > 0 AND purchased > 0) / NULLIF(COUNTIF(viewed_item > 0 AND added_to_cart > 0 AND began_checkout > 0), 0) * 100, 1) AS pct_step3_to_step4
+
+FROM session_events
+```
+
+This is a closed funnel — all steps must be present in the session for a user to count at that step.
+
+## Ordered funnel (strict sequence)
+
+The simple approach does not enforce that step 1 happened before step 2. For a strict ordered funnel:
+
+```sql
+WITH ordered_events AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    event_name,
+    event_timestamp
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name IN ('view_item', 'add_to_cart', 'begin_checkout', 'purchase')
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+),
+
+session_steps AS (
+  SELECT
+    user_pseudo_id,
+    session_id,
+    -- Timestamp of first occurrence of each step
+    MIN(CASE WHEN event_name = 'view_item' THEN event_timestamp END) AS t1,
+    MIN(CASE WHEN event_name = 'add_to_cart' THEN event_timestamp END) AS t2,
+    MIN(CASE WHEN event_name = 'begin_checkout' THEN event_timestamp END) AS t3,
+    MIN(CASE WHEN event_name = 'purchase' THEN event_timestamp END) AS t4
+  FROM ordered_events
+  GROUP BY user_pseudo_id, session_id
+)
+
+SELECT
+  COUNT(*) AS total_sessions,
+  -- Step 1: any view_item
+  COUNTIF(t1 IS NOT NULL) AS step1,
+  -- Step 2: add_to_cart AFTER view_item
+  COUNTIF(t1 IS NOT NULL AND t2 IS NOT NULL AND t2 > t1) AS step2,
+  -- Step 3: begin_checkout AFTER add_to_cart
+  COUNTIF(t1 IS NOT NULL AND t2 IS NOT NULL AND t2 > t1 AND t3 IS NOT NULL AND t3 > t2) AS step3,
+  -- Step 4: purchase AFTER begin_checkout
+  COUNTIF(t1 IS NOT NULL AND t2 IS NOT NULL AND t2 > t1 AND t3 IS NOT NULL AND t3 > t2 AND t4 IS NOT NULL AND t4 > t3) AS step4
+
+FROM session_steps
+```
+
+## Funnel with time window between steps
+
+Add a time constraint — each step must happen within N minutes of the previous:
+
+```sql
+WITH session_steps AS (
+  -- (same as above, with t1, t2, t3, t4)
+  SELECT
+    user_pseudo_id,
+    session_id,
+    MIN(CASE WHEN event_name = 'view_item' THEN event_timestamp END) AS t1,
+    MIN(CASE WHEN event_name = 'add_to_cart' THEN event_timestamp END) AS t2,
+    MIN(CASE WHEN event_name = 'begin_checkout' THEN event_timestamp END) AS t3,
+    MIN(CASE WHEN event_name = 'purchase' THEN event_timestamp END) AS t4
+  FROM (
+    SELECT
+      user_pseudo_id,
+      (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+      event_name,
+      event_timestamp
+    FROM `project.analytics_PROPERTY_ID.events_*`
+    WHERE event_name IN ('view_item', 'add_to_cart', 'begin_checkout', 'purchase')
+      AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  )
+  GROUP BY user_pseudo_id, session_id
+)
+
+SELECT
+  COUNT(*) AS total,
+  COUNTIF(t1 IS NOT NULL) AS step1,
+  -- Step 2 within 30 minutes of step 1
+  COUNTIF(t1 IS NOT NULL AND t2 IS NOT NULL AND t2 > t1
+    AND t2 - t1 <= 30 * 60 * 1000000) AS step2_within_30min,
+  -- Step 3 within 30 min of step 2
+  COUNTIF(t1 IS NOT NULL AND t2 IS NOT NULL AND t2 > t1 AND t2 - t1 <= 30 * 60 * 1000000
+    AND t3 IS NOT NULL AND t3 > t2 AND t3 - t2 <= 30 * 60 * 1000000) AS step3_within_30min,
+  -- Step 4 within 1 hour of step 3
+  COUNTIF(t1 IS NOT NULL AND t2 IS NOT NULL AND t2 > t1 AND t2 - t1 <= 30 * 60 * 1000000
+    AND t3 IS NOT NULL AND t3 > t2 AND t3 - t2 <= 30 * 60 * 1000000
+    AND t4 IS NOT NULL AND t4 > t3 AND t4 - t3 <= 60 * 60 * 1000000) AS step4_within_1hr
+FROM session_steps
+```
+
+`event_timestamp` is in microseconds. Multiply minutes by `60 * 1,000,000` to convert.
+
+## Cross-session funnel (user-level)
+
+For funnels that span multiple sessions (SaaS trial → paid conversion over days/weeks):
+
+```sql
+WITH user_journey AS (
+  SELECT
+    user_pseudo_id,
+    MIN(CASE WHEN event_name = 'trial_started' THEN PARSE_DATE('%Y%m%d', event_date) END) AS trial_date,
+    MIN(CASE WHEN event_name = 'feature_used' THEN PARSE_DATE('%Y%m%d', event_date) END) AS feature_date,
+    MIN(CASE WHEN event_name = 'upgrade_clicked' THEN PARSE_DATE('%Y%m%d', event_date) END) AS upgrade_click_date,
+    MIN(CASE WHEN event_name = 'purchase' THEN PARSE_DATE('%Y%m%d', event_date) END) AS purchase_date
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name IN ('trial_started', 'feature_used', 'upgrade_clicked', 'purchase')
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240331'
+  GROUP BY user_pseudo_id
+)
+
+SELECT
+  COUNT(*) AS users_who_trialed,
+  COUNTIF(feature_date IS NOT NULL AND feature_date >= trial_date) AS used_feature,
+  COUNTIF(upgrade_click_date IS NOT NULL AND upgrade_click_date >= trial_date) AS clicked_upgrade,
+  COUNTIF(purchase_date IS NOT NULL AND purchase_date >= trial_date) AS converted,
+  COUNTIF(purchase_date IS NOT NULL AND purchase_date >= trial_date AND
+          DATE_DIFF(purchase_date, trial_date, DAY) <= 14) AS converted_within_14_days
+FROM user_journey
+WHERE trial_date IS NOT NULL
+```
+
+## Funnel breakdown by segment
+
+Compare funnel completion across user groups by adding a dimension:
+
+```sql
+WITH session_steps AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    device.category AS device_type,
+    COUNTIF(event_name = 'view_item') > 0 AS did_view,
+    COUNTIF(event_name = 'add_to_cart') > 0 AS did_cart,
+    COUNTIF(event_name = 'purchase') > 0 AS did_purchase
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name IN ('view_item', 'add_to_cart', 'purchase')
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  GROUP BY user_pseudo_id, session_id, device_type
+)
+
+SELECT
+  device_type,
+  COUNT(*) AS total_sessions,
+  COUNTIF(did_view) AS viewed_product,
+  COUNTIF(did_view AND did_cart) AS added_to_cart,
+  COUNTIF(did_view AND did_cart AND did_purchase) AS purchased,
+  ROUND(COUNTIF(did_view AND did_cart AND did_purchase) / NULLIF(COUNTIF(did_view), 0) * 100, 1) AS view_to_purchase_pct
+FROM session_steps
+GROUP BY device_type
+ORDER BY total_sessions DESC
+```
+
+## Funnel output for visualization
+
+For Looker Studio or other BI tools, format funnel output as rows:
+
+```sql
+WITH funnel_steps AS (
+  -- ... compute steps as above
+  SELECT
+    COUNTIF(viewed_item > 0) AS step1,
+    COUNTIF(viewed_item > 0 AND added_to_cart > 0) AS step2,
+    COUNTIF(viewed_item > 0 AND added_to_cart > 0 AND began_checkout > 0) AS step3,
+    COUNTIF(viewed_item > 0 AND added_to_cart > 0 AND began_checkout > 0 AND purchased > 0) AS step4
+  FROM session_events
+)
+
+-- Unpivot to rows for charting
+SELECT 1 AS step_number, 'View Item' AS step_name, step1 AS users FROM funnel_steps
+UNION ALL
+SELECT 2, 'Add to Cart', step2 FROM funnel_steps
+UNION ALL
+SELECT 3, 'Begin Checkout', step3 FROM funnel_steps
+UNION ALL
+SELECT 4, 'Purchase', step4 FROM funnel_steps
+ORDER BY step_number
+```
+
+## Common mistakes
+
+### Not using NULLIF to prevent division-by-zero
+
+`ROUND(step2 / step1 * 100, 1)` fails if `step1 = 0`. Always use `NULLIF(denominator, 0)` in rate calculations.
+
+### Confusing open and closed funnel behavior
+
+The `COUNTIF(viewed_item > 0 AND added_to_cart > 0 AND ...)` pattern is a closed funnel — all steps must be present. Removing the dependency checks creates an open funnel. Know which you intend.
+
+### Not filtering `_TABLE_SUFFIX` when events span long periods
+
+For multi-session funnels with 90-day lookback windows, set `_TABLE_SUFFIX BETWEEN '20231001' AND '20240331'` to capture the full conversion window. A narrow date range will miss conversions from users who entered the funnel before your start date.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Funnel Exploration"
+    description="Use GA4's built-in funnel tool for quick, visual funnel analysis."
+    href="/ga4/reporting/funnel-exploration/"
+  />
+  <LinkCard
+    title="Session Reconstruction"
+    description="Build the session-level base table used in funnel queries."
+    href="/ga4/bigquery/session-reconstruction/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="Additional SQL patterns for GA4 BigQuery analysis."
+    href="/ga4/bigquery/common-queries/"
+  />
+</CardGrid>

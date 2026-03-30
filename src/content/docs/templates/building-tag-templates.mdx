@@ -1,6 +1,282 @@
 ---
 title: "Building Tag Templates"
-description: "Step-by-step guide to building a custom tag template from scratch."
+description: "Step-by-step walkthrough of building a GTM tag template — the template editor, field types, code structure, permission declaration, and a complete LinkedIn Insight Tag implementation from first field to passing tests."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Building a tag template from scratch involves four interconnected pieces: the fields that configure the tag's behavior, the code that executes using those field values, the permissions that declare what the code is allowed to do, and the tests that verify the code does what you think it does. All four live in the template editor.
+
+This article walks through the complete process, building a LinkedIn Insight Tag template as a real example.
+
+## The template editor
+
+Open the template editor via **Templates → Tag Templates → New**. The editor has four tabs:
+
+- **Fields**: Define the UI that appears when someone creates a tag from this template
+- **Code**: Write the sandboxed JavaScript that executes when the tag fires
+- **Permissions**: Declare what your code is allowed to access
+- **Tests**: Write automated test cases
+
+Work through them in this order: Fields first (they determine what `data` contains in code), then Code, then Permissions (which are auto-detected from code), then Tests.
+
+## Step 1: Define fields
+
+Fields create the template's configuration UI. Every field has:
+- **ID**: The key name used in code as `data.fieldId`
+- **Display name**: The label shown in GTM UI
+- **Type**: The input control type
+
+### Field types
+
+**Text field**:
+```
+Type: TEXT
+Name (ID): partnerId
+Display name: Partner ID
+```
+Results in a text input. Accessed in code as `data.partnerId`.
+
+**Dropdown field**:
+```
+Type: SELECT
+Name (ID): eventType
+Display name: Event Type
+Options:
+  - Display: "Page View", Value: PageView
+  - Display: "Custom Event", Value: Custom
+```
+Returns the selected option's `value` as a string.
+
+**Checkbox field**:
+```
+Type: CHECKBOX
+Name (ID): enableAutoPageView
+Display name: Enable automatic Page View tracking
+```
+Returns `true` or `false`.
+
+**Param table** (key-value pairs):
+```
+Type: PARAM_TABLE
+Name (ID): customParameters
+Display name: Custom Parameters
+Columns:
+  - Name: paramName, Display: Parameter Name, Type: TEXT
+  - Name: paramValue, Display: Parameter Value, Type: TEMPLATE
+```
+Returns an array: `[{paramName: 'key1', paramValue: 'value1'}, ...]`
+
+**Group**: Wraps multiple fields in a collapsible section. Useful for organizing optional advanced settings.
+
+### LinkedIn Insight Tag fields
+
+For a LinkedIn Insight Tag template:
+
+| ID | Display Name | Type | Notes |
+|----|--------------|------|-------|
+| `partnerId` | LinkedIn Partner ID | TEXT | Required |
+| `conversionId` | Conversion ID | TEXT | Optional |
+| `eventType` | Event Type | SELECT | PageView / Conversion |
+
+## Step 2: Write the code
+
+Template code runs in the sandboxed environment. Access field values via the `data` object. Call `data.gtmOnSuccess()` when the tag completes successfully and `data.gtmOnFailure()` on failure.
+
+```javascript
+// LinkedIn Insight Tag Template
+
+// Import required sandboxed APIs
+const createArgumentsQueue = require('createArgumentsQueue');
+const injectScript = require('injectScript');
+const logToConsole = require('logToConsole');
+
+// Access template field values
+var partnerId = data.partnerId;
+var eventType = data.eventType;
+var conversionId = data.conversionId;
+
+// Validate required fields
+if (!partnerId) {
+  logToConsole('LinkedIn Insight Tag: Partner ID is required');
+  data.gtmOnFailure();
+  return;
+}
+
+// Initialize the LinkedIn Insight tag queue
+// createArgumentsQueue creates: window._linkedin_data_partner_ids = window._linkedin_data_partner_ids || []
+// and a function at window.lintrk that queues calls
+
+// Set the partner ID in the queue
+var _linkedin_data_partner_ids = createArgumentsQueue(
+  '_linkedin_data_partner_ids',
+  '_linkedin_data_partner_ids'
+);
+
+// The LinkedIn pixel needs the partner ID in a specific array format
+// We'll use setInWindow to handle this directly
+const setInWindow = require('setInWindow');
+const copyFromWindow = require('copyFromWindow');
+
+var existingIds = copyFromWindow('_linkedin_data_partner_ids') || [];
+if (existingIds.indexOf(partnerId) === -1) {
+  existingIds.push(partnerId);
+  setInWindow('_linkedin_data_partner_ids', existingIds);
+}
+
+// Inject the LinkedIn Insight Tag SDK
+injectScript(
+  'https://snap.licdn.com/li.lms-analytics/insight.min.js',
+  function() {
+    // Script loaded successfully
+    var lintrk = copyFromWindow('lintrk');
+
+    // Fire event based on configuration
+    if (eventType === 'Conversion' && conversionId && lintrk) {
+      lintrk('track', { conversion_id: conversionId });
+    }
+    // PageView is tracked automatically by the Insight tag on load
+
+    data.gtmOnSuccess();
+  },
+  function() {
+    logToConsole('LinkedIn Insight Tag: Script injection failed');
+    data.gtmOnFailure();
+  },
+  'linkedin_insight_tag'  // Cache key — prevents re-loading on every event
+);
+```
+
+### The `return` statement
+
+Template code uses `return` to exit early. This is standard JavaScript function return behavior in the sandboxed context. Always ensure `data.gtmOnSuccess()` or `data.gtmOnFailure()` is called before every `return` path.
+
+### Accessing field values from tables
+
+```javascript
+// Param table field "customParameters"
+var params = data.customParameters || [];
+
+params.forEach(function(row) {
+  var name = row.paramName;
+  var value = row.paramValue;
+  // Use name and value
+});
+```
+
+## Step 3: Configure permissions
+
+GTM auto-detects most permissions from your code. After writing the code:
+
+1. Click the **Permissions** tab
+2. GTM shows detected permissions based on which APIs you imported and which URLs you referenced
+3. Review and confirm each permission
+
+For the LinkedIn template, you will see:
+
+**inject_script** — required to call `injectScript()`:
+- URL: `https://snap.licdn.com/li.lms-analytics/insight.min.js`
+- Add this specific URL (not a wildcard) for maximum security
+
+**access_globals** — required for `copyFromWindow()` and `setInWindow()`:
+- `_linkedin_data_partner_ids` — read/write
+- `lintrk` — read only
+
+### Editing permissions manually
+
+Auto-detection is a starting point, not the final word. Click any permission to edit:
+- Change URL patterns from wildcards to specific URLs
+- Change access levels from read/write to read-only where appropriate
+- Add permissions that auto-detection missed
+
+<Aside type="caution">
+When editing a Community Gallery template's permissions, GTM breaks the link between your installation and the original template. You lose the ability to receive automatic updates from the template author. Only modify permissions when you have a specific security reason to do so.
+</Aside>
+
+## Step 4: Write tests
+
+Tests are the most-skipped step in template development and the one that saves the most time. The test framework lets you mock API calls and verify your code responds correctly to different inputs.
+
+See [Testing Custom Templates](/templates/testing-custom-templates/) for the complete testing guide. A minimal test for the LinkedIn template:
+
+```javascript
+// Test: tag fires gtmOnSuccess when script loads successfully
+const mockData = {
+  partnerId: '12345',
+  eventType: 'PageView'
+};
+
+// Mock the injectScript API to simulate successful load
+mock('injectScript', function(url, onSuccess, onFailure, cacheKey) {
+  onSuccess();  // Simulate successful load
+});
+
+// Mock other APIs
+mock('createArgumentsQueue', function(globalName, queuePath) {
+  return function() {};  // Return a no-op function
+});
+mock('copyFromWindow', function() { return []; });
+mock('setInWindow', function() {});
+
+runCode(mockData);
+
+assertApi('gtmOnSuccess').wasCalled();
+assertApi('gtmOnFailure').wasNotCalled();
+assertApi('injectScript').wasCalled();
+assertApi('injectScript').wasCalledWith(
+  'https://snap.licdn.com/li.lms-analytics/insight.min.js',
+  jasmine.any(Function),
+  jasmine.any(Function),
+  'linkedin_insight_tag'
+);
+```
+
+## Step 5: Configure metadata
+
+Before publishing or exporting your template, fill in the metadata:
+- **Template name**: Descriptive and specific ("LinkedIn Insight Tag", not "My Tag")
+- **Description**: What it does and what field is required
+- **Icon**: Upload a 64x64 PNG (vendor logo if available, otherwise leave default)
+
+For Gallery submission, you also need to configure categories and documentation URL in `metadata.yaml` — see [Template Publishing](/templates/template-publishing/).
+
+## Complete template structure summary
+
+```
+Template
+├── Fields
+│   ├── partnerId (TEXT, required)
+│   ├── eventType (SELECT: PageView/Conversion)
+│   └── conversionId (TEXT, optional)
+├── Code
+│   ├── Import APIs (createArgumentsQueue, injectScript, etc.)
+│   ├── Read field values (data.partnerId, data.eventType)
+│   ├── Validate required fields
+│   ├── Execute tag logic
+│   └── Call data.gtmOnSuccess() or data.gtmOnFailure()
+├── Permissions
+│   ├── inject_script: snap.licdn.com/...
+│   └── access_globals: _linkedin_data_partner_ids, lintrk
+└── Tests
+    ├── Success case: script loads, gtmOnSuccess called
+    ├── Failure case: script fails, gtmOnFailure called
+    └── Missing required field: gtmOnFailure called
+```
+
+## Common mistakes
+
+**Not calling `data.gtmOnSuccess()` or `data.gtmOnFailure()`.** Every code path must call one or the other. Tags that don't call either cause GTM to hang waiting for the tag to complete.
+
+**Forgetting the cache key in `injectScript`.** Without a cache key, every tag invocation re-injects the script. On a page with multiple events, you end up loading the vendor SDK multiple times.
+
+**Using wildcards in `inject_script` permissions.** A permission like `https://*.example.com/*` is much broader than necessary. Specify the exact URL. Wildcards are appropriate only when the URL is genuinely dynamic.
+
+**Not testing the early exit paths.** Write tests for missing required fields and script load failures. These paths are easy to get wrong and hard to notice without tests.
+
+---
+
+<CardGrid>
+  <LinkCard title="Sandboxed JavaScript APIs" href="/templates/sandboxed-javascript/" description="Complete reference for every API available in the template sandbox." />
+  <LinkCard title="Testing Custom Templates" href="/templates/testing-custom-templates/" description="Writing comprehensive tests including mocking API calls." />
+  <LinkCard title="Template Permissions and Security" href="/templates/template-permissions-security/" description="Configuring permissions correctly and securely." />
+</CardGrid>

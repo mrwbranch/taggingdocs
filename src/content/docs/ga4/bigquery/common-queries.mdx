@@ -1,6 +1,389 @@
 ---
 title: "Common Queries"
-description: "Ready-to-use SQL queries for GA4 BigQuery data."
+description: "Ready-to-use SQL queries for the most frequent GA4 BigQuery analysis tasks — sessions, users, pages, conversions, ecommerce, and more."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Replace `project.analytics_PROPERTY_ID` with your actual BigQuery project and dataset throughout all queries. Always set `_TABLE_SUFFIX` date bounds to avoid scanning unnecessary data.
+
+## Sessions and users
+
+### Daily sessions and users
+
+```sql
+SELECT
+  event_date,
+  COUNT(DISTINCT user_pseudo_id) AS users,
+  COUNT(DISTINCT CONCAT(
+    user_pseudo_id, '.',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  )) AS sessions
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_date
+ORDER BY event_date
+```
+
+### New users (first visits)
+
+```sql
+SELECT
+  event_date,
+  COUNT(DISTINCT user_pseudo_id) AS new_users
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'first_visit'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_date
+ORDER BY event_date
+```
+
+### Sessions by channel
+
+```sql
+SELECT
+  traffic_source.source AS source,
+  traffic_source.medium AS medium,
+  COUNT(DISTINCT CONCAT(
+    user_pseudo_id, '.',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  )) AS sessions
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'session_start'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY source, medium
+ORDER BY sessions DESC
+```
+
+<Aside type="tip">
+For session-level source/medium, always filter on `session_start` events and use `traffic_source.source` and `traffic_source.medium`. The `traffic_source` struct on non-session_start events may not accurately reflect the current session's source.
+</Aside>
+
+### Engagement rate
+
+```sql
+SELECT
+  event_date,
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  )) AS total_sessions,
+  COUNT(DISTINCT CASE
+    WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'session_engaged') = '1'
+    THEN CONCAT(user_pseudo_id, '.',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING))
+  END) AS engaged_sessions,
+  ROUND(
+    COUNT(DISTINCT CASE
+      WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'session_engaged') = '1'
+      THEN CONCAT(user_pseudo_id, '.',
+        CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING))
+    END) /
+    COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    )) * 100, 2
+  ) AS engagement_rate_pct
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_date
+ORDER BY event_date
+```
+
+## Page analysis
+
+### Top pages by views
+
+```sql
+SELECT
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_url,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title') AS page_title,
+  COUNT(*) AS page_views,
+  COUNT(DISTINCT user_pseudo_id) AS unique_users
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'page_view'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY page_url, page_title
+ORDER BY page_views DESC
+LIMIT 50
+```
+
+### Top landing pages (entry pages)
+
+```sql
+WITH session_entries AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS entry_page,
+    ROW_NUMBER() OVER (
+      PARTITION BY user_pseudo_id,
+        (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id')
+      ORDER BY event_timestamp
+    ) AS event_rank
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name = 'page_view'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+)
+
+SELECT
+  entry_page,
+  COUNT(*) AS landing_sessions
+FROM session_entries
+WHERE event_rank = 1
+GROUP BY entry_page
+ORDER BY landing_sessions DESC
+LIMIT 50
+```
+
+## Event analysis
+
+### All events with counts
+
+```sql
+SELECT
+  event_name,
+  COUNT(*) AS event_count,
+  COUNT(DISTINCT user_pseudo_id) AS unique_users
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_name
+ORDER BY event_count DESC
+```
+
+### Custom event parameters
+
+```sql
+-- Distribution of search terms
+SELECT
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'search_term') AS search_term,
+  COUNT(*) AS searches,
+  COUNT(DISTINCT user_pseudo_id) AS unique_searchers
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'search'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY search_term
+ORDER BY searches DESC
+LIMIT 100
+```
+
+## Ecommerce
+
+### Daily revenue
+
+```sql
+SELECT
+  event_date,
+  COUNT(*) AS transactions,
+  SUM(ecommerce.purchase_revenue) AS revenue,
+  AVG(ecommerce.purchase_revenue) AS avg_order_value,
+  COUNT(DISTINCT user_pseudo_id) AS buyers
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_date
+ORDER BY event_date
+```
+
+### Revenue by product
+
+```sql
+SELECT
+  item.item_id,
+  item.item_name,
+  item.item_category,
+  COUNT(*) AS purchase_count,
+  SUM(item.quantity) AS units_sold,
+  SUM(item.item_revenue) AS total_revenue,
+  AVG(item.price) AS avg_price
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(items) AS item
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY item.item_id, item.item_name, item.item_category
+ORDER BY total_revenue DESC
+LIMIT 50
+```
+
+### Add-to-cart to purchase conversion rate
+
+```sql
+WITH cart_events AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    COUNTIF(event_name = 'add_to_cart') AS cart_adds,
+    COUNTIF(event_name = 'purchase') AS purchases
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name IN ('add_to_cart', 'purchase')
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  GROUP BY user_pseudo_id, session_id
+)
+
+SELECT
+  COUNTIF(cart_adds > 0) AS sessions_with_cart_add,
+  COUNTIF(purchases > 0) AS sessions_with_purchase,
+  COUNTIF(cart_adds > 0 AND purchases > 0) AS converted_sessions,
+  ROUND(
+    COUNTIF(cart_adds > 0 AND purchases > 0) / COUNTIF(cart_adds > 0) * 100, 2
+  ) AS cart_to_purchase_rate_pct
+FROM cart_events
+```
+
+## Conversions and goal analysis
+
+### Conversions by source/medium
+
+```sql
+WITH session_sources AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    traffic_source.source AS source,
+    traffic_source.medium AS medium
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name = 'session_start'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+),
+conversions AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name = 'purchase'  -- replace with your conversion event
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+)
+
+SELECT
+  s.source,
+  s.medium,
+  COUNT(DISTINCT CONCAT(s.user_pseudo_id, '.', CAST(s.session_id AS STRING))) AS sessions,
+  COUNT(DISTINCT CONCAT(c.user_pseudo_id, '.', CAST(c.session_id AS STRING))) AS conversions,
+  ROUND(
+    COUNT(DISTINCT CONCAT(c.user_pseudo_id, '.', CAST(c.session_id AS STRING))) /
+    COUNT(DISTINCT CONCAT(s.user_pseudo_id, '.', CAST(s.session_id AS STRING))) * 100, 2
+  ) AS conversion_rate_pct
+FROM session_sources s
+LEFT JOIN conversions c USING (user_pseudo_id, session_id)
+GROUP BY s.source, s.medium
+HAVING sessions > 50
+ORDER BY conversions DESC
+```
+
+## Device and geography
+
+### Sessions by device category
+
+```sql
+SELECT
+  device.category AS device_type,
+  device.operating_system,
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  )) AS sessions,
+  ROUND(
+    COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    )) / SUM(COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    ))) OVER () * 100, 1
+  ) AS pct_of_total
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'session_start'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY device_type, device.operating_system
+ORDER BY sessions DESC
+```
+
+### Top countries
+
+```sql
+SELECT
+  geo.country,
+  COUNT(DISTINCT user_pseudo_id) AS users,
+  COUNT(*) AS events
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY geo.country
+ORDER BY users DESC
+LIMIT 30
+```
+
+## User behavior
+
+### Repeat purchaser analysis
+
+```sql
+SELECT
+  purchase_count,
+  COUNT(*) AS users,
+  SUM(total_revenue) AS revenue_from_segment
+FROM (
+  SELECT
+    user_pseudo_id,
+    COUNT(DISTINCT (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id')) AS purchase_count,
+    SUM(ecommerce.purchase_revenue) AS total_revenue
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name = 'purchase'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20241231'
+  GROUP BY user_pseudo_id
+)
+GROUP BY purchase_count
+ORDER BY purchase_count
+```
+
+### Days between first visit and first purchase
+
+```sql
+WITH user_first_events AS (
+  SELECT
+    user_pseudo_id,
+    MIN(CASE WHEN event_name = 'first_visit' THEN PARSE_DATE('%Y%m%d', event_date) END) AS first_visit_date,
+    MIN(CASE WHEN event_name = 'purchase' THEN PARSE_DATE('%Y%m%d', event_date) END) AS first_purchase_date
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name IN ('first_visit', 'purchase')
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  GROUP BY user_pseudo_id
+)
+
+SELECT
+  DATE_DIFF(first_purchase_date, first_visit_date, DAY) AS days_to_first_purchase,
+  COUNT(*) AS users
+FROM user_first_events
+WHERE first_purchase_date IS NOT NULL
+  AND first_visit_date IS NOT NULL
+GROUP BY days_to_first_purchase
+ORDER BY days_to_first_purchase
+```
+
+## Common mistakes
+
+### Not using _TABLE_SUFFIX for date filtering
+
+Without `WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'`, BigQuery scans your entire dataset. On a 2-year history, that is 730 tables. Always include date bounds.
+
+### Counting `session_start` events for session count
+
+Session start events may not exist for all sessions (due to identity stitching or collection issues). Use `COUNT(DISTINCT CONCAT(user_pseudo_id, '.', session_id))` for reliable session counts.
+
+### Not handling NULL from UNNEST
+
+If an event does not have a parameter, `(SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'my_param')` returns NULL — which is correct. Just handle NULLs appropriately in your downstream logic.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Unnesting Patterns"
+    description="Deep dive into working with nested ARRAY and STRUCT fields."
+    href="/ga4/bigquery/unnesting-patterns/"
+  />
+  <LinkCard
+    title="Session Reconstruction"
+    description="Rebuild full sessions with source attribution in SQL."
+    href="/ga4/bigquery/session-reconstruction/"
+  />
+  <LinkCard
+    title="Cost Optimization"
+    description="Structure queries to minimize BigQuery costs."
+    href="/ga4/bigquery/cost-optimization/"
+  />
+</CardGrid>

@@ -1,6 +1,263 @@
 ---
 title: "Monitoring & Logging"
-description: "Observability for your server-side GTM deployment."
+description: "Observability for production sGTM — Cloud Logging, custom log statements, Cloud Monitoring dashboards, alerting, and debugging tools."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+A sGTM server that goes dark does not generate browser console errors. There is no user-visible error page. Tags silently stop firing, ad conversions stop flowing, and analytics data gaps widen — all without any direct signal. Monitoring and logging are not optional for production sGTM deployments. They are how you find out something went wrong before your stakeholders do.
+
+## Cloud Logging
+
+Cloud Logging automatically captures all output from your sGTM container. Every `logToConsole()` call in your templates, every HTTP request your server handles, and system events from Cloud Run all appear in Cloud Logging.
+
+### Accessing logs
+
+```bash
+# View recent sGTM logs
+gcloud logging read \
+  "resource.type=cloud_run_revision \
+   AND resource.labels.service_name=sgtm-production" \
+  --limit 100 \
+  --freshness 1h \
+  --format "table(timestamp,textPayload)"
+
+# Filter for errors only
+gcloud logging read \
+  "resource.type=cloud_run_revision \
+   AND resource.labels.service_name=sgtm-production \
+   AND severity>=ERROR" \
+  --limit 50 \
+  --freshness 24h
+```
+
+Or use the GCP Console: **Logging** → **Logs Explorer**. Filter by service name and severity.
+
+### Log structure
+
+sGTM generates several log types:
+
+**Request logs**: One log entry per incoming HTTP request. Shows:
+- Timestamp
+- Request path and method
+- Response status code
+- Response time (milliseconds)
+- Request size / response size
+
+**Tag logs**: When tags call `logToConsole()`, entries appear in Cloud Logging. This is how you get visibility into what tags are processing.
+
+**Error logs**: Container errors, template exceptions, and system errors appear with `severity: ERROR`.
+
+### Custom log statements
+
+Add `logToConsole()` calls to your tag templates for operational visibility:
+
+```javascript
+const logToConsole = require('logToConsole');
+const JSON = require('JSON');
+const getEventData = require('getEventData');
+
+// Log at tag execution start
+logToConsole(JSON.stringify({
+  level: 'info',
+  tag: 'meta_capi',
+  event: getEventData('event_name'),
+  client_id: getEventData('client_id'),
+  has_email: !!getEventData('user_email'),
+  ts: getTimestampMillis(),
+}));
+
+// After successful API call
+logToConsole(JSON.stringify({
+  level: 'info',
+  tag: 'meta_capi',
+  status: 'success',
+  event: getEventData('event_name'),
+}));
+
+// On failure
+logToConsole(JSON.stringify({
+  level: 'error',
+  tag: 'meta_capi',
+  status: 'failed',
+  http_status: statusCode,
+  event: getEventData('event_name'),
+}));
+```
+
+Structured JSON logs (rather than string messages) are queryable in Cloud Logging and exportable to BigQuery for analysis.
+
+## Cloud Monitoring
+
+Cloud Monitoring provides time-series metrics from your Cloud Run service.
+
+### Key metrics to track
+
+**Request count**: Total inbound requests per minute. Monitor for unexpected drops (server down) or unexpected spikes (runaway client or traffic spike).
+
+**Request latency (P50, P95, P99)**: P50 should be under 200ms. P99 should be under 1 second. A spike in P99 indicates cold starts or slow outbound API calls.
+
+**Container instance count**: How many Cloud Run instances are running. Unexpectedly high instance counts indicate either a traffic spike or misconfigured concurrency settings.
+
+**CPU utilization**: Should stay below 70% average. Consistent high CPU may require upgrading to 2 vCPU or reducing concurrency.
+
+**Memory utilization**: Should stay below 80%. Approaching 100% causes OOM errors and container restarts.
+
+### Setting up a monitoring dashboard
+
+<Steps>
+1. GCP Console → **Cloud Monitoring** → **Dashboards** → **Create Custom Dashboard**
+
+2. Add these chart widgets:
+   - Request count (grouped by response code)
+   - Request latency percentiles (P50, P95, P99)
+   - Container instance count
+   - CPU utilization
+   - Memory utilization
+
+3. Set the dashboard as your default view for the project
+</Steps>
+
+### Alerting policies
+
+Set up alerts for the conditions that matter most:
+
+**High error rate alert:**
+```bash
+gcloud alpha monitoring policies create \
+  --notification-channels="projects/PROJECT/notificationChannels/CHANNEL_ID" \
+  --display-name="sGTM high error rate" \
+  --condition-filter='resource.type="cloud_run_revision" AND metric.type="run.googleapis.com/request_count" AND metric.labels.response_code_class="5xx"' \
+  --condition-threshold-value=10 \
+  --condition-threshold-comparison=COMPARISON_GT \
+  --condition-duration=60s
+```
+
+**High P99 latency alert (cold start indicator):**
+Trigger when P99 request latency exceeds 2000ms for more than 2 minutes.
+
+**Low request count alert (server down):**
+Trigger when request count drops below 20% of the rolling 7-day average for more than 5 minutes.
+
+**Cost spike alert:**
+In GCP Billing → Budget Alerts → Create Budget. Set a monthly budget and alert at 80% and 100%.
+
+## Uptime monitoring
+
+Cloud Monitoring's Uptime Checks provide external health monitoring independent of Cloud Logging:
+
+<Steps>
+1. **Cloud Monitoring** → **Uptime Checks** → **Create Check**
+
+2. Settings:
+   - Protocol: HTTPS
+   - Host: `collect.yoursite.com`
+   - Path: `/healthz`
+   - Check frequency: 1 minute
+   - Expected response: `200`
+
+3. Create an alert policy that fires when the check fails for 2+ consecutive periods (2 minutes)
+
+4. Add email or PagerDuty notification channel
+</Steps>
+
+An external uptime check is your fastest signal for server outages. Cloud Logging often lags by 1–2 minutes during incidents; the uptime check alerts within 2 minutes of the first failed response.
+
+## sGTM Preview as a debugging tool
+
+For non-production debugging, sGTM Preview is more useful than logs. It shows every step of request processing in real time:
+
+1. Open your sGTM container in GTM editor
+2. Click **Preview** — a debug session starts
+3. Navigate to your site with client-side GTM Preview also active
+4. In the sGTM Preview panel, click any request to see:
+   - Which client claimed it
+   - The full Event Model built from the request
+   - Which triggers fired
+   - Which tags executed, with their output payloads
+   - Console output from `logToConsole()` calls
+
+For tags that make outbound HTTP requests, the Preview panel shows the request URL, request body, and response status code. This is where you diagnose tag failures before they become production issues.
+
+## Log-based alerting for tag failures
+
+Create a log-based metric that counts error-level tag log entries:
+
+```bash
+# Create a log-based metric for tag errors
+gcloud logging metrics create sgtm-tag-errors \
+  --description="sGTM tag execution errors" \
+  --log-filter='resource.type="cloud_run_revision" AND textPayload=~"\"level\":\"error\""'
+```
+
+Then create a Cloud Monitoring alert on this metric: fire when the error count exceeds 10 per minute.
+
+## Request tracing
+
+For debugging specific request flows, use Cloud Trace:
+
+1. GCP Console → **Cloud Trace** → **Trace List**
+2. Find requests by URL path or time range
+3. Click a trace to see the full request timeline: which function calls took how long, where latency occurred
+
+This is particularly useful for diagnosing slow Firestore lookups or slow outbound API calls in enrichment tags.
+
+## Log export to BigQuery
+
+For long-term analysis, export Cloud Logging to BigQuery:
+
+1. Cloud Logging → **Log Router** → **Create Sink**
+2. Destination: BigQuery dataset (create one)
+3. Filter: your sGTM service logs
+4. Save — logs stream to BigQuery in near-real-time
+
+Once in BigQuery, query for trends:
+
+```sql
+-- Top error-producing events over the last 7 days
+SELECT
+  JSON_VALUE(textPayload, '$.event') as event_name,
+  COUNT(*) as error_count
+FROM `your_project.sgtm_logs.cloud_run_*`
+WHERE
+  DATE(_PARTITIONTIME) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+  AND JSON_VALUE(textPayload, '$.level') = 'error'
+GROUP BY event_name
+ORDER BY error_count DESC
+LIMIT 20
+```
+
+## Common mistakes
+
+**No minimum instances + no monitoring.** With minimum instances at 0 and no cold start monitoring, you silently drop tracking events every morning when the first request of the day hits a cold container. The event data gap is invisible without log-based monitoring.
+
+**Not structuring log output as JSON.** Unstructured log messages are not queryable. If your `logToConsole()` calls emit plain strings, you cannot build alerts or BigQuery queries on them.
+
+**Monitoring only the health check, not tag success rates.** The `/healthz` endpoint returning 200 means the server is running — it does not mean your tags are firing correctly. Monitor tag-level success rates separately.
+
+**Alert fatigue from overly sensitive thresholds.** An alert that fires 20 times per week for normal traffic spikes trains your team to ignore alerts. Tune alert thresholds after observing normal traffic patterns for 2+ weeks.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Debugging sGTM"
+    description="Preview mode, Preview Header technique, and systematic debugging workflows."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+  <LinkCard
+    title="Cloud Run Scaling"
+    description="Scaling metrics and the relationship between instance count and monitoring."
+    href="/server-side/setup/cloud-run-scaling/"
+  />
+  <LinkCard
+    title="Uptime Monitoring"
+    description="External uptime checks, failover configuration, and SLA considerations."
+    href="/server-side/operations/uptime-monitoring/"
+  />
+  <LinkCard
+    title="Cost Management"
+    description="Cost monitoring and budget alerts to prevent unexpected bills."
+    href="/server-side/operations/cost-management/"
+  />
+</CardGrid>

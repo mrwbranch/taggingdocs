@@ -1,6 +1,540 @@
 ---
 title: "Automated Testing"
-description: "CI/CD testing for dataLayer implementations."
+description: "CI/CD testing for dataLayer implementations — Playwright and Cypress patterns for asserting on window.dataLayer, CI integration, and preventing analytics regressions."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
+
+Automated tests catch analytics regressions before they reach production. Without them, a refactor that renames a product property or restructures the checkout flow breaks your tracking silently — you find out weeks later when your funnel data looks wrong.
+
+This article covers two levels of automated testing: unit tests for the functions that build dataLayer objects, and end-to-end tests that drive a real browser and assert on `window.dataLayer`.
+
+## Unit testing dataLayer builder functions
+
+If your application has functions that construct dataLayer event objects (rather than building them inline), unit test those functions directly. This approach is fast, runs without a browser, and integrates easily into any CI environment.
+
+### Example: testing a purchase event builder
+
+```typescript
+// src/analytics/ecommerce.ts
+import type { PurchaseEvent } from '../types/datalayer';
+
+interface OrderItem {
+    sku: string;
+    name: string;
+    price: number;
+    quantity: number;
+    category?: string;
+}
+
+interface Order {
+    id: string;
+    total: number;
+    tax: number;
+    shipping: number;
+    currency: string;
+    coupon?: string;
+    items: OrderItem[];
+}
+
+export function buildPurchaseEvent(order: Order): PurchaseEvent {
+    return {
+        event: 'purchase',
+        ecommerce: {
+            transaction_id: order.id,
+            value: order.total,
+            tax: order.tax,
+            shipping: order.shipping,
+            currency: order.currency,
+            coupon: order.coupon,
+            items: order.items.map((item, i) => ({
+                item_id:       item.sku,
+                item_name:     item.name,
+                price:         item.price,
+                quantity:      item.quantity,
+                item_category: item.category,
+                index:         i,
+            })),
+        },
+    };
+}
+```
+
+```typescript
+// src/analytics/__tests__/ecommerce.test.ts
+import { buildPurchaseEvent } from '../ecommerce';
+
+describe('buildPurchaseEvent', () => {
+    const sampleOrder = {
+        id: 'ORD-2024-001',
+        total: 179.97,
+        tax: 14.40,
+        shipping: 5.00,
+        currency: 'USD',
+        items: [
+            { sku: 'SKU-001-BLK-L', name: 'Heritage Jacket', price: 120.00, quantity: 1, category: 'Jackets' },
+            { sku: 'SKU-047-WHT-M', name: 'Classic T-Shirt', price: 29.99, quantity: 2, category: 'T-Shirts' },
+        ],
+    };
+
+    test('event name is "purchase"', () => {
+        expect(buildPurchaseEvent(sampleOrder).event).toBe('purchase');
+    });
+
+    test('transaction_id matches order id', () => {
+        expect(buildPurchaseEvent(sampleOrder).ecommerce.transaction_id).toBe('ORD-2024-001');
+    });
+
+    test('value is numeric', () => {
+        expect(typeof buildPurchaseEvent(sampleOrder).ecommerce.value).toBe('number');
+    });
+
+    test('currency is 3-character string', () => {
+        const { currency } = buildPurchaseEvent(sampleOrder).ecommerce;
+        expect(typeof currency).toBe('string');
+        expect(currency.length).toBe(3);
+    });
+
+    test('items array has correct length', () => {
+        expect(buildPurchaseEvent(sampleOrder).ecommerce.items).toHaveLength(2);
+    });
+
+    test('item price is numeric', () => {
+        const items = buildPurchaseEvent(sampleOrder).ecommerce.items;
+        items.forEach(item => {
+            expect(typeof item.price).toBe('number');
+        });
+    });
+
+    test('items have sequential index values', () => {
+        const items = buildPurchaseEvent(sampleOrder).ecommerce.items;
+        items.forEach((item, i) => {
+            expect(item.index).toBe(i);
+        });
+    });
+
+    test('coupon is undefined when not provided', () => {
+        expect(buildPurchaseEvent(sampleOrder).ecommerce.coupon).toBeUndefined();
+    });
+
+    test('coupon is included when provided', () => {
+        const orderWithCoupon = { ...sampleOrder, coupon: 'SAVE10' };
+        expect(buildPurchaseEvent(orderWithCoupon).ecommerce.coupon).toBe('SAVE10');
+    });
+});
+```
+
+## End-to-end testing with Playwright
+
+Playwright drives a real browser and can read `window.dataLayer` after each user interaction. This catches issues that unit tests can't: GTM not loading, the tracking code not being called from the right component, or timing issues where the push happens before or after expected.
+
+### Setup
+
+```bash
+npm install --save-dev @playwright/test
+npx playwright install chromium  # install browser
+```
+
+### Playwright helper utilities
+
+Create helper functions to avoid repeating dataLayer assertions across tests:
+
+```typescript
+// tests/helpers/datalayer.ts
+import { Page } from '@playwright/test';
+
+/**
+ * Wait for a specific dataLayer event and return it.
+ * Polls until the event appears or timeout is reached.
+ */
+export async function waitForDataLayerEvent(
+    page: Page,
+    eventName: string,
+    timeoutMs = 5000
+): Promise<Record<string, unknown> | null> {
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+        const event = await page.evaluate((name) => {
+            const dl = window.dataLayer || [];
+            return dl.find((e: Record<string, unknown>) => e.event === name) || null;
+        }, eventName);
+
+        if (event) return event as Record<string, unknown>;
+
+        await page.waitForTimeout(200);
+    }
+
+    return null;
+}
+
+/**
+ * Get all dataLayer pushes for a given event name.
+ */
+export async function getAllDataLayerEvents(
+    page: Page,
+    eventName: string
+): Promise<Record<string, unknown>[]> {
+    return page.evaluate((name) => {
+        const dl = window.dataLayer || [];
+        return dl.filter((e: Record<string, unknown>) => e.event === name) as Record<string, unknown>[];
+    }, eventName);
+}
+
+/**
+ * Get the full dataLayer array.
+ */
+export async function getDataLayer(page: Page): Promise<unknown[]> {
+    return page.evaluate(() => window.dataLayer || []);
+}
+
+/**
+ * Assert that a null clear preceded an ecommerce event.
+ */
+export async function assertNullClearBefore(
+    page: Page,
+    eventName: string
+): Promise<void> {
+    const dataLayer = await getDataLayer(page);
+    const eventIndex = dataLayer.findIndex(
+        (e) => typeof e === 'object' && e !== null && (e as Record<string, unknown>).event === eventName
+    );
+
+    if (eventIndex === -1) throw new Error(`Event "${eventName}" not found in dataLayer`);
+    if (eventIndex === 0) throw new Error(`No item before "${eventName}" — cannot check null clear`);
+
+    const preceding = dataLayer[eventIndex - 1] as Record<string, unknown>;
+    if (preceding.ecommerce !== null) {
+        throw new Error(`Event before "${eventName}" does not have ecommerce: null. Got: ${JSON.stringify(preceding)}`);
+    }
+}
+```
+
+### Purchase event E2E test
+
+```typescript
+// tests/e2e/purchase.spec.ts
+import { test, expect } from '@playwright/test';
+import { waitForDataLayerEvent, assertNullClearBefore } from '../helpers/datalayer';
+
+test.describe('Purchase tracking', () => {
+    test('purchase event fires on order confirmation', async ({ page }) => {
+        // Navigate to a product page
+        await page.goto('/products/heritage-jacket');
+
+        // Add to cart
+        await page.click('button[data-testid="add-to-cart"]');
+        await page.waitForSelector('[data-testid="cart-count"]'); // wait for cart update
+
+        // Navigate to checkout
+        await page.goto('/checkout');
+
+        // Fill out checkout form (adjust selectors to your implementation)
+        await page.fill('[name="email"]', 'test@example.com');
+        await page.fill('[name="firstName"]', 'Test');
+        await page.fill('[name="lastName"]', 'User');
+        await page.fill('[name="address"]', '123 Test Street');
+        await page.fill('[name="city"]', 'San Francisco');
+        await page.fill('[name="zip"]', '94102');
+        await page.selectOption('[name="country"]', 'US');
+
+        await page.click('[data-testid="continue-to-shipping"]');
+        await page.click('[data-testid="continue-to-payment"]');
+
+        // Fill payment (adjust to your payment provider)
+        await page.fill('[name="cardNumber"]', '4242424242424242');
+        await page.fill('[name="expiry"]', '12/28');
+        await page.fill('[name="cvv"]', '123');
+
+        await page.click('[data-testid="place-order"]');
+
+        // Wait for order confirmation page
+        await page.waitForURL(/\/order-confirmation|\/thank-you|\/orders\//);
+
+        // Assert purchase event
+        const purchaseEvent = await waitForDataLayerEvent(page, 'purchase', 10000);
+        expect(purchaseEvent).not.toBeNull();
+
+        const ecommerce = (purchaseEvent as Record<string, unknown>).ecommerce as Record<string, unknown>;
+
+        // transaction_id is present and non-empty
+        expect(typeof ecommerce.transaction_id).toBe('string');
+        expect(String(ecommerce.transaction_id).length).toBeGreaterThan(0);
+
+        // value is a positive number
+        expect(typeof ecommerce.value).toBe('number');
+        expect(Number(ecommerce.value)).toBeGreaterThan(0);
+
+        // currency is a 3-letter code
+        expect(typeof ecommerce.currency).toBe('string');
+        expect(String(ecommerce.currency).length).toBe(3);
+
+        // items is a non-empty array
+        const items = ecommerce.items as unknown[];
+        expect(Array.isArray(items)).toBe(true);
+        expect(items.length).toBeGreaterThan(0);
+
+        // Each item has required fields
+        items.forEach((item) => {
+            const i = item as Record<string, unknown>;
+            expect(typeof i.item_id).toBe('string');
+            expect(String(i.item_id).length).toBeGreaterThan(0);
+            expect(typeof i.item_name).toBe('string');
+            expect(typeof i.price).toBe('number');
+            expect(typeof i.quantity).toBe('number');
+        });
+
+        // Assert null clear preceded the purchase event
+        await assertNullClearBefore(page, 'purchase');
+    });
+
+    test('purchase event fires only once', async ({ page }) => {
+        // Navigate to order confirmation directly (simulating post-purchase redirect)
+        // This tests deduplication: refreshing should not fire purchase again
+        await page.goto('/order-confirmation?orderId=ORD-2024-001');
+        await page.waitForSelector('[data-testid="order-confirmed"]');
+
+        const firstCount = (await page.evaluate(() =>
+            (window.dataLayer || []).filter((e: Record<string, unknown>) => e.event === 'purchase').length
+        ));
+
+        await page.reload();
+        await page.waitForSelector('[data-testid="order-confirmed"]');
+
+        const secondCount = (await page.evaluate(() =>
+            (window.dataLayer || []).filter((e: Record<string, unknown>) => e.event === 'purchase').length
+        ));
+
+        // After reload, should still be only 1 — deduplication should prevent re-fire
+        expect(secondCount).toBe(firstCount);
+    });
+});
+```
+
+### Add-to-cart event test
+
+```typescript
+// tests/e2e/add-to-cart.spec.ts
+import { test, expect } from '@playwright/test';
+import { waitForDataLayerEvent } from '../helpers/datalayer';
+
+test('add_to_cart event fires when item added', async ({ page }) => {
+    await page.goto('/products/heritage-jacket');
+
+    // Set quantity to 2 before adding
+    await page.fill('[name="quantity"]', '2');
+    await page.click('button[data-testid="add-to-cart"]');
+
+    const event = await waitForDataLayerEvent(page, 'add_to_cart');
+    expect(event).not.toBeNull();
+
+    const ecommerce = (event as Record<string, unknown>).ecommerce as Record<string, unknown>;
+
+    // Value should be price × quantity
+    const items = ecommerce.items as Array<Record<string, unknown>>;
+    const expectedValue = Number(items[0].price) * Number(items[0].quantity);
+    expect(Number(ecommerce.value)).toBeCloseTo(expectedValue, 2);
+
+    // Quantity should match what was selected
+    expect(Number(items[0].quantity)).toBe(2);
+});
+```
+
+## End-to-end testing with Cypress
+
+Cypress uses a different API but the same assertion strategy:
+
+```javascript
+// cypress/e2e/purchase.cy.js
+
+describe('Purchase tracking', () => {
+    it('fires purchase event on order confirmation', () => {
+        // Complete a checkout flow...
+        cy.visit('/products/heritage-jacket');
+        cy.get('[data-testid="add-to-cart"]').click();
+        // ... checkout steps ...
+        cy.url().should('include', '/order-confirmation');
+
+        // Assert on window.dataLayer
+        cy.window().then((win) => {
+            const purchaseEvent = win.dataLayer.find(e => e.event === 'purchase');
+            expect(purchaseEvent).to.exist;
+            expect(purchaseEvent.ecommerce.transaction_id).to.be.a('string').and.not.be.empty;
+            expect(purchaseEvent.ecommerce.value).to.be.a('number').and.be.greaterThan(0);
+            expect(purchaseEvent.ecommerce.items).to.be.an('array').with.length.greaterThan(0);
+        });
+    });
+});
+```
+
+### Cypress command for dataLayer assertions
+
+Register a custom Cypress command to reuse across tests:
+
+```javascript
+// cypress/support/commands.js
+
+Cypress.Commands.add('getDataLayerEvent', (eventName, options = {}) => {
+    const { timeout = 5000 } = options;
+
+    return cy.window({ timeout }).then((win) => {
+        const event = (win.dataLayer || []).find(e => e.event === eventName);
+        if (!event) {
+            throw new Error(`DataLayer event "${eventName}" not found`);
+        }
+        return event;
+    });
+});
+```
+
+Usage:
+
+```javascript
+cy.getDataLayerEvent('purchase').then((event) => {
+    expect(event.ecommerce.transaction_id).to.be.a('string');
+});
+```
+
+## CI/CD integration
+
+<Steps>
+1. **Add a test script to package.json**
+
+   ```json
+   {
+     "scripts": {
+       "test:e2e": "playwright test",
+       "test:e2e:ci": "playwright test --reporter=github"
+     }
+   }
+   ```
+
+2. **Configure Playwright for CI**
+
+   Create `playwright.config.ts`:
+
+   ```typescript
+   import { defineConfig } from '@playwright/test';
+
+   export default defineConfig({
+     testDir: './tests/e2e',
+     fullyParallel: true,
+     forbidOnly: !!process.env.CI,
+     retries: process.env.CI ? 2 : 0,
+     workers: process.env.CI ? 1 : undefined,
+     reporter: process.env.CI ? 'github' : 'html',
+     use: {
+       baseURL: process.env.BASE_URL || 'http://localhost:3000',
+       trace: 'on-first-retry',
+     },
+   });
+   ```
+
+3. **Add GitHub Actions workflow**
+
+   ```yaml
+   # .github/workflows/analytics-tests.yml
+   name: Analytics E2E Tests
+
+   on:
+     pull_request:
+       branches: [main]
+     push:
+       branches: [main]
+
+   jobs:
+     test-analytics:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+
+         - uses: actions/setup-node@v4
+           with:
+             node-version: '20'
+             cache: 'npm'
+
+         - name: Install dependencies
+           run: npm ci
+
+         - name: Install Playwright browsers
+           run: npx playwright install --with-deps chromium
+
+         - name: Build application
+           run: npm run build
+
+         - name: Start application
+           run: npm start &
+           env:
+             PORT: 3000
+
+         - name: Wait for app to be ready
+           run: npx wait-on http://localhost:3000 --timeout 30000
+
+         - name: Run analytics E2E tests
+           run: npm run test:e2e:ci
+           env:
+             BASE_URL: http://localhost:3000
+
+         - name: Upload Playwright report
+           uses: actions/upload-artifact@v4
+           if: always()
+           with:
+             name: playwright-report
+             path: playwright-report/
+   ```
+
+4. **Run unit tests in the same pipeline**
+
+   ```yaml
+   - name: Run unit tests
+     run: npm test -- --testPathPattern="analytics"
+   ```
+</Steps>
+
+## What to test and what to skip
+
+Not every dataLayer event needs an E2E test. Focus on:
+
+**Always test with E2E:**
+- `purchase` — revenue data is irreplaceable
+- `add_to_cart` — the most-used funnel event
+- `view_item` on the product detail page
+
+**Test with unit tests:**
+- All dataLayer builder functions
+- Ecommerce event construction helpers
+- Cart calculation functions used in `value`
+
+**Test manually or with runtime validation:**
+- Events deep in complex UI flows (infinite scroll list impressions)
+- Events that require third-party interactions (payment iframes)
+
+<Aside type="note">
+Use test IDs (`data-testid` attributes) in your HTML for elements that E2E tests interact with. This decouples your tests from visual design — when a designer changes the button text or CSS class, tests don't break.
+</Aside>
+
+## Common mistakes
+
+**Testing against production data.** E2E tests that complete real checkouts create real orders and pollute your analytics data. Use a dedicated test environment with a test payment gateway (Stripe's test mode, for example) and a separate GA4 data stream.
+
+**Asserting on event order rather than event existence.** `window.dataLayer[3].event === 'purchase'` will fail if any earlier push changes the array position. Assert on the specific event by filtering: `dataLayer.find(e => e.event === 'purchase')`.
+
+**Not retrying flaky timing-dependent assertions.** Analytics events sometimes fire after asynchronous operations. Use `waitForDataLayerEvent` with a generous timeout rather than asserting on `dataLayer` immediately after clicking a button.
+
+<CardGrid>
+  <LinkCard
+    title="Runtime Validation"
+    description="Catch validation errors in the browser before tests run — the complementary live layer."
+    href="/datalayer/validation/runtime-validation/"
+  />
+  <LinkCard
+    title="TypeScript Schemas"
+    description="Type-safe dataLayer pushes — catches structural errors at compile time."
+    href="/datalayer/validation/typescript-schemas/"
+  />
+  <LinkCard
+    title="Validation Approaches"
+    description="Overview of all four validation layers — choose what fits your project."
+    href="/datalayer/validation/validation-approaches/"
+  />
+</CardGrid>

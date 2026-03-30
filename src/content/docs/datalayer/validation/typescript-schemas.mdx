@@ -1,6 +1,491 @@
 ---
 title: "TypeScript Schemas"
-description: "Type-safe dataLayer with TypeScript interfaces and validation."
+description: "Complete TypeScript type definitions for GA4 ecommerce dataLayer events — EcommerceItem interface, discriminated union event types, typed push functions, and Window extension."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+TypeScript's type system catches dataLayer errors at compile time, before code ships. A typo in `item_categiry` becomes a type error instead of silent analytics corruption. This article provides complete type definitions for the GA4 ecommerce event schema and shows how to integrate them into your project.
+
+## Window interface extension
+
+The global `window.dataLayer` array needs to be typed so TypeScript knows what you can push into it.
+
+```typescript
+// types/datalayer.d.ts
+// This file extends the global Window interface. Import it or include it in tsconfig.
+
+export {};
+
+declare global {
+  interface Window {
+    dataLayer: DataLayerObject[];
+  }
+}
+
+type DataLayerObject =
+  | EcommerceNullClear
+  | ViewItemListEvent
+  | SelectItemEvent
+  | ViewItemEvent
+  | AddToCartEvent
+  | RemoveFromCartEvent
+  | ViewCartEvent
+  | BeginCheckoutEvent
+  | AddShippingInfoEvent
+  | AddPaymentInfoEvent
+  | PurchaseEvent
+  | RefundEvent
+  | ViewPromotionEvent
+  | SelectPromotionEvent
+  | LoginEvent
+  | SignUpEvent
+  | SearchEvent
+  | Record<string, unknown>;
+```
+
+Place this file in a `types/` directory and include it in your `tsconfig.json` via the `include` array, or import it in files where you push to `window.dataLayer`.
+
+## EcommerceItem interface
+
+All ecommerce events share the same item object structure:
+
+```typescript
+// types/datalayer.d.ts (continued)
+
+interface EcommerceItem {
+  /** Product SKU or variant ID. Required. */
+  item_id: string;
+
+  /** Product display name. Required. */
+  item_name: string;
+
+  /** Brand or manufacturer name. Optional. */
+  item_brand?: string;
+
+  /** Primary product category. Optional. */
+  item_category?: string;
+
+  /** Secondary category (breadcrumb level 2). Optional. */
+  item_category2?: string;
+
+  /** Tertiary category (breadcrumb level 3). Optional. */
+  item_category3?: string;
+
+  /** Fourth-level category. Optional. */
+  item_category4?: string;
+
+  /** Fifth-level category. Optional. */
+  item_category5?: string;
+
+  /**
+   * Selected variant, e.g. "Black / Large" or "36W 32L".
+   * Omit if the product has no variants. Do not use "Default Title".
+   */
+  item_variant?: string;
+
+  /** List or collection this item belongs to. Optional. */
+  item_list_id?: string;
+
+  /** Display name for the item list. Optional. */
+  item_list_name?: string;
+
+  /**
+   * Unit price of one item. Must be a number, not a string.
+   * Do not multiply by quantity.
+   */
+  price: number;
+
+  /** Quantity of this item. Required. */
+  quantity: number;
+
+  /** 0-based position in a list. Required for list events. */
+  index?: number;
+
+  /** Discount amount applied to this item. Optional. */
+  discount?: number;
+
+  /** Coupon code applied at item level. Optional. */
+  coupon?: string;
+
+  /** Selling channel, e.g. "Google Shopping". Optional. */
+  affiliation?: string;
+
+  /** Creative name for promotional items. Optional. */
+  creative_name?: string;
+
+  /** Creative slot identifier. Optional. */
+  creative_slot?: string;
+
+  /** Promotion ID. Optional. */
+  promotion_id?: string;
+
+  /** Promotion display name. Optional. */
+  promotion_name?: string;
+}
+```
+
+## Null clear type
+
+The ecommerce null clear must be pushed before every ecommerce event:
+
+```typescript
+interface EcommerceNullClear {
+  ecommerce: null;
+}
+```
+
+## Ecommerce event types
+
+### view_item_list
+
+```typescript
+interface ViewItemListEvent {
+  event: 'view_item_list';
+  ecommerce: {
+    item_list_id?: string;
+    item_list_name?: string;
+    items: EcommerceItem[];
+  };
+}
+```
+
+### select_item
+
+```typescript
+interface SelectItemEvent {
+  event: 'select_item';
+  ecommerce: {
+    item_list_id?: string;
+    item_list_name?: string;
+    items: [EcommerceItem]; // exactly one item
+  };
+}
+```
+
+### view_item
+
+```typescript
+interface ViewItemEvent {
+  event: 'view_item';
+  ecommerce: {
+    currency: string;
+    value: number;
+    items: [EcommerceItem]; // exactly one item
+  };
+}
+```
+
+### add_to_cart
+
+```typescript
+interface AddToCartEvent {
+  event: 'add_to_cart';
+  ecommerce: {
+    currency: string;
+    value: number;
+    items: EcommerceItem[];
+  };
+}
+```
+
+### remove_from_cart
+
+```typescript
+interface RemoveFromCartEvent {
+  event: 'remove_from_cart';
+  ecommerce: {
+    currency: string;
+    value: number;
+    items: EcommerceItem[];
+  };
+}
+```
+
+### view_cart
+
+```typescript
+interface ViewCartEvent {
+  event: 'view_cart';
+  ecommerce: {
+    currency: string;
+    value: number;
+    items: EcommerceItem[];
+  };
+}
+```
+
+### begin_checkout
+
+```typescript
+interface BeginCheckoutEvent {
+  event: 'begin_checkout';
+  ecommerce: {
+    currency: string;
+    value: number;
+    coupon?: string;
+    items: EcommerceItem[];
+  };
+}
+```
+
+### add_shipping_info
+
+```typescript
+interface AddShippingInfoEvent {
+  event: 'add_shipping_info';
+  ecommerce: {
+    currency: string;
+    value: number;
+    coupon?: string;
+    shipping_tier?: string;
+    items: EcommerceItem[];
+  };
+}
+```
+
+### add_payment_info
+
+```typescript
+interface AddPaymentInfoEvent {
+  event: 'add_payment_info';
+  ecommerce: {
+    currency: string;
+    value: number;
+    coupon?: string;
+    payment_type?: string;
+    items: EcommerceItem[];
+  };
+}
+```
+
+### purchase
+
+```typescript
+interface PurchaseEvent {
+  event: 'purchase';
+  ecommerce: {
+    /** Unique order ID. Must not be reused across orders. */
+    transaction_id: string;
+    value: number;
+    currency: string;
+    tax?: number;
+    shipping?: number;
+    coupon?: string;
+    affiliation?: string;
+    items: EcommerceItem[];
+  };
+}
+```
+
+### refund
+
+```typescript
+interface RefundEvent {
+  event: 'refund';
+  ecommerce: {
+    transaction_id: string;
+    value: number;
+    currency: string;
+    tax?: number;
+    shipping?: number;
+    /** Omit items for a full refund. Include items for a partial refund. */
+    items?: EcommerceItem[];
+  };
+}
+```
+
+### view_promotion and select_promotion
+
+```typescript
+interface ViewPromotionEvent {
+  event: 'view_promotion';
+  ecommerce: {
+    creative_name?: string;
+    creative_slot?: string;
+    promotion_id?: string;
+    promotion_name?: string;
+    items: EcommerceItem[];
+  };
+}
+
+interface SelectPromotionEvent {
+  event: 'select_promotion';
+  ecommerce: {
+    creative_name?: string;
+    creative_slot?: string;
+    promotion_id?: string;
+    promotion_name?: string;
+    items: EcommerceItem[];
+  };
+}
+```
+
+## Non-ecommerce event types
+
+```typescript
+interface LoginEvent {
+  event: 'login';
+  method: string;
+}
+
+interface SignUpEvent {
+  event: 'sign_up';
+  method: string;
+}
+
+interface SearchEvent {
+  event: 'search';
+  search_term: string;
+  search_results_count?: number;
+  search_category?: string;
+}
+```
+
+## Type-safe push helper
+
+Rather than pushing directly to `window.dataLayer`, use a helper function that enforces the null clear for ecommerce events:
+
+```typescript
+// lib/datalayer.ts
+
+type EcommerceEvent =
+  | ViewItemListEvent
+  | SelectItemEvent
+  | ViewItemEvent
+  | AddToCartEvent
+  | RemoveFromCartEvent
+  | ViewCartEvent
+  | BeginCheckoutEvent
+  | AddShippingInfoEvent
+  | AddPaymentInfoEvent
+  | PurchaseEvent
+  | RefundEvent
+  | ViewPromotionEvent
+  | SelectPromotionEvent;
+
+type NonEcommerceEvent =
+  | LoginEvent
+  | SignUpEvent
+  | SearchEvent;
+
+/**
+ * Push an ecommerce event to the dataLayer.
+ * Automatically inserts the required { ecommerce: null } clear before the event.
+ */
+export function pushEcommerceEvent(event: EcommerceEvent): void {
+  if (typeof window === 'undefined') return;
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push(event as Record<string, unknown>);
+}
+
+/**
+ * Push a non-ecommerce event to the dataLayer.
+ */
+export function pushEvent(event: NonEcommerceEvent): void {
+  if (typeof window === 'undefined') return;
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push(event as Record<string, unknown>);
+}
+```
+
+Usage in a React component:
+
+```tsx
+import { pushEcommerceEvent } from '@/lib/datalayer';
+
+function ProductPage({ product, selectedVariant, currency }) {
+  useEffect(() => {
+    if (!selectedVariant) return;
+
+    pushEcommerceEvent({
+      event: 'view_item',
+      ecommerce: {
+        currency,
+        value: parseFloat(selectedVariant.price),
+        items: [{
+          item_id: selectedVariant.sku || selectedVariant.id,
+          item_name: product.title,
+          item_variant: selectedVariant.title !== 'Default Title' ? selectedVariant.title : undefined,
+          price: parseFloat(selectedVariant.price),
+          quantity: 1,
+        }],
+      },
+    });
+  }, [selectedVariant?.id]);
+}
+```
+
+## tsconfig.json setup
+
+Ensure your `types/datalayer.d.ts` file is included:
+
+```json
+{
+  "compilerOptions": {
+    "strict": true,
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "target": "ES2017"
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "types/**/*.d.ts"
+  ]
+}
+```
+
+<Aside type="note">
+If you're using Next.js, Nuxt, or another framework that auto-generates `tsconfig.json`, add `"types/**/*.d.ts"` to the `include` array in your project root `tsconfig.json`. The framework will merge it with its generated configuration.
+</Aside>
+
+## Strict vs. permissive typing
+
+The types above use `?` to mark optional fields. You can make the types stricter by removing `?` from fields that you require in your implementation — even if GA4 doesn't require them.
+
+For example, if your implementation always includes `item_brand`:
+
+```typescript
+// Stricter version for your implementation
+interface EcommerceItem {
+  item_id: string;
+  item_name: string;
+  item_brand: string;  // required in our schema
+  item_category: string;  // required in our schema
+  price: number;
+  quantity: number;
+  item_variant?: string;  // still optional — products may not have variants
+  index?: number;
+}
+```
+
+This is the recommended approach — TypeScript is most useful when the types reflect your actual requirements, not the loosest possible schema.
+
+## Common mistakes
+
+**Using `string | number` for price fields.** Price values must always be `number` in your TypeScript types. If your data source provides prices as strings (common with API responses), parse them before pushing. TypeScript will force you to handle the conversion: `price: parseFloat(apiProduct.price)`.
+
+**Declaring `window.dataLayer` as `any[]`.** If you type `window.dataLayer` as `any[]`, TypeScript will never catch a dataLayer push error. The cost is minimal — writing the types once buys permanent compile-time checking.
+
+**Not including the `d.ts` file in your TypeScript compilation.** If the file isn't included in `tsconfig.json`'s `include` array (or imported explicitly), TypeScript won't use it and no errors will surface.
+
+<CardGrid>
+  <LinkCard
+    title="Runtime Validation"
+    description="Zod schemas for runtime validation of the same events — catches errors TypeScript cannot."
+    href="/datalayer/validation/runtime-validation/"
+  />
+  <LinkCard
+    title="Validation Approaches"
+    description="Overview of all four validation layers and when to use each."
+    href="/datalayer/validation/validation-approaches/"
+  />
+  <LinkCard
+    title="Automated Testing"
+    description="CI/CD tests that verify TypeScript-typed events reach the dataLayer correctly."
+    href="/datalayer/validation/automated-testing/"
+  />
+</CardGrid>

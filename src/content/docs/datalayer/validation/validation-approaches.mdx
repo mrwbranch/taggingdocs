@@ -1,6 +1,367 @@
 ---
 title: "Validation Approaches"
-description: "Strategies for validating your dataLayer implementation."
+description: "The three-layer dataLayer validation pyramid — manual browser checks, TypeScript type safety, runtime schema validation, and automated tests. When to use each."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
+
+DataLayer implementations break silently. A misnamed parameter passes through GTM and GA4 without error — you only discover the problem weeks later when a report looks wrong and you trace it back to a typo in `item_categiry` that nobody caught. Unlike application code that throws exceptions, bad dataLayer pushes simply produce incomplete or incorrect analytics data.
+
+Validation is the discipline of catching these issues before they reach production. There are four layers of validation, each catching different classes of problems.
+
+## The validation pyramid
+
+```
+             ┌─────────────────┐
+             │   Automated E2E  │   Slowest, most comprehensive
+             │   (Playwright/  │   Catches: regression, integration
+             │    Cypress)     │
+             └────────┬────────┘
+          ┌───────────┴───────────┐
+          │   Runtime Validation   │   Fast, catches live data issues
+          │   (Zod / custom)      │   Catches: wrong types, missing fields
+          └──────────┬────────────┘
+       ┌─────────────┴─────────────┐
+       │   TypeScript Type System   │   Zero runtime cost
+       │   (compile-time checks)   │   Catches: structural errors, typos
+       └────────────┬──────────────┘
+    ┌───────────────┴───────────────┐
+    │   Manual Browser Inspection   │   Fastest to start, labor-intensive
+    │   (DevTools / GTM Preview)   │   Catches: anything you look for
+    └───────────────────────────────┘
+```
+
+Every layer has a role. The goal is to catch errors as early as possible — at compile time if feasible, at runtime in development if not, in automated tests before merge, and as a final check in production with monitoring.
+
+## Layer 1: Manual browser inspection
+
+Manual validation is where you start and where you always have a fallback. It requires no tooling setup and catches any issue you know to look for.
+
+### Browser console
+
+The simplest approach: log every dataLayer push during development.
+
+```javascript
+// Development-only dataLayer monitor
+// Add to your analytics initialization code, gated by environment
+if (process.env.NODE_ENV === 'development' || window.location.hostname === 'localhost') {
+    const originalPush = window.dataLayer.push.bind(window.dataLayer);
+    window.dataLayer.push = function(...args) {
+        args.forEach(item => {
+            if (item.event) {
+                console.group(`%c[DataLayer] ${item.event}`, 'color: #4285f4; font-weight: bold');
+                console.log(JSON.stringify(item, null, 2));
+                console.groupEnd();
+            }
+        });
+        return originalPush(...args);
+    };
+}
+```
+
+### GTM Preview mode
+
+GTM's built-in Preview mode is the most comprehensive manual validation tool. It shows every dataLayer push, when it was pushed relative to GTM events, and whether tags fired. Use it for any significant implementation.
+
+<Steps>
+1. Open GTM and click **Preview** in the top right
+2. Enter your site URL and click **Connect**
+3. A debug window opens alongside your site
+4. Interact with the site to trigger events
+5. Check the **Data Layer** tab in the debug window for each event — verify field names, types, and values
+6. Check the **Tags** tab to confirm your GA4 tag fired on the expected trigger
+</Steps>
+
+### GA4 DebugView
+
+DebugView in GA4 shows events in real time. Enable debug mode by:
+
+- Installing the [Google Analytics Debugger Chrome extension](https://chrome.google.com/webstore/detail/google-analytics-debugger/jnkmfdileelhofjcijamephohjechhna) — it adds `?_gl=debug` to send events to DebugView
+- Or setting `window['ga-disable-G-XXXXXXXX'] = false` and sending a `debug_mode: true` parameter
+
+In GA4, navigate to **Configure > DebugView** to see events stream in. DebugView shows event parameters and flags missing required parameters.
+
+<Aside type="caution">
+DebugView has a delay of 5–10 seconds. Don't confuse this with events not firing — wait for the full delay before concluding an event is missing.
+</Aside>
+
+### What manual inspection doesn't catch
+
+Manual inspection catches issues you look for. It doesn't catch:
+- Regressions in future deployments
+- Events that fire on obscure user paths you didn't test
+- Parameter type mismatches (a string "49.99" where you expect a number)
+- Missing null clears causing data contamination
+
+## Layer 2: TypeScript type checking
+
+If your codebase uses TypeScript, type-checking catches structural errors at compile time — before the code ships. There's no runtime cost and no test infrastructure required.
+
+The principle: extend the `Window` interface to type `window.dataLayer`, then define discriminated union types for each event.
+
+```typescript
+// types/datalayer.d.ts
+
+interface EcommerceItem {
+  item_id: string;
+  item_name: string;
+  item_brand?: string;
+  item_category?: string;
+  item_category2?: string;
+  item_variant?: string;
+  item_list_id?: string;
+  item_list_name?: string;
+  price: number;
+  quantity: number;
+  index?: number;
+  discount?: number;
+  coupon?: string;
+  affiliation?: string;
+}
+
+interface ViewItemListEvent {
+  event: 'view_item_list';
+  ecommerce: {
+    item_list_id?: string;
+    item_list_name?: string;
+    items: EcommerceItem[];
+  };
+}
+
+interface AddToCartEvent {
+  event: 'add_to_cart';
+  ecommerce: {
+    currency: string;
+    value: number;
+    items: EcommerceItem[];
+  };
+}
+
+interface PurchaseEvent {
+  event: 'purchase';
+  ecommerce: {
+    transaction_id: string;
+    value: number;
+    currency: string;
+    tax?: number;
+    shipping?: number;
+    coupon?: string;
+    items: EcommerceItem[];
+  };
+}
+
+interface EcommerceNullClear {
+  ecommerce: null;
+}
+
+type DataLayerEvent =
+  | ViewItemListEvent
+  | AddToCartEvent
+  | PurchaseEvent
+  | EcommerceNullClear
+  | Record<string, unknown>;
+
+declare global {
+  interface Window {
+    dataLayer: DataLayerEvent[];
+  }
+}
+```
+
+With this in place, TypeScript will catch misspellings in event names and parameter names at compile time:
+
+```typescript
+// TypeScript catches this at compile time:
+window.dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 49.99,
+    items: [{
+      item_id: 'SKU-001',
+      item_name: 'Heritage Jacket',
+      item_categiry: 'Jackets', // TS error: 'item_categiry' does not exist in type 'EcommerceItem'
+      price: 49.99,
+      quantity: 1,
+    }]
+  }
+});
+```
+
+TypeScript schemas are covered in detail in the [TypeScript Schemas](/datalayer/validation/typescript-schemas/) article.
+
+## Layer 3: Runtime validation
+
+TypeScript only catches errors in code you write — it can't validate data that comes from an API, a CMS, or a third-party library at runtime. Runtime validation checks the actual values being pushed before they leave the browser.
+
+The pattern: intercept `dataLayer.push`, validate each object against a schema, and log or throw on violations.
+
+```javascript
+// Minimal runtime validator using a schema map
+const schemas = {
+    purchase: {
+        required: ['transaction_id', 'value', 'currency', 'items'],
+        types: { transaction_id: 'string', value: 'number', currency: 'string' },
+        arrayFields: ['items']
+    },
+    add_to_cart: {
+        required: ['currency', 'value', 'items'],
+        types: { currency: 'string', value: 'number' },
+        arrayFields: ['items']
+    }
+};
+
+function validateEcommerceEvent(obj) {
+    if (!obj.event || !obj.ecommerce) return;
+
+    const schema = schemas[obj.event];
+    if (!schema) return;
+
+    const ecommerce = obj.ecommerce;
+    const errors = [];
+
+    // Check required fields
+    schema.required.forEach(field => {
+        if (ecommerce[field] === undefined || ecommerce[field] === null) {
+            errors.push(`Missing required field: ecommerce.${field}`);
+        }
+    });
+
+    // Check types
+    Object.entries(schema.types || {}).forEach(([field, expectedType]) => {
+        if (ecommerce[field] !== undefined && typeof ecommerce[field] !== expectedType) {
+            errors.push(`Wrong type for ecommerce.${field}: expected ${expectedType}, got ${typeof ecommerce[field]}`);
+        }
+    });
+
+    // Check items is non-empty array
+    if (schema.arrayFields?.includes('items')) {
+        if (!Array.isArray(ecommerce.items) || ecommerce.items.length === 0) {
+            errors.push('ecommerce.items must be a non-empty array');
+        }
+    }
+
+    if (errors.length > 0) {
+        const isDev = process.env.NODE_ENV === 'development';
+        errors.forEach(err => {
+            if (isDev) {
+                console.error(`[DataLayer Validation] ${obj.event}: ${err}`);
+            } else {
+                // In production, send to your error monitoring
+                // errorMonitor.captureMessage(`DataLayer: ${err}`, { event: obj.event });
+            }
+        });
+    }
+}
+
+// Install the interceptor
+const _originalPush = window.dataLayer.push.bind(window.dataLayer);
+window.dataLayer.push = function(...args) {
+    args.forEach(validateEcommerceEvent);
+    return _originalPush(...args);
+};
+```
+
+Zod-based runtime validation with full schemas is covered in [Runtime Validation](/datalayer/validation/runtime-validation/).
+
+## Layer 4: Automated testing
+
+Automated tests run in CI/CD and catch regressions. They're the most expensive layer to set up but the most valuable for ongoing maintenance.
+
+Two approaches:
+
+**Unit tests**: Test the functions that build dataLayer objects in isolation. Fast, no browser required.
+
+```javascript
+// Jest unit test for a dataLayer builder function
+import { buildPurchaseEvent } from '../analytics/ecommerce';
+
+describe('buildPurchaseEvent', () => {
+    test('constructs correct GA4 purchase event', () => {
+        const order = {
+            id: 'ORD-123',
+            total: 149.97,
+            currency: 'USD',
+            items: [
+                { sku: 'SKU-001', name: 'Heritage Jacket', price: 89.99, qty: 1 },
+                { sku: 'SKU-047', name: 'Classic T-Shirt', price: 29.99, qty: 2 }
+            ]
+        };
+
+        const event = buildPurchaseEvent(order);
+
+        expect(event.event).toBe('purchase');
+        expect(event.ecommerce.transaction_id).toBe('ORD-123');
+        expect(event.ecommerce.value).toBe(149.97);
+        expect(event.ecommerce.currency).toBe('USD');
+        expect(event.ecommerce.items).toHaveLength(2);
+        expect(event.ecommerce.items[0].item_id).toBe('SKU-001');
+        expect(typeof event.ecommerce.items[0].price).toBe('number');
+    });
+});
+```
+
+**End-to-end tests**: Use Playwright or Cypress to drive a real browser through user flows and assert on the actual `window.dataLayer` state.
+
+```javascript
+// Playwright E2E test
+test('purchase event fires on order confirmation', async ({ page }) => {
+    await page.goto('/products/heritage-jacket');
+    await page.click('button[data-testid="add-to-cart"]');
+    await page.goto('/checkout');
+    // ... complete checkout ...
+
+    const purchaseEvent = await page.evaluate(() => {
+        return window.dataLayer.find(e => e.event === 'purchase');
+    });
+
+    expect(purchaseEvent).toBeTruthy();
+    expect(purchaseEvent.ecommerce.transaction_id).toBeTruthy();
+    expect(typeof purchaseEvent.ecommerce.value).toBe('number');
+    expect(purchaseEvent.ecommerce.items.length).toBeGreaterThan(0);
+});
+```
+
+Playwright patterns and CI/CD integration are covered in detail in [Automated Testing](/datalayer/validation/automated-testing/).
+
+## Choosing the right approach
+
+| Scenario | Recommended approach |
+|----------|---------------------|
+| Quick check during development | Manual browser inspection + GTM Preview |
+| TypeScript project, structured events | TypeScript schemas (compile-time) |
+| Dynamic data from APIs or CMS | Runtime validation with Zod |
+| Team with mixed expertise, regression risk | Automated E2E tests |
+| Production data quality monitoring | Runtime validation reporting to error monitoring |
+| Pre-launch audit | All four layers |
+
+For most projects, the practical starting point is:
+1. TypeScript schemas if you're using TypeScript — zero ongoing cost
+2. Runtime validation in development mode — catches real data issues
+3. E2E tests for the purchase event at minimum — highest business value
+
+## Common mistakes
+
+**Validating only in development.** Switching off validation in production means you only catch issues during development testing, not from real user interactions with edge-case data. Runtime validation in production should log to an error monitoring service (not the console), not be disabled entirely.
+
+**Treating validation as a one-time setup.** Validation catches existing schema. When you add new events or new parameters, update your schemas. Otherwise the validation gives a false sense of security — it's checking the old schema while new events go unchecked.
+
+**Using manual inspection as the only method on a large team.** Manual inspection doesn't scale. Two developers implementing tracking on the same site will produce inconsistent output without shared type schemas or validation rules. Type schemas and runtime validation enforce consistency automatically.
+
+<CardGrid>
+  <LinkCard
+    title="TypeScript Schemas"
+    description="Full TypeScript type definitions for all ecommerce events and the dataLayer interface."
+    href="/datalayer/validation/typescript-schemas/"
+  />
+  <LinkCard
+    title="Runtime Validation"
+    description="Zod-based runtime validation with the dataLayer interceptor pattern."
+    href="/datalayer/validation/runtime-validation/"
+  />
+  <LinkCard
+    title="Automated Testing"
+    description="Playwright and Cypress patterns for CI/CD dataLayer testing."
+    href="/datalayer/validation/automated-testing/"
+  />
+</CardGrid>

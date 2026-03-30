@@ -1,6 +1,369 @@
 ---
 title: "Testing Custom Templates"
-description: "Writing and running automated tests for custom templates."
+description: "Writing and running automated tests for GTM custom templates — the test runner, runCode(), assertThat(), assertApi(), mock(), and the patterns that catch real bugs before they reach production."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+GTM's template test framework is underused and not well documented. That is unfortunate, because it is genuinely useful — it lets you mock API calls, assert behavior, and catch bugs that are invisible in manual testing. A template with tests is significantly easier to maintain and safer to modify than one without.
+
+This article covers the complete test API and the patterns that actually catch bugs.
+
+## The test framework basics
+
+Template tests live in the **Tests** tab of the template editor. Each test is a JavaScript function that:
+1. Sets up mock implementations for sandboxed APIs
+2. Calls `runCode(data)` to execute the template code with specified field values
+3. Asserts expected behavior using `assertThat()` and `assertApi()`
+
+```javascript
+// A minimal test
+runCode({
+  pixelId: '12345',
+  eventType: 'PageView'
+});
+
+assertApi('gtmOnSuccess').wasCalled();
+```
+
+## `runCode(data)`
+
+`runCode()` executes your template code synchronously. Pass it an object representing the template's field values:
+
+```javascript
+runCode({
+  partnerId: '67890',        // data.partnerId in template code
+  eventType: 'Conversion',   // data.eventType
+  conversionId: '12345'      // data.conversionId
+});
+```
+
+For variable templates, `runCode()` returns the value your template returns:
+
+```javascript
+// Test a variable template
+mock('getCookieValues', function(name) {
+  return ['1234567890.1234567890'];
+});
+
+var result = runCode({
+  cookieName: '_ga'
+});
+
+assertThat(result).isEqualTo('1234567890.1234567890');
+```
+
+## `assertApi(apiName)`
+
+`assertApi()` creates an assertion about how a sandboxed API was called. It returns an assertion object with several methods:
+
+```javascript
+// Check that an API was called at least once
+assertApi('gtmOnSuccess').wasCalled();
+assertApi('gtmOnFailure').wasNotCalled();
+
+// Check call count
+assertApi('injectScript').wasCalledWith(
+  jasmine.any(String),  // URL (any string)
+  jasmine.any(Function), // success callback
+  jasmine.any(Function), // failure callback
+  jasmine.any(String)    // cache key
+);
+
+// Check the API was not called
+assertApi('injectScript').wasNotCalled();
+```
+
+### Common assertion methods
+
+```javascript
+// Was it called?
+assertApi('apiName').wasCalled();
+assertApi('apiName').wasNotCalled();
+
+// Was it called with specific arguments?
+assertApi('apiName').wasCalledWith(arg1, arg2, arg3);
+
+// How many times was it called?
+assertApi('apiName').wasCalledTimes(1);
+assertApi('apiName').wasCalledTimes(2);
+```
+
+## `assertThat(value)`
+
+`assertThat()` creates an assertion about a value. Used primarily with variable templates but also for intermediate values in tag templates.
+
+```javascript
+// Equality assertions
+assertThat(result).isEqualTo('expected_value');
+assertThat(result).isNotEqualTo('other_value');
+
+// Type assertions
+assertThat(result).isString();
+assertThat(result).isNumber();
+assertThat(result).isBoolean();
+assertThat(result).isArray();
+assertThat(result).isObject();
+assertThat(result).isNull();
+assertThat(result).isUndefined();
+
+// Numeric comparisons
+assertThat(result).isGreaterThan(0);
+assertThat(result).isLessThan(100);
+
+// Boolean assertions
+assertThat(result).isTrue();
+assertThat(result).isFalse();
+```
+
+## `mock(apiName, implementation)`
+
+`mock()` replaces a sandboxed API with your own implementation for the duration of the test. This is how you simulate API behavior without making real network requests or writing real cookies.
+
+```javascript
+// Mock injectScript to simulate successful load
+mock('injectScript', function(url, onSuccess, onFailure, cacheKey) {
+  onSuccess();  // Immediately call the success callback
+});
+
+// Mock injectScript to simulate failure
+mock('injectScript', function(url, onSuccess, onFailure, cacheKey) {
+  onFailure();  // Immediately call the failure callback
+});
+
+// Mock getCookieValues to return specific values
+mock('getCookieValues', function(cookieName) {
+  if (cookieName === '_ga') return ['GA1.1.1234567890.1234567890'];
+  return [];
+});
+
+// Mock copyFromWindow to return specific globals
+mock('copyFromWindow', function(path) {
+  var globals = {
+    'location.href': 'https://example.com/products/widget?utm_source=google',
+    'fbq': function() {}
+  };
+  return globals[path] || undefined;
+});
+
+// Mock sendPixel to capture the URL
+var capturedUrl;
+mock('sendPixel', function(url, onSuccess, onFailure) {
+  capturedUrl = url;
+  onSuccess();
+});
+```
+
+Mocks only apply for the duration of the test they are declared in. Each test starts with a clean slate.
+
+## Complete test suite example: tag template
+
+Here is a complete test suite for the LinkedIn Insight Tag template from [Building Tag Templates](/templates/building-tag-templates/):
+
+```javascript
+// Test 1: Successful PageView tracking
+(function() {
+  var injectedUrls = [];
+
+  mock('injectScript', function(url, onSuccess, onFailure, cacheKey) {
+    injectedUrls.push(url);
+    onSuccess();
+  });
+  mock('createArgumentsQueue', function(globalName, queuePath) {
+    return function() {};
+  });
+  mock('copyFromWindow', function(path) {
+    if (path === '_linkedin_data_partner_ids') return [];
+    if (path === 'lintrk') return function() {};
+    return undefined;
+  });
+  mock('setInWindow', function() {});
+
+  runCode({
+    partnerId: '12345',
+    eventType: 'PageView'
+  });
+
+  assertApi('injectScript').wasCalled();
+  assertApi('gtmOnSuccess').wasCalled();
+  assertApi('gtmOnFailure').wasNotCalled();
+
+  assertThat(injectedUrls[0]).isEqualTo('https://snap.licdn.com/li.lms-analytics/insight.min.js');
+})();
+
+// Test 2: Successful Conversion tracking
+(function() {
+  var lintrk_calls = [];
+  var lintrk_mock = function(action, data) {
+    lintrk_calls.push({action: action, data: data});
+  };
+
+  mock('injectScript', function(url, onSuccess, onFailure, cacheKey) {
+    onSuccess();
+  });
+  mock('createArgumentsQueue', function() { return function() {}; });
+  mock('copyFromWindow', function(path) {
+    if (path === '_linkedin_data_partner_ids') return [];
+    if (path === 'lintrk') return lintrk_mock;
+    return undefined;
+  });
+  mock('setInWindow', function() {});
+
+  runCode({
+    partnerId: '12345',
+    eventType: 'Conversion',
+    conversionId: '67890'
+  });
+
+  assertApi('gtmOnSuccess').wasCalled();
+  assertThat(lintrk_calls.length).isGreaterThan(0);
+  assertThat(lintrk_calls[0].action).isEqualTo('track');
+  assertThat(lintrk_calls[0].data.conversion_id).isEqualTo('67890');
+})();
+
+// Test 3: Missing required field — should fail
+(function() {
+  mock('injectScript', function(url, onSuccess) { onSuccess(); });
+  mock('createArgumentsQueue', function() { return function() {}; });
+  mock('copyFromWindow', function() { return []; });
+  mock('setInWindow', function() {});
+
+  runCode({
+    partnerId: '',  // Empty — should trigger validation failure
+    eventType: 'PageView'
+  });
+
+  assertApi('gtmOnFailure').wasCalled();
+  assertApi('gtmOnSuccess').wasNotCalled();
+  assertApi('injectScript').wasNotCalled();  // Should exit before injection
+})();
+
+// Test 4: Script load failure
+(function() {
+  mock('injectScript', function(url, onSuccess, onFailure, cacheKey) {
+    onFailure();  // Simulate network failure
+  });
+  mock('createArgumentsQueue', function() { return function() {}; });
+  mock('copyFromWindow', function() { return []; });
+  mock('setInWindow', function() {});
+
+  runCode({
+    partnerId: '12345',
+    eventType: 'PageView'
+  });
+
+  assertApi('gtmOnFailure').wasCalled();
+  assertApi('gtmOnSuccess').wasNotCalled();
+})();
+```
+
+## Complete test suite example: variable template
+
+```javascript
+// Testing a URL parameter extractor variable template
+
+// Test 1: Extracts existing parameter
+(function() {
+  mock('copyFromWindow', function(path) {
+    if (path === 'location.href') {
+      return 'https://example.com/page?utm_source=google&utm_medium=cpc';
+    }
+    return undefined;
+  });
+
+  var result = runCode({ parameterName: 'utm_source' });
+  assertThat(result).isEqualTo('google');
+})();
+
+// Test 2: Returns null for missing parameter
+(function() {
+  mock('copyFromWindow', function() {
+    return 'https://example.com/page?utm_source=google';
+  });
+
+  var result = runCode({ parameterName: 'utm_campaign' });
+  assertThat(result).isNull();
+})();
+
+// Test 3: Returns null when no query string
+(function() {
+  mock('copyFromWindow', function() {
+    return 'https://example.com/page';
+  });
+
+  var result = runCode({ parameterName: 'utm_source' });
+  assertThat(result).isNull();
+})();
+
+// Test 4: Handles URL-encoded values
+(function() {
+  mock('copyFromWindow', function() {
+    return 'https://example.com/page?campaign=summer%20sale%202024';
+  });
+
+  var result = runCode({ parameterName: 'campaign' });
+  assertThat(result).isEqualTo('summer sale 2024');
+})();
+
+// Test 5: Returns null when no field specified
+(function() {
+  mock('copyFromWindow', function() {
+    return 'https://example.com/page?utm_source=google';
+  });
+
+  var result = runCode({ parameterName: '' });
+  assertThat(result).isNull();
+})();
+```
+
+## Running tests
+
+Tests run in the browser inside the GTM template editor. Click **Run Tests** in the Tests tab. Each test displays pass/fail with any assertion failure messages.
+
+Tests also run automatically when you:
+- Save the template
+- Export the template for sharing
+
+If any test fails, GTM will not allow the template to be saved or exported until all tests pass.
+
+## Patterns for effective testing
+
+**Test the happy path first.** Write a test where everything works correctly and all required fields are provided. This verifies your basic logic is correct.
+
+**Test each validation independently.** If you validate multiple required fields, write a separate test for each one being missing.
+
+**Test the failure paths.** For each API that can fail (injectScript, sendPixel, sendHttpRequest), write a test where the failure callback fires. Verify `gtmOnFailure()` is called and `gtmOnSuccess()` is not.
+
+**Capture API call arguments.** Don't just assert that an API was called — verify it was called with the correct arguments. For pixel URLs, capture the URL string and assert it contains the expected parameters:
+
+```javascript
+var capturedPixelUrl;
+mock('sendPixel', function(url, onSuccess, onFailure) {
+  capturedPixelUrl = url;
+  onSuccess();
+});
+
+runCode({ pixelId: '12345', eventType: 'purchase', revenue: 49.99 });
+
+assertThat(capturedPixelUrl).contains('12345');
+assertThat(capturedPixelUrl).contains('purchase');
+assertThat(capturedPixelUrl).contains('49.99');
+```
+
+**Use Jasmine matchers for flexible assertions.** The test framework includes Jasmine matchers like `jasmine.any(Function)`, `jasmine.objectContaining({...})`, and `jasmine.stringContaining('...')` for partial matching.
+
+## Common test failures
+
+**"API was not mocked" error.** You used an API in your template code but didn't mock it in the test. Every `require('apiName')` call in your template needs a corresponding `mock('apiName', ...)` in each test.
+
+**`gtmOnSuccess` was not called.** Your template code reached a code path that doesn't call `gtmOnSuccess()`. Check your return paths — every code path (including error handling) must call either `gtmOnSuccess()` or `gtmOnFailure()`.
+
+**Test passes but behavior is wrong.** You mocked too broadly — your mock always returns a success response regardless of input. Make your mocks more specific to catch edge cases.
+
+---
+
+<CardGrid>
+  <LinkCard title="Building Tag Templates" href="/templates/building-tag-templates/" description="The template structure that your tests should validate." />
+  <LinkCard title="Sandboxed JavaScript APIs" href="/templates/sandboxed-javascript/" description="All the APIs you need to mock in your tests." />
+  <LinkCard title="Template Permissions and Security" href="/templates/template-permissions-security/" description="How permissions are validated — and what tests don't cover." />
+</CardGrid>

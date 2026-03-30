@@ -1,6 +1,310 @@
 ---
 title: "Session Reconstruction"
-description: "Rebuilding sessions from raw event data in BigQuery."
+description: "Rebuild GA4 sessions from raw event data in BigQuery — the canonical approach with session-level dimensions, source attribution, and engagement metrics."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+GA4 does not store sessions as first-class records in BigQuery — it stores events. Sessions must be reconstructed by grouping events using the `user_pseudo_id` + `ga_session_id` composite key. This guide shows how to build a complete session-level table suitable for most analytics use cases.
+
+## The session identifier
+
+Every event in GA4 (except a few system events) carries two parameters:
+- `ga_session_id` — an integer timestamp of session start, in seconds
+- `ga_session_number` — which session this is for the user
+
+The combination of `user_pseudo_id` + `ga_session_id` is the unique session identifier. Use this composite key wherever you need to group events into sessions.
+
+```sql
+-- The session ID for any event
+(SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id
+```
+
+<Aside type="caution">
+Do not count sessions by counting `session_start` events. Session_start may be missing for some sessions due to data stitching, cross-device attribution, or collection gaps. The reliable session count is `COUNT(DISTINCT CONCAT(user_pseudo_id, '.', CAST(session_id AS STRING)))`.
+</Aside>
+
+## Building a sessions CTE
+
+The standard pattern is a CTE that aggregates all events per session and extracts the session-level attributes:
+
+```sql
+WITH sessions AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+
+    -- Session metadata
+    MIN(event_date) AS session_date,
+    MIN(TIMESTAMP_MICROS(event_timestamp)) AS session_start,
+    MAX(TIMESTAMP_MICROS(event_timestamp)) AS session_end,
+    TIMESTAMP_DIFF(
+      MAX(TIMESTAMP_MICROS(event_timestamp)),
+      MIN(TIMESTAMP_MICROS(event_timestamp)),
+      SECOND
+    ) AS session_duration_seconds,
+
+    -- Engagement
+    MAX(
+      CASE WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'session_engaged') = '1'
+      THEN 1 ELSE 0 END
+    ) AS is_engaged,
+
+    -- Session number
+    MAX((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_number')) AS session_number,
+
+    -- Event counts
+    COUNT(*) AS total_events,
+    COUNTIF(event_name = 'page_view') AS pageviews,
+
+    -- Conversions
+    COUNTIF(event_name = 'purchase') AS purchases,
+    SUM(CASE WHEN event_name = 'purchase' THEN ecommerce.purchase_revenue ELSE 0 END) AS revenue,
+
+    -- Traffic source (from session_start event)
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.source END) AS source,
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.medium END) AS medium,
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.name END) AS campaign,
+
+    -- Device
+    MAX(device.category) AS device_category,
+    MAX(device.operating_system) AS operating_system,
+    MAX(device.browser) AS browser,
+
+    -- Geography
+    MAX(geo.country) AS country,
+    MAX(geo.city) AS city
+
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+    -- Exclude events without a session ID (some system events)
+    AND (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') IS NOT NULL
+
+  GROUP BY user_pseudo_id, session_id
+)
+
+SELECT *
+FROM sessions
+ORDER BY session_start
+```
+
+## Adding landing page to sessions
+
+The landing page is the first `page_view` event in the session:
+
+```sql
+WITH session_pages AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_location,
+    event_timestamp,
+    ROW_NUMBER() OVER (
+      PARTITION BY user_pseudo_id,
+        (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id')
+      ORDER BY event_timestamp
+    ) AS page_rank
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name = 'page_view'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+),
+
+landing_pages AS (
+  SELECT
+    user_pseudo_id,
+    session_id,
+    page_location AS landing_page
+  FROM session_pages
+  WHERE page_rank = 1
+)
+
+-- Join to sessions CTE
+SELECT
+  s.*,
+  l.landing_page
+FROM sessions s
+LEFT JOIN landing_pages l USING (user_pseudo_id, session_id)
+```
+
+## Session-level source attribution
+
+Getting the session-level source correctly requires care. The `traffic_source` struct on events reflects the user's acquisition source (first touch), not the current session. To get session-level source, extract it from the `session_start` event:
+
+```sql
+-- Session-level campaign parameters
+WITH session_sources AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    traffic_source.source AS source,
+    traffic_source.medium AS medium,
+    traffic_source.name AS campaign,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'utm_content') AS content,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'utm_term') AS term
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name = 'session_start'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+)
+
+SELECT *
+FROM session_sources
+```
+
+<Aside type="tip">
+For UTM term and UTM content, you must extract them from `event_params` on the `session_start` event — they are not in the `traffic_source` struct. `traffic_source.name` is the campaign name.
+</Aside>
+
+## Persisting session data with a permanent table
+
+For repeated analysis, create a permanent sessions table rather than recomputing the CTE each time:
+
+```sql
+-- Create a sessions table for a specific date range
+CREATE OR REPLACE TABLE `project.analytics_derived.sessions_2024` AS
+
+WITH all_events AS (
+  SELECT
+    user_pseudo_id,
+    event_name,
+    event_date,
+    event_timestamp,
+    event_params,
+    user_properties,
+    traffic_source,
+    device,
+    geo,
+    ecommerce
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20241231'
+)
+
+SELECT
+  user_pseudo_id,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+  MIN(event_date) AS session_date,
+  -- ... (remaining aggregations as above)
+FROM all_events
+WHERE (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') IS NOT NULL
+GROUP BY user_pseudo_id, session_id
+```
+
+This approach dramatically reduces query costs for repeated analysis — you query the derived table (much smaller, no unnesting needed) rather than the raw events tables.
+
+## Handling cross-day sessions
+
+Sessions that start before midnight and end after midnight span two tables (`events_YYYYMMDD` for each day). The `ga_session_id` is the same across both days, so grouping by `user_pseudo_id` + `session_id` naturally merges them.
+
+However, `event_date` may differ across events in the same session. Use the minimum `event_date` as the session date:
+
+```sql
+MIN(event_date) AS session_date
+```
+
+## Session with user properties
+
+Include user properties from the session's events:
+
+```sql
+-- Get user property at session time
+MAX((SELECT value.string_value FROM UNNEST(user_properties) WHERE key = 'subscription_tier')) AS subscription_tier
+```
+
+This gets the user property value as it was set at any point during the session. If the user upgraded mid-session, you may get either value depending on event ordering. For consistency, use the first non-null value:
+
+```sql
+-- First non-null value seen in session
+MAX(CASE
+  WHEN (SELECT value.string_value FROM UNNEST(user_properties) WHERE key = 'subscription_tier') IS NOT NULL
+  THEN (SELECT value.string_value FROM UNNEST(user_properties) WHERE key = 'subscription_tier')
+END) AS subscription_tier
+```
+
+## Complete session table query
+
+```sql
+WITH events AS (
+  SELECT
+    user_pseudo_id,
+    event_name,
+    event_date,
+    TIMESTAMP_MICROS(event_timestamp) AS event_time,
+    event_params,
+    user_properties,
+    traffic_source,
+    device,
+    geo,
+    ecommerce
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+),
+
+sessions AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    MIN(event_date) AS session_date,
+    MIN(event_time) AS session_start,
+    MAX(event_time) AS session_end,
+    TIMESTAMP_DIFF(MAX(event_time), MIN(event_time), SECOND) AS duration_seconds,
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.source END) AS source,
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.medium END) AS medium,
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.name END) AS campaign,
+    MAX((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_number')) AS session_number,
+    MAX(CASE WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'session_engaged') = '1' THEN 1 ELSE 0 END) AS is_engaged,
+    COUNTIF(event_name = 'page_view') AS pageviews,
+    COUNTIF(event_name = 'purchase') AS purchases,
+    SUM(CASE WHEN event_name = 'purchase' THEN ecommerce.purchase_revenue ELSE 0 END) AS revenue,
+    MAX(device.category) AS device_category,
+    MAX(geo.country) AS country,
+    MAX((SELECT value.string_value FROM UNNEST(user_properties) WHERE key = 'subscription_tier')) AS subscription_tier
+  FROM events
+  WHERE (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') IS NOT NULL
+  GROUP BY user_pseudo_id, session_id
+)
+
+SELECT
+  session_date,
+  COUNT(*) AS total_sessions,
+  SUM(is_engaged) AS engaged_sessions,
+  ROUND(AVG(duration_seconds), 0) AS avg_duration_seconds,
+  SUM(pageviews) AS total_pageviews,
+  SUM(purchases) AS total_purchases,
+  SUM(revenue) AS total_revenue
+FROM sessions
+GROUP BY session_date
+ORDER BY session_date
+```
+
+## Common mistakes
+
+### Using session_start count instead of unique session IDs
+
+`SELECT COUNT(*) FROM ... WHERE event_name = 'session_start'` is less reliable than `COUNT(DISTINCT CONCAT(user_pseudo_id, session_id))`. Some sessions legitimately lack a `session_start` event. The distinct count is more accurate.
+
+### Not extracting source from session_start events
+
+Using `traffic_source.source` from non-session_start events returns the user's original acquisition source, not the current session's source. Always aggregate session source by filtering to `event_name = 'session_start'` within your session CTE.
+
+### Missing sessions that span two days
+
+If your CTE filters raw events by `event_date = '2024-01-15'`, you miss the tail end of sessions that started on the 14th and continued past midnight. Filter by `_TABLE_SUFFIX` over a range and group by session ID to capture complete sessions.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Common Queries"
+    description="Ready-to-use SQL including session-based analysis patterns."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Unnesting Patterns"
+    description="How to extract session ID and other nested parameters."
+    href="/ga4/bigquery/unnesting-patterns/"
+  />
+  <LinkCard
+    title="Attribution Queries"
+    description="Multi-touch attribution built on top of session reconstruction."
+    href="/ga4/bigquery/attribution-queries/"
+  />
+</CardGrid>

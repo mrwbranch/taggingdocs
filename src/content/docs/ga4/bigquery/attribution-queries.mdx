@@ -1,6 +1,304 @@
 ---
 title: "Attribution Queries"
-description: "Building attribution models in BigQuery."
+description: "Implement first-touch, last-touch, linear, time-decay, and position-based attribution models in BigQuery SQL using GA4 event data."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Attribution analysis in BigQuery gives you full control over the model, lookback window, and conversion definition. Unlike GA4's built-in attribution (which is session-scoped and uses last non-direct click in standard reports), BigQuery attribution can span the full user lifetime and credit any event or channel you define.
+
+## Foundation: building the touchpoint sequence
+
+All attribution models start from the same foundation — a table of sessions with their traffic source, ordered by time, for each user who eventually converted.
+
+```sql
+-- Step 1: Get all sessions with source information
+WITH sessions AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    MIN(TIMESTAMP_MICROS(event_timestamp)) AS session_start_time,
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.source END) AS source,
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.medium END) AS medium,
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.name END) AS campaign,
+    COUNTIF(event_name = 'purchase') AS purchases,
+    SUM(CASE WHEN event_name = 'purchase' THEN ecommerce.purchase_revenue ELSE 0 END) AS revenue
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20231001' AND '20240131'  -- 90-day lookback window
+    AND (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') IS NOT NULL
+  GROUP BY user_pseudo_id, session_id
+),
+
+-- Step 2: Identify converting users and their conversion time
+conversions AS (
+  SELECT
+    user_pseudo_id,
+    MIN(session_start_time) AS first_conversion_time,
+    SUM(revenue) AS total_revenue
+  FROM sessions
+  WHERE purchases > 0
+  GROUP BY user_pseudo_id
+),
+
+-- Step 3: Build conversion paths — all sessions before conversion, within lookback
+conversion_paths AS (
+  SELECT
+    s.user_pseudo_id,
+    s.session_id,
+    s.session_start_time,
+    s.source,
+    s.medium,
+    s.campaign,
+    c.first_conversion_time,
+    c.total_revenue,
+    ROW_NUMBER() OVER (
+      PARTITION BY s.user_pseudo_id
+      ORDER BY s.session_start_time
+    ) AS touchpoint_number,
+    COUNT(*) OVER (PARTITION BY s.user_pseudo_id) AS total_touchpoints
+  FROM sessions s
+  INNER JOIN conversions c USING (user_pseudo_id)
+  WHERE s.session_start_time <= c.first_conversion_time  -- before conversion
+    AND s.session_start_time >= TIMESTAMP_SUB(c.first_conversion_time, INTERVAL 90 DAY)  -- within lookback
+    AND s.source != '(direct)'  -- exclude direct (consistent with GA4's last non-direct click)
+)
+
+SELECT *
+FROM conversion_paths
+ORDER BY user_pseudo_id, touchpoint_number
+```
+
+## Last-touch attribution
+
+```sql
+WITH conversion_paths AS (
+  -- ... (CTE from above)
+),
+
+last_touch AS (
+  SELECT *
+  FROM conversion_paths
+  WHERE touchpoint_number = total_touchpoints  -- only the last touchpoint
+)
+
+SELECT
+  source,
+  medium,
+  campaign,
+  COUNT(DISTINCT user_pseudo_id) AS conversions,
+  SUM(total_revenue) AS attributed_revenue
+FROM last_touch
+GROUP BY source, medium, campaign
+ORDER BY attributed_revenue DESC
+```
+
+## First-touch attribution
+
+```sql
+WITH first_touch AS (
+  SELECT *
+  FROM conversion_paths
+  WHERE touchpoint_number = 1  -- only the first touchpoint
+)
+
+SELECT
+  source,
+  medium,
+  campaign,
+  COUNT(DISTINCT user_pseudo_id) AS conversions,
+  SUM(total_revenue) AS attributed_revenue
+FROM first_touch
+GROUP BY source, medium, campaign
+ORDER BY attributed_revenue DESC
+```
+
+## Linear attribution
+
+Each touchpoint gets an equal share of conversion credit:
+
+```sql
+SELECT
+  source,
+  medium,
+  campaign,
+  COUNT(DISTINCT user_pseudo_id) AS conversion_paths,
+  SUM(1.0 / total_touchpoints) AS attributed_conversions,
+  SUM(total_revenue / total_touchpoints) AS attributed_revenue
+FROM conversion_paths
+GROUP BY source, medium, campaign
+ORDER BY attributed_revenue DESC
+```
+
+## Time-decay attribution
+
+More recent touchpoints get more credit. The weight decreases exponentially with time before conversion:
+
+```sql
+WITH paths_with_weights AS (
+  SELECT
+    *,
+    -- Time decay: half-life of 7 days
+    -- Weight = 2^(days_before_conversion / 7)
+    -- Normalized so all weights sum to 1 per conversion path
+    TIMESTAMP_DIFF(first_conversion_time, session_start_time, DAY) AS days_before_conversion
+  FROM conversion_paths
+),
+
+paths_with_decay AS (
+  SELECT
+    *,
+    POW(2, -1.0 * days_before_conversion / 7.0) AS raw_weight
+  FROM paths_with_weights
+),
+
+paths_with_normalized_weights AS (
+  SELECT
+    *,
+    raw_weight / SUM(raw_weight) OVER (PARTITION BY user_pseudo_id) AS weight
+  FROM paths_with_decay
+)
+
+SELECT
+  source,
+  medium,
+  campaign,
+  SUM(weight) AS attributed_conversions,
+  SUM(total_revenue * weight) AS attributed_revenue
+FROM paths_with_normalized_weights
+GROUP BY source, medium, campaign
+ORDER BY attributed_revenue DESC
+```
+
+## Position-based (U-shaped) attribution
+
+40% to first touch, 40% to last touch, 20% equally distributed across middle touches:
+
+```sql
+WITH paths_with_position_weights AS (
+  SELECT
+    *,
+    CASE
+      WHEN total_touchpoints = 1
+        THEN 1.0  -- single touchpoint gets 100%
+      WHEN total_touchpoints = 2 AND touchpoint_number = 1
+        THEN 0.5  -- first of two
+      WHEN total_touchpoints = 2 AND touchpoint_number = 2
+        THEN 0.5  -- last of two
+      WHEN touchpoint_number = 1
+        THEN 0.4  -- first touch
+      WHEN touchpoint_number = total_touchpoints
+        THEN 0.4  -- last touch
+      ELSE
+        0.2 / GREATEST(total_touchpoints - 2, 1)  -- middle touches share 20%
+    END AS weight
+  FROM conversion_paths
+)
+
+SELECT
+  source,
+  medium,
+  campaign,
+  SUM(weight) AS attributed_conversions,
+  SUM(total_revenue * weight) AS attributed_revenue
+FROM paths_with_position_weights
+GROUP BY source, medium, campaign
+ORDER BY attributed_revenue DESC
+```
+
+## Multi-model comparison
+
+Compare all models side by side:
+
+```sql
+WITH all_models AS (
+  SELECT
+    source, medium, campaign,
+    'Last Touch' AS model,
+    COUNT(DISTINCT user_pseudo_id) AS conversions,
+    SUM(total_revenue) AS revenue
+  FROM conversion_paths
+  WHERE touchpoint_number = total_touchpoints
+  GROUP BY source, medium, campaign
+
+  UNION ALL
+
+  SELECT
+    source, medium, campaign,
+    'First Touch',
+    COUNT(DISTINCT user_pseudo_id),
+    SUM(total_revenue)
+  FROM conversion_paths
+  WHERE touchpoint_number = 1
+  GROUP BY source, medium, campaign
+
+  UNION ALL
+
+  SELECT
+    source, medium, campaign,
+    'Linear',
+    SUM(1.0 / total_touchpoints),
+    SUM(total_revenue / total_touchpoints)
+  FROM conversion_paths
+  GROUP BY source, medium, campaign
+)
+
+SELECT
+  source,
+  medium,
+  model,
+  ROUND(conversions, 1) AS attributed_conversions,
+  ROUND(revenue, 2) AS attributed_revenue
+FROM all_models
+ORDER BY source, medium, model
+```
+
+## Attribution with channel grouping
+
+Apply the channel UDF to the attribution output for cleaner reporting:
+
+```sql
+SELECT
+  `project.analytics_derived.classify_channel`(source, medium, campaign) AS channel,
+  SUM(total_revenue / total_touchpoints) AS linear_attributed_revenue
+FROM conversion_paths
+GROUP BY channel
+ORDER BY linear_attributed_revenue DESC
+```
+
+## Common mistakes
+
+### Forgetting to exclude direct traffic
+
+GA4's standard attribution excludes direct from the conversion path (last non-direct click). If you include direct sessions in your path, they dominate as the last touchpoint because users often return directly to complete their purchase. Decide whether to include or exclude direct, be consistent, and document your choice.
+
+### Not applying a lookback window
+
+Without a lookback window limit, a user's first organic search visit 18 months ago might receive first-touch attribution for a recent purchase. Set a realistic lookback window (30-90 days for most businesses; 90+ days for high-consideration B2B purchases).
+
+### Using event_date instead of event_timestamp for ordering
+
+`event_date` is a string in `YYYYMMDD` format. For touchpoint ordering, use `event_timestamp` (microseconds since epoch) to get the correct chronological order within the same day.
+
+### Counting the same conversion multiple times
+
+If a user has multiple purchase events, the foundation query above attributes all revenue to a single "first conversion." For multi-purchase attribution (attributing each order independently), adjust the `conversions` CTE to be per-transaction, not per-user.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Attribution Settings"
+    description="Configure GA4's built-in attribution models for standard reports."
+    href="/ga4/configuration/attribution-settings/"
+  />
+  <LinkCard
+    title="Custom Channel Grouping"
+    description="Apply channel classification logic to attribution output."
+    href="/ga4/bigquery/custom-channel-grouping/"
+  />
+  <LinkCard
+    title="Session Reconstruction"
+    description="Build the session table foundation used in attribution queries."
+    href="/ga4/bigquery/session-reconstruction/"
+  />
+</CardGrid>

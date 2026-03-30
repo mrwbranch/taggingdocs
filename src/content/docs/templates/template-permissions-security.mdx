@@ -1,6 +1,270 @@
 ---
-title: "Template Permissions & Security"
-description: "The permissions model, Template Policies, and security implications."
+title: "Template Permissions and Security"
+description: "The GTM template permissions model — granular permission types, auto-detection, manual configuration, Template Policies for page-level control, and what malicious template code could do without proper governance."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Template permissions are the mechanism that makes the sandbox meaningful. Without declared permissions, the sandboxed APIs are unavailable — your template cannot inject scripts, read cookies, or make network requests. Permissions make the template's capabilities explicit and auditable.
+
+Understanding the permissions model is essential both for writing templates (so your code can do what it needs) and for evaluating templates from others (so you know what they are allowed to do before deploying them to your production site).
+
+## Permission types
+
+### `inject_script`
+
+Required to call `injectScript()`. Must declare the specific URL or URL pattern of each script you inject.
+
+```
+Permission: inject_script
+URL: https://snap.licdn.com/li.lms-analytics/insight.min.js
+```
+
+Specific URLs (not wildcards) are strongly preferred. A wildcard like `https://cdn.vendor.com/*` allows injecting any script from that CDN — not just the one you intended.
+
+### `send_pixel`
+
+Required to call `sendPixel()`. Must declare the URL pattern of each pixel request.
+
+```
+Permission: send_pixel
+URL: https://px.ads.linkedin.com/*
+```
+
+Wildcards are more justifiable here because pixel URLs are parameterized with event data and vary per call.
+
+### `access_globals`
+
+Required to call `copyFromWindow()`, `setInWindow()`. Must declare each global variable path with its access level (read, write, or read/write).
+
+```
+Permission: access_globals
+Path: fbq
+Access: read, write, execute
+
+Permission: access_globals
+Path: _linkedin_data_partner_ids
+Access: read, write
+```
+
+The `execute` access level is needed when you call the global as a function. Read-only is sufficient when you only call `copyFromWindow()`. Write is needed for `setInWindow()`.
+
+### `get_cookies`
+
+Required to call `getCookieValues()`. Must declare each cookie name.
+
+```
+Permission: get_cookies
+Cookie name: _ga
+Cookie name: _gid
+Cookie name: _my_custom_cookie
+```
+
+### `set_cookies`
+
+Required to call `setCookie()`. Must declare each cookie name along with allowed domain, path, and expiration constraints.
+
+```
+Permission: set_cookies
+Cookie name: my_tracking_cookie
+Domain: .example.com
+Path: /
+```
+
+Setting narrow constraints here limits what an attacker can do if they exploit the template — they can only set a specific named cookie on specific domains.
+
+### `read_data_layer`
+
+Required to call `copyFromDataLayer()`. Must declare each key path.
+
+```
+Permission: read_data_layer
+Key: ecommerce
+Key: user.id
+Key: page_type
+```
+
+### `access_consent_state`
+
+Required to call `accessConsentState()`. Must declare which consent type(s) the template reads.
+
+```
+Permission: access_consent_state
+Consent type: analytics_storage
+Consent type: ad_storage
+```
+
+### `send_http` (server-side only)
+
+Required for `sendHttpGet()` and `sendHttpRequest()` in server-side templates.
+
+```
+Permission: send_http
+URL: https://api.example.com/*
+```
+
+### `read_request` (server-side only)
+
+Required to read incoming request data in client templates.
+
+```
+Permission: read_request
+Headers: user-agent, content-type
+Body: any
+Query parameters: all
+Path: any
+```
+
+## Auto-detection vs. manual configuration
+
+GTM's template editor auto-detects permissions from your code. When you use `injectScript('https://specific.cdn.com/script.js', ...)`, GTM adds a `inject_script` permission for that specific URL.
+
+Auto-detection is a starting point. Review all auto-detected permissions:
+- **Too broad**: URL wildcards that should be specific URLs
+- **Unnecessary**: APIs imported but not actually needed
+- **Missing**: Dynamic URLs that GTM couldn't statically analyze
+
+```javascript
+// GTM can auto-detect this specific URL
+injectScript('https://snap.licdn.com/li.lms-analytics/insight.min.js', ...);
+
+// GTM cannot auto-detect dynamic URLs — you must add the permission manually
+var sdkUrl = data.customSdkUrl;
+injectScript(sdkUrl, ...);  // You need to add a broad permission manually
+```
+
+## Template Policies: page-level permission override
+
+Template Policies allow the owner of a webpage to override what installed templates are allowed to do. A policy is defined using `gtag('policy', ...)` calls in the page source:
+
+```javascript
+// Add to your page, before GTM loads
+window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+
+// Block all templates from injecting scripts to non-allowlisted domains
+gtag('policy', 'inject_script', function(containerName, permissionData) {
+  // permissionData.url is the URL the template wants to inject
+  var allowedDomains = [
+    'snap.licdn.com',
+    'connect.facebook.net',
+    'analytics.tiktok.com',
+    'www.googletagmanager.com'
+  ];
+
+  var url = permissionData.url;
+  return allowedDomains.some(function(domain) {
+    return url && url.indexOf('https://' + domain + '/') === 0;
+  });
+});
+```
+
+If the policy function returns `false` (or throws an error), the permission is denied and the API call fails. The template's code continues executing but the API call does nothing.
+
+### Other policy types
+
+```javascript
+// Control which globals templates can access
+gtag('policy', 'access_globals', function(containerName, data) {
+  var blockedGlobals = ['__secretData', '_internalConfig'];
+  return blockedGlobals.indexOf(data.key) === -1;
+});
+
+// Control which cookies templates can read
+gtag('policy', 'get_cookies', function(containerName, data) {
+  var sensitivePatterns = ['session_token', 'auth_cookie'];
+  return !sensitivePatterns.some(function(pattern) {
+    return data.id.indexOf(pattern) !== -1;
+  });
+});
+
+// Control which URLs can receive pixels
+gtag('policy', 'send_pixel', function(containerName, data) {
+  // Only allow pixels to known vendor domains
+  var allowedDomains = ['px.ads.linkedin.com', 'www.facebook.com'];
+  return allowedDomains.some(function(domain) {
+    return data.url && data.url.indexOf('https://' + domain) === 0;
+  });
+});
+```
+
+Template Policies are your last line of defense for a deployed site. They let you enforce constraints on all templates regardless of what permissions those templates declared.
+
+## Security implications: what templates can do
+
+Understanding the threat model requires understanding what a template with broad permissions can do:
+
+**With `access_globals` (read/write, all globals):**
+- Read any JavaScript variable on the page including authentication tokens, form field values, internal state
+- Modify global objects used by other code (e.g., modify `window.fetch` to intercept network requests)
+- Access and exfiltrate any data in the page's JavaScript context
+
+**With `inject_script` (broad URL pattern):**
+- Inject arbitrary JavaScript from any URL matching the pattern
+- Load malicious scripts if the CDN domain is compromised (supply chain attack)
+- Inject keyloggers, skimmers, or data exfiltration code
+
+**With `set_cookies` (broad domain):**
+- Create persistent tracking cookies beyond what was intended
+- Overwrite existing cookies (potentially breaking authentication or analytics)
+
+**With `send_pixel` (broad URL):**
+- Exfiltrate data to any server matching the URL pattern
+- Including page content, form field values, or any data accessible via `copyFromDataLayer()`
+
+This is not hypothetical. Real-world attacks (Magecart, formjacking) have exploited JavaScript code running in the context of web pages. A GTM template with broad permissions is a capable exfiltration tool in the wrong hands.
+
+## Security best practices
+
+**Review every permission before deploying a template.** Do not assume a Community Gallery template has minimal permissions. Click the Permissions tab and read every permission declaration.
+
+**Prefer specific over wildcard permissions.** A `inject_script` permission for `https://connect.facebook.net/en_US/fbevents.js` is safer than one for `https://connect.facebook.net/*`.
+
+**Implement Template Policies for high-risk permission types.** At minimum, policy `inject_script` to an explicit allowlist of approved CDN domains.
+
+**Treat GTM publish access as equivalent to production code deployment.** Every GTM publish potentially runs new code on your users' browsers. Apply the same review process you would to a production code change.
+
+**Audit templates quarterly.** Review the Community Gallery templates in your container for new versions. Check permission declarations for any templates you didn't write. Look for templates that haven't been updated in 12+ months (may be abandoned, not receiving security updates).
+
+**Never give Publish access to people who don't understand the security implications.** GTM publish access is the ability to deploy arbitrary JavaScript to your production website. Treat it accordingly.
+
+<Comparison leftTitle="Before deploying any template" rightTitle="Red flags in permission declarations" leftType="good" rightType="bad">
+  <div slot="left">
+
+- Review every permission in the Permissions tab
+- Verify inject_script URLs match expected vendor CDN domains
+- Check access_globals for sensitive global names
+- Test in Preview mode before publishing
+- Check template's GitHub repository for recent activity
+
+  </div>
+  <div slot="right">
+
+- `inject_script` with `https://*` (any URL)
+- `access_globals` for `document.cookie` or `sessionStorage`
+- `send_pixel` with a URL that doesn't match any known vendor
+- `set_cookies` with `domain: *`
+- Any obfuscated or minified template code
+
+  </div>
+</Comparison>
+
+## Modifying Community Gallery templates
+
+When you install a template from the Community Gallery, it maintains a link to the original repository (via commit SHA). When the template author publishes an update, you can pull the update in GTM.
+
+If you modify the template's permissions (even to make them more restrictive), **GTM severs this link**. You will no longer receive updates from the original author. This is a deliberate design choice: template authors are responsible for the integrity of their templates, and modifications change that integrity guarantee.
+
+Before modifying a template's permissions:
+1. Check whether the template's documentation explains why the permission is needed
+2. Contact the template author if the permission seems overly broad
+3. If you must modify for security reasons, accept that you own the template going forward
+
+---
+
+<CardGrid>
+  <LinkCard title="Sandboxed JavaScript APIs" href="/templates/sandboxed-javascript/" description="How the sandboxed APIs correspond to permission declarations." />
+  <LinkCard title="Community Gallery Guide" href="/templates/community-gallery-guide/" description="How to evaluate template permissions before installing from the Gallery." />
+  <LinkCard title="Building Tag Templates" href="/templates/building-tag-templates/" description="Declaring permissions correctly when building your own templates." />
+</CardGrid>

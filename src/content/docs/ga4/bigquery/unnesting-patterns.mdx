@@ -1,6 +1,312 @@
 ---
 title: "Unnesting Patterns"
-description: "The essential UNNEST patterns for GA4 BigQuery data."
+description: "Every UNNEST pattern you need for GA4 BigQuery data — event params, user properties, items, and the value struct's four sub-fields."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The single biggest challenge in querying GA4 BigQuery data is the nested structure. Event parameters, user properties, and items are all stored as arrays of structs rather than flat columns. Every parameter lookup requires an UNNEST operation. This guide covers every pattern you will encounter.
+
+## The value struct
+
+GA4 parameters store their value in one of four sub-fields depending on the data type:
+
+```sql
+value STRUCT<
+  string_value  STRING,
+  int_value     INT64,
+  float_value   FLOAT64,
+  double_value  FLOAT64
+>
+```
+
+Only one field is populated per parameter — the others are NULL. You must know which value type your parameter uses:
+- String parameters → `value.string_value`
+- Integer parameters → `value.int_value`
+- Float/double parameters → `value.float_value` or `value.double_value`
+
+If you are unsure, use COALESCE to try all types:
+
+```sql
+COALESCE(
+  value.string_value,
+  CAST(value.int_value AS STRING),
+  CAST(value.float_value AS STRING),
+  CAST(value.double_value AS STRING)
+) AS any_value
+```
+
+## Correlated subquery pattern (most common)
+
+The standard way to extract a single parameter from `event_params`:
+
+```sql
+-- String parameter
+(SELECT value.string_value
+ FROM UNNEST(event_params)
+ WHERE key = 'page_title') AS page_title
+
+-- Integer parameter
+(SELECT value.int_value
+ FROM UNNEST(event_params)
+ WHERE key = 'ga_session_id') AS session_id
+
+-- Float/double parameter (use COALESCE — GA4 uses either float or double depending on precision)
+(SELECT COALESCE(value.float_value, value.double_value)
+ FROM UNNEST(event_params)
+ WHERE key = 'value') AS event_value
+```
+
+The correlated subquery runs once per row and returns a scalar value. This is the cleanest pattern for extracting a few parameters.
+
+### Multiple parameters in one query
+
+```sql
+SELECT
+  event_date,
+  event_name,
+  user_pseudo_id,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_url,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title') AS page_title,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_number') AS session_number,
+  (SELECT COALESCE(value.float_value, value.double_value) FROM UNNEST(event_params) WHERE key = 'value') AS revenue
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+```
+
+## UNNEST in FROM clause (for filtering on parameters)
+
+When you need to filter by a parameter value, use UNNEST in the FROM clause:
+
+```sql
+-- Find all events where a specific parameter equals a value
+SELECT
+  event_date,
+  event_name,
+  user_pseudo_id,
+  ep.value.string_value AS content_type
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(event_params) AS ep
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND ep.key = 'content_type'
+  AND ep.value.string_value = 'blog_post'
+```
+
+<Aside type="caution">
+Using UNNEST in the FROM clause with `CROSS JOIN` semantics multiplies rows — one row per parameter per event. Always filter `ep.key = 'your_param'` immediately to avoid row explosion. Without the key filter, a single event with 10 parameters produces 10 rows.
+</Aside>
+
+### LEFT JOIN UNNEST (preserves events without the parameter)
+
+When you want to include events even if the parameter is not present:
+
+```sql
+SELECT
+  e.event_date,
+  e.event_name,
+  e.user_pseudo_id,
+  ep.value.string_value AS content_type  -- NULL for events without this param
+FROM `project.analytics_PROPERTY_ID.events_*` e
+LEFT JOIN UNNEST(e.event_params) AS ep
+  ON ep.key = 'content_type'
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+```
+
+## User properties
+
+The same patterns apply to `user_properties`:
+
+```sql
+-- Correlated subquery pattern
+(SELECT value.string_value
+ FROM UNNEST(user_properties)
+ WHERE key = 'subscription_tier') AS subscription_tier
+
+-- User property with timestamp
+(SELECT value.set_timestamp_micros
+ FROM UNNEST(user_properties)
+ WHERE key = 'subscription_tier') AS tier_last_set_at
+
+-- Filter by user property value
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(user_properties) AS up
+WHERE up.key = 'subscription_tier'
+  AND up.value.string_value = 'premium'
+```
+
+## Items array
+
+The `items` array is used in ecommerce events. Each item is a STRUCT (not a key-value array), so access its fields directly:
+
+```sql
+-- UNNEST items to get product-level rows
+SELECT
+  event_date,
+  user_pseudo_id,
+  item.item_id,
+  item.item_name,
+  item.item_category,
+  item.quantity,
+  item.price,
+  item.item_revenue
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(items) AS item
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+```
+
+### Aggregating items within a purchase
+
+```sql
+-- Total items and revenue per transaction
+SELECT
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id') AS transaction_id,
+  SUM(item.quantity) AS total_items,
+  SUM(item.item_revenue) AS total_revenue,
+  COUNT(DISTINCT item.item_id) AS unique_items
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(items) AS item
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX = '20240115'
+GROUP BY transaction_id
+```
+
+### Items with custom item parameters
+
+If you added custom parameters to your items (beyond the standard fields), they are in `item.item_params`, which is also an ARRAY<STRUCT>:
+
+```sql
+-- Access custom item parameter
+SELECT
+  item.item_name,
+  (SELECT value.string_value
+   FROM UNNEST(item.item_params)
+   WHERE key = 'custom_attribute') AS custom_attribute
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(items) AS item
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX = '20240115'
+```
+
+## Checking if a parameter exists
+
+Use EXISTS or check for NULL from the correlated subquery:
+
+```sql
+-- Events that have the 'coupon' parameter (any value)
+WHERE (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'coupon') IS NOT NULL
+
+-- Events where coupon parameter exists and is not empty
+WHERE (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'coupon')
+      NOT IN ('', '(not set)')
+```
+
+## Extracting all parameter keys for an event
+
+Useful for discovering what parameters are sent with an event:
+
+```sql
+-- See all parameter keys and their value types for purchase events
+SELECT
+  ep.key,
+  CASE
+    WHEN ep.value.string_value IS NOT NULL THEN 'string'
+    WHEN ep.value.int_value IS NOT NULL THEN 'int'
+    WHEN ep.value.float_value IS NOT NULL THEN 'float'
+    WHEN ep.value.double_value IS NOT NULL THEN 'double'
+    ELSE 'null'
+  END AS value_type,
+  COUNT(*) AS frequency
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(event_params) AS ep
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX = '20240115'
+GROUP BY ep.key, value_type
+ORDER BY frequency DESC
+```
+
+## Extracting multiple parameters efficiently
+
+When you need many parameters from the same event, a single UNNEST with aggregation is more efficient than multiple correlated subqueries:
+
+```sql
+-- Extract multiple parameters with MAX aggregation over UNNEST
+SELECT
+  event_date,
+  user_pseudo_id,
+  MAX(CASE WHEN key = 'page_location' THEN value.string_value END) AS page_url,
+  MAX(CASE WHEN key = 'page_title' THEN value.string_value END) AS page_title,
+  MAX(CASE WHEN key = 'ga_session_id' THEN value.int_value END) AS session_id,
+  MAX(CASE WHEN key = 'page_referrer' THEN value.string_value END) AS referrer
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(event_params)
+WHERE event_name = 'page_view'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_date, user_pseudo_id
+```
+
+This reads `event_params` once and extracts all parameters in a single pass, versus reading it N times with N correlated subqueries.
+
+## Common value type mistakes
+
+### Using string_value for numeric parameters
+
+`ga_session_id` is stored as `int_value`. Using `value.string_value` for it returns NULL.
+
+```sql
+-- ❌ Returns NULL
+(SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'ga_session_id')
+
+-- ✅ Returns the integer session ID
+(SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id')
+```
+
+### Not handling float vs. double for revenue
+
+GA4 sometimes stores monetary values as `float_value` and sometimes as `double_value`. Use COALESCE:
+
+```sql
+-- ✅ Safe for any precision
+(SELECT COALESCE(value.float_value, value.double_value)
+ FROM UNNEST(event_params)
+ WHERE key = 'value') AS revenue
+```
+
+### Row multiplication without key filtering
+
+```sql
+-- ❌ Multiplies every row by the number of event_params (10-25x)
+SELECT event_name, ep.value.string_value
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(event_params) AS ep
+WHERE event_name = 'page_view'
+
+-- ✅ One row per event
+SELECT event_name, ep.value.string_value
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(event_params) AS ep
+WHERE event_name = 'page_view'
+  AND ep.key = 'page_title'  -- always filter to the key you need
+```
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Schema Reference"
+    description="Full field reference for the GA4 BigQuery export schema."
+    href="/ga4/bigquery/schema-reference/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="Ready-to-use SQL applying these unnesting patterns."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Session Reconstruction"
+    description="Session reconstruction query using multiple unnesting patterns."
+    href="/ga4/bigquery/session-reconstruction/"
+  />
+</CardGrid>

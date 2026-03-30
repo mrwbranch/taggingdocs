@@ -1,6 +1,558 @@
 ---
 title: "WooCommerce Advanced"
-description: "Advanced WooCommerce tracking beyond the basics."
+description: "Advanced WooCommerce tracking — GTM4WP plugin deep configuration, variable product variant tracking, subscription events, multi-currency, HPOS compatibility, full page cache, and AJAX cart patterns."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
+
+WooCommerce's basic tracking covers the purchase funnel, but production stores quickly encounter deeper challenges: variable products where color and size become `item_variant`, subscriptions with recurring orders that happen outside the browser, multi-currency setups where the displayed price doesn't match the base currency, and caching plugins that serve static pages without executing PHP.
+
+This guide covers each of these patterns and goes deep on GTM4WP's configuration options — the most common plugin for WooCommerce GTM integration.
+
+## GTM4WP plugin deep configuration
+
+GTM4WP (Google Tag Manager for WordPress by Thomas Geiger) handles GTM installation and generates a comprehensive dataLayer including WooCommerce ecommerce events. Most WooCommerce stores should start here rather than writing custom PHP.
+
+### Container settings
+
+Navigate to **Settings > Google Tag Manager** to access the plugin configuration.
+
+**Container ID**: Your `GTM-XXXXXXX` ID. Required.
+
+**Container code placement**: Controls where the GTM snippet is injected:
+- `Footer` (default) — loads GTM after page content. Slightly better performance but GTM fires later
+- `Header` — loads GTM in `<head>`. Required if you need GTM to fire on page load before first paint (rare — most use footer)
+
+**Script loading method**: `Script tag` is standard. `DOM API` is an alternative that avoids some ad blocker blocking but is less common.
+
+**Blacklist/whitelist**: You can restrict which GTM tag types fire. Leave empty unless you have a specific security requirement.
+
+### Integration settings
+
+The **Integrations** tab controls which dataLayer events GTM4WP generates:
+
+**WooCommerce**: Enable this. Sub-options include:
+
+- **Track logged-in users**: Pushes `user_id` to dataLayer when a customer is logged in. Enable this.
+- **Track classic ecommerce data**: Pushes GA Universal ecommerce objects. You don't need this for GA4 — it's for legacy Universal Analytics setups.
+- **Track enhanced ecommerce data**: Pushes GA4-style ecommerce events including `view_item`, `add_to_cart`, `begin_checkout`, `purchase`. Enable this.
+- **Track checkout options**: Pushes `add_shipping_info` and `add_payment_info` during checkout steps.
+- **Product list name**: Controls the `item_list_name` value on list events. Default is the WooCommerce page name. Customizable via filter.
+- **Webshop page**: Tells GTM4WP which page is your shop page for accurate `page_type` detection.
+
+### Customizing GTM4WP output with filters
+
+GTM4WP exposes WordPress filters to customize the dataLayer output without modifying the plugin:
+
+```php
+// Add custom parameters to all product items in GTM4WP's ecommerce events
+add_filter('gtm4wp_woocommerce_product_data', function($product_data, $woo_product) {
+    // Add a custom dimension
+    $product_data['item_brand'] = $woo_product->get_meta('_brand') ?: get_bloginfo('name');
+    $product_data['item_collection'] = $woo_product->get_meta('_collection') ?: '';
+
+    return $product_data;
+}, 10, 2);
+
+// Customize the order data pushed on purchase
+add_filter('gtm4wp_woocommerce_order_data', function($order_data, $order) {
+    $order_data['order_source'] = $order->get_meta('_order_source') ?: 'web';
+    return $order_data;
+}, 10, 2);
+
+// Customize product list name
+add_filter('gtm4wp_woocommerce_product_list_name', function($list_name, $location) {
+    if ($location === 'related') return 'Related Products';
+    if ($location === 'cross-sell') return 'Cross-Sells';
+    return $list_name;
+}, 10, 2);
+```
+
+### When GTM4WP isn't enough
+
+GTM4WP doesn't cover every scenario. For variable product variant tracking, subscription events, or non-standard purchase flows, you'll need custom PHP alongside GTM4WP's output.
+
+## Variable product tracking
+
+WooCommerce variable products (t-shirts with size/color, shoes with size/width) present a specific tracking challenge: the selected variation must become `item_variant` in your dataLayer push.
+
+### The variant update problem
+
+When a customer selects a variation on the product page, WooCommerce updates the price via JavaScript without a page reload. The variation data is available in JavaScript but requires listening to WooCommerce's custom events.
+
+```javascript
+// WooCommerce fires 'found_variation' when customer selects a complete variation
+jQuery(document).on('found_variation', '.variations_form', function(event, variation) {
+    var form = jQuery(this);
+    var productId = form.find('[name="product_id"]').val();
+
+    // Get the selected attribute values
+    var selectedAttributes = {};
+    form.find('.variations select').each(function() {
+        var attributeName = jQuery(this).attr('name'); // e.g., attribute_pa_color
+        var attributeValue = jQuery(this).val();
+        var label = jQuery('option:selected', this).text();
+        selectedAttributes[attributeName] = label;
+    });
+
+    // Build item_variant from selected attributes
+    var variantParts = Object.values(selectedAttributes).filter(Boolean);
+    var itemVariant = variantParts.join(' / ');
+
+    // Update a window variable so add-to-cart can reference it
+    window._selectedVariant = {
+        id: variation.variation_id,
+        sku: variation.sku,
+        price: parseFloat(variation.display_price),
+        item_variant: itemVariant
+    };
+
+    // Optionally fire view_item for the selected variation
+    window.dataLayer = window.dataLayer || [];
+    dataLayer.push({ ecommerce: null });
+    dataLayer.push({
+        event: 'view_item',
+        ecommerce: {
+            currency: woocommerce_params?.currency || 'USD',
+            value: parseFloat(variation.display_price),
+            items: [{
+                item_id: variation.sku || String(variation.variation_id),
+                item_name: document.title.replace(' – ' + window.location.hostname, '').trim(),
+                item_variant: itemVariant,
+                price: parseFloat(variation.display_price),
+                quantity: 1
+            }]
+        }
+    });
+});
+
+// Listen for variation reset
+jQuery(document).on('reset_data', '.variations_form', function() {
+    window._selectedVariant = null;
+});
+```
+
+### Variant data in add-to-cart
+
+When the customer clicks Add to Cart for a variable product, use the stored variant data:
+
+```javascript
+jQuery(document).on('added_to_cart', function(event, fragments, cart_hash, button) {
+    var $button = jQuery(button);
+    var variationId = $button.val(); // WooCommerce sets button value to variation ID
+
+    var selectedVariant = window._selectedVariant;
+
+    window.dataLayer = window.dataLayer || [];
+    dataLayer.push({ ecommerce: null });
+    dataLayer.push({
+        event: 'add_to_cart',
+        ecommerce: {
+            currency: woocommerce_params?.currency || 'USD',
+            value: selectedVariant ? selectedVariant.price * 1 : parseFloat($button.data('product_price') || 0),
+            items: [{
+                item_id: selectedVariant ? selectedVariant.sku || String(selectedVariant.id) : $button.data('product_id'),
+                item_name: $button.data('product_name') || '',
+                item_variant: selectedVariant ? selectedVariant.item_variant : '',
+                price: selectedVariant ? selectedVariant.price : parseFloat($button.data('product_price') || 0),
+                quantity: 1
+            }]
+        }
+    });
+});
+```
+
+### Server-side variant data for GTM4WP
+
+If you're using GTM4WP for ecommerce tracking, you can extend its product data output to include variant data using the filter approach shown above. GTM4WP already handles the `item_variant` field using the variation's attribute string — verify it matches your expected format by checking the dataLayer in browser DevTools after selecting a variation.
+
+## Subscription tracking
+
+WooCommerce Subscriptions (by WooThemes/Automattic) handles recurring billing. The initial subscription order behaves like a normal WooCommerce order — it fires through the standard checkout flow. Renewals are different.
+
+### First subscription order
+
+The initial subscription purchase fires through the normal WooCommerce `woocommerce_thankyou` hook. Add subscription-specific parameters:
+
+```php
+add_action('woocommerce_thankyou', function($order_id) {
+    if (get_post_meta($order_id, '_gtm_purchase_fired', true)) return;
+    update_post_meta($order_id, '_gtm_purchase_fired', 1);
+
+    $order = wc_get_order($order_id);
+    if (!$order) return;
+
+    // Check if this order contains subscriptions
+    $has_subscription = false;
+    $subscription_interval = '';
+    $subscription_period = '';
+
+    if (function_exists('wcs_order_contains_subscription') && wcs_order_contains_subscription($order)) {
+        $has_subscription = true;
+        $subscriptions = wcs_get_subscriptions_for_order($order);
+        $first_subscription = reset($subscriptions);
+        if ($first_subscription) {
+            $subscription_interval = $first_subscription->get_billing_interval();
+            $subscription_period = $first_subscription->get_billing_period(); // day, week, month, year
+        }
+    }
+
+    $items = [];
+    foreach ($order->get_items() as $item) {
+        $product = $item->get_product();
+        $items[] = [
+            'item_id'   => $product ? ($product->get_sku() ?: (string)$product->get_id()) : '',
+            'item_name' => $item->get_name(),
+            'price'     => (float) ($item->get_total() / max(1, $item->get_quantity())),
+            'quantity'  => $item->get_quantity(),
+            'item_category' => $product ? implode('/', wp_list_pluck(wc_get_product_terms($product->get_id(), 'product_cat', ['fields' => 'names']), 0)) : '',
+        ];
+    }
+
+    $ecommerce_data = [
+        'transaction_id' => (string) $order->get_order_number(),
+        'value'          => (float) $order->get_total(),
+        'tax'            => (float) $order->get_total_tax(),
+        'shipping'       => (float) $order->get_shipping_total(),
+        'currency'       => $order->get_currency(),
+        'items'          => $items,
+    ];
+
+    if ($has_subscription) {
+        $ecommerce_data['subscription_type']     = 'new';
+        $ecommerce_data['subscription_interval'] = $subscription_interval;
+        $ecommerce_data['subscription_period']   = $subscription_period;
+    }
+
+    ?>
+    <script>
+    window.dataLayer = window.dataLayer || [];
+    dataLayer.push({ ecommerce: null });
+    dataLayer.push({
+        event: 'purchase',
+        ecommerce: <?php echo wp_json_encode($ecommerce_data); ?>
+    });
+    </script>
+    <?php
+}, 10);
+```
+
+### Renewal tracking via Measurement Protocol
+
+Subscription renewals are processed server-side by WooCommerce Subscriptions without user browser activity. There is no browser session to push to the dataLayer. Use GA4 Measurement Protocol:
+
+```php
+// Fires when a subscription renewal order is complete
+add_action('woocommerce_subscription_renewal_payment_complete', function($subscription, $renewal_order) {
+    $order = $renewal_order;
+    $items = [];
+
+    foreach ($order->get_items() as $item) {
+        $product = $item->get_product();
+        $items[] = [
+            'item_id'  => $product ? ($product->get_sku() ?: (string)$product->get_id()) : '',
+            'item_name'=> $item->get_name(),
+            'price'    => (float) ($item->get_total() / max(1, $item->get_quantity())),
+            'quantity' => (int) $item->get_quantity(),
+        ];
+    }
+
+    $payload = json_encode([
+        'client_id'  => 'server-' . $order->get_customer_id(), // stable identifier
+        'user_id'    => (string) $order->get_customer_id(),
+        'events' => [[
+            'name' => 'purchase',
+            'params' => [
+                'transaction_id'      => (string) $order->get_order_number(),
+                'value'               => (float) $order->get_total(),
+                'currency'            => $order->get_currency(),
+                'subscription_type'   => 'renewal',
+                'items'               => $items,
+            ],
+        ]],
+    ]);
+
+    wp_remote_post('https://www.google-analytics.com/mp/collect?measurement_id=G-XXXXXXXX&api_secret=YOUR_SECRET', [
+        'headers' => ['Content-Type' => 'application/json'],
+        'body'    => $payload,
+        'timeout' => 10,
+    ]);
+}, 10, 2);
+```
+
+<Aside type="note">
+Replace `G-XXXXXXXX` with your GA4 Measurement ID and `YOUR_SECRET` with your API Secret from GA4 > Admin > Data Streams > Measurement Protocol API secrets.
+</Aside>
+
+## Multi-currency tracking
+
+WooCommerce doesn't have native multi-currency support. Stores use plugins: WPML + WooCommerce Multilingual, WooCommerce Multilingual & Multicurrency (WCML), or Currency Switcher for WooCommerce.
+
+### Always send presentment currency
+
+The `currency` parameter in your GA4 events must match the `value` and `price` parameters. If a customer is seeing EUR prices and you push `currency: 'USD'` with EUR amounts, GA4 reports wrong revenue.
+
+```php
+// WCML exposes the active currency
+function get_active_currency() {
+    if (function_exists('wcml_get_woocommerce_currency_option')) {
+        return get_woocommerce_currency(); // WCML hooks this to return active currency
+    }
+    return get_woocommerce_currency();
+}
+
+// For product prices, use wc_get_price_to_display() which respects currency
+function get_product_price_in_active_currency($product) {
+    $price = wc_get_price_to_display($product);
+
+    // If WCML is active, it handles conversion in wc_get_price_to_display()
+    return $price;
+}
+```
+
+On the order confirmation page, WooCommerce stores the currency used at purchase time on the order:
+
+```php
+// Order currency is always the currency the customer paid in
+$currency = $order->get_currency(); // e.g., 'EUR'
+$total    = $order->get_total();    // amount in that currency
+```
+
+This is the correct approach — `$order->get_currency()` returns what the customer paid, not the shop's base currency.
+
+### WPML currency detection
+
+If you're using WPML:
+
+```php
+// WPML exposes the active language and currency through globals
+$current_currency = apply_filters('wcml_price_currency', get_woocommerce_currency());
+```
+
+## High Performance Order Storage (HPOS) compatibility
+
+Shopify HPOS (also called Custom Order Tables) moves WooCommerce orders from the `wp_posts` / `wp_postmeta` tables to dedicated order tables. This affects code that uses `update_post_meta` for order deduplication.
+
+### The deduplication problem
+
+Standard deduplication for the purchase event uses:
+
+```php
+// Old approach — works with legacy post-based orders
+get_post_meta($order_id, '_gtm_purchase_fired', true)
+update_post_meta($order_id, '_gtm_purchase_fired', 1)
+```
+
+With HPOS enabled, orders are no longer in `wp_posts`. `get_post_meta` and `update_post_meta` may not work depending on your HPOS compatibility mode setting. Use WooCommerce's order meta API instead:
+
+```php
+// HPOS-compatible deduplication
+$order = wc_get_order($order_id);
+
+// Check
+if ($order->get_meta('_gtm_purchase_fired')) return;
+
+// Set
+$order->update_meta_data('_gtm_purchase_fired', 1);
+$order->save();
+```
+
+`$order->get_meta()` and `$order->update_meta_data()` work correctly regardless of whether HPOS is enabled or whether the store is in compatibility mode. Use these methods in all new WooCommerce development.
+
+<Aside type="tip">
+If you're maintaining existing tracking code, audit all `get_post_meta` and `update_post_meta` calls that operate on order IDs. Replace them with HPOS-compatible equivalents before enabling HPOS on your store.
+</Aside>
+
+## Full page cache compatibility
+
+Caching plugins (WP Super Cache, W3 Total Cache, WP Rocket, LiteSpeed Cache) serve pre-generated HTML to visitors. PHP doesn't execute for cached pages, which means `wp_head` hooks don't run.
+
+For most pages, this is fine — your GTM snippet is in the cached HTML and the dataLayer init code fires normally. The problem arises on pages with dynamic data.
+
+### Pages where caching breaks tracking
+
+**Product pages with user-specific pricing**: If you output a customer-specific price in the dataLayer, the cached version shows the price for whoever first loaded the page.
+
+**The cart page**: Cart contents change per user. Most caching plugins automatically exclude the cart page. Verify your caching plugin has WooCommerce integration enabled.
+
+**The thank you page**: This page must never be cached — it contains order-specific data. WP Rocket, W3 Total Cache, and WP Super Cache all exclude `order-received` pages by default. Verify this exclusion is in place.
+
+### Solutions for dynamic dataLayer data
+
+**Option 1: Fetch dynamically via AJAX**
+
+Instead of outputting dynamic data via PHP on page load, fetch it via an AJAX endpoint after the page loads:
+
+```javascript
+// On product page load, fetch current pricing
+jQuery(document).ready(function($) {
+    if (typeof productId === 'undefined') return;
+
+    $.post(wc_add_to_cart_params.ajax_url, {
+        action: 'get_product_datalayer_data',
+        product_id: productId,
+        nonce: wc_add_to_cart_params.nonce
+    }, function(response) {
+        if (!response.success) return;
+
+        window.dataLayer = window.dataLayer || [];
+        dataLayer.push({ ecommerce: null });
+        dataLayer.push(response.data);
+    });
+});
+```
+
+```php
+// Register the AJAX endpoint
+add_action('wp_ajax_get_product_datalayer_data', 'handle_product_datalayer_request');
+add_action('wp_ajax_nopriv_get_product_datalayer_data', 'handle_product_datalayer_request');
+
+function handle_product_datalayer_request() {
+    check_ajax_referer('wc_nonce', 'nonce');
+    $product_id = intval($_POST['product_id'] ?? 0);
+    $product = wc_get_product($product_id);
+
+    if (!$product) {
+        wp_send_json_error();
+        return;
+    }
+
+    $data = [
+        'event' => 'view_item',
+        'ecommerce' => [
+            'currency' => get_woocommerce_currency(),
+            'value'    => (float) wc_get_price_to_display($product),
+            'items'    => [[
+                'item_id'   => $product->get_sku() ?: (string)$product->get_id(),
+                'item_name' => $product->get_name(),
+                'price'     => (float) wc_get_price_to_display($product),
+                'quantity'  => 1,
+            ]],
+        ],
+    ];
+
+    wp_send_json_success($data);
+}
+```
+
+**Option 2: Cache exclusion for logged-in users**
+
+Most caching plugins allow you to bypass cache for logged-in users entirely. For stores where pricing is the same for all users, this isn't needed — but for stores with role-based pricing or B2B tiers, it's the simplest solution.
+
+**Option 3: Use the `woocommerce_before_cart` hook**
+
+WooCommerce's cart page uses a shortcode or block that caching plugins recognize. Pages containing `[woocommerce_cart]` are often excluded from page caching automatically. Confirm this in your caching plugin's settings.
+
+## AJAX add-to-cart
+
+WooCommerce's AJAX add-to-cart feature (enabled by default on shop/archive pages) adds products to the cart without a page reload. The `added_to_cart` jQuery event is how you hook into this.
+
+### Complete AJAX add-to-cart tracking
+
+```php
+// Enqueue the tracking script and pass required data
+add_action('wp_enqueue_scripts', function() {
+    if (!is_shop() && !is_product_category() && !is_product_tag() && !is_front_page()) return;
+
+    wp_enqueue_script(
+        'woo-ajax-cart-tracking',
+        get_stylesheet_directory_uri() . '/js/ajax-cart-tracking.js',
+        ['jquery', 'wc-add-to-cart'],
+        '1.0.0',
+        true
+    );
+
+    // Pass product data for all products on the page
+    $products_data = [];
+    global $wp_query;
+    if ($wp_query->posts) {
+        foreach ($wp_query->posts as $post) {
+            $product = wc_get_product($post->ID);
+            if (!$product) continue;
+            $products_data[$post->ID] = [
+                'item_id'       => $product->get_sku() ?: (string)$product->get_id(),
+                'item_name'     => $product->get_name(),
+                'price'         => (float) wc_get_price_to_display($product),
+                'item_category' => implode('/', wp_list_pluck(wc_get_product_terms($product->get_id(), 'product_cat', ['fields' => 'names']), 0)),
+            ];
+        }
+    }
+
+    wp_localize_script('woo-ajax-cart-tracking', 'wcProductsData', [
+        'products'  => $products_data,
+        'currency'  => get_woocommerce_currency(),
+    ]);
+});
+```
+
+```javascript
+// js/ajax-cart-tracking.js
+jQuery(document).on('added_to_cart', function(event, fragments, cart_hash, $button) {
+    var productId = $button.data('product_id');
+    var quantity  = parseInt($button.data('quantity') || 1, 10);
+
+    var product = (wcProductsData && wcProductsData.products && wcProductsData.products[productId])
+        ? wcProductsData.products[productId]
+        : null;
+
+    if (!product) return;
+
+    window.dataLayer = window.dataLayer || [];
+    dataLayer.push({ ecommerce: null });
+    dataLayer.push({
+        event: 'add_to_cart',
+        ecommerce: {
+            currency: wcProductsData.currency || 'USD',
+            value: parseFloat((product.price * quantity).toFixed(2)),
+            items: [{
+                item_id:       product.item_id,
+                item_name:     product.item_name,
+                item_category: product.item_category,
+                price:         product.price,
+                quantity:      quantity
+            }]
+        }
+    });
+});
+```
+
+### Handling the add-to-cart button on product pages
+
+On single product pages, AJAX add-to-cart also fires the `added_to_cart` event. If GTM4WP is active and handling add-to-cart, disable your custom handler on single product pages to avoid duplicates:
+
+```javascript
+jQuery(document).on('added_to_cart', function(event, fragments, cart_hash, $button) {
+    // Skip on single product pages if GTM4WP is handling it
+    if (jQuery('body').hasClass('single-product') && typeof window.google_tag_manager !== 'undefined') return;
+
+    // ... rest of handler
+});
+```
+
+## Common mistakes
+
+**Not using HPOS-compatible order meta methods.** Code using `get_post_meta($order_id, ...)` for deduplication or storing order data will fail silently when HPOS is enabled. Always use `$order->get_meta()` and `$order->update_meta_data()` for WooCommerce orders.
+
+**Pushing the wrong currency in multi-currency stores.** If your store uses WCML or a currency switcher, you must push the active presentment currency, not `get_woocommerce_currency()` from the shop settings (which returns the base currency). Use `$order->get_currency()` for purchase events and filter-based approaches for storefront events.
+
+**Tracking subscription renewals client-side.** Renewal orders are created by a cron job or webhook — there is no browser session. Any dataLayer push in `woocommerce_thankyou` for renewal orders never fires. Use Measurement Protocol for renewals.
+
+**Caching the thank you page.** If your caching plugin caches the order confirmation page, multiple users may see the same cached purchase event, or the order data may be missing entirely. Verify your caching plugin excludes `/checkout/order-received/` URLs.
+
+<CardGrid>
+  <LinkCard
+    title="WooCommerce"
+    description="Base WooCommerce implementation — GTM setup, product page, cart, and purchase tracking."
+    href="/datalayer/platforms/woocommerce/"
+  />
+  <LinkCard
+    title="purchase"
+    description="GA4 purchase event specification — transaction_id, items array, deduplication."
+    href="/datalayer/ecommerce/purchase/"
+  />
+  <LinkCard
+    title="Runtime Validation"
+    description="Validate dataLayer pushes at runtime to catch data quality issues early."
+    href="/datalayer/validation/runtime-validation/"
+  />
+</CardGrid>

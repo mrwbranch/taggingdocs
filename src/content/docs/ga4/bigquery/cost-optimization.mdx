@@ -1,6 +1,233 @@
 ---
 title: "Cost Optimization"
-description: "Managing BigQuery costs for GA4 data."
+description: "Keep BigQuery costs under control for GA4 data — partitioning, clustering, derived tables, query patterns, and pricing model selection."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+BigQuery costs for GA4 data are primarily driven by query volume — how much data your queries scan. A single poorly written query can scan hundreds of gigabytes and generate a significant unexpected bill. Good practices keep your costs predictable and low.
+
+## How BigQuery charges work
+
+BigQuery has two pricing models:
+
+**On-demand pricing**: You pay per byte scanned by your queries, currently approximately $5 per TB. There is no charge for storage beyond the first 10 GB/month free tier, then $0.02/GB/month for active storage and $0.01/GB/month for long-term (data not modified in 90 days).
+
+**Flat-rate pricing**: You reserve a specific number of "slots" (processing capacity) for a fixed monthly fee. Cost-effective only for very high query volumes (typically >$5,000/month equivalent in on-demand charges).
+
+For most organizations, on-demand pricing is appropriate. The key metric is bytes scanned per query.
+
+## The primary cost control: _TABLE_SUFFIX filtering
+
+GA4 exports create one table per day: `events_20240101`, `events_20240102`, etc. Using the wildcard `events_*` is convenient but dangerous — without a date filter, BigQuery scans every table in the dataset.
+
+**Always include `_TABLE_SUFFIX` bounds:**
+
+```sql
+-- ✅ Scans only January 2024 (31 tables)
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+
+-- ❌ Scans ALL historical tables — years of data
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'purchase'
+```
+
+If you have 2 years of data and scan without `_TABLE_SUFFIX`, every query processes 730 days of events. The difference between a 7-day query and a 730-day query can be a 100x cost difference.
+
+## Partition-expiration and clustering
+
+### Partition by ingestion time (default)
+
+The GA4 export uses date-sharded tables (separate tables per day) rather than partitioned tables. This means `_TABLE_SUFFIX` filtering is the partitioning equivalent. When you filter by `_TABLE_SUFFIX`, BigQuery only reads the relevant table files.
+
+### Converting to partitioned tables
+
+For better query performance and more flexible date filtering, some teams copy GA4 export data into a date-partitioned table:
+
+```sql
+-- Create a partitioned table from the sharded tables
+CREATE OR REPLACE TABLE `project.analytics_derived.events`
+PARTITION BY event_date_dt
+CLUSTER BY event_name, user_pseudo_id
+AS
+SELECT
+  *,
+  PARSE_DATE('%Y%m%d', event_date) AS event_date_dt
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20241231'
+```
+
+With a proper DATE-partitioned table, you can filter with `WHERE event_date_dt BETWEEN '2024-01-01' AND '2024-01-31'` instead of `_TABLE_SUFFIX`, and BigQuery uses partition pruning automatically.
+
+### Clustering
+
+Clustering orders data within partitions by specified columns, making queries that filter on those columns faster and cheaper:
+
+```sql
+-- Good cluster keys for GA4 data
+CLUSTER BY event_name, user_pseudo_id
+```
+
+Queries that filter by `event_name` (which most do) will scan less data because matching records are physically co-located.
+
+## Pre-aggregated derived tables
+
+The most impactful cost optimization is building derived tables at the granularity you actually need:
+
+### Session-level table
+
+Instead of repeatedly querying raw events to compute session metrics, compute once and store:
+
+```sql
+-- Run this query once (or on a schedule) to build the session table
+CREATE OR REPLACE TABLE `project.analytics_derived.sessions`
+PARTITION BY session_date
+CLUSTER BY source, medium
+AS
+SELECT
+  user_pseudo_id,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+  PARSE_DATE('%Y%m%d', MIN(event_date)) AS session_date,
+  MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.source END) AS source,
+  MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.medium END) AS medium,
+  MAX(device.category) AS device_category,
+  MAX(geo.country) AS country,
+  COUNTIF(event_name = 'page_view') AS pageviews,
+  COUNTIF(event_name = 'purchase') AS purchases,
+  SUM(CASE WHEN event_name = 'purchase' THEN ecommerce.purchase_revenue ELSE 0 END) AS revenue
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20241231'
+GROUP BY user_pseudo_id, session_id
+```
+
+Daily reporting queries run against `analytics_derived.sessions` (kilobytes to megabytes) instead of `analytics_PROPERTY_ID.events_*` (hundreds of gigabytes).
+
+### Daily aggregates table
+
+For dashboards showing daily totals, pre-aggregate by day:
+
+```sql
+CREATE OR REPLACE TABLE `project.analytics_derived.daily_metrics`
+AS
+SELECT
+  event_date,
+  COUNT(DISTINCT user_pseudo_id) AS users,
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  )) AS sessions,
+  COUNTIF(event_name = 'purchase') AS transactions,
+  SUM(CASE WHEN event_name = 'purchase' THEN ecommerce.purchase_revenue ELSE 0 END) AS revenue
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20241231'
+GROUP BY event_date
+ORDER BY event_date
+```
+
+This 365-row table replaces year-scale raw event queries for most dashboard needs.
+
+## Column selection
+
+BigQuery on-demand pricing is based on bytes scanned, not rows — and each column has a cost. Selecting only the columns you need reduces scan costs.
+
+```sql
+-- ✅ Select only needed columns
+SELECT
+  event_date,
+  event_name,
+  user_pseudo_id,
+  event_params,
+  ecommerce
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+
+-- ❌ SELECT * scans all columns including device, geo, app_info, etc.
+SELECT * FROM ...
+```
+
+The `event_params` column is a large ARRAY — even selecting it when you only need one parameter means scanning the full array. For very high-volume tables, consider materializing frequently-needed parameters into a flattened derived table.
+
+## Avoiding streaming export costs
+
+If streaming export is enabled, you pay for the streaming inserts themselves (~$0.01 per 200 MB). Additionally, intraday tables (`events_intraday_YYYYMMDD`) exist for each current day and count toward your query costs.
+
+Unless you have a specific need for real-time data, disable streaming export and use daily export only. Go to **GA4 Admin → BigQuery Links** to check your export settings.
+
+## Query cost estimation
+
+Before running a large query, estimate its cost:
+
+1. In the BigQuery console, click the query editor
+2. Paste your query (do not run it)
+3. Look at the top right of the editor — it shows the estimated data processed
+
+Multiply GB processed by $0.005 to estimate cost. If a query shows "500 GB processed" — that is a $2.50 charge.
+
+For automated queries and scheduled jobs, always validate the estimated bytes processed before deploying.
+
+## Setting cost controls
+
+### Quotas and alerts
+
+Set a budget alert in your GCP project to get notified when BigQuery costs exceed a threshold:
+- Go to **GCP Billing → Budgets & Alerts**
+- Create a budget with an email alert at your threshold
+
+### User-level query quotas
+
+In the BigQuery console, you can set custom quotas to limit bytes processed per user per day:
+- Go to **GCP IAM → Quotas**
+- Find "Queries per day" or "Bytes processed per day" for BigQuery
+- Set limits for individual service accounts or users
+
+This prevents a single runaway query from generating a large bill.
+
+## Pricing model comparison
+
+For typical GA4 analytics teams:
+
+| Team size | Monthly query volume | Recommended pricing |
+|-----------|---------------------|---------------------|
+| 1-5 analysts | < 5 TB/month | On-demand |
+| 5-20 analysts | 5-50 TB/month | On-demand or flex slots |
+| 20+ analysts | > 50 TB/month | Evaluate flat-rate slots |
+
+Most organizations with GA4 data stay well under 5 TB/month with proper query discipline, making on-demand the cost-effective choice.
+
+## Common mistakes
+
+### Using SELECT * in production queries
+
+Selecting all columns including nested arrays (`event_params`, `user_properties`, `items`) scans significantly more data than selecting only the columns you need. This is the second most common cost mistake after missing `_TABLE_SUFFIX` filters.
+
+### Running ad-hoc queries on full history
+
+An analyst exploring "what happened to traffic in 2022?" running an unoptimized query against two years of data can generate a $10-50 bill from a single query. Establish a team norm: always estimate bytes before running unfamiliar queries on large date ranges.
+
+### Not building derived tables for dashboards
+
+A Looker Studio dashboard that runs direct BigQuery queries on raw events every time it refreshes will scan the same large tables repeatedly. Build derived tables and connect dashboards to those instead.
+
+### Forgetting that intraday tables add cost
+
+If streaming export is on, the intraday table for today is included in `events_*` wildcard queries. Queries running multiple times per day against today's data incur streaming scan costs for each run.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Export Setup"
+    description="Configure daily vs. streaming export and understand cost implications."
+    href="/ga4/bigquery/export-setup/"
+  />
+  <LinkCard
+    title="Dataform Workflows"
+    description="Automate incremental derived table builds to reduce repeated scan costs."
+    href="/ga4/bigquery/dataform-workflows/"
+  />
+  <LinkCard
+    title="Looker Studio Patterns"
+    description="Connect dashboards to derived tables rather than raw events."
+    href="/ga4/bigquery/looker-studio-patterns/"
+  />
+</CardGrid>

@@ -1,6 +1,425 @@
 ---
-title: "Sandboxed JavaScript"
-description: "Complete guide to the sandboxed JavaScript environment in GTM templates."
+title: "Sandboxed JavaScript in GTM Templates"
+description: "Complete reference for the sandboxed JavaScript environment — which APIs are available, what's blocked and why, client-side vs. server-side APIs, and patterns for working within the sandbox's constraints."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Custom Templates in GTM run in a sandboxed JavaScript environment that deliberately restricts what your code can do. There is no access to `window`, `document`, `this`, standard `try/catch` blocks, `new` keyword, or `prototype` chains in the conventional sense. Instead, the sandbox exposes a curated set of APIs — imported explicitly — that provide controlled access to browser capabilities.
+
+The sandbox is not an obstacle. It is what makes templates auditable, testable, and safe to distribute. Understanding which APIs exist and how to use them is the foundation of template development.
+
+## What's NOT available
+
+Before covering what is available, understanding the restrictions:
+
+- **`window` and `document`**: Not directly accessible. Use `copyFromWindow()`, `setInWindow()`, `queryPermission()` for controlled global access.
+- **`this`**: Context is not the page global. `this` inside template code has no meaningful value.
+- **`new` keyword**: No constructor patterns. Use factory functions instead.
+- **`prototype`**: No prototype chain manipulation.
+- **Top-level `try/catch`**: Template code cannot use top-level try/catch. Use the error handling APIs.
+- **`XMLHttpRequest`**: Use `sendHttpGet()`, `sendHttpRequest()`, or `sendPixel()` instead.
+- **`fetch()`**: Not available. Use the HTTP APIs above.
+- **`setTimeout/setInterval`**: Not available in the conventional sense. Operations must complete synchronously or use callbacks.
+- **`eval()`**: Blocked entirely.
+- **Dynamic script injection via DOM**: Use `injectScript()` instead.
+
+## Importing APIs
+
+Every sandboxed API must be imported explicitly using the `require()` function:
+
+```javascript
+// Import APIs you need — only import what you use
+const createArgumentsQueue = require('createArgumentsQueue');
+const copyFromWindow = require('copyFromWindow');
+const setInWindow = require('setInWindow');
+const injectScript = require('injectScript');
+const sendPixel = require('sendPixel');
+const getCookieValues = require('getCookieValues');
+const setCookie = require('setCookie');
+const logToConsole = require('logToConsole');
+const templateDataStorage = require('templateDataStorage');
+const localStorage = require('localStorage');
+const queryPermission = require('queryPermission');
+const callLater = require('callLater');
+const makeString = require('makeString');
+const makeNumber = require('makeNumber');
+const makeTableMap = require('makeTableMap');
+```
+
+The `require()` call fails silently if the API is not permitted by the template's permissions. Always configure permissions before using APIs.
+
+## Client-side APIs
+
+### Global variable access: `copyFromWindow` and `setInWindow`
+
+```javascript
+const copyFromWindow = require('copyFromWindow');
+const setInWindow = require('setInWindow');
+
+// Read a global variable (equivalent to window.myVar)
+var vendorId = copyFromWindow('VENDOR_PIXEL_ID');
+// Returns: the value of window.VENDOR_PIXEL_ID, or undefined
+
+// Write a global variable (equivalent to window.myVar = value)
+setInWindow('myGlobal', 'some_value', true);
+// Third parameter: true = only set if not already defined (prevent overwrite)
+// setInWindow('myGlobal', 'value', false) always overwrites
+```
+
+These require the `access_globals` permission with specific variable paths declared.
+
+### Queue-based SDK initialization: `createArgumentsQueue`
+
+Many vendor SDKs initialize via a `function.q` queue pattern (like the original GA snippet). The `createArgumentsQueue` API creates this pattern:
+
+```javascript
+const createArgumentsQueue = require('createArgumentsQueue');
+
+// Equivalent to:
+// window.fbq = function() { fbq.callMethod ? fbq.callMethod(...) : fbq.queue.push(arguments) };
+// window.fbq.push = fbq;
+// window.fbq.loaded = true;
+// window.fbq.version = '2.0';
+// window.fbq.queue = [];
+var fbq = createArgumentsQueue('fbq', 'fbq.queue');
+fbq('init', data.pixelId);
+fbq('track', 'PageView');
+```
+
+`createArgumentsQueue(globalName, queuePath)`:
+- `globalName`: the name of the global function (e.g., `'fbq'`)
+- `queuePath`: dot-notation path to the queue array (e.g., `'fbq.queue'`)
+
+This creates the global function if it doesn't exist. If it already exists (from a previous template run or page-level code), it returns the existing function.
+
+### Script injection: `injectScript`
+
+```javascript
+const injectScript = require('injectScript');
+
+// Inject an external script (like loading vendor SDK)
+injectScript(
+  'https://connect.facebook.net/en_US/fbevents.js',
+  function onSuccess() {
+    // Script loaded successfully — proceed with initialization
+    data.gtmOnSuccess();
+  },
+  function onFailure() {
+    // Script failed to load
+    data.gtmOnFailure();
+  },
+  'fbevents_script'  // Cache key — prevents re-injection on subsequent calls
+);
+```
+
+The cache key (fourth parameter) is important: if you call `injectScript` again with the same cache key, it doesn't re-inject the script. It calls the success callback immediately if the script already loaded, or queues the callback if it's still loading.
+
+This requires the `inject_script` permission with the script URL declared.
+
+### Pixel requests: `sendPixel`
+
+```javascript
+const sendPixel = require('sendPixel');
+
+// Send a tracking pixel (GET request, response ignored)
+sendPixel(
+  'https://tracking.vendor.com/pixel?id=' + data.accountId + '&event=pageview',
+  function onSuccess() {
+    data.gtmOnSuccess();
+  },
+  function onFailure() {
+    data.gtmOnFailure();
+  }
+);
+```
+
+This requires the `send_pixel` permission with the URL pattern declared.
+
+### Cookies: `getCookieValues` and `setCookie`
+
+```javascript
+const getCookieValues = require('getCookieValues');
+const setCookie = require('setCookie');
+
+// Read all values for a cookie name (returns array — cookies can be set multiple times)
+var gaValues = getCookieValues('_ga');
+var gaValue = gaValues.length > 0 ? gaValues[0] : undefined;
+
+// Write a cookie
+setCookie('my_tracking_cookie', 'value', {
+  domain: 'example.com',   // Cookie domain
+  path: '/',               // Cookie path
+  secure: true,            // HTTPS only
+  samesite: 'Lax',        // SameSite policy
+  // expires: 'Session'   // Session cookie (default)
+  // 'max-age': 2592000   // 30 days in seconds
+});
+```
+
+These require `get_cookies` and `set_cookies` permissions respectively, with specific cookie names declared.
+
+### Storage APIs
+
+```javascript
+const localStorage = require('localStorage');
+const templateDataStorage = require('templateDataStorage');
+
+// localStorage — browser's localStorage
+localStorage.setItem('my_key', 'my_value');
+var value = localStorage.getItem('my_key');
+localStorage.removeItem('my_key');
+
+// templateDataStorage — persists for the lifetime of the GTM container session
+// Cleared on container reload, not on page navigation
+templateDataStorage.setItemCopy('session_key', { userId: '123' });
+var stored = templateDataStorage.getItemCopy('session_key');
+```
+
+`templateDataStorage` is useful for passing data between multiple invocations of the same template on different events within a page session.
+
+### HTTP requests (client-side tags)
+
+Client-side tag templates can make network requests:
+
+```javascript
+const sendHttpGet = require('sendHttpGet');
+const sendHttpRequest = require('sendHttpRequest');
+
+// GET request
+sendHttpGet(
+  'https://api.example.com/lookup?id=' + userId,
+  function(statusCode, headers, body) {
+    if (statusCode === 200) {
+      var result = JSON.parse(body);
+      logToConsole('Lookup result:', result);
+    }
+  },
+  {timeout: 3000}
+);
+
+// POST request
+sendHttpRequest(
+  'https://api.example.com/events',
+  {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)},
+  function(statusCode, headers, body) {
+    if (statusCode >= 200 && statusCode < 300) {
+      data.gtmOnSuccess();
+    } else {
+      data.gtmOnFailure();
+    }
+  }
+);
+```
+
+Note: client-side HTTP requests from templates are subject to CORS. The target server must include appropriate `Access-Control-Allow-Origin` headers.
+
+### Consent state: `accessConsentState`
+
+```javascript
+const accessConsentState = require('accessConsentState');
+
+// Read current consent state for a specific type
+var analyticsConsent = accessConsentState('analytics_storage');
+// Returns: 'granted', 'denied', or undefined
+
+if (analyticsConsent !== 'granted') {
+  data.gtmOnSuccess();  // Exit without firing
+  return;
+}
+```
+
+This requires the `access_consent_state` permission.
+
+### Reading the dataLayer: `copyFromDataLayer`
+
+```javascript
+const copyFromDataLayer = require('copyFromDataLayer');
+
+// Read a value from the dataLayer (from GTM's data model)
+var ecommerceItems = copyFromDataLayer('ecommerce.items');
+var userId = copyFromDataLayer('user.id');
+```
+
+This requires the `read_data_layer` permission with specific key paths declared.
+
+## Server-side APIs
+
+Server-side templates have a different set of APIs for handling HTTP requests and responses.
+
+### Request data
+
+```javascript
+const getRequestHeader = require('getRequestHeader');
+const getRequestBody = require('getRequestBody');
+const getRequestQueryString = require('getRequestQueryString');
+const getRequestPath = require('getRequestPath');
+const getRequestMethod = require('getRequestMethod');
+
+// Read the incoming request
+var userAgent = getRequestHeader('user-agent');
+var requestBody = getRequestBody();  // Returns body as string
+var queryParams = getRequestQueryString();  // Returns query string object
+var path = getRequestPath();  // Returns URL path
+var method = getRequestMethod();  // Returns 'GET', 'POST', etc.
+```
+
+### Response control
+
+```javascript
+const returnResponse = require('returnResponse');
+const setResponseHeader = require('setResponseHeader');
+const setResponseBody = require('setResponseBody');
+const setResponseStatus = require('setResponseStatus');
+const setCookie = require('setCookie');  // Available server-side too
+
+// Build and send response (for client templates)
+setResponseStatus(200);
+setResponseHeader('Content-Type', 'application/json');
+setResponseBody(JSON.stringify({status: 'ok'}));
+returnResponse();  // Send the response — calling this is final
+```
+
+### Event model (server-side)
+
+```javascript
+const getAllEventData = require('getAllEventData');
+const getEventData = require('getEventData');
+const addEventCallback = require('addEventCallback');
+const setEventData = require('setEventData');
+
+// Read event data
+var eventData = getAllEventData();  // Returns full event model object
+var eventName = getEventData('event_name');  // Read specific field
+var userId = getEventData('user_id');
+
+// Modify event data
+setEventData('enriched_field', 'computed_value');
+```
+
+### Claiming requests (client templates)
+
+```javascript
+const claimRequest = require('claimRequest');
+const runContainer = require('runContainer');
+
+// In a client template, claim the incoming request
+claimRequest();
+
+// Run the container with the event data
+runContainer(eventModelObject, function() {
+  // Called after container runs — send response here
+  returnResponse();
+});
+```
+
+`claimRequest()` must be called synchronously (not in a callback). If no client template claims the request, the request is handled by the default client.
+
+## Utility APIs
+
+```javascript
+const logToConsole = require('logToConsole');
+const makeString = require('makeString');
+const makeNumber = require('makeNumber');
+const makeTableMap = require('makeTableMap');
+const JSON = require('JSON');
+const Math = require('Math');
+const encodeUri = require('encodeUri');
+const encodeUriComponent = require('encodeUriComponent');
+const parseUrl = require('parseUrl');
+
+// Logging (visible in template debug mode)
+logToConsole('Debug message:', someVariable);
+
+// Type conversion
+var str = makeString(42);       // '42'
+var num = makeNumber('42.5');   // 42.5
+
+// Convert an array of objects to a key-value map
+var myTable = [
+  {key: 'color', value: 'blue'},
+  {key: 'size', value: 'large'}
+];
+var tableMap = makeTableMap(myTable, 'key', 'value');
+// Result: {color: 'blue', size: 'large'}
+
+// JSON parsing/serialization
+var obj = JSON.parse('{"key":"value"}');
+var str = JSON.stringify({key: 'value'});
+
+// Math operations
+var rounded = Math.round(3.7);
+var max = Math.max(1, 2, 3);
+
+// URL encoding
+var encoded = encodeUriComponent('hello world');  // 'hello%20world'
+
+// URL parsing
+var parsed = parseUrl('https://example.com/path?q=1#hash');
+// Returns: {protocol: 'https:', host: 'example.com', pathname: '/path', search: '?q=1', hash: '#hash'}
+```
+
+## Common patterns
+
+### The vendor pixel initialization pattern
+
+```javascript
+// Standard pattern for initializing a vendor analytics/advertising pixel
+const createArgumentsQueue = require('createArgumentsQueue');
+const injectScript = require('injectScript');
+const callLater = require('callLater');
+const logToConsole = require('logToConsole');
+
+// Initialize the vendor queue (safe to call multiple times)
+var ttq = createArgumentsQueue('ttq', 'ttq.queue');
+
+// Inject the vendor SDK
+injectScript(
+  data.sdkUrl || 'https://analytics.tiktok.com/i18n/pixel/events.js',
+  function() {
+    // SDK loaded — initialize with pixel ID
+    ttq.load(data.pixelId);
+
+    // Track the configured event type
+    if (data.eventType === 'PageView') {
+      ttq.page();
+    } else if (data.eventType === 'Custom') {
+      ttq.track(data.customEventName, buildEventParams());
+    }
+
+    data.gtmOnSuccess();
+  },
+  function() {
+    logToConsole('Template: SDK injection failed');
+    data.gtmOnFailure();
+  },
+  'tiktok_pixel_sdk'
+);
+```
+
+### Reading template field values
+
+Template fields are accessible directly via the `data` object in your template code:
+
+```javascript
+// If you have a text field named "accountId" in your template
+var accountId = data.accountId;
+
+// Dropdown field named "eventType"
+var eventType = data.eventType;  // Returns the selected key
+
+// Checkbox field named "enableDebug"
+var debug = data.enableDebug;  // Returns boolean
+
+// Table field named "customParameters"
+var params = data.customParameters;  // Returns array of row objects
+```
+
+---
+
+<CardGrid>
+  <LinkCard title="Building Tag Templates" href="/templates/building-tag-templates/" description="Complete walkthrough of building a full vendor pixel template." />
+  <LinkCard title="Template Permissions and Security" href="/templates/template-permissions-security/" description="Declaring and configuring the permissions your template needs." />
+  <LinkCard title="Testing Custom Templates" href="/templates/testing-custom-templates/" description="Using mock() to test API calls in the sandbox." />
+</CardGrid>

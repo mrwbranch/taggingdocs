@@ -1,6 +1,321 @@
 ---
 title: "Custom Templates"
-description: "Building custom tag and client templates for sGTM."
+description: "Building tag, client, and variable templates for sGTM — the sandboxed JavaScript environment, available APIs, and practical examples."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+When the Community Template Gallery does not have what you need, you build it yourself. Custom templates in sGTM use a sandboxed JavaScript environment with a specific set of APIs designed for server-side processing. The sandbox is intentionally restrictive — no `window`, no DOM, no arbitrary `require()` — but the available APIs cover everything you need to receive requests, make outbound calls, read and write cookies, and interact with Google Cloud services.
+
+## The sandboxed environment
+
+sGTM templates execute in a JavaScript sandbox that is neither Node.js nor browser JavaScript. Standard APIs you might expect are absent or replaced:
+
+**Not available:**
+- `window`, `document`, `navigator`, `location`
+- `XMLHttpRequest`, `fetch`
+- `require()` for arbitrary modules
+- `try/catch` in the traditional sense (available but with restrictions)
+- `Promise`, `async/await` (use callback patterns instead)
+- `new` keyword (cannot instantiate arbitrary classes)
+
+**Available via `require()`:**
+- `sendHttpRequest` — make outbound HTTP requests
+- `sendPixel` — send a GET request to a URL (lightweight, no response needed)
+- `JSON` — parse and stringify JSON
+- `sha256` — compute SHA-256 hash
+- `getTimestampMillis` — current Unix timestamp in milliseconds
+- `logToConsole` — write to Cloud Logging
+- `templateDataStorage` — per-instance key-value cache
+- `getEventData` — read from the Event Model (in tag templates)
+- `getAllEventData` — read entire Event Model as object
+- `getRequestHeader` — read request header (in client templates)
+- `getRequestBody` — read request body (in client templates)
+- `getRequestPath` — read request path (in client templates)
+- `claimRequest` — claim the request (in client templates)
+- `runContainer` — execute the container with an Event Model (in client templates)
+- `setResponseHeader` — set response headers (in client templates)
+- `returnResponse` — send HTTP response (in client templates)
+- `getGoogleAuth` — get Google Cloud auth token (for GCP API calls)
+- `computeHmac` — compute HMAC signature
+
+## Template types
+
+### Tag templates
+
+Tag templates define actions that execute when a trigger fires. They run after a client has claimed the request and built the Event Model. Tag templates:
+- Read from the Event Model via `getEventData()`
+- Make outbound HTTP requests via `sendHttpRequest()`
+- Write to Firestore, BigQuery, or other GCP services
+- Must call `data.gtmOnSuccess()` or `data.gtmOnFailure()` to signal completion
+
+### Client templates
+
+Client templates handle incoming HTTP requests. They:
+- Evaluate whether to claim a request via `claimRequest()`
+- Read request data (headers, body, path, query params)
+- Build the Event Model
+- Run the container via `runContainer()`
+- Send the HTTP response via `returnResponse()`
+
+### Variable templates
+
+Variable templates return a computed value. They:
+- Read from the Event Model or request context
+- Perform transformations (hashing, parsing, formatting)
+- Return a single value that other templates reference
+
+Variable templates must return synchronously. They cannot use `sendHttpRequest` with async callbacks and expect the result to be returned — that pattern requires a tag template instead.
+
+## Building a tag template: complete example
+
+This example builds a complete tag template that sends event data to a custom analytics webhook:
+
+**Template code:**
+
+```javascript
+const sendHttpRequest = require('sendHttpRequest');
+const JSON = require('JSON');
+const getEventData = require('getEventData');
+const logToConsole = require('logToConsole');
+const getTimestampMillis = require('getTimestampMillis');
+
+// Build the payload from Event Model data
+const payload = {
+  event_name: getEventData('event_name'),
+  client_id: getEventData('client_id'),
+  user_id: getEventData('user_id'),
+  page_location: getEventData('page_location'),
+  value: getEventData('value'),
+  currency: getEventData('currency'),
+  transaction_id: getEventData('transaction_id'),
+  timestamp_ms: getTimestampMillis(),
+  // Include custom fields configured in template
+  source: data.source,
+};
+
+// Filter out undefined values
+const filteredPayload = {};
+for (const key in payload) {
+  if (payload[key] !== undefined && payload[key] !== null) {
+    filteredPayload[key] = payload[key];
+  }
+}
+
+const requestOptions = {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + data.authToken,
+    'X-Source': 'sgtm',
+  },
+  body: JSON.stringify(filteredPayload),
+  timeout: 5000,
+};
+
+sendHttpRequest(
+  data.endpointUrl,
+  requestOptions,
+  function(statusCode, headers, body) {
+    if (statusCode >= 200 && statusCode < 300) {
+      data.gtmOnSuccess();
+    } else {
+      logToConsole(JSON.stringify({
+        level: 'error',
+        tag: 'webhook_forwarder',
+        status: statusCode,
+        event: getEventData('event_name'),
+      }));
+      data.gtmOnFailure();
+    }
+  }
+);
+```
+
+**Template fields (configured in the Fields tab):**
+- `endpointUrl` — text field, the webhook URL
+- `authToken` — text field, marked as `canBeSensitive: true`
+- `source` — text field with default value `web`
+
+**Template permissions (configured in Permissions tab):**
+The sandbox requires explicit permission grants:
+- `sends_pixel_to` or `send_http_request` for the webhook domain
+- `logging` for `logToConsole`
+- `read_event_data` for `getEventData`
+
+Permissions can be auto-detected by clicking **Auto-Generate Permissions** in the template editor.
+
+## Building a variable template: hash and normalize
+
+```javascript
+// Variable template: SHA-256 hash with normalization
+const sha256 = require('sha256');
+const getEventData = require('getEventData');
+
+const fieldName = data.fieldName; // template field
+const rawValue = getEventData(fieldName);
+
+if (!rawValue || typeof rawValue !== 'string') {
+  return undefined;
+}
+
+// Normalize: lowercase, trim whitespace
+let normalized = rawValue.toLowerCase().trim();
+
+// For phone numbers: remove non-digits and format
+if (data.fieldType === 'phone') {
+  normalized = normalized.replace(/\D/g, '');
+  // Ensure country code present (simplified example)
+  if (normalized.length === 10) {
+    normalized = '1' + normalized; // assume US
+  }
+}
+
+return sha256(normalized);
+```
+
+**Fields:**
+- `fieldName` — text (the Event Model field to read)
+- `fieldType` — dropdown with options `email`, `phone`, `generic`
+
+## Building a client template: custom endpoint
+
+```javascript
+const claimRequest = require('claimRequest');
+const runContainer = require('runContainer');
+const getRequestPath = require('getRequestPath');
+const getRequestMethod = require('getRequestMethod');
+const getRequestBody = require('getRequestBody');
+const getRequestHeader = require('getRequestHeader');
+const returnResponse = require('returnResponse');
+const setResponseStatus = require('setResponseStatus');
+const JSON = require('JSON');
+const logToConsole = require('logToConsole');
+
+const path = getRequestPath();
+const method = getRequestMethod();
+
+// Only handle POST to /track
+if (path !== '/track' || method !== 'POST') {
+  return; // Not our request
+}
+
+claimRequest();
+
+// Validate API key
+const apiKey = getRequestHeader('x-api-key');
+if (apiKey !== data.expectedApiKey) {
+  setResponseStatus(401);
+  returnResponse();
+  return;
+}
+
+// Parse request body
+const rawBody = getRequestBody();
+let event;
+try {
+  event = JSON.parse(rawBody);
+} catch (e) {
+  setResponseStatus(400);
+  returnResponse();
+  return;
+}
+
+// Build Event Model
+const eventModel = {
+  event_name: event.name || 'custom_event',
+  client_id: event.client_id || event.anonymous_id || 'unknown',
+  user_id: event.user_id,
+  // Spread all other properties
+};
+
+// Copy remaining properties
+for (const key in event) {
+  if (!eventModel[key]) {
+    eventModel[key] = event[key];
+  }
+}
+
+// Run the container
+runContainer(eventModel, function() {
+  setResponseStatus(200);
+  returnResponse();
+});
+```
+
+## The template testing framework
+
+Every template has a Tests tab where you can write unit tests:
+
+```javascript
+// Test: tag sends correct payload on purchase event
+const mockPurchaseEvent = {
+  event_name: 'purchase',
+  client_id: 'test123',
+  value: 99.99,
+  currency: 'USD',
+  transaction_id: 'ORD-123',
+};
+
+// Mock the event data
+mock('getEventData', function(key) {
+  return mockPurchaseEvent[key];
+});
+
+// Mock sendHttpRequest to capture what the tag sends
+let capturedUrl = '';
+let capturedBody = '';
+mock('sendHttpRequest', function(url, options, callback) {
+  capturedUrl = url;
+  capturedBody = options.body;
+  callback(200, {}, '');
+});
+
+// Run the template code
+runCode(data);
+
+// Assertions
+assertThat(capturedUrl).isEqualTo('https://webhook.example.com/events');
+const parsedBody = JSON.parse(capturedBody);
+assertThat(parsedBody.event_name).isEqualTo('purchase');
+assertThat(parsedBody.value).isEqualTo(99.99);
+```
+
+Write tests for every template you build. The test runner catches regressions when you update template code.
+
+## Common mistakes
+
+**Using callbacks in variable templates.** Variable templates must return synchronously. You cannot call `sendHttpRequest` inside a variable template and return the response value. If you need async data for a computed value, implement it in a tag template that runs before your data-forwarding tags and stores the result in `templateDataStorage`.
+
+**Not calling `data.gtmOnSuccess()`.** Tag templates must call `gtmOnSuccess()` or `gtmOnFailure()` to signal completion to the container. Without this call, tag sequencing breaks and the container hangs waiting for completion.
+
+**Ignoring permissions.** Templates with missing permissions fail silently in production. Always verify the permissions tab matches the APIs your code uses.
+
+**No error handling around JSON.parse.** `JSON.parse` throws on invalid input. Wrap it in a try/catch equivalent pattern and return a sensible default or fail gracefully.
+
+**Hardcoding credentials.** API keys and tokens should be template fields, not hardcoded strings. This makes credentials configurable via the GTM UI and avoids exposing them in template code.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Clients"
+    description="Using client templates to receive webhooks and custom data formats."
+    href="/server-side/clients/custom-clients/"
+  />
+  <LinkCard
+    title="Custom HTTP Requests"
+    description="Using the sendHttpRequest API to forward data to any endpoint."
+    href="/server-side/tags/custom-http-requests/"
+  />
+  <LinkCard
+    title="Data Redaction & PII"
+    description="Practical redaction patterns using variable and tag templates."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+  <LinkCard
+    title="Debugging sGTM"
+    description="Testing custom templates with Preview mode and the Preview Header technique."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+</CardGrid>

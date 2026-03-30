@@ -1,6 +1,353 @@
 ---
-title: "Building Client Templates"
-description: "Creating custom client templates for server-side GTM."
+title: "Building Client Templates for Server-Side GTM"
+description: "How to create server-side GTM client templates — claimRequest(), building the event model from incoming HTTP data, running the container, setting response headers and cookies, and a complete webhook receiver example."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Server-side GTM clients are the entry point for all data entering your sGTM container. When an HTTP request arrives at your server container, a client claims the request, translates its data into the GTM event model, and runs the container. Without a client claiming a request, nothing happens.
+
+GTM includes built-in clients for GA4, Universal Analytics, and a few other protocols. When you need to receive data from a custom webhook, a non-Google analytics tool, or any data format that the built-in clients don't handle, you build a custom client template.
+
+## How clients work
+
+The flow for every incoming request to sGTM:
+
+1. HTTP request arrives at the sGTM endpoint
+2. GTM evaluates all client templates in priority order
+3. The first client that calls `claimRequest()` owns the request
+4. That client builds an event model from the request data
+5. The client calls `runContainer(eventModel, callback)` to process tags
+6. After tags complete, the callback sends the HTTP response
+
+A client that does not call `claimRequest()` is passed over. The request is then offered to the next client in priority order.
+
+## The minimum viable client template
+
+```javascript
+// Minimum client template — claims all requests and logs them
+const claimRequest = require('claimRequest');
+const runContainer = require('runContainer');
+const returnResponse = require('returnResponse');
+const getAllRequestData = require('getAllRequestData');
+const logToConsole = require('logToConsole');
+
+// 1. Claim the request (must be synchronous)
+claimRequest();
+
+// 2. Read the incoming request
+var requestData = getAllRequestData();
+logToConsole('Received request:', requestData);
+
+// 3. Build an event model
+var eventModel = {
+  event_name: 'custom_webhook',
+  // Add fields from the request
+};
+
+// 4. Run the container with the event model
+runContainer(eventModel, function() {
+  // 5. Send response after container finishes
+  returnResponse();
+});
+```
+
+This is the skeleton. Everything real comes from how you transform the incoming request into the event model.
+
+## Building a webhook receiver client
+
+A common use case: receiving a JSON POST from a backend system (form submission, CRM event, purchase confirmation) and running GTM tags based on that data.
+
+**Scenario**: Your e-commerce backend sends a purchase confirmation webhook to sGTM:
+
+```json
+POST /webhook/purchase
+Content-Type: application/json
+
+{
+  "event": "purchase_complete",
+  "order_id": "ORDER-12345",
+  "revenue": 149.99,
+  "currency": "USD",
+  "customer_id": "CUST-789",
+  "items": [
+    {"sku": "WIDGET-A", "name": "Blue Widget", "price": 49.99, "qty": 2},
+    {"sku": "GADGET-B", "name": "Red Gadget", "price": 50.01, "qty": 1}
+  ]
+}
+```
+
+**Client template code:**
+
+```javascript
+const claimRequest = require('claimRequest');
+const runContainer = require('runContainer');
+const returnResponse = require('returnResponse');
+const setResponseStatus = require('setResponseStatus');
+const setResponseBody = require('setResponseBody');
+const setResponseHeader = require('setResponseHeader');
+const getRequestBody = require('getRequestBody');
+const getRequestHeader = require('getRequestHeader');
+const getRequestPath = require('getRequestPath');
+const logToConsole = require('logToConsole');
+const JSON = require('JSON');
+
+// Only claim requests to our webhook path
+var path = getRequestPath();
+if (path !== '/webhook/purchase') {
+  // Don't claim — pass to next client
+  return;
+}
+
+// Claim the request
+claimRequest();
+
+// Verify the content type
+var contentType = getRequestHeader('content-type') || '';
+if (contentType.indexOf('application/json') === -1) {
+  setResponseStatus(400);
+  setResponseBody(JSON.stringify({error: 'Expected application/json'}));
+  setResponseHeader('Content-Type', 'application/json');
+  returnResponse();
+  return;
+}
+
+// Parse the request body
+var body;
+try {
+  body = JSON.parse(getRequestBody());
+} catch(e) {
+  setResponseStatus(400);
+  setResponseBody(JSON.stringify({error: 'Invalid JSON'}));
+  setResponseHeader('Content-Type', 'application/json');
+  returnResponse();
+  return;
+}
+
+// Build the GTM event model
+// Map your payload format to GA4-compatible event model
+var eventModel = {
+  'event_name': 'purchase',
+
+  // GA4 ecommerce parameters
+  'currency': body.currency || 'USD',
+  'value': body.revenue,
+  'transaction_id': body.order_id,
+
+  // User identification
+  'user_id': body.customer_id,
+
+  // Items array (GA4 format)
+  'items': (body.items || []).map(function(item) {
+    return {
+      'item_id': item.sku,
+      'item_name': item.name,
+      'price': item.price,
+      'quantity': item.qty
+    };
+  }),
+
+  // Source identification — tells GA4 client this is a server-side event
+  'x-sst-system-properties': {
+    'ht': 'server'  // Hit type: server
+  }
+};
+
+logToConsole('Processing purchase event for order:', body.order_id);
+
+// Run the container
+runContainer(eventModel, function() {
+  // Send success response to the webhook sender
+  setResponseStatus(200);
+  setResponseBody(JSON.stringify({status: 'received', order_id: body.order_id}));
+  setResponseHeader('Content-Type', 'application/json');
+  returnResponse();
+});
+```
+
+## Conditional request claiming
+
+Clients should only claim requests they can handle. Use conditions before calling `claimRequest()`:
+
+```javascript
+const getRequestPath = require('getRequestPath');
+const getRequestMethod = require('getRequestMethod');
+const getRequestHeader = require('getRequestHeader');
+
+var path = getRequestPath();
+var method = getRequestMethod();
+var contentType = getRequestHeader('content-type') || '';
+
+// Only claim POST requests to /events/custom with JSON body
+if (method !== 'POST' ||
+    path !== '/events/custom' ||
+    contentType.indexOf('application/json') === -1) {
+  return;  // Don't claim — pass to next client
+}
+
+claimRequest();
+// ... rest of handling
+```
+
+<Aside type="caution">
+`claimRequest()` must be called synchronously — not inside a callback or after any asynchronous operation. If you call `claimRequest()` inside a `sendHttpRequest` callback, the sGTM framework will not recognize the claim.
+</Aside>
+
+## Authentication and security
+
+Webhook receivers need to validate that incoming requests are legitimate. Common approaches:
+
+**Shared secret header:**
+```javascript
+const getRequestHeader = require('getRequestHeader');
+
+var secret = getRequestHeader('x-webhook-secret');
+var expectedSecret = data.webhookSecret;  // Template field
+
+if (!secret || secret !== expectedSecret) {
+  setResponseStatus(401);
+  setResponseBody('Unauthorized');
+  returnResponse();
+  return;
+}
+
+claimRequest();
+```
+
+**HMAC signature verification:**
+```javascript
+const getRequestBody = require('getRequestBody');
+const getRequestHeader = require('getRequestHeader');
+const hmacSha256 = require('hmacSha256');  // Available in sGTM
+const toHexString = require('toHexString');
+
+var body = getRequestBody();
+var signature = getRequestHeader('x-signature');
+var secret = data.signingSecret;
+
+// Compute expected signature
+var expected = toHexString(hmacSha256(secret, body));
+
+if (signature !== 'sha256=' + expected) {
+  setResponseStatus(403);
+  setResponseBody('Invalid signature');
+  returnResponse();
+  return;
+}
+
+claimRequest();
+```
+
+## Setting cookies from a client
+
+Clients can set first-party cookies in the response, which are useful for establishing persistent user identifiers:
+
+```javascript
+const setCookie = require('setCookie');
+
+// Set a first-party persistent cookie
+setCookie('_custom_id', userId, {
+  domain: 'auto',        // 'auto' uses the request's host
+  path: '/',
+  secure: true,
+  httpOnly: true,        // Not accessible via JavaScript (more secure)
+  samesite: 'Lax',
+  'max-age': 34560000    // 400 days in seconds
+});
+```
+
+Setting cookies is why server-side clients are useful for implementing persistent first-party identifiers that bypass ITP restrictions on JavaScript-set cookies.
+
+## Reading cookies in a client
+
+```javascript
+const parseCookieHeader = require('parseCookieHeader');
+const getRequestHeader = require('getRequestHeader');
+
+// Parse the Cookie header from the incoming request
+var cookieHeader = getRequestHeader('cookie');
+var cookies = parseCookieHeader(cookieHeader);
+
+// Access specific cookie
+var gaClientId = cookies['_ga'];
+var customId = cookies['_custom_id'];
+```
+
+## Event model conventions
+
+The sGTM GA4 client expects a specific event model format. When building custom clients, follow these conventions to maximize compatibility with sGTM's built-in tag templates:
+
+```javascript
+var eventModel = {
+  // Required: event identification
+  'event_name': 'your_event_name',
+
+  // Standard GA4 parameters (use if applicable)
+  'currency': 'USD',
+  'value': 49.99,
+  'transaction_id': 'T001',
+  'page_location': 'https://example.com/checkout/complete',
+  'page_title': 'Order Complete',
+
+  // User identification
+  'user_id': 'USER-123',
+  'client_id': '1234567890.1234567890',  // GA4 client ID format
+
+  // Traffic source
+  'traffic_source.source': 'webhook',
+  'traffic_source.medium': 'server-to-server',
+
+  // Consent signals (if you know them)
+  'x-ga-gcs': 'G111',  // G{ads}{analytics} — G111 = both granted
+
+  // Client identification for GA4
+  'x-ga-measurement_id': 'G-XXXXXXXXXX'  // Target GA4 property
+};
+```
+
+## Testing client templates
+
+Test your client by sending real HTTP requests to the sGTM Preview endpoint. In sGTM Preview mode, all incoming requests are visible in the preview panel with full request/response detail.
+
+You can also use the template test runner for unit tests:
+
+```javascript
+// Mock the request APIs
+mock('getRequestPath', function() { return '/webhook/purchase'; });
+mock('getRequestMethod', function() { return 'POST'; });
+mock('getRequestHeader', function(name) {
+  if (name === 'content-type') return 'application/json';
+  return null;
+});
+mock('getRequestBody', function() {
+  return '{"event":"purchase_complete","order_id":"123","revenue":49.99}';
+});
+
+// Mock claimRequest and runContainer
+mock('claimRequest', function() {});
+mock('runContainer', function(model, callback) { callback(); });
+mock('returnResponse', function() {});
+
+runCode(mockData);
+
+assertApi('claimRequest').wasCalled();
+assertApi('runContainer').wasCalled();
+assertApi('returnResponse').wasCalled();
+```
+
+## Common mistakes
+
+**Calling `claimRequest()` inside an `if` block based on async data.** The claim must be synchronous. Decide whether to claim based only on synchronous data (headers, path, method) before making any async calls.
+
+**Not calling `returnResponse()`.** If your client runs `runContainer()` but never calls `returnResponse()`, the HTTP client (your backend) waits forever for a response that never comes. Always call `returnResponse()` in the `runContainer` callback.
+
+**Not handling JSON parse errors.** Webhooks can have malformed JSON. Always wrap `JSON.parse()` in error handling and return a 400 response with a meaningful error body.
+
+**Building an event model that doesn't match what your tags expect.** If your GA4 tag expects `event_name` but your client builds `event_type`, the tag fires with no event name. Document the event model conventions your container uses and ensure clients adhere to them.
+
+---
+
+<CardGrid>
+  <LinkCard title="Sandboxed JavaScript APIs" href="/templates/sandboxed-javascript/" description="Server-side APIs including getRequestHeader, setResponseHeader, runContainer, and claimRequest." />
+  <LinkCard title="Testing Custom Templates" href="/templates/testing-custom-templates/" description="Testing client templates with mocked request and response APIs." />
+</CardGrid>

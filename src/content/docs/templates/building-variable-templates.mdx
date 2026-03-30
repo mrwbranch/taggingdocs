@@ -1,6 +1,350 @@
 ---
 title: "Building Variable Templates"
-description: "Creating custom variable templates for reusable data transformations."
+description: "Creating custom variable templates for data transformation, cookie parsing, URL parameter extraction, and server-side async lookups — when to use templates over Custom JavaScript variables and how to structure the code."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Variable templates are the least-discussed template type, but they solve real problems that Custom JavaScript variables struggle with. A Custom JS variable runs in the page context with access to everything — which is both its power and its maintenance liability. A variable template runs in the sandbox with declared permissions and a test suite.
+
+If you are building a data transformation function that will be shared across teams or containers, it should be a variable template, not a Custom JavaScript variable.
+
+## Variable template vs. Custom JavaScript variable
+
+The fundamental difference: a variable template **must return a value**. Everything in the template code is oriented around computing and returning a single value.
+
+<table>
+  <thead>
+    <tr>
+      <th>Aspect</th>
+      <th>Custom JavaScript Variable</th>
+      <th>Variable Template</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Environment</td>
+      <td>Full browser context</td>
+      <td>Sandboxed APIs</td>
+    </tr>
+    <tr>
+      <td>Access to window/document</td>
+      <td>Yes</td>
+      <td>Via explicit APIs only</td>
+    </tr>
+    <tr>
+      <td>Testable</td>
+      <td>No built-in test runner</td>
+      <td>Yes, built-in test framework</td>
+    </tr>
+    <tr>
+      <td>Distributable</td>
+      <td>No</td>
+      <td>Yes (import/export, Gallery)</td>
+    </tr>
+    <tr>
+      <td>Best for</td>
+      <td>Quick one-off transformations</td>
+      <td>Reusable, tested transformations</td>
+    </tr>
+  </tbody>
+</table>
+
+Use a variable template when:
+- The variable will be used in multiple containers
+- The logic is complex enough to benefit from tests
+- You want to share or distribute the variable to others
+- The variable accesses browser APIs (cookies, localStorage) that need permission declarations
+
+## Anatomy of a variable template
+
+Variable template code must call `return` with the value you want the variable to return. The execution model is synchronous — if you need async values, you must use a callback-based pattern (covered below).
+
+```javascript
+// Minimum variable template
+// This is the entire code section
+return data.someField;
+```
+
+A more realistic example — a cookie parser:
+
+```javascript
+// Template fields: cookieName (TEXT)
+
+const getCookieValues = require('getCookieValues');
+
+var cookieName = data.cookieName;
+
+if (!cookieName) {
+  return null;
+}
+
+var cookieValues = getCookieValues(cookieName);
+return cookieValues.length > 0 ? cookieValues[0] : null;
+```
+
+## Example: URL parameter extractor
+
+A reusable template that extracts any URL parameter from the current page URL.
+
+**Fields:**
+- `parameterName` (TEXT): the URL parameter name to extract
+
+**Code:**
+```javascript
+// URL Parameter Extractor Variable Template
+
+const parseUrl = require('parseUrl');
+const copyFromWindow = require('copyFromWindow');
+
+var paramName = data.parameterName;
+
+if (!paramName) {
+  return null;
+}
+
+// Get the current URL
+var currentUrl = copyFromWindow('location.href');
+if (!currentUrl) {
+  return null;
+}
+
+// Parse the URL and extract query parameters
+var parsed = parseUrl(currentUrl);
+var search = parsed.search || '';
+
+// Parse query string manually (parseUrl doesn't parse individual params)
+if (!search || search.length <= 1) {
+  return null;
+}
+
+var queryString = search.slice(1);  // Remove leading '?'
+var pairs = queryString.split('&');
+
+for (var i = 0; i < pairs.length; i++) {
+  var pair = pairs[i].split('=');
+  if (pair.length >= 2) {
+    var key = decodeURIComponent(pair[0]);
+    if (key === paramName) {
+      return decodeURIComponent(pair.slice(1).join('='));
+    }
+  }
+}
+
+return null;
+```
+
+**Permissions needed:**
+- `access_globals`: `location.href` (read only)
+
+## Example: Cookie parser with JSON support
+
+Many tracking cookies store JSON-encoded values. This template parses a cookie and optionally extracts a nested path.
+
+**Fields:**
+- `cookieName` (TEXT): Cookie name
+- `jsonPath` (TEXT): Optional dot-notation path (e.g., `user.id`)
+- `defaultValue` (TEXT): Value to return if cookie is absent or path not found
+
+**Code:**
+```javascript
+const getCookieValues = require('getCookieValues');
+const JSON = require('JSON');
+const logToConsole = require('logToConsole');
+
+var cookieName = data.cookieName;
+var jsonPath = data.jsonPath;
+var defaultValue = data.defaultValue || undefined;
+
+if (!cookieName) {
+  return defaultValue;
+}
+
+var values = getCookieValues(cookieName);
+if (!values || values.length === 0) {
+  return defaultValue;
+}
+
+var rawValue = values[0];
+
+// If no JSON path, return raw value
+if (!jsonPath) {
+  return rawValue;
+}
+
+// Attempt JSON parse
+var parsed;
+try {
+  parsed = JSON.parse(rawValue);
+} catch (e) {
+  logToConsole('Cookie parser: failed to parse JSON in cookie', cookieName);
+  return defaultValue;
+}
+
+// Navigate the JSON path
+var pathParts = jsonPath.split('.');
+var current = parsed;
+
+for (var i = 0; i < pathParts.length; i++) {
+  if (current === null || current === undefined) {
+    return defaultValue;
+  }
+  current = current[pathParts[i]];
+}
+
+return current !== undefined ? current : defaultValue;
+```
+
+Note: the sandbox's `try/catch` handling is different from regular JavaScript. In templates, error handling is done through the template runtime rather than `try/catch`. However, `try/catch` IS actually available in template code for catching specific runtime errors — this is one area where the sandbox is more permissive than often stated.
+
+## Example: Data transformation template
+
+Useful for applying consistent value formatting across an organization.
+
+**Fields:**
+- `inputValue` (TEMPLATE): The value to transform
+- `transformType` (SELECT): currency / percentage / truncate / sanitize_pii
+
+**Code:**
+```javascript
+const makeString = require('makeString');
+const makeNumber = require('makeNumber');
+
+var input = data.inputValue;
+var transform = data.transformType;
+
+if (input === null || input === undefined) {
+  return null;
+}
+
+switch(transform) {
+  case 'currency':
+    // Convert to number, round to 2 decimal places
+    var num = makeNumber(input);
+    if (isNaN(num)) return null;
+    return Math.round(num * 100) / 100;
+
+  case 'percentage':
+    var pct = makeNumber(input);
+    if (isNaN(pct)) return null;
+    return Math.round(pct * 10000) / 100;  // e.g., 0.1523 → 15.23
+
+  case 'truncate':
+    var str = makeString(input);
+    return str.length > 100 ? str.slice(0, 100) + '...' : str;
+
+  case 'sanitize_pii':
+    // Remove email addresses from string values
+    var text = makeString(input);
+    return text.replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, '[email]');
+
+  default:
+    return input;
+}
+```
+
+## Server-side variable templates with async
+
+Server-side variable templates support asynchronous operations via Promises. This allows lookups from external services — databases, APIs, KV stores.
+
+```javascript
+// Server-side variable template: Firestore user lookup
+// Returns the user's tier from Firestore based on user_id in the event
+
+const getAllEventData = require('getAllEventData');
+const sendHttpRequest = require('sendHttpRequest');
+const templateDataStorage = require('templateDataStorage');
+const logToConsole = require('logToConsole');
+
+const eventData = getAllEventData();
+const userId = eventData.user_id;
+
+if (!userId) {
+  return 'unknown';
+}
+
+// Check cache first
+var cacheKey = 'user_tier_' + userId;
+var cached = templateDataStorage.getItemCopy(cacheKey);
+if (cached !== null && cached !== undefined) {
+  return cached;
+}
+
+// Return a Promise for async resolution
+return new Promise(function(resolve) {
+  var firestoreUrl = 'https://firestore.googleapis.com/v1/projects/MY_PROJECT/databases/(default)/documents/users/' + userId;
+
+  sendHttpRequest(firestoreUrl, {
+    method: 'GET',
+    headers: {'Authorization': 'Bearer ' + getGoogleAuth()}
+  }, function(statusCode, headers, body) {
+    if (statusCode !== 200) {
+      resolve('unknown');
+      return;
+    }
+
+    try {
+      var doc = JSON.parse(body);
+      var tier = doc.fields && doc.fields.tier && doc.fields.tier.stringValue || 'free';
+
+      // Cache the result
+      templateDataStorage.setItemCopy(cacheKey, tier);
+      resolve(tier);
+    } catch(e) {
+      logToConsole('User lookup failed:', e);
+      resolve('unknown');
+    }
+  });
+});
+```
+
+<Aside type="tip">
+On the client side, variable templates cannot use Promises — they must return synchronously. If you need async data on the client side, fetch it in a Custom HTML tag that fires before the variable is needed, and store the result in a Global Variable for the template to read via `copyFromWindow()`.
+</Aside>
+
+## Testing variable templates
+
+Variable templates are tested with `runCode()` which executes the template and captures the return value:
+
+```javascript
+// Test: URL parameter extractor returns correct value
+var testUrl = 'https://example.com/page?utm_source=google&utm_medium=cpc';
+
+mock('copyFromWindow', function(path) {
+  if (path === 'location.href') return testUrl;
+  return undefined;
+});
+
+var result = runCode({
+  parameterName: 'utm_source'
+});
+
+assertThat(result).isEqualTo('google');
+```
+
+```javascript
+// Test: returns default value when cookie is absent
+mock('getCookieValues', function(name) { return []; });
+
+var result = runCode({
+  cookieName: 'my_cookie',
+  defaultValue: 'unknown'
+});
+
+assertThat(result).isEqualTo('unknown');
+```
+
+## Common mistakes
+
+**Returning `undefined` instead of a default value.** When a variable template returns `undefined`, the GTM variable evaluates to `undefined`. Set a meaningful default in the template (or use a "default value" field) rather than returning undefined for missing inputs.
+
+**Not handling the case where `data.field` is an empty string.** In GTM, empty text fields return `''` (empty string), not `undefined`. Check for both: `if (!data.fieldName)` catches both undefined and empty string.
+
+**Using synchronous return in server-side templates when async is needed.** If you return synchronously but the value depends on an async operation (network request), the variable returns before the data is available. Use `return new Promise(...)` for any async server-side operation.
+
+---
+
+<CardGrid>
+  <LinkCard title="Sandboxed JavaScript APIs" href="/templates/sandboxed-javascript/" description="All available APIs including getCookieValues, parseUrl, and copyFromWindow." />
+  <LinkCard title="Testing Custom Templates" href="/templates/testing-custom-templates/" description="Writing test cases for variable templates using runCode() and assertThat()." />
+</CardGrid>

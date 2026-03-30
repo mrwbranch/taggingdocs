@@ -1,6 +1,406 @@
 ---
 title: "Runtime Validation"
-description: "Validating dataLayer pushes at runtime in the browser."
+description: "Validating dataLayer pushes at runtime — Zod schemas for GA4 ecommerce events, the dataLayer interceptor pattern, development vs. production error handling, and monitoring integration."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+TypeScript catches structural errors at compile time. Runtime validation catches errors in the actual data — prices that come back as strings from an API, empty items arrays from an edge-case in your cart logic, or a `transaction_id` that's undefined because the order object was shaped differently than expected.
+
+Runtime validation runs in the browser and checks every dataLayer push against your schema before the data leaves the page.
+
+## The interceptor pattern
+
+The core technique is intercepting `window.dataLayer.push` before your analytics code calls it:
+
+```javascript
+function installDataLayerValidator(schemas) {
+    if (typeof window === 'undefined') return;
+
+    window.dataLayer = window.dataLayer || [];
+
+    const _originalPush = Array.prototype.push.bind(window.dataLayer);
+
+    window.dataLayer.push = function(...args) {
+        args.forEach(item => validate(item, schemas));
+        return _originalPush(...args);
+    };
+}
+```
+
+The interceptor calls the original `push` regardless of validation outcome — it observes and reports, it doesn't block. The event still reaches GTM and GA4. This is deliberate: validation failures should alert you to a problem, not break your analytics in production.
+
+## Zod schemas for ecommerce events
+
+[Zod](https://zod.dev) is the standard choice for runtime schema validation in JavaScript. Install it:
+
+```bash
+npm install zod
+```
+
+### Item schema
+
+```typescript
+import { z } from 'zod';
+
+const EcommerceItemSchema = z.object({
+    item_id:         z.string().min(1, 'item_id must not be empty'),
+    item_name:       z.string().min(1, 'item_name must not be empty'),
+    price:           z.number({ invalid_type_error: 'price must be a number, not a string' }),
+    quantity:        z.number().int().positive('quantity must be a positive integer'),
+
+    // Optional fields
+    item_brand:      z.string().optional(),
+    item_category:   z.string().optional(),
+    item_category2:  z.string().optional(),
+    item_category3:  z.string().optional(),
+    item_category4:  z.string().optional(),
+    item_category5:  z.string().optional(),
+    item_variant:    z.string().optional(),
+    item_list_id:    z.string().optional(),
+    item_list_name:  z.string().optional(),
+    index:           z.number().int().min(0).optional(),
+    discount:        z.number().min(0).optional(),
+    coupon:          z.string().optional(),
+    affiliation:     z.string().optional(),
+    creative_name:   z.string().optional(),
+    creative_slot:   z.string().optional(),
+    promotion_id:    z.string().optional(),
+    promotion_name:  z.string().optional(),
+});
+```
+
+### Ecommerce event schemas
+
+```typescript
+const EcommerceNullClearSchema = z.object({
+    ecommerce: z.null(),
+});
+
+const ViewItemListSchema = z.object({
+    event:     z.literal('view_item_list'),
+    ecommerce: z.object({
+        item_list_id:   z.string().optional(),
+        item_list_name: z.string().optional(),
+        items:          z.array(EcommerceItemSchema).min(1, 'items array must not be empty'),
+    }),
+});
+
+const SelectItemSchema = z.object({
+    event:     z.literal('select_item'),
+    ecommerce: z.object({
+        item_list_id:   z.string().optional(),
+        item_list_name: z.string().optional(),
+        items:          z.array(EcommerceItemSchema).length(1, 'select_item must have exactly one item'),
+    }),
+});
+
+const ViewItemSchema = z.object({
+    event:     z.literal('view_item'),
+    ecommerce: z.object({
+        currency: z.string().length(3, 'currency must be a 3-letter ISO code'),
+        value:    z.number(),
+        items:    z.array(EcommerceItemSchema).length(1, 'view_item must have exactly one item'),
+    }),
+});
+
+const AddToCartSchema = z.object({
+    event:     z.literal('add_to_cart'),
+    ecommerce: z.object({
+        currency: z.string().length(3, 'currency must be a 3-letter ISO code'),
+        value:    z.number().positive('value must be positive'),
+        items:    z.array(EcommerceItemSchema).min(1),
+    }),
+});
+
+const RemoveFromCartSchema = z.object({
+    event:     z.literal('remove_from_cart'),
+    ecommerce: z.object({
+        currency: z.string().length(3),
+        value:    z.number().positive(),
+        items:    z.array(EcommerceItemSchema).min(1),
+    }),
+});
+
+const ViewCartSchema = z.object({
+    event:     z.literal('view_cart'),
+    ecommerce: z.object({
+        currency: z.string().length(3),
+        value:    z.number().min(0),
+        items:    z.array(EcommerceItemSchema).min(1),
+    }),
+});
+
+const BeginCheckoutSchema = z.object({
+    event:     z.literal('begin_checkout'),
+    ecommerce: z.object({
+        currency: z.string().length(3),
+        value:    z.number().min(0),
+        coupon:   z.string().optional(),
+        items:    z.array(EcommerceItemSchema).min(1),
+    }),
+});
+
+const AddShippingInfoSchema = z.object({
+    event:     z.literal('add_shipping_info'),
+    ecommerce: z.object({
+        currency:      z.string().length(3),
+        value:         z.number().min(0),
+        coupon:        z.string().optional(),
+        shipping_tier: z.string().optional(),
+        items:         z.array(EcommerceItemSchema).min(1),
+    }),
+});
+
+const AddPaymentInfoSchema = z.object({
+    event:     z.literal('add_payment_info'),
+    ecommerce: z.object({
+        currency:     z.string().length(3),
+        value:        z.number().min(0),
+        coupon:       z.string().optional(),
+        payment_type: z.string().optional(),
+        items:        z.array(EcommerceItemSchema).min(1),
+    }),
+});
+
+const PurchaseSchema = z.object({
+    event:     z.literal('purchase'),
+    ecommerce: z.object({
+        transaction_id: z.string().min(1, 'transaction_id must not be empty'),
+        value:          z.number().min(0),
+        currency:       z.string().length(3),
+        tax:            z.number().min(0).optional(),
+        shipping:       z.number().min(0).optional(),
+        coupon:         z.string().optional(),
+        affiliation:    z.string().optional(),
+        items:          z.array(EcommerceItemSchema).min(1),
+    }),
+});
+
+const RefundSchema = z.object({
+    event:     z.literal('refund'),
+    ecommerce: z.object({
+        transaction_id: z.string().min(1),
+        value:          z.number().min(0),
+        currency:       z.string().length(3),
+        items:          z.array(EcommerceItemSchema).optional(), // omit for full refund
+    }),
+});
+```
+
+### Schema map
+
+```typescript
+const ecommerceEventSchemas: Record<string, z.ZodSchema> = {
+    view_item_list:   ViewItemListSchema,
+    select_item:      SelectItemSchema,
+    view_item:        ViewItemSchema,
+    add_to_cart:      AddToCartSchema,
+    remove_from_cart: RemoveFromCartSchema,
+    view_cart:        ViewCartSchema,
+    begin_checkout:   BeginCheckoutSchema,
+    add_shipping_info: AddShippingInfoSchema,
+    add_payment_info: AddPaymentInfoSchema,
+    purchase:         PurchaseSchema,
+    refund:           RefundSchema,
+};
+```
+
+## Complete interceptor implementation
+
+```typescript
+type ValidationErrorHandler = (event: string, errors: string[]) => void;
+
+function formatZodErrors(zodError: z.ZodError): string[] {
+    return zodError.errors.map(err => {
+        const path = err.path.join('.');
+        return path ? `${path}: ${err.message}` : err.message;
+    });
+}
+
+function createDataLayerValidator(onError?: ValidationErrorHandler) {
+    const defaultHandler: ValidationErrorHandler = (eventName, errors) => {
+        const isDev = typeof process !== 'undefined'
+            ? process.env.NODE_ENV === 'development'
+            : window.location.hostname === 'localhost';
+
+        if (isDev) {
+            console.group(`%c[DataLayer] Validation errors in "${eventName}"`, 'color: #d93025; font-weight: bold');
+            errors.forEach(err => console.error(`  • ${err}`));
+            console.groupEnd();
+        } else {
+            // Production: send to error monitoring
+            // Replace with your error monitoring SDK:
+            // Sentry.captureMessage('DataLayer validation error', { extra: { eventName, errors } });
+            // errorTracker.log({ type: 'datalayer_validation', event: eventName, errors });
+        }
+    };
+
+    const handleError = onError || defaultHandler;
+
+    return function validatePush(item: unknown): void {
+        if (!item || typeof item !== 'object') return;
+
+        const obj = item as Record<string, unknown>;
+
+        // Skip null clear objects
+        if ('ecommerce' in obj && obj.ecommerce === null) return;
+
+        // Skip non-event objects (user property pushes, etc.)
+        if (!obj.event || typeof obj.event !== 'string') return;
+
+        const schema = ecommerceEventSchemas[obj.event as string];
+        if (!schema) return; // No schema registered for this event
+
+        const result = schema.safeParse(obj);
+        if (!result.success) {
+            const errors = formatZodErrors(result.error);
+            handleError(obj.event as string, errors);
+        }
+    };
+}
+
+export function installDataLayerValidation(onError?: ValidationErrorHandler): void {
+    if (typeof window === 'undefined') return;
+
+    window.dataLayer = window.dataLayer || [];
+
+    const validate = createDataLayerValidator(onError);
+    const _originalPush = Array.prototype.push.bind(window.dataLayer);
+
+    window.dataLayer.push = function(...args: unknown[]) {
+        args.forEach(validate);
+        return _originalPush(...args);
+    };
+}
+```
+
+## Installation
+
+Call `installDataLayerValidation()` as early as possible in your application — before any analytics code runs:
+
+```typescript
+// In your app's entry point or analytics initialization module
+
+import { installDataLayerValidation } from './lib/datalayer-validation';
+
+// Install with default error handling
+installDataLayerValidation();
+
+// Or with a custom error handler (e.g., Sentry)
+installDataLayerValidation((eventName, errors) => {
+    Sentry.captureMessage('DataLayer validation error', {
+        level: 'warning',
+        extra: { eventName, errors },
+        tags: { component: 'analytics' },
+    });
+});
+```
+
+In **Next.js** (App Router):
+
+```typescript
+// app/layout.tsx or a Client Component that runs early
+'use client';
+import { useEffect } from 'react';
+import { installDataLayerValidation } from '@/lib/datalayer-validation';
+
+export function DataLayerValidator() {
+    useEffect(() => {
+        installDataLayerValidation();
+    }, []);
+    return null;
+}
+```
+
+In **Nuxt 3**:
+
+```typescript
+// plugins/datalayer-validation.client.ts
+import { installDataLayerValidation } from '~/lib/datalayer-validation';
+
+export default defineNuxtPlugin(() => {
+    installDataLayerValidation();
+});
+```
+
+## Development vs. production behavior
+
+The interceptor should behave differently in development and production:
+
+| Environment | Behavior |
+|-------------|----------|
+| Development (localhost) | `console.error` with full details — visible in DevTools |
+| Staging | `console.warn` + send to error monitoring |
+| Production | Send to error monitoring silently |
+
+<Aside type="caution">
+Never throw exceptions in the production interceptor. A validation error should never break your application or block an analytics push. The purpose is observation and reporting, not enforcement.
+</Aside>
+
+## Validation in the purchase event specifically
+
+The purchase event is the most important to validate because purchase data drives revenue reporting. Consider stricter validation for this event specifically:
+
+```typescript
+// Extra purchase event checks beyond the schema
+function validatePurchaseSpecifics(event: unknown): void {
+    if (!event || typeof event !== 'object') return;
+    const obj = event as Record<string, unknown>;
+    if (obj.event !== 'purchase') return;
+
+    const ecommerce = obj.ecommerce as Record<string, unknown>;
+    if (!ecommerce) return;
+
+    // Check for duplicate transaction IDs in this session
+    const sentTransactions = (window as any)._sentTransactionIds || new Set<string>();
+    const txId = String(ecommerce.transaction_id || '');
+
+    if (sentTransactions.has(txId)) {
+        console.error(`[DataLayer] Duplicate purchase event for transaction_id: ${txId}`);
+    }
+    sentTransactions.add(txId);
+    (window as any)._sentTransactionIds = sentTransactions;
+
+    // Check value matches sum of item prices × quantities
+    const items = ecommerce.items as Array<{price: number; quantity: number}> | undefined;
+    if (Array.isArray(items) && items.length > 0) {
+        const computedSubtotal = items.reduce((sum, item) => {
+            return sum + (item.price * item.quantity);
+        }, 0);
+        const reportedValue = Number(ecommerce.value);
+
+        // Allow for rounding and shipping/tax differences — just flag large discrepancies
+        const discrepancy = Math.abs(reportedValue - computedSubtotal);
+        if (discrepancy > reportedValue * 0.5) {
+            console.warn(`[DataLayer] purchase value (${reportedValue}) differs significantly from sum of items (${computedSubtotal.toFixed(2)}). Check if value includes tax/shipping, or if price/quantity are wrong.`);
+        }
+    }
+}
+```
+
+## Common mistakes
+
+**Installing the interceptor after analytics code has already pushed.** If GTM loads and pushes events before your interceptor is installed, those pushes won't be validated. Install validation before any analytics initialization.
+
+**Validating in development only.** Development test cases rarely match the full range of real user data. Edge-case data from real users — products with missing SKUs, orders with unusual totals, currency codes from obscure markets — only surfaces in production. Enable production validation with error monitoring.
+
+**Blocking pushes on validation failure.** Throwing an exception or skipping the original `_originalPush()` call when validation fails means your analytics stop working for any user who triggers a validation error. Validate and report, don't block.
+
+<CardGrid>
+  <LinkCard
+    title="TypeScript Schemas"
+    description="Compile-time type checking — the complementary layer to runtime validation."
+    href="/datalayer/validation/typescript-schemas/"
+  />
+  <LinkCard
+    title="Validation Approaches"
+    description="Overview of all four validation layers and when each one applies."
+    href="/datalayer/validation/validation-approaches/"
+  />
+  <LinkCard
+    title="Automated Testing"
+    description="E2E tests that verify events fire correctly in real browser flows."
+    href="/datalayer/validation/automated-testing/"
+  />
+</CardGrid>

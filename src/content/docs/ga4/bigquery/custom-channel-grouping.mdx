@@ -1,6 +1,280 @@
 ---
-title: "Custom Channel Grouping"
-description: "Building custom channel groupings in BigQuery SQL."
+title: "Custom Channel Grouping in BigQuery"
+description: "Implement GA4's channel classification logic in SQL and extend it with custom rules — a reusable BigQuery function for all your analytics queries."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+GA4's default channel grouping in the UI is useful but opaque — you cannot see or modify the classification logic, and it does not always reflect your traffic correctly. In BigQuery, you control the classification entirely. This guide shows how to implement channel grouping as a BigQuery persistent user-defined function (UDF), then use it across all your queries.
+
+## The channel classification approach
+
+Channel grouping is a priority-ordered set of rules applied to `source` and `medium`. The first matching rule determines the channel. We will implement this as a BigQuery SQL UDF so you can call it in any query without duplicating the CASE expression.
+
+## Basic channel CASE expression
+
+For quick use without a UDF:
+
+```sql
+SELECT
+  event_date,
+  CASE
+    -- Direct: no source or source is "(direct)" with no/none medium
+    WHEN traffic_source.source IN ('(direct)', '') AND traffic_source.medium IN ('(none)', '(not set)', '')
+      THEN 'Direct'
+
+    -- Email
+    WHEN REGEXP_CONTAINS(LOWER(traffic_source.medium), r'email|e-mail|e_mail')
+      THEN 'Email'
+
+    -- SMS
+    WHEN LOWER(traffic_source.source) = 'sms' OR LOWER(traffic_source.medium) = 'sms'
+      THEN 'SMS'
+
+    -- Paid Search
+    WHEN LOWER(traffic_source.medium) IN ('cpc', 'ppc', 'paid', 'paidsearch')
+      AND REGEXP_CONTAINS(LOWER(traffic_source.source), r'google|bing|yahoo|duckduckgo|baidu|yandex')
+      THEN 'Paid Search'
+
+    -- Paid Social
+    WHEN LOWER(traffic_source.medium) IN ('cpc', 'ppc', 'paid', 'paid_social')
+      AND REGEXP_CONTAINS(LOWER(traffic_source.source), r'facebook|instagram|twitter|x|linkedin|tiktok|pinterest|snapchat|reddit')
+      THEN 'Paid Social'
+
+    -- Display
+    WHEN LOWER(traffic_source.medium) IN ('display', 'banner', 'expandable', 'cpm', 'cpv')
+      THEN 'Display'
+
+    -- Paid Video
+    WHEN LOWER(traffic_source.medium) IN ('cpc', 'ppc', 'paid')
+      AND REGEXP_CONTAINS(LOWER(traffic_source.source), r'youtube|vimeo|twitch')
+      THEN 'Paid Video'
+
+    -- Affiliates
+    WHEN LOWER(traffic_source.medium) = 'affiliate'
+      THEN 'Affiliates'
+
+    -- Organic Search
+    WHEN LOWER(traffic_source.medium) = 'organic'
+      AND REGEXP_CONTAINS(LOWER(traffic_source.source), r'google|bing|yahoo|duckduckgo|baidu|yandex|ecosia|startpage|brave')
+      THEN 'Organic Search'
+
+    -- Organic Social
+    WHEN REGEXP_CONTAINS(LOWER(traffic_source.source), r'facebook|instagram|twitter|x\.com|linkedin|tiktok|pinterest|snapchat|reddit|youtube')
+      AND LOWER(traffic_source.medium) NOT IN ('cpc', 'ppc', 'paid')
+      THEN 'Organic Social'
+
+    -- Organic Video
+    WHEN REGEXP_CONTAINS(LOWER(traffic_source.source), r'youtube|vimeo|twitch')
+      AND LOWER(traffic_source.medium) NOT IN ('cpc', 'ppc', 'paid')
+      THEN 'Organic Video'
+
+    -- Referral
+    WHEN LOWER(traffic_source.medium) = 'referral'
+      THEN 'Referral'
+
+    -- Cross-network
+    WHEN REGEXP_CONTAINS(LOWER(COALESCE(traffic_source.name, '')), r'cross.network')
+      THEN 'Cross-network'
+
+    -- Unassigned catch-all
+    ELSE 'Unassigned'
+  END AS channel,
+
+  COUNT(DISTINCT CONCAT(
+    user_pseudo_id, '.',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  )) AS sessions
+
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'session_start'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_date, channel
+ORDER BY event_date, sessions DESC
+```
+
+## Persistent SQL UDF
+
+Create a reusable function to avoid repeating the CASE expression:
+
+```sql
+-- Create the UDF in your derived dataset
+CREATE OR REPLACE FUNCTION `project.analytics_derived.classify_channel`(
+  source STRING,
+  medium STRING,
+  campaign STRING
+) RETURNS STRING AS (
+  CASE
+    WHEN source IN ('(direct)', '') AND medium IN ('(none)', '(not set)', '')
+      THEN 'Direct'
+    WHEN REGEXP_CONTAINS(LOWER(medium), r'email|e-mail|e_mail')
+      THEN 'Email'
+    WHEN LOWER(source) = 'sms' OR LOWER(medium) = 'sms'
+      THEN 'SMS'
+    WHEN LOWER(medium) IN ('cpc', 'ppc', 'paid', 'paidsearch')
+      AND REGEXP_CONTAINS(LOWER(source), r'google|bing|yahoo|duckduckgo|baidu|yandex')
+      THEN 'Paid Search'
+    WHEN LOWER(medium) IN ('cpc', 'ppc', 'paid', 'paid_social')
+      AND REGEXP_CONTAINS(LOWER(source), r'facebook|instagram|twitter|x|linkedin|tiktok|pinterest|snapchat|reddit')
+      THEN 'Paid Social'
+    WHEN LOWER(medium) IN ('display', 'banner', 'expandable', 'cpm', 'cpv')
+      THEN 'Display'
+    WHEN LOWER(medium) IN ('cpc', 'ppc', 'paid')
+      AND REGEXP_CONTAINS(LOWER(source), r'youtube|vimeo|twitch')
+      THEN 'Paid Video'
+    WHEN LOWER(medium) = 'affiliate'
+      THEN 'Affiliates'
+    WHEN LOWER(medium) = 'organic'
+      AND REGEXP_CONTAINS(LOWER(source), r'google|bing|yahoo|duckduckgo|baidu|yandex|ecosia|startpage')
+      THEN 'Organic Search'
+    WHEN REGEXP_CONTAINS(LOWER(source), r'facebook|instagram|twitter|x\.com|linkedin|tiktok|pinterest|snapchat|reddit|youtube')
+      AND LOWER(medium) NOT IN ('cpc', 'ppc', 'paid')
+      THEN 'Organic Social'
+    WHEN REGEXP_CONTAINS(LOWER(source), r'youtube|vimeo|twitch')
+      AND LOWER(medium) NOT IN ('cpc', 'ppc', 'paid')
+      THEN 'Organic Video'
+    WHEN LOWER(medium) = 'referral'
+      THEN 'Referral'
+    ELSE 'Unassigned'
+  END
+);
+```
+
+### Using the UDF
+
+```sql
+SELECT
+  event_date,
+  `project.analytics_derived.classify_channel`(
+    traffic_source.source,
+    traffic_source.medium,
+    traffic_source.name
+  ) AS channel,
+  COUNT(DISTINCT CONCAT(
+    user_pseudo_id, '.',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  )) AS sessions,
+  SUM(CASE WHEN event_name = 'purchase' THEN ecommerce.purchase_revenue ELSE 0 END) AS revenue
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name IN ('session_start', 'purchase')
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_date, channel
+ORDER BY event_date, sessions DESC
+```
+
+<Aside type="tip">
+Place the UDF in your derived analytics dataset (e.g., `analytics_derived`), not in the raw GA4 export dataset. This keeps the UDF alongside your other derived tables and makes it easy to update the channel logic without modifying query code.
+</Aside>
+
+## Adding custom channels
+
+Extend the UDF with business-specific channels. Add your custom rules before the catch-all ELSE:
+
+```sql
+-- Add before the final ELSE 'Unassigned':
+
+-- Podcast advertising (custom medium)
+WHEN LOWER(medium) = 'podcast'
+  THEN 'Podcast'
+
+-- Partner referrals
+WHEN REGEXP_CONTAINS(LOWER(source), r'partner1\.com|partner2\.com|reseller\.example\.com')
+  THEN 'Partner Referral'
+
+-- PR / press coverage
+WHEN LOWER(medium) = 'pr' OR REGEXP_CONTAINS(LOWER(source), r'techcrunch|wsj\.com|forbes\.com')
+  THEN 'Press / PR'
+
+-- Internal promotion (cross-site links)
+WHEN LOWER(medium) = 'internal'
+  THEN 'Internal Promotion'
+```
+
+## Channel grouping in a sessions table
+
+For best performance, compute channel once at session creation time and store it:
+
+```sql
+CREATE OR REPLACE TABLE `project.analytics_derived.sessions`
+PARTITION BY session_date
+AS
+SELECT
+  user_pseudo_id,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+  PARSE_DATE('%Y%m%d', MIN(event_date)) AS session_date,
+  MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.source END) AS source,
+  MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.medium END) AS medium,
+  MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.name END) AS campaign,
+  `project.analytics_derived.classify_channel`(
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.source END),
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.medium END),
+    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.name END)
+  ) AS channel,
+  -- ... other session metrics
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20241231'
+GROUP BY user_pseudo_id, session_id
+```
+
+## Handling Unassigned traffic
+
+A high Unassigned percentage indicates tagging issues. Run this query to identify problematic source/medium combinations:
+
+```sql
+SELECT
+  traffic_source.source AS source,
+  traffic_source.medium AS medium,
+  COUNT(DISTINCT CONCAT(
+    user_pseudo_id, '.',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  )) AS sessions
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'session_start'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND `project.analytics_derived.classify_channel`(
+    traffic_source.source,
+    traffic_source.medium,
+    traffic_source.name
+  ) = 'Unassigned'
+GROUP BY source, medium
+HAVING sessions > 10
+ORDER BY sessions DESC
+```
+
+Review these combinations and either:
+1. Fix the UTM tagging at the source (add proper medium values)
+2. Add a custom rule to the UDF for this source/medium pattern
+
+## Common mistakes
+
+### Hard-coding channel logic in every query
+
+Without a UDF, every query that needs channel grouping contains the same 30-line CASE expression. When your marketing team adds a new channel or you fix a misclassification rule, you must update every query. The UDF pattern means one update propagates everywhere.
+
+### Not including lower() normalization
+
+`utm_medium=CPC` and `utm_medium=cpc` are treated as different strings without LOWER(). Normalize all source/medium values to lowercase before pattern matching.
+
+### Missing the Direct classification
+
+`source = '(direct)'` is the explicit direct label. But sessions can also have empty source `''` and medium `'(not set)'` without being labeled direct. Handle both cases to avoid Direct traffic leaking into Unassigned.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Channel Groupings"
+    description="Configure custom channel groupings in the GA4 UI."
+    href="/ga4/configuration/channel-groupings/"
+  />
+  <LinkCard
+    title="Session Reconstruction"
+    description="Build the sessions table where channel grouping is applied."
+    href="/ga4/bigquery/session-reconstruction/"
+  />
+  <LinkCard
+    title="Attribution Queries"
+    description="Multi-touch attribution using the session-level channel data."
+    href="/ga4/bigquery/attribution-queries/"
+  />
+</CardGrid>
