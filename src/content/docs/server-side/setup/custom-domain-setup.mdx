@@ -11,37 +11,67 @@ This guide covers domain selection, DNS configuration for major providers, SSL s
 
 ## Why the custom domain matters
 
-When your sGTM server runs at `collect.yoursite.com`:
+When your sGTM server runs at `data.yoursite.com`:
 
-- **Cookies are first-party.** The browser treats cookies set at `collect.yoursite.com` as belonging to `yoursite.com` — the same origin as your main site. Safari's ITP 7-day cookie cap applies only to JavaScript-set cookies classified as trackers. Server-set first-party cookies receive the full expiration you configure.
-- **Ad blockers have a harder time.** Most ad blockers match against lists of known tracking domains (`google-analytics.com`, `googletagmanager.com`, `connect.facebook.net`). A request to `collect.yoursite.com` does not match any tracking domain list. It looks like a first-party API call.
+- **Cookies are first-party.** The browser treats cookies set at `data.yoursite.com` as belonging to `yoursite.com` — the same origin as your main site. Safari's ITP 7-day cookie cap applies only to JavaScript-set cookies classified as trackers. Server-set first-party cookies receive the full expiration you configure.
+- **Ad blockers have a harder time.** Most ad blockers match against lists of known tracking domains (`google-analytics.com`, `googletagmanager.com`, `connect.facebook.net`). A request to `data.yoursite.com` does not match any tracking domain list. It looks like a first-party API call.
 - **Browser privacy features apply rules appropriate for first-party context.** Requests to your own domain are treated with the trust level your main site has, not the lower trust level for known third-party tracking scripts.
 
 Without a custom domain, your sGTM server at `*.a.run.app` is recognizable as a Google-hosted endpoint and provides none of these benefits.
 
 ## Step 1: Choose your subdomain
 
-Good subdomain choices for sGTM:
+The subdomain you pick determines whether ad blockers ignore your sGTM endpoint or flag it immediately. The goal: **make it look like it belongs to your regular site infrastructure**, not like a tracking endpoint.
 
-| Subdomain | Notes |
+### Naming principles
+
+1. **Blend with your existing subdomains.** If your site uses `app.yoursite.com` and `cdn.yoursite.com`, choose something that fits that pattern. A subdomain that looks like your other infrastructure is invisible to filter lists.
+2. **Avoid anything tracking-related.** Filter lists pattern-match on keywords. Any subdomain containing `gtm`, `sgtm`, `tag`, `track`, `analytics`, `pixel`, `stats`, `collect`, or `beacon` is a target — today or in the near future.
+3. **Don't use your root domain.** Never point your bare `yoursite.com` at sGTM — you will overwrite your website.
+4. **One subdomain per domain.** If you run multiple sites, each gets its own subdomain and container. Sharing a single sGTM container across unrelated domains causes debugging headaches and breaks cookie scoping.
+5. **Route through the same CDN as your main site.** If your main site uses Cloudflare, your sGTM subdomain should resolve through the same infrastructure. When the IP addresses match, browser heuristics and filter lists have a much harder time distinguishing your sGTM traffic from regular site traffic.
+
+### Recommended subdomains
+
+These blend well with typical web infrastructure and are not on common filter lists:
+
+| Subdomain | Why it works |
 |---|---|
-| `collect.yoursite.com` | Clean, functional, no tracking connotation |
-| `metrics.yoursite.com` | Works well, sounds like an internal API |
-| `data.yoursite.com` | Generic enough to avoid block lists |
-| `events.yoursite.com` | Good for event-focused architectures |
-| `api.yoursite.com` | Works if you do not already use this for your actual API |
+| `web.yoursite.com` | Generic, could be anything |
+| `data.yoursite.com` | Many legitimate uses (data APIs, data services) |
+| `load.yoursite.com` | Sounds like a CDN or load balancer |
+| `edge.yoursite.com` | Sounds like an edge computing service |
+| `io.yoursite.com` | Generic, tech-sounding |
+| `hub.yoursite.com` | Could be any internal service |
+| `pipe.yoursite.com` | Sounds like a data pipeline |
 
-Avoid these:
+Single-letter subdomains are also effective — `m.yoursite.com`, `s.yoursite.com`, `t.yoursite.com` — they are short, generic, and impossible to pattern-match meaningfully.
+
+### Subdomains to avoid
 
 | Subdomain | Why to avoid |
 |---|---|
-| `analytics.yoursite.com` | Blocked by many filter lists |
-| `tracker.yoursite.com` | Obvious to browser privacy tools |
-| `gtm.yoursite.com` | The "gtm" string appears in some filter lists |
+| `gtm.yoursite.com` | Directly references Google Tag Manager |
+| `sgtm.yoursite.com` | Known sGTM convention, increasingly blocked |
+| `tagging.yoursite.com` | Obvious tracking purpose |
+| `analytics.yoursite.com` | On nearly every filter list |
+| `data.yoursite.com` | Increasingly recognized as an sGTM convention |
+| `collection.yoursite.com` | Same problem as `collect` |
+| `metrics.yoursite.com` | Borderline — on some lists, consider alternatives first |
+| `tracker.yoursite.com` | Obvious purpose |
 | `pixel.yoursite.com` | Common block list pattern |
-| `stats.yoursite.com` | Some filter lists match this |
+| `stats.yoursite.com` | On several filter lists |
+| `tag.yoursite.com` | Pattern-matched by lists |
+| `beacon.yoursite.com` | Pattern-matched by lists |
+| `sst.yoursite.com` | Known Stape convention, increasingly recognized |
 
-There is no perfect subdomain that will never appear on any filter list. The goal is choosing something that does not obviously match known tracking patterns.
+<Aside type="tip">
+The naming landscape evolves as filter lists catch up to conventions. A subdomain that is safe today may appear on lists next year if it becomes widely adopted. The best strategy is to choose something unique to your infrastructure — something that makes sense for your site specifically rather than following any "recommended sGTM subdomain" pattern.
+</Aside>
+
+### The subfolder alternative
+
+Instead of a subdomain, you can route sGTM traffic through a path on your main domain: `yoursite.com/measure/`. This is even more robust against ad blockers because it fully shares the same origin — there is no subdomain to detect. However, it requires a reverse proxy setup (Cloudflare Workers, nginx, etc.). See the [same-origin proxy guide](/server-side/advanced/same-origin-proxy/) for full instructions.
 
 ## Step 2: Configure DNS
 
@@ -52,7 +82,7 @@ The DNS configuration depends on your hosting provider.
 GCP provides a domain mapping tool that handles both DNS verification and SSL. The result is typically a `CNAME` record:
 
 ```
-collect.yoursite.com  CNAME  ghs.googlehosted.com
+data.yoursite.com  CNAME  ghs.googlehosted.com
 ```
 
 Get the exact record by going to: **Cloud Run** → your service → **Manage Custom Domains** → **Add Mapping**.
@@ -62,7 +92,7 @@ Get the exact record by going to: **Cloud Run** → your service → **Manage Cu
 Stape provides a `CNAME` target in their dashboard under **Domains** → **Add Domain**:
 
 ```
-collect.yoursite.com  CNAME  cname.stape.io
+data.yoursite.com  CNAME  cname.stape.io
 ```
 
 ### AWS ALB
@@ -70,13 +100,13 @@ collect.yoursite.com  CNAME  cname.stape.io
 Point to your ALB's DNS name:
 
 ```
-collect.yoursite.com  CNAME  sgtm-alb-xxxxxxxxx.region.elb.amazonaws.com
+data.yoursite.com  CNAME  sgtm-alb-xxxxxxxxx.region.elb.amazonaws.com
 ```
 
 Or use an `A` record via Route 53 Alias if you are managing DNS in Route 53:
 
 ```
-collect.yoursite.com  ALIAS  sgtm-alb-xxxxxxxxx.eu-west-1.elb.amazonaws.com
+data.yoursite.com  ALIAS  sgtm-alb-xxxxxxxxx.eu-west-1.elb.amazonaws.com
 ```
 
 ### Self-hosted (VPS or other)
@@ -84,7 +114,7 @@ collect.yoursite.com  ALIAS  sgtm-alb-xxxxxxxxx.eu-west-1.elb.amazonaws.com
 Point directly to your server's IP:
 
 ```
-collect.yoursite.com  A  YOUR_SERVER_IP
+data.yoursite.com  A  YOUR_SERVER_IP
 ```
 
 ## DNS configuration by provider
@@ -105,7 +135,7 @@ collect.yoursite.com  A  YOUR_SERVER_IP
 
 4. Verify:
    ```bash
-   dig collect.yoursite.com
+   dig data.yoursite.com
    # Should return CNAME pointing to your provider's target
    ```
 </Steps>
@@ -159,7 +189,7 @@ DNS changes propagate at the speed of your TTL setting — typically 5 minutes t
 
 ```bash
 # Check from multiple locations
-dig collect.yoursite.com +short
+dig data.yoursite.com +short
 
 # Or use online tools
 # https://dnschecker.org
@@ -168,9 +198,9 @@ dig collect.yoursite.com +short
 
 You can also check directly from the command line against multiple DNS resolvers:
 ```bash
-dig collect.yoursite.com @8.8.8.8    # Google
-dig collect.yoursite.com @1.1.1.1    # Cloudflare
-dig collect.yoursite.com @9.9.9.9    # Quad9
+dig data.yoursite.com @8.8.8.8    # Google
+dig data.yoursite.com @1.1.1.1    # Cloudflare
+dig data.yoursite.com @9.9.9.9    # Quad9
 ```
 
 ## Step 4: SSL certificate
@@ -181,11 +211,11 @@ SSL setup varies by hosting provider:
 
 **Stape**: Automatic provisioning, same as GCP.
 
-**AWS ALB**: Use AWS Certificate Manager (ACM). Request a certificate for `collect.yoursite.com` in ACM, validate ownership via DNS CNAME (ACM provides the record to create), then attach the validated certificate to your ALB HTTPS listener.
+**AWS ALB**: Use AWS Certificate Manager (ACM). Request a certificate for `data.yoursite.com` in ACM, validate ownership via DNS CNAME (ACM provides the record to create), then attach the validated certificate to your ALB HTTPS listener.
 
 **Self-hosted**: Use Let's Encrypt with Certbot:
 ```bash
-certbot certonly --standalone -d collect.yoursite.com
+certbot certonly --standalone -d data.yoursite.com
 # Certbot auto-renewal handles certificate refresh every 90 days
 ```
 
@@ -195,15 +225,15 @@ Once DNS has propagated and SSL is provisioned, verify:
 
 ```bash
 # Health check
-curl -v https://collect.yoursite.com/healthz
+curl -v https://data.yoursite.com/healthz
 # Expected: HTTP 200, body: ok
 
 # Check SSL certificate
-curl -v https://collect.yoursite.com/healthz 2>&1 | grep "SSL connection"
+curl -v https://data.yoursite.com/healthz 2>&1 | grep "SSL connection"
 # Should show: SSL connection using TLSv1.3
 
 # Check cookies work (test cookie setting)
-curl -I https://collect.yoursite.com/g/collect?v=2&tid=G-XXXXXXXX&...
+curl -I https://data.yoursite.com/g/collect?v=2&tid=G-XXXXXXXX&...
 # Response headers should include Set-Cookie if configured
 ```
 
@@ -215,9 +245,9 @@ With the endpoint verified, update your client-side GA4 tag:
 2. Find your **GA4 Configuration tag** (or Google Tag)
 3. Set **Tagging Server URL** to:
    ```
-   https://collect.yoursite.com
+   https://data.yoursite.com
    ```
-4. Preview the change — network tab should show requests going to `collect.yoursite.com/g/collect`
+4. Preview the change — network tab should show requests going to `data.yoursite.com/g/collect`
 5. Publish when verified
 
 ## Verifying first-party behavior
@@ -249,11 +279,11 @@ Using one `collect.example.com` for multiple unrelated domains prevents first-pa
 
 ## Loading Google scripts through your server container
 
-As of mid-2025, the **Web Container Client** in sGTM can serve Google's script libraries (`gtm.js`, `gtag.js`) directly from your first-party domain. This means the GTM container snippet itself loads from `collect.yoursite.com` instead of `googletagmanager.com` — a significant improvement for ad blocker resistance and page load control.
+As of mid-2025, the **Web Container Client** in sGTM can serve Google's script libraries (`gtm.js`, `gtag.js`) directly from your first-party domain. This means the GTM container snippet itself loads from `data.yoursite.com` instead of `googletagmanager.com` — a significant improvement for ad blocker resistance and page load control.
 
 ### How it works
 
-The Web Container Client unifies the previously separate `gtm.js` and `gtag.js` clients into a single client that can serve all dependent Google scripts. When a browser requests `https://collect.yoursite.com/gtm.js?id=GTM-XXXXXXX`, your sGTM server fetches the container from Google, and returns it as a first-party response.
+The Web Container Client unifies the previously separate `gtm.js` and `gtag.js` clients into a single client that can serve all dependent Google scripts. When a browser requests `https://data.yoursite.com/gtm.js?id=GTM-XXXXXXX`, your sGTM server fetches the container from Google, and returns it as a first-party response.
 
 ### Configuration
 
@@ -274,7 +304,7 @@ The Web Container Client unifies the previously separate `gtm.js` and `gtag.js` 
    (function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
    new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
    j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;
-   j.src='https://collect.yoursite.com/gtm.js?id='+i+dl;
+   j.src='https://data.yoursite.com/gtm.js?id='+i+dl;
    f.parentNode.insertBefore(j,f);
    })(window,document,'script','dataLayer','GTM-XXXXXXX');
    </script>
@@ -283,13 +313,13 @@ The Web Container Client unifies the previously separate `gtm.js` and `gtag.js` 
 6. If you use `gtag.js` directly (without GTM), update the script source:
 
    ```html
-   <script async src="https://collect.yoursite.com/gtag/js?id=G-XXXXXXXX"></script>
+   <script async src="https://data.yoursite.com/gtag/js?id=G-XXXXXXXX"></script>
    <script>
      window.dataLayer = window.dataLayer || [];
      function gtag(){ dataLayer.push(arguments); }
      gtag('js', new Date());
      gtag('config', 'G-XXXXXXXX', {
-       server_container_url: 'https://collect.yoursite.com'
+       server_container_url: 'https://data.yoursite.com'
      });
    </script>
    ```
@@ -304,60 +334,6 @@ When loading the web container through sGTM with dependent script serving enable
 - **No requests to Google domains.** The browser never contacts `googletagmanager.com` or `google-analytics.com`. Every request goes to your first-party domain.
 - **Ad blocker resistance.** Block lists target Google's domains. Your domain is not on those lists.
 - **Single point of control.** All script loading and data collection flows through your server, giving you one place to monitor, debug, and control.
-
-## Subdomain naming best practices
-
-Choosing the right subdomain is more important than most teams realize. A poorly chosen name gets blocked by filter lists, while a good name blends in with your legitimate first-party infrastructure.
-
-### Naming principles
-
-1. **Sound like infrastructure, not tracking.** The subdomain should look like it could be a legitimate API endpoint, CDN, or microservice.
-2. **Avoid any tracking-related terminology.** Filter lists match on patterns like `track`, `analytics`, `pixel`, `stats`, `tag`, `gtm`, `collect`, and `beacon`.
-3. **Match your existing infrastructure naming patterns.** If your API lives at `api.yoursite.com` and your CDN at `cdn.yoursite.com`, your sGTM subdomain should follow the same pattern.
-4. **Keep it short.** Shorter subdomains are easier to configure and less likely to cause issues with cookie domain scoping.
-
-### Recommended names by category
-
-**Safe — blend well with typical infrastructure:**
-
-| Subdomain | Rationale |
-|---|---|
-| `m.yoursite.com` | Short, generic, could be mobile or metrics |
-| `s.yoursite.com` | Short, generic, could be static assets |
-| `edge.yoursite.com` | Sounds like an edge computing service |
-| `gateway.yoursite.com` | Sounds like an API gateway |
-| `signal.yoursite.com` | Generic enough, not on common lists |
-| `stream.yoursite.com` | Could be data streaming, video, etc. |
-
-**Acceptable — functional but not on most block lists (yet):**
-
-| Subdomain | Rationale |
-|---|---|
-| `collect.yoursite.com` | Functional, on some newer lists |
-| `metrics.yoursite.com` | Clear purpose, rarely blocked |
-| `data.yoursite.com` | Generic, many legitimate uses |
-| `events.yoursite.com` | Event-driven architecture is common |
-
-**Avoid — commonly blocked or suspicious:**
-
-| Subdomain | Why |
-|---|---|
-| `analytics.yoursite.com` | On nearly every filter list |
-| `tracker.yoursite.com` | Obvious purpose |
-| `gtm.yoursite.com` | Pattern-matched by lists |
-| `pixel.yoursite.com` | Pattern-matched by lists |
-| `stats.yoursite.com` | On several filter lists |
-| `tag.yoursite.com` | Pattern-matched by lists |
-| `beacon.yoursite.com` | Pattern-matched by lists |
-| `sst.yoursite.com` | Becoming a known sGTM convention |
-
-<Aside type="tip">
-The naming landscape evolves. A subdomain safe today may appear on filter lists next year if it becomes a widely adopted convention. The best strategy is to choose something unique to your infrastructure that does not follow any recognizable tracking pattern.
-</Aside>
-
-### Same-origin alternative
-
-Instead of a subdomain, you can route sGTM traffic through a path on your main domain: `yoursite.com/measure/`. This avoids subdomain-based blocking entirely, but requires a reverse proxy (Cloudflare Workers, nginx, etc.). See the [same-origin proxy guide](/server-side/advanced/same-origin-proxy/) for full setup instructions.
 
 ## Common mistakes
 
