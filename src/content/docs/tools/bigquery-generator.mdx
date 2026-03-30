@@ -1,6 +1,12 @@
 ---
 title: BigQuery Query Generator
 description: Generate ready-to-use SQL queries for GA4 BigQuery export data. Templates for traffic, ecommerce, funnels, and more. Free, no signup.
+head:
+  - tag: script
+    attrs:
+      type: application/ld+json
+    content: |
+      {"@context":"https://schema.org","@type":"SoftwareApplication","name":"GA4 BigQuery Query Generator","description":"Generate ready-to-use SQL queries for GA4 BigQuery export data. 15+ templates for traffic, ecommerce, funnels, and more.","url":"https://taggingdocs.com/tools/bigquery-generator/","applicationCategory":"DeveloperApplication","operatingSystem":"Web","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Organization","name":"TaggingDocs","url":"https://taggingdocs.com"}}
 ---
 
 import BigQueryGenerator from '../../../components/tools/BigQueryGenerator.tsx';

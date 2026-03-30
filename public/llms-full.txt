@@ -1,0 +1,278 @@
+# TaggingDocs — Full Reference for LLMs
+
+> The GTM & GA4 reference that should have existed from the start.
+
+This is the extended version of llms.txt with detailed information about every section and topic covered on TaggingDocs. Use this when you need comprehensive context about GTM, GA4, dataLayer, and analytics tagging.
+
+## Site Information
+
+- URL: https://taggingdocs.com
+- Content type: Technical documentation and interactive tools
+- Topics: Google Tag Manager (GTM), Google Analytics 4 (GA4), dataLayer, BigQuery, consent management, ad platform integrations
+- Audience: Web analysts, marketing technologists, developers implementing analytics
+
+## Foundations
+
+Core concepts for understanding analytics tagging:
+- What Google Tag Manager is and why it exists
+- How tags, triggers, and variables work together
+- The data flow from website → GTM → analytics platforms
+- When to use GTM vs hardcoded tags
+
+## Client-Side GTM
+
+### Setup
+- Installing the GTM container snippet (head and body portions)
+- Container configuration and environments
+- GTM account and container structure
+- Workspace management
+
+### Triggers
+- All trigger types: Page View, Click, Form Submission, Timer, Scroll, Custom Event, History Change, JavaScript Error, Element Visibility
+- Trigger conditions and filtering
+- Trigger groups and sequencing
+- Regex in trigger conditions — GTM uses ECMAScript regex with FULL MATCH behavior (implicit ^...$)
+- Custom Event triggers matching dataLayer event names
+
+### Variables
+- Built-in variables (Page URL, Page Path, Click Element, etc.)
+- User-defined variables: Data Layer, JavaScript, Lookup Table, Regex Table, Custom JavaScript, Auto-Event, DOM Element
+- Regex Table variables for pattern-based value mapping
+- CSS selectors for element targeting
+- Variable formatting and utilities
+
+### Tags
+- Google Analytics 4 tag configuration
+- Google Ads conversion and remarketing tags
+- Custom HTML tags
+- Tag sequencing (setup and cleanup tags)
+- Tag firing priority
+
+### Tracking
+- Ecommerce tracking implementation (all GA4 ecommerce events)
+- Form tracking (submissions, field interactions)
+- Scroll depth tracking
+- Video tracking (YouTube, HTML5)
+- File download tracking
+- Error tracking
+- Cross-domain tracking
+
+### Debugging
+- GTM Preview mode usage
+- Chrome DevTools for tag debugging
+- Common error diagnosis
+- Tag Assistant
+- Decision trees for "why isn't my tag firing"
+
+### Management
+- Container versioning and publishing
+- Workspace collaboration
+- Container import/export
+- Folder organization
+- Naming conventions
+
+## Server-Side GTM
+
+### Fundamentals
+- What server-side tagging is and why it matters
+- Architecture: browser → server container → vendor endpoints
+- Benefits: data control, performance, first-party context, consent enforcement
+- When to use server-side vs client-side
+
+### Setup
+- Google Cloud Platform deployment (Cloud Run, App Engine)
+- First-party domain configuration (subdomain proxy)
+- Transport URL configuration
+- Custom domain setup
+
+### Clients
+- GA4 client configuration
+- Custom client development
+- Client claiming logic
+- Request/response handling
+
+### Tags
+- Server-side GA4 tag
+- Google Ads conversion tag (server-side)
+- HTTP Request tag for custom endpoints
+- Firestore writer
+- BigQuery writer
+
+### Advanced
+- Same-origin proxy setup (Cloudflare, Fastly, nginx, AWS CloudFront)
+- Server-side consent enforcement
+- Measurement Protocol
+- Custom event processing
+- Data enrichment and transformation
+- Multi-region deployment
+
+### Operations
+- Monitoring and logging
+- Error handling
+- Cost management
+- Scaling and performance
+
+## DataLayer
+
+### Specification
+- dataLayer.push() syntax and structure
+- Event naming conventions (snake_case, max 40 characters)
+- Parameter types and limits
+- The ecommerce object wrapper
+- Ecommerce clearing (dataLayer.push({ ecommerce: null }))
+
+### Ecommerce Events
+Complete implementation guides for all 13 GA4 recommended ecommerce events:
+- view_item_list — product listing / category page
+- select_item — click product in list
+- view_item — product detail page
+- add_to_cart — add product to cart
+- remove_from_cart — remove from cart
+- view_cart — cart page
+- begin_checkout — start checkout
+- add_shipping_info — shipping step
+- add_payment_info — payment step
+- purchase — order complete (requires transaction_id, value, currency)
+- refund — order refund
+- view_promotion — view promotional banner
+- select_promotion — click promotional banner
+
+Each event page includes: complete dataLayer.push() code, required and optional parameters, item array structure, common mistakes, and validation checklist.
+
+### Item Parameters
+Shared across all ecommerce events:
+- item_id (required) — product SKU/ID
+- item_name (required) — product name
+- price (number, not string)
+- quantity (number, not string)
+- item_brand, item_category through item_category5
+- item_variant, item_list_id, item_list_name
+- index, coupon, discount, affiliation
+
+### Custom Events
+- Custom event naming conventions
+- Parameter design best practices
+- When to use custom events vs recommended events
+- Error events, form events, engagement events
+
+### Platforms
+- Shopify dataLayer implementation (custom pixels)
+- WooCommerce integration
+- Magento integration
+- Platform-specific considerations
+
+### Validation
+- How to validate dataLayer pushes
+- Common data type errors (strings where numbers expected)
+- PII detection in dataLayer
+
+## GA4
+
+### Fundamentals
+- GA4 data model (events + parameters, not sessions + pageviews)
+- Event types: automatically collected, enhanced measurement, recommended, custom
+- User identification: User-ID, device ID, Google signals
+- Data streams and measurement IDs
+
+### Configuration
+- GA4 property setup
+- Data stream configuration
+- Enhanced measurement settings
+- Custom dimensions and metrics (50 event-scoped + 25 user-scoped)
+- Internal traffic filtering
+- Regex in GA4 — uses RE2 engine (not PCRE), partial match by default
+- Custom channel groups
+- Data retention settings
+
+### Reporting
+- Standard reports navigation
+- Explorations (free-form, funnel, path, segment overlap, cohort)
+- Real-time reporting
+- Comparisons and segments
+- Attribution models
+
+### BigQuery
+- GA4 BigQuery export setup and configuration
+- BigQuery schema structure (event_date, event_name, event_params as repeated RECORD)
+- UNNEST patterns for extracting event parameters
+- _TABLE_SUFFIX date partitioning for cost optimization
+- Session reconstruction from event-level data
+- Common queries: pageviews, users, sessions, traffic sources, ecommerce
+- Funnel analysis in BigQuery
+- Cost optimization strategies
+
+### Troubleshooting
+- Data discrepancies between GTM and GA4
+- Missing events and parameters
+- Conversion counting issues
+- Real-time vs processed data differences
+
+### APIs
+- GA4 Admin API
+- GA4 Data API (reporting)
+- Measurement Protocol (server-to-server)
+
+## Consent & Privacy
+- Google Consent Mode v2 (basic and advanced)
+- CMP integration (Cookiebot, OneTrust, Usercentrics)
+- GDPR and CCPA compliance
+- Cookie categories and consent states
+- Server-side consent enforcement
+- Consent mode debugging
+
+## GTM Internals
+- How the GTM container loads and executes
+- Tag execution order and sequencing
+- The message queue and dataLayer processing
+- Runtime JavaScript analysis
+
+## Custom Templates
+- Template Editor overview
+- Sandboxed JavaScript APIs
+- Tag templates vs variable templates
+- Template permissions and policy
+- Community Template Gallery
+
+## Security & Governance
+- Content Security Policy (CSP) for GTM
+- Tag governance and approval workflows
+- Container access control
+- Custom template security review
+
+## Browser & Privacy
+- Intelligent Tracking Prevention (ITP) — Safari
+- Enhanced Tracking Protection (ETP) — Firefox
+- Cookie restrictions and SameSite
+- Impact on analytics data quality
+- First-party data strategies
+
+## Ad Platforms
+- Google Ads conversion tracking and remarketing
+- Meta (Facebook) Pixel and Conversions API
+- TikTok Pixel and Events API
+- LinkedIn Insight Tag
+- Microsoft Ads UET tag
+- Pinterest Tag
+- Snapchat Pixel
+
+## Interactive Tools
+
+### DataLayer Builder + Validator
+URL: https://taggingdocs.com/tools/datalayer-builder/
+Build correct dataLayer.push() code by selecting an event type and filling in parameters. Supports all 13 GA4 ecommerce events plus engagement events and custom events. Validate mode: paste existing code and get instant feedback on errors (wrong data types, missing required fields, PII detection).
+
+### BigQuery Query Generator
+URL: https://taggingdocs.com/tools/bigquery-generator/
+Generate SQL queries for GA4 BigQuery export data. 15+ templates covering: pageviews, sessions, traffic sources, landing/exit pages, revenue by product, conversion rate, cart abandonment, product performance funnel, session reconstruction, funnel analysis, custom parameter extraction, schema explorer, data freshness.
+
+### GA4 & GTM Regex Tester
+URL: https://taggingdocs.com/tools/regex-tester/
+Test regex patterns against the RE2 engine (what GA4 actually uses). Two modes: GA4 (partial match, RE2) and GTM (full match, ECMAScript). Validates RE2 compatibility and flags unsupported PCRE features. Includes common pattern templates and a regex reference guide.
+
+## Recipes
+- GTM Regex Cheatsheet (30+ patterns)
+- PII detection and removal
+- PDF download tracking
+- Cross-domain tracking setup
+- Form tracking implementation
+- And more practical implementation guides

@@ -1,6 +1,12 @@
 ---
 title: DataLayer Builder + Validator
 description: Build correct dataLayer.push() code for GA4 ecommerce events. Validates required fields, data types, and structure. Free, no signup.
+head:
+  - tag: script
+    attrs:
+      type: application/ld+json
+    content: |
+      {"@context":"https://schema.org","@type":"SoftwareApplication","name":"DataLayer Builder + Validator","description":"Build correct dataLayer.push() code for any GA4 event, or validate existing code against the GA4 specification.","url":"https://taggingdocs.com/tools/datalayer-builder/","applicationCategory":"DeveloperApplication","operatingSystem":"Web","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Organization","name":"TaggingDocs","url":"https://taggingdocs.com"}}
 ---
 
 import DataLayerBuilder from '../../../components/tools/DataLayerBuilder.tsx';

@@ -1,6 +1,12 @@
 ---
 title: GA4 & GTM Regex Tester
 description: Test regex patterns against RE2 (GA4's regex engine) and GTM matching rules. Validates RE2 compatibility and includes common pattern templates.
+head:
+  - tag: script
+    attrs:
+      type: application/ld+json
+    content: |
+      {"@context":"https://schema.org","@type":"SoftwareApplication","name":"GA4 & GTM Regex Tester","description":"Test regex patterns against RE2 (GA4's regex engine) and GTM matching rules. Validates RE2 compatibility and includes common pattern templates.","url":"https://taggingdocs.com/tools/regex-tester/","applicationCategory":"DeveloperApplication","operatingSystem":"Web","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Organization","name":"TaggingDocs","url":"https://taggingdocs.com"}}
 ---
 
 import RegexTester from '../../../components/tools/RegexTester.tsx';

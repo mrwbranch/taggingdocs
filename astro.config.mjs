@@ -2,6 +2,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import tailwindcss from '@tailwindcss/vite';
 import react from '@astrojs/react';
+import sitemap from '@astrojs/sitemap';
 
 export default defineConfig({
   site: 'https://taggingdocs.com',
@@ -26,6 +27,32 @@ export default defineConfig({
       expressiveCode: {
         themes: ['dracula', 'github-light'],
       },
+      head: [
+        // OpenGraph
+        { tag: 'meta', attrs: { property: 'og:image', content: 'https://taggingdocs.com/og-image.png' } },
+        { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
+        { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+        { tag: 'meta', attrs: { property: 'og:image:alt', content: 'TaggingDocs — The GTM & GA4 reference' } },
+        // Twitter
+        { tag: 'meta', attrs: { name: 'twitter:image', content: 'https://taggingdocs.com/og-image.png' } },
+        // Structured data
+        {
+          tag: 'script',
+          attrs: { type: 'application/ld+json' },
+          content: JSON.stringify({
+            '@context': 'https://schema.org',
+            '@type': 'WebSite',
+            name: 'TaggingDocs',
+            url: 'https://taggingdocs.com',
+            description: 'The GTM & GA4 reference that should have existed from the start.',
+            publisher: {
+              '@type': 'Organization',
+              name: 'TaggingDocs',
+              url: 'https://taggingdocs.com',
+            },
+          }),
+        },
+      ],
       sidebar: [
         {
           label: 'Tools',
@@ -136,5 +163,6 @@ export default defineConfig({
       ],
     }),
     react(),
+    sitemap(),
   ],
 });
