@@ -1,0 +1,195 @@
+---
+title: "Regex in GTM Triggers"
+description: "How regular expressions work in Google Tag Manager trigger conditions — matching behavior, full match vs contains, case sensitivity, and common pitfalls."
+sidebar:
+  order: 15
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+GTM lets you match trigger conditions with regular expressions using the **"matches RegEx"** and **"matches RegEx (ignore case)"** operators. Used correctly, regex handles matching patterns that no static string operator can cover. Used carelessly, it produces triggers that silently never fire — or fire on everything.
+
+The most important thing to understand before writing a single pattern: GTM's regex matching is a **full match**, not a search. If you don't account for that, you will write patterns that look right and never match.
+
+## How GTM uses regex
+
+GTM runs in the browser, so it uses JavaScript's ECMAScript regex engine — not PCRE, not RE2. The practical difference: GTM does not support inline flags like `(?i)` for case-insensitivity or `(?s)` for dotall mode. It also does not support lookbehind assertions in older browsers. For most GTM use cases this doesn't matter, but it does mean patterns you copy from Python or PHP tools may not work as written.
+
+Regex is available in two places in GTM:
+
+- **Trigger conditions** — the "matches RegEx" and "matches RegEx (ignore case)" operators on any variable
+- **Regex Table variables** — a variable type that maps input values to output values based on regex patterns (same full-match behavior applies)
+
+Custom JavaScript variables accept regex through normal `RegExp` objects and behave like ordinary JavaScript — there's no GTM-specific matching logic involved.
+
+## Full match vs. partial match
+
+This is the most common source of broken triggers in GTM. The "matches RegEx" operator performs a **full match**: GTM implicitly anchors your pattern so the entire variable value must match from start to finish. The effect is the same as wrapping your pattern in `^...$`.
+
+This surprises developers who expect regex to search within a string. It doesn't. If the variable is `Page Path` and the path is `/checkout/shipping`, the pattern `checkout` does not match because the literal string `checkout` is not the same as `/checkout/shipping`.
+
+| Pattern | What GTM actually tests | Page Path: `/checkout/shipping` |
+|---------|------------------------|--------------------------------|
+| `checkout` | `^checkout$` | No — doesn't start with `checkout` |
+| `/checkout` | `^/checkout$` | No — has more after `/checkout` |
+| `/checkout/.*` | `^/checkout/.*$` | Yes |
+| `.*/checkout/.*` | `^.*/checkout/.*$` | Yes — but overly broad |
+| `/(checkout\|cart)/.*` | `^/(checkout\|cart)/.*$` | Yes |
+
+The implication: to match a path and allow anything after it, you must explicitly write `.*` at the end. `/checkout` matches only the exact path `/checkout`. `/checkout/.*` matches `/checkout/` followed by anything.
+
+<Aside type="tip">
+If you want to match a page and all its subpages, the pattern is `/checkout/.*` — not `/checkout`. And if the page itself (`/checkout`) should also match, use `/checkout(/.*)?`.
+</Aside>
+
+### Why "contains" is not the same thing
+
+The **"contains"** operator is a simple substring check, not regex. It does partial matching — `checkout` with "contains" matches `/checkout/shipping` because the string `checkout` appears somewhere in the path. But you can't use regex syntax with it: `.*(pdf|docx)` treated as a literal string will never match a URL.
+
+The operators are not interchangeable. Pick "matches RegEx" when you need pattern matching. Pick "contains" when you need a plain substring check.
+
+## Case sensitivity
+
+"matches RegEx" is case-sensitive. The pattern `/Blog/.*` does not match `/blog/post`.
+
+Use **"matches RegEx (ignore case)"** to match regardless of case. GTM doesn't support the `(?i)` inline flag, so this operator is the only way to get case-insensitive matching.
+
+For most URL matching, case doesn't matter — paths are typically lowercase. But it becomes relevant when matching against event names, click text, or any user-generated content.
+
+## Common trigger patterns
+
+These use the `Page Path` variable, which contains only the path portion of the URL (no domain, no query string). It's the right variable for page-based trigger conditions in most cases.
+
+### Match a specific page
+
+To match exactly `/thank-you` and nothing else, you don't need regex — the "equals" operator is cleaner. But when you need to combine it with other pages, regex works:
+
+```
+/(thank-you|order-confirmation|purchase-complete)
+```
+
+This matches any of the three paths exactly.
+
+### Match a section and its subpages
+
+```
+/blog/.*
+```
+
+Matches `/blog/` followed by anything. Does not match `/blog` without a trailing slash. To handle both:
+
+```
+/blog(/.*)?
+```
+
+### Multiple sections
+
+```
+/(about|contact|team)(/.*)?
+```
+
+Matches `/about`, `/contact`, `/team`, and any subpages under each.
+
+### Product detail pages
+
+```
+/products/[^/]+
+```
+
+Matches `/products/blue-widget` but not `/products/category/blue-widget`. The `[^/]+` means "one or more characters that are not a forward slash" — exactly one path segment.
+
+### Query parameters
+
+When you need to match based on a query string, use the `Query String` variable rather than `Page URL`. Matching against the full URL with "matches RegEx" requires you to account for the entire URL structure.
+
+With the `Query String` variable (value: `utm_source=email&utm_medium=newsletter`):
+
+```
+.*utm_source=email.*
+```
+
+This works because `.*` covers anything before and after the parameter. With a full URL in `Page URL`, you'd need to account for `https://`, the domain, the path, the `?`, and everything else — that's fragile.
+
+### File download links
+
+Used on a Click URL variable to match document links:
+
+```
+.*\.(pdf|docx|xlsx|pptx|zip)
+```
+
+The `\.` escapes the dot so it matches a literal period, not any character.
+
+## Escaping special characters
+
+Several characters have special meaning in regex and must be escaped with a backslash when you want them treated literally.
+
+| Character | Meaning in regex | Escaped form | When you need it |
+|-----------|-----------------|--------------|-----------------|
+| `.` | Any character | `\.` | Domain names, file extensions |
+| `?` | Zero or one of preceding | `\?` | Literal `?` in query strings |
+| `*` | Zero or more of preceding | `\*` | Rarely needed |
+| `+` | One or more of preceding | `\+` | Rarely needed |
+| `(` `)` | Grouping | `\(` `\)` | Literal parentheses |
+| `[` `]` | Character class | `\[` `\]` | Rarely needed |
+| `\|` | Alternation (or) | `\|` | Not needed — `|` means "or" |
+| `/` | No special meaning in JS | `/` | No escaping needed |
+
+The most consequential one is the dot. The pattern `example.com` matches `example.com` — but it also matches `exampleXcom`, `example_com`, and `example-com`, because `.` means "any character." Write `example\.com` when you mean a literal dot.
+
+<Aside type="caution">
+Unescaped dots in domain matching are a real source of data leakage. If you're using a Hostname variable to restrict a trigger to your site with `example.com`, that pattern also matches `exampleXcom` if someone ever registers that domain and the user visits it. Use `example\.com` to be precise.
+</Aside>
+
+## Common pitfalls
+
+<Aside type="caution">
+**"matches RegEx" is a full match.** The single most common GTM regex mistake is writing `/checkout` and expecting it to match `/checkout/shipping`. It doesn't. Add `.*` to the end when you want to allow anything after your pattern, or use the "starts with" operator if you don't need regex at all.
+</Aside>
+
+<Aside type="caution">
+**Using regex when a simpler operator works.** If you want to match exactly `/thank-you`, use "equals". If you want to match paths that start with `/blog/`, use "starts with". Regex is harder to read and easier to get wrong. Reach for it only when simpler operators can't express what you need.
+</Aside>
+
+<Aside type="caution">
+**Testing patterns in a PCRE tester.** Tools like regex101.com default to PCRE mode, which supports features GTM doesn't (lookbehinds, `(?s)` dotall flag) and performs partial matching by default. A pattern that works in regex101 may behave differently in GTM. Set regex101 to "ECMAScript" mode and test with the full variable value, not just the interesting part.
+</Aside>
+
+<Aside type="caution">
+**Using `.*` everywhere unnecessarily.** `.*checkout.*` technically works to match `/checkout/shipping`, but it also matches `/reset-checkout-flow`. Write patterns that are as specific as the trigger requires.
+</Aside>
+
+<Aside type="caution">
+**Putting regex in the wrong variable.** Matching a URL pattern against the `Page URL` variable requires accounting for the full URL including protocol, domain, and query string. Use `Page Path` for path matching, `Query String` for parameter matching, and `Page Hostname` for domain matching — then write simpler, more readable patterns.
+</Aside>
+
+## Regex in Regex Table variables
+
+The full-match behavior applies in Regex Table variables too. Each row's pattern must match the entire input value to return that row's output. If you're building a Regex Table to categorize pages, write patterns accordingly:
+
+```
+/blog/.*        → Blog
+/products/.*    → Products
+/checkout(/.*)?  → Checkout
+.*              → Other
+```
+
+The catch-all `.*` at the end works as a fallback because it matches any complete string.
+
+## Testing your patterns
+
+GTM Preview mode is the authoritative test. Open Preview, navigate to a page, and check whether the trigger fires. If it doesn't fire when you expect it to, open the trigger details in the Preview summary to see the variable value and the condition that failed.
+
+For iterating on patterns before opening GTM, the interactive tester on this site lets you test patterns against GTM's full-match behavior:
+
+[Test your GTM regex patterns →](/tools/regex-tester)
+
+For ready-made patterns covering the most common scenarios:
+
+[GTM Regex Cheatsheet →](/recipes/regex-cheatsheet)
+
+<CardGrid>
+  <LinkCard title="GTM Regex Cheatsheet" href="/recipes/regex-cheatsheet/" description="30+ ready-to-use regex patterns for GTM" />
+  <LinkCard title="Regex Table Variables" href="/client-side/variables/regex-tables/" description="Pattern-based value mapping" />
+  <LinkCard title="Regex Tester Tool" href="/tools/regex-tester/" description="Test patterns against GTM's matching behavior" />
+</CardGrid>
