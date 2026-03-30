@@ -71,7 +71,7 @@ SELECT
   (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title')    AS page_title,
   COUNT(DISTINCT CONCAT(user_pseudo_id, ga_session_id.value))                       AS sessions,
   COUNT(*)                                                                           AS pageviews
-FROM \`${dataset}.${tableName}\`,
+FROM ${'`'}${dataset}.${tableName}${'`'},
   UNNEST(event_params) AS ga_session_id
 WHERE ${suffix}
   AND event_name = 'page_view'
@@ -106,7 +106,7 @@ SELECT
   COUNT(DISTINCT CONCAT(user_pseudo_id, (
     SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id'
   )))                                                                              AS sessions
-FROM \`${dataset}.${tableName}\`
+FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix}
 GROUP BY
   event_date
@@ -146,7 +146,7 @@ SELECT
   event_name,
   COUNT(*)                       AS event_count,
   COUNT(DISTINCT user_pseudo_id) AS unique_users
-FROM \`${dataset}.${tableName}\`
+FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix}${eventFilter}
 GROUP BY
   event_name
@@ -188,7 +188,7 @@ SELECT
   COUNT(DISTINCT CONCAT(user_pseudo_id, (
     SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id'
   )))                                                          AS sessions
-FROM \`${dataset}.${tableName}\`
+FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix}
   AND event_name = 'session_start'
 GROUP BY
@@ -231,7 +231,7 @@ SELECT
   COUNT(DISTINCT CONCAT(user_pseudo_id, (
     SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id'
   )))                                                                               AS sessions
-FROM \`${dataset}.${tableName}\`
+FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix}
   AND event_name = 'page_view'
   AND (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'entrances') = 1
@@ -280,7 +280,7 @@ WITH ranked_pageviews AS (
         (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id')
       ORDER BY event_timestamp DESC
     ) AS rn
-  FROM \`${dataset}.${tableName}\`
+  FROM ${'`'}${dataset}.${tableName}${'`'}
   WHERE ${suffix}
     AND event_name = 'page_view'
 )
@@ -333,7 +333,7 @@ SELECT
   SUM(item.quantity)             AS total_quantity,
   SUM(item.item_revenue)         AS total_revenue,
   COUNT(DISTINCT event_bundle_sequence_id) AS purchase_count
-FROM \`${dataset}.${tableName}\`,
+FROM ${'`'}${dataset}.${tableName}${'`'},
   UNNEST(items) AS item
 WHERE ${suffix}
   AND event_name = 'purchase'
@@ -390,7 +390,7 @@ SELECT
       )))
     ) * 100, 2
   )                                                                                AS conversion_rate_pct
-FROM \`${dataset}.${tableName}\`
+FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix}
 GROUP BY
   event_date
@@ -421,7 +421,7 @@ SELECT
   ROUND(AVG(ecommerce.purchase_revenue), 2) AS avg_order_value,
   ROUND(MIN(ecommerce.purchase_revenue), 2) AS min_order_value,
   ROUND(MAX(ecommerce.purchase_revenue), 2) AS max_order_value
-FROM \`${dataset}.${tableName}\`
+FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix}
   AND event_name = 'purchase'
   AND ecommerce.purchase_revenue IS NOT NULL
@@ -455,7 +455,7 @@ WITH session_events AS (
     )) AS session_key,
     COUNTIF(event_name = 'add_to_cart') AS added_to_cart,
     COUNTIF(event_name = 'purchase')    AS purchased
-  FROM \`${dataset}.${tableName}\`
+  FROM ${'`'}${dataset}.${tableName}${'`'}
   WHERE ${suffix}
   GROUP BY
     event_date,
@@ -510,7 +510,7 @@ WITH item_views AS (
     item.item_id,
     item.item_name,
     COUNT(*) AS views
-  FROM \`${dataset}.${tableName}\`,
+  FROM ${'`'}${dataset}.${tableName}${'`'},
     UNNEST(items) AS item
   WHERE ${suffix}
     AND event_name = 'view_item'
@@ -522,7 +522,7 @@ item_atc AS (
     item.item_id,
     item.item_name,
     COUNT(*) AS add_to_carts
-  FROM \`${dataset}.${tableName}\`,
+  FROM ${'`'}${dataset}.${tableName}${'`'},
     UNNEST(items) AS item
   WHERE ${suffix}
     AND event_name = 'add_to_cart'
@@ -536,7 +536,7 @@ item_purchases AS (
     COUNT(*)           AS purchases,
     SUM(item.quantity) AS units_sold,
     SUM(item.item_revenue) AS revenue
-  FROM \`${dataset}.${tableName}\`,
+  FROM ${'`'}${dataset}.${tableName}${'`'},
     UNNEST(items) AS item
   WHERE ${suffix}
     AND event_name = 'purchase'
@@ -596,7 +596,7 @@ WITH session_data AS (
     event_name,
     event_timestamp,
     (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_location
-  FROM \`${dataset}.${tableName}\`
+  FROM ${'`'}${dataset}.${tableName}${'`'}
   WHERE ${suffix}
 )
 SELECT
@@ -674,7 +674,7 @@ LIMIT ${limit};`;
         ? `,
 step4 AS (
   SELECT DISTINCT user_pseudo_id
-  FROM \`${dataset}.${tableName}\`
+  FROM ${'`'}${dataset}.${tableName}${'`'}
   WHERE ${suffix}
     AND event_name = '${step4}'
 )`
@@ -690,19 +690,19 @@ step4 AS (
 -- Funnel: ${step1} → ${step2} → ${step3}${step4 ? ' → ' + step4 : ''}
 WITH step1 AS (
   SELECT DISTINCT user_pseudo_id
-  FROM \`${dataset}.${tableName}\`
+  FROM ${'`'}${dataset}.${tableName}${'`'}
   WHERE ${suffix}
     AND event_name = '${step1}'
 ),
 step2 AS (
   SELECT DISTINCT user_pseudo_id
-  FROM \`${dataset}.${tableName}\`
+  FROM ${'`'}${dataset}.${tableName}${'`'}
   WHERE ${suffix}
     AND event_name = '${step2}'
 ),
 step3 AS (
   SELECT DISTINCT user_pseudo_id
-  FROM \`${dataset}.${tableName}\`
+  FROM ${'`'}${dataset}.${tableName}${'`'}
   WHERE ${suffix}
     AND event_name = '${step3}'
 )${step4CTE}
@@ -777,7 +777,7 @@ SELECT
   ep.value.${paramType}             AS param_value,
   COUNT(*)                          AS occurrences,
   COUNT(DISTINCT user_pseudo_id)    AS unique_users
-FROM \`${dataset}.${tableName}\`,
+FROM ${'`'}${dataset}.${tableName}${'`'},
   UNNEST(event_params) AS ep
 WHERE ${suffix}
   AND event_name = '${eventName}'
@@ -813,7 +813,7 @@ SELECT
   event_name,
   ARRAY_AGG(DISTINCT ep.key ORDER BY ep.key) AS param_keys,
   COUNT(*)                                   AS event_count
-FROM \`${dataset}.${tableName}\`,
+FROM ${'`'}${dataset}.${tableName}${'`'},
   UNNEST(event_params) AS ep
 WHERE ${suffix}
 GROUP BY
@@ -844,7 +844,7 @@ SELECT
   MIN(event_date)                                               AS earliest_event_date,
   TIMESTAMP_MICROS(MIN(event_timestamp))                        AS earliest_event_timestamp_utc,
   COUNT(DISTINCT event_date)                                    AS days_with_data
-FROM \`${dataset}.${tableName}\`
+FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix};`;
     },
   },
@@ -871,8 +871,8 @@ SELECT
   COUNT(DISTINCT event_name)     AS unique_event_names,
   MIN(event_date)                AS first_date,
   MAX(event_date)                AS last_date
-FROM \`${dataset}.${tableName}\`
-WHERE ${suffix};`,
+FROM ${'`'}${dataset}.${tableName}${'`'}
+WHERE ${suffix};`;
     },
   },
 ];
