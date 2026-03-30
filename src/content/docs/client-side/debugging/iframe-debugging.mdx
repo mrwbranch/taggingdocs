@@ -29,18 +29,22 @@ When Tag Assistant connects to `https://yoursite.com`, it communicates with the 
 
 ## Forcing debug mode in an iframe
 
-If you control both the parent page and the iframe, you can force debug mode by appending `?gtm_debug=x` to the iframe URL. This tells GTM inside the iframe to activate debug mode — but the output goes to the iframe's own console context, not the parent page's.
+If you control both the parent page and the iframe, you can share the Tag Assistant debug session with the iframe by appending the `gtm_debug` parameter to the iframe URL. The value must be the session token from Tag Assistant (the token that appears in the Preview URL), not a manually chosen value like "true" or "1". This connects the iframe's GTM container to your Tag Assistant session — but the debug output goes to the iframe's own console context, not the parent page's.
 
 ```javascript
-// Temporarily force debug mode in a same-origin iframe via JavaScript
-var iframe = document.querySelector('iframe.tracked-embed');
-if (iframe) {
-  var src = iframe.src;
-  iframe.src = src + (src.indexOf('?') !== -1 ? '&' : '?') + 'gtm_debug=1';
+// Share the Tag Assistant debug session with a same-origin iframe
+// The token comes from the gtm_debug parameter in your Tag Assistant Preview URL
+var debugToken = new URLSearchParams(window.location.search).get('gtm_debug');
+if (debugToken) {
+  var iframe = document.querySelector('iframe.tracked-embed');
+  if (iframe) {
+    var src = iframe.src;
+    iframe.src = src + (src.indexOf('?') !== -1 ? '&' : '?') + 'gtm_debug=' + debugToken;
+  }
 }
 ```
 
-For a cross-origin iframe (a third-party service), you'd need to add the `?gtm_debug=x` parameter to the embed URL in your HTML — if the third-party service allows it.
+For a cross-origin iframe (a third-party service), you would need to append the `gtm_debug` parameter with the Tag Assistant session token to the embed URL in your HTML — if the third-party service allows it.
 
 ## Debugging same-origin iframes
 

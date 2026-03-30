@@ -17,7 +17,7 @@ GA4 currently supports two Data Filter types:
 
 **Internal Traffic** — excludes events from IP addresses you designate as internal. This handles office IPs, developer laptops, and QA team traffic.
 
-**Developer Traffic** — excludes events where the `debug_mode` event parameter is `1` (or `true`). This handles events sent during GTM Preview mode or with `?gtm_debug=true` active.
+**Developer Traffic** — excludes events where the `debug_mode` event parameter is `1` (or `true`). This handles events sent during GTM Preview mode (which sets `debug_mode` automatically), when `debug_mode: true` is configured in the Google tag, or when the GA Debugger extension is active.
 
 ## Setting up an Internal Traffic filter
 
@@ -85,10 +85,9 @@ Switching a filter from Testing to Active is not retroactive. Events already col
 ## Setting up a Developer Traffic filter
 
 The developer traffic filter excludes events with `debug_mode = 1`, which is set automatically when:
-- GTM Preview mode is active
-- You use `?gtm_debug=true` query parameter
-- You set `debug_mode: true` in Measurement Protocol events
-- The GA4 DebugView browser extension is active
+- GTM Preview mode is active (Preview mode sets `debug_mode` on all events for your session)
+- You set `debug_mode: true` in your Google tag configuration or in Measurement Protocol events
+- The GA Debugger browser extension is active
 
 <Steps>
 1. Go to **Admin → Data Filters → Create Filter**.

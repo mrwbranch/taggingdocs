@@ -125,10 +125,9 @@ There is no undo for activating a filter. Once active, matching events are perma
 </Steps>
 
 Developer traffic filter catches:
-- GTM Preview mode sessions
-- Sessions with `?gtm_debug=true` URL parameter
+- GTM Preview mode sessions (Preview mode automatically sets `debug_mode` on events)
 - Google Tag Assistant extension sessions
-- Any event with `debug_mode = 1` in its parameters
+- Any event with `debug_mode = 1` in its parameters (including events where `debug_mode: true` is set in the gtag config)
 
 ## Handling VPNs and dynamic IPs
 

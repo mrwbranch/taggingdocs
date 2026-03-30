@@ -17,22 +17,11 @@ When you use GTM's Preview/Debug mode (by clicking Preview in the GTM workspace)
 
 No additional configuration needed — just open your site in the GTM preview, navigate normally, and watch DebugView populate.
 
-### Method 2: URL parameter
-
-Add `?gtm_debug=true` to any page URL on your site. This activates debug mode for that browser session.
-
-```
-https://www.example.com/?gtm_debug=true
-https://www.example.com/checkout/?gtm_debug=true
-```
-
-The parameter persists for the session but does not carry across new tab opens.
-
-### Method 3: Google Tag Assistant browser extension
+### Method 2: Google Tag Assistant browser extension
 
 Install the [Google Tag Assistant browser extension](https://tagassistant.google.com/). When the extension is active and the toggle is on, it sets debug mode for all GA4 tags on the page.
 
-### Method 4: gtag debug mode (for direct gtag.js implementations)
+### Method 3: gtag debug mode (for direct gtag.js implementations)
 
 Add `debug_mode: true` to your gtag config:
 
@@ -44,7 +33,7 @@ gtag('config', 'G-XXXXXXXXXX', {
 
 Remove this before deploying to production.
 
-### Method 5: Measurement Protocol events
+### Method 4: Measurement Protocol events
 
 Add `debug_mode: 1` as an event parameter in Measurement Protocol requests:
 

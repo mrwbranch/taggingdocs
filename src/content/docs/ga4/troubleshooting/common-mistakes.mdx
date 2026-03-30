@@ -69,13 +69,13 @@ HAVING COUNT(*) > 1
 
 **Fix**: Register all custom dimensions at the start of implementation, before going live. Review planned parameters against the 50 event-scoped dimension limit.
 
-## 7. Using gtm_debug in production
+## 7. Leaving debug_mode active in production
 
 **What happens**: All users' events appear in your DebugView. Developer Traffic filters may exclude real user data.
 
-**Why it happens**: A developer tests with `?gtm_debug=true` and a URL containing this parameter gets shared or linked to.
+**Why it happens**: The `gtm_debug` URL parameter is added automatically by Google Tag Assistant when you click Preview in GTM — it is not something you manually add to URLs. However, if a developer hardcodes `debug_mode: true` in the gtag config for testing and deploys it to production, or if a GTM Preview session URL (which contains a `gtm_debug` token) gets shared or bookmarked, debug mode can inadvertently activate for production users.
 
-**Fix**: DebugView is harmless for data quality (events are still processed normally), but Developer Traffic filters may exclude them. Remove `?gtm_debug=true` from production URLs.
+**Fix**: Never deploy `debug_mode: true` in your gtag config to production. Use GTM Preview mode for testing (it activates debug mode only for your session). If Developer Traffic filters are active, events with `debug_mode` set will be excluded from reports — so leaving debug mode on in production means losing real user data from filtered reports.
 
 ## 8. Wrong attribution model comparison
 

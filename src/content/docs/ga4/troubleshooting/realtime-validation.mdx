@@ -48,7 +48,7 @@ Before marking an implementation complete:
 
 2. **Key events**: Trigger each event type in your implementation. After each action, check Realtime — the event should appear within 1-2 minutes without debug mode.
 
-3. **Event parameters**: Enable debug mode (GTM Preview or `?gtm_debug=true`) and repeat the same actions. In DebugView, verify parameters for each event are populated correctly.
+3. **Event parameters**: Enable debug mode (GTM Preview mode, or by setting `debug_mode: true` in your Google tag configuration) and repeat the same actions. In DebugView, verify parameters for each event are populated correctly.
 
 4. **Conversion events**: Complete a test conversion. Verify in Realtime that the conversion event count increments. Verify in DebugView that parameters (transaction_id, value, currency) are correct.
 

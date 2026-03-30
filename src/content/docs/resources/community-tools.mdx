@@ -29,7 +29,7 @@ Tag Assistant also shows GA4 DebugView integration, Consent Mode state, and whic
 
 **Built into GA4 Admin** | **Free**
 
-Not an extension but essential: GA4 DebugView (found in Admin → DebugView) shows real-time events from any device with debug mode enabled. In GTM Preview, debug mode is automatically set. In production, append `?gtm_debug=x` to any URL to enable it.
+Not an extension but essential: GA4 DebugView (found in Admin → DebugView) shows real-time events from any device with debug mode enabled. To activate debug mode, use GTM Preview mode (which sets `debug_mode` automatically for your session), set `debug_mode: true` in your Google tag configuration, or use the GA Debugger Chrome extension.
 
 DebugView shows each event as it arrives in GA4, with all parameters. Use it to verify that parameters are reaching GA4 correctly — not just that they are being pushed to the dataLayer.
 
