@@ -1,0 +1,185 @@
+---
+title: "Regex in GA4"
+description: "How to use regular expressions in GA4 reports, explorations, audiences, and filters — including RE2 syntax differences and common patterns."
+sidebar:
+  order: 12
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+GA4 supports regular expressions across reports, explorations, audiences, and admin filters. Before writing any pattern, you need to know one thing: **GA4 uses Google's RE2 regex engine, not the PCRE engine used by most regex tools and editors**. Patterns that work in regex101.com may fail silently in GA4.
+
+## RE2 vs PCRE
+
+RE2 is Google's open-source regex library designed to guarantee linear-time matching — no matter how complex the pattern or how long the input, RE2 will not catastrophically backtrack. This makes it safe to run at Google's scale. The trade-off is that RE2 drops several PCRE features.
+
+**RE2 does NOT support:**
+- Lookaheads (`(?=...)`, `(?!...)`)
+- Lookbehinds (`(?<=...)`, `(?<!...)`)
+- Backreferences (`\1`, `\2`)
+- Atomic groups (`(?>...)`)
+- Possessive quantifiers (`*+`, `++`)
+
+**RE2 does support:**
+- Character classes (`[a-z]`, `[^/]`, `\d`, `\w`)
+- Alternation (`|`)
+- Quantifiers (`*`, `+`, `?`, `{n,m}`) including non-greedy (`*?`, `+?`)
+- Capturing groups and non-capturing groups (`(?:...)`)
+- Anchors (`^`, `$`)
+- Unicode and named character classes
+
+<Aside type="tip">
+Test GA4 patterns on the RE2 playground or use the built-in Regex Tester tool on this site (linked at the bottom of this page) before deploying to reports or audiences.
+</Aside>
+
+## Where you can use regex in GA4
+
+### Report filters
+
+Standard reports in GA4 let you filter any dimension using "matches regex." The match is **partial by default** — the pattern only needs to match somewhere within the value, not the entire string. This differs from GTM, where regex matches are full-string by default.
+
+Example: filtering Page path by `/blog/.*2024.*` will return any page path that contains `/blog/` followed by `2024` anywhere in the path.
+
+Case sensitivity: report filter regex is **case-insensitive by default**. You generally do not need to write `(?i)` flags.
+
+### Explorations
+
+Dimension filters and segment conditions in Explorations use the same RE2 engine and the same partial-match behavior. Regex is most useful here for:
+
+- Grouping pages by URL pattern into a segment
+- Filtering events to a subset of names
+- Building custom funnels based on URL shape
+
+### Audiences
+
+Audience conditions support "matches regex" for dimensions such as `page_location`, `page_referrer`, and event parameters. Because audiences are evaluated continuously as new data arrives, patterns run on every qualifying event — keep them efficient.
+
+Example: an audience where `page_location` matches `/pricing|/demo|/contact` captures users who visited any of those three pages.
+
+### Data filters (admin)
+
+The internal traffic filter in Admin supports regex IP matching. This is useful for covering CIDR-style IP ranges that "begins with" matching cannot express cleanly.
+
+Example pattern for common private IP ranges:
+
+```
+^192\.168\.|^10\.|^172\.(1[6-9]|2[0-9]|3[01])\.
+```
+
+Note the escaped dots (`\.`). An unescaped `.` in regex matches any character, so `192.168` would also match `192X168`.
+
+### Custom channel groups
+
+Source and medium matching in custom channel groups uses regex. You can consolidate similar sources into one channel without listing every variant.
+
+Example — email channel: `email|newsletter|mailchimp|klaviyo`
+
+### Modify events and create events (admin)
+
+Event modification and creation conditions support regex matching on event parameters. This allows you to create a new event based on whether a parameter value matches a pattern, without modifying your tagging.
+
+## Partial match vs. full match
+
+This is the most common source of unexpected results in GA4 report filters.
+
+| Pattern | GA4 behavior | Matches `/blog/my-post`? | Matches `/about`? |
+|---------|-------------|--------------------------|-------------------|
+| `blog` | Partial match | Yes | No |
+| `^/blog$` | Full match | No | No |
+| `^/blog` | Starts with | Yes | No |
+| `/blog/.+` | Has subpath | Yes | No |
+
+Without anchors, `blog` matches any page path that contains the word "blog" — including `/en/blog/category/video` and `/author-blog-posts`. Use `^` and `$` explicitly when you need to restrict the match.
+
+## Case sensitivity
+
+GA4 regex is case-insensitive by default in report filters and most other contexts. `Blog`, `blog`, and `BLOG` all match the same pattern.
+
+This is the opposite of GTM, where regex is case-sensitive by default unless you add the `(?i)` flag or enable case-insensitive matching in the trigger settings. If you are adapting a GTM regex for GA4 use, remove any `(?i)` flags — they are unnecessary and add noise.
+
+## Common patterns
+
+### Page filtering
+
+| Pattern | Use case |
+|---------|----------|
+| `^/(en\|sv\|de)/` | Pages in specific language subdirectories |
+| `/products/[^/]+$` | Product detail pages (one path segment after `/products/`) |
+| `\?.*gclid=` | Pages with a Google click ID in the query string |
+| `^/blog/2024/` | Blog posts from 2024 |
+| `^/(checkout\|cart\|order)` | Checkout funnel pages |
+
+### Traffic source filtering
+
+| Pattern | Use case |
+|---------|----------|
+| `google\|bing\|yahoo\|duckduckgo` | All major search engines |
+| `^(not set)$` | Exactly the "(not set)" value |
+| `facebook\|instagram\|meta` | Meta platform sources |
+| `email\|newsletter\|mailchimp\|klaviyo` | Email traffic |
+
+### Event filtering
+
+| Pattern | Use case |
+|---------|----------|
+| `^(purchase\|add_to_cart\|begin_checkout)$` | Core ecommerce conversion events |
+| `^click_` | All events following a `click_*` naming convention |
+| `^scroll$` | Exactly the scroll event (excludes `scroll_depth`, etc.) |
+| `^(video_start\|video_progress\|video_complete)$` | All video engagement events |
+
+## RE2 gotchas and workarounds
+
+### No negative lookahead
+
+PCRE: `^/(?!admin).*` — match all paths except those starting with `/admin`
+
+RE2 cannot do this in a single filter. Two approaches:
+
+1. Use two separate filters: add a "matches regex `^/admin`" exclusion condition, or use GA4's built-in "does not match regex" operator alongside your inclusion pattern.
+2. Explicitly list what you want instead of excluding what you don't: `^/(blog|products|about|contact)` rather than trying to negate `/admin`.
+
+### No backreferences
+
+PCRE: `(\w+)\s+\1` — match a repeated word
+
+RE2 does not support backreferences at all. If you need this kind of matching, it has to happen in your application logic or in BigQuery (where you can use standard SQL regex functions alongside JavaScript UDFs).
+
+### Alternation needs no space around the pipe
+
+`/pricing | /demo` (with spaces) will not match `/pricing` — the spaces are part of the pattern. Write it as `/pricing|/demo`.
+
+### Dot matches everything including slashes
+
+In RE2 (as in PCRE), `.` matches any character including `/`. Use `[^/]` when you want "any character except a slash" — for example, to match a single path segment without consuming further segments.
+
+## Common mistakes
+
+<Aside type="caution">
+**Writing PCRE patterns in GA4.** Patterns with `(?=...)`, `(?!...)`, or `\1` backreferences will either fail silently or match nothing. GA4 does not show a syntax error — it simply returns no results. Always test RE2 compatibility before relying on a filter.
+</Aside>
+
+<Aside type="caution">
+**Forgetting partial match behavior.** A filter on Page path using `products` will match `/en/products/shirts`, `/products-overview`, and `/category?tag=products` — not just `/products`. Anchor with `^` and `$` if you need precision.
+</Aside>
+
+**Not escaping dots in domain names.** The pattern `mysite.com` matches `mysiteXcom` as well. Write `mysite\.com` to match the literal dot.
+
+**Using `.*` when `.+` is appropriate.** `.*` matches zero or more characters — it can match an empty string. `.+` requires at least one character. For "any page path after `/blog/`", use `/blog/.+` rather than `/blog/.*`, so that `/blog/` alone (with no trailing content) is excluded.
+
+**Reaching for regex when a simpler operator works.** GA4 filters also offer "contains," "starts with," and "ends with" operators. `^/blog` as a regex does exactly what "starts with `/blog`" does without the overhead of writing a pattern. Use regex when you genuinely need alternation, character classes, or quantifiers.
+
+## Testing patterns
+
+Before deploying a pattern to an audience or a permanent report filter:
+
+1. **Use the Regex Tester tool** on this site — it validates against RE2, not PCRE, so results reflect what GA4 will actually do.
+2. **Test in Explorations first.** Dimension filters in Explorations are non-destructive and easy to iterate on. Confirm the pattern returns the right rows before creating an audience or data filter from the same logic.
+3. **Verify with a known value.** Pick a specific page path or event name you know should match, and confirm it does. Then pick one that should not match, and confirm it does not.
+
+Audiences and Data Filters are not easy to retroactively fix — audiences do not backfill, and data filters cannot remove already-collected events. A few minutes of testing in Explorations is worth it.
+
+<CardGrid>
+  <LinkCard title="Regex Tester Tool" href="/tools/regex-tester/" description="Test patterns against RE2 (GA4's regex engine)" />
+  <LinkCard title="GTM Regex Cheatsheet" href="/recipes/regex-cheatsheet/" description="30+ ready-to-use patterns for GTM and GA4" />
+  <LinkCard title="GTM Trigger Types" href="/client-side/triggers/trigger-types-overview/" description="How regex works in GTM triggers (case-sensitive by default)" />
+</CardGrid>
