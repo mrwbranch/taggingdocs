@@ -1,6 +1,286 @@
 ---
 title: "Offline Tracking"
-description: "Queuing analytics hits when users go offline."
+description: "Queue analytics hits when users go offline and replay them when connectivity returns — Service Worker approach, IndexedDB queuing, and Measurement Protocol replay."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+When a user goes offline, standard analytics collection fails silently. The GTM tag fires, GA4 attempts to send the hit, the network request fails, and the event is lost. For most desktop web apps this is an acceptable loss. For mobile-first applications, PWAs, and apps used in low-connectivity environments, it's not.
+
+Offline tracking is advanced territory. It requires Service Workers, IndexedDB, and careful handling of timestamps. Don't implement this unless you have a clear need and team capacity to maintain it.
+
+## When offline tracking is worth implementing
+
+- Progressive Web Apps (PWAs) where offline functionality is a feature
+- Mobile-first applications used in environments with intermittent connectivity (field service, retail floor, events)
+- High-value interactions (purchase events, lead form completions) where losing a conversion hit has business impact
+
+For standard content sites with desktop-majority traffic, the complexity outweighs the benefit.
+
+## Detecting offline status
+
+The `navigator.onLine` API provides the current connection status, and `online`/`offline` events fire when connectivity changes:
+
+```javascript
+// Push connection status changes to the dataLayer
+window.addEventListener('offline', function() {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'connectivity_change',
+    connectivity_status: 'offline',
+    page_path: window.location.pathname
+  });
+  // Activate offline mode in your app
+});
+
+window.addEventListener('online', function() {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'connectivity_change',
+    connectivity_status: 'online',
+    page_path: window.location.pathname
+  });
+  // Trigger queue replay
+  replayQueuedEvents();
+});
+```
+
+<Aside type="caution">
+`navigator.onLine` is unreliable. It returns `false` when definitively offline and `true` when there's a network interface — but having a network interface doesn't mean you have internet access. A user connected to wifi with no internet route is reported as `onLine: true`. Test with actual network drops.
+</Aside>
+
+## Service Worker approach for intercepting requests
+
+The Service Worker can intercept outbound requests to GA4's collection endpoint and queue them when the network is unavailable:
+
+```javascript
+// service-worker.js
+const GA4_ENDPOINT = 'https://www.google-analytics.com/g/collect';
+const QUEUE_STORE = 'ga4-offline-queue';
+
+// Open IndexedDB
+function openDB() {
+  return new Promise(function(resolve, reject) {
+    var req = indexedDB.open('offline-analytics', 1);
+    req.onupgradeneeded = function(event) {
+      event.target.result.createObjectStore(QUEUE_STORE, { autoIncrement: true });
+    };
+    req.onsuccess = function(event) { resolve(event.target.result); };
+    req.onerror = function(event) { reject(event.target.error); };
+  });
+}
+
+// Queue a request for later
+async function queueRequest(url, body) {
+  var db = await openDB();
+  var tx = db.transaction(QUEUE_STORE, 'readwrite');
+  tx.objectStore(QUEUE_STORE).add({
+    url: url,
+    body: body,
+    timestamp: Date.now()
+  });
+}
+
+// Replay all queued requests
+async function replayQueue() {
+  var db = await openDB();
+  var tx = db.transaction(QUEUE_STORE, 'readwrite');
+  var store = tx.objectStore(QUEUE_STORE);
+  var getAllReq = store.getAll();
+
+  getAllReq.onsuccess = async function() {
+    var items = getAllReq.result;
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      try {
+        await fetch(item.url, {
+          method: 'POST',
+          body: item.body,
+          keepalive: true
+        });
+        // Remove from queue on success
+        store.delete(i + 1);
+      } catch (e) {
+        // Still offline — leave in queue
+        break;
+      }
+    }
+  };
+}
+
+// Intercept GA4 collection requests
+self.addEventListener('fetch', function(event) {
+  if (!event.request.url.startsWith(GA4_ENDPOINT)) return;
+
+  event.respondWith(
+    fetch(event.request.clone()).catch(async function() {
+      // Network failed — queue the request
+      var body = await event.request.text();
+      await queueRequest(event.request.url, body);
+      // Return a synthetic OK response to avoid errors
+      return new Response('', { status: 200 });
+    })
+  );
+});
+
+// Replay when back online
+self.addEventListener('sync', function(event) {
+  if (event.tag === 'ga4-replay') {
+    event.waitUntil(replayQueue());
+  }
+});
+```
+
+Register the service worker and trigger replay:
+
+```javascript
+// In your main application code
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/service-worker.js');
+
+  window.addEventListener('online', function() {
+    navigator.serviceWorker.ready.then(function(registration) {
+      // Request background sync if supported
+      if ('sync' in registration) {
+        registration.sync.register('ga4-replay');
+      } else {
+        // Fallback: replay immediately
+        replayQueuedEvents();
+      }
+    });
+  });
+}
+```
+
+## Timestamp management
+
+Events replayed from the offline queue happened in the past. GA4 supports sending historical timestamps via the Measurement Protocol's `timestamp_micros` parameter:
+
+```javascript
+// When queuing, record the original timestamp
+async function queueRequest(url, body) {
+  var originalTime = Date.now();
+  var db = await openDB();
+  var tx = db.transaction(QUEUE_STORE, 'readwrite');
+  tx.objectStore(QUEUE_STORE).add({
+    url: url,
+    body: body,
+    queued_at: originalTime
+  });
+}
+
+// When replaying, add timestamp to the Measurement Protocol URL
+async function replayWithTimestamp(item) {
+  var url = new URL(item.url);
+  var ageMs = Date.now() - item.queued_at;
+
+  // GA4 Measurement Protocol: timestamp_micros is original event time in microseconds
+  // Add to the URL as a parameter
+  url.searchParams.set('timestamp_micros', (item.queued_at * 1000).toString());
+
+  return fetch(url.toString(), {
+    method: item.method || 'POST',
+    body: item.body
+  });
+}
+```
+
+<Aside type="tip">
+GA4 accepts events up to 72 hours old via the Measurement Protocol. Events older than 72 hours will be accepted but may not appear in standard reports. For most offline scenarios (brief connectivity loss), this is never a concern.
+</Aside>
+
+## Simpler approach: localStorage queue without Service Workers
+
+If Service Workers are not available or the implementation complexity is too high, use a localStorage-based queue from the main thread:
+
+```javascript
+var OFFLINE_QUEUE_KEY = 'ga4_offline_queue';
+
+// Custom dataLayer listener that queues events when offline
+function pushWithOfflineSupport(event) {
+  window.dataLayer = window.dataLayer || [];
+
+  if (!navigator.onLine) {
+    // Queue for later
+    var queue = JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]');
+    queue.push({ event: event, timestamp: Date.now() });
+    localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
+  } else {
+    window.dataLayer.push(event);
+  }
+}
+
+// Replay when online
+function replayQueuedEvents() {
+  var queue = JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]');
+  if (queue.length === 0) return;
+
+  queue.forEach(function(item) {
+    window.dataLayer.push(item.event);
+  });
+
+  localStorage.removeItem(OFFLINE_QUEUE_KEY);
+}
+
+window.addEventListener('online', replayQueuedEvents);
+```
+
+This approach doesn't handle the case where the page is closed before connectivity is restored. For those events, use the Service Worker approach with IndexedDB persistence.
+
+## Storage limits and cleanup
+
+Both localStorage and IndexedDB have storage limits that vary by browser. For offline tracking:
+
+- Cap the queue at a reasonable maximum (50-100 events) to prevent storage overflow
+- Implement age-based cleanup: discard events older than 48 hours that haven't been replayed
+- Monitor queue size and alert if it grows beyond expected bounds (indicates a persistent connectivity or replay problem)
+
+```javascript
+function cleanupQueue() {
+  var queue = JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]');
+  var now = Date.now();
+  var maxAge = 48 * 60 * 60 * 1000; // 48 hours
+  var maxSize = 100;
+
+  // Remove expired events
+  queue = queue.filter(function(item) {
+    return (now - item.timestamp) < maxAge;
+  });
+
+  // Trim to max size (keep most recent)
+  if (queue.length > maxSize) {
+    queue = queue.slice(queue.length - maxSize);
+  }
+
+  localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
+}
+```
+
+## Common mistakes
+
+### Queuing events that have privacy consent requirements
+
+If a user was in a consent-denied state when the event was queued, replaying it after they come back online is a consent violation. Store the consent state alongside each queued event and skip replay for events queued without analytics consent.
+
+### Not testing with actual network drops
+
+Simulating offline with DevTools Network tab → Offline mode doesn't fully replicate real conditions. Test with your device's actual wifi or cellular toggled off. Service Worker behavior, especially Background Sync, differs between simulated and real offline.
+
+### Assuming Background Sync is available
+
+Background Sync is not universally supported. Safari and some Firefox configurations don't support it. Always implement a direct replay fallback for when Background Sync registration fails.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Error Tracking"
+    description="Tracking network errors and API failures in your application — complements offline tracking."
+    href="/client-side/tracking/error-tracking/"
+  />
+  <LinkCard
+    title="GTM for Developers"
+    description="The developer's role in GTM — this kind of infrastructure belongs in application code, not GTM tags."
+    href="/foundations/gtm-for-developers/"
+  />
+</CardGrid>

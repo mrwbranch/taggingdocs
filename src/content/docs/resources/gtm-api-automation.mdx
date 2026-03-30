@@ -1,6 +1,683 @@
 ---
 title: "GTM API Automation"
-description: "Practical GTM API v2 automation guide."
+description: "Practical guide to the GTM API v2 — authentication, listing containers, creating tags programmatically, bulk updates, container export/import, and automation workflows with Python and Node.js."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+The GTM Tag Manager API v2 gives you programmatic access to everything in GTM: containers, workspaces, tags, triggers, variables, and container versions. Most practitioners never use it — and then spend hours manually updating the same tag across 20 client containers.
+
+This article covers practical GTM API automation: authentication, the operations you will actually need, and real Python and Node.js code you can run immediately.
+
+<Aside type="note">
+The GTM API uses the Google Tag Manager API v2, which is different from the older Tag Manager API v1. Always use v2 for new work. The base URL is `https://tagmanager.googleapis.com/tagmanager/v2/`.
+</Aside>
+
+---
+
+## Authentication
+
+GTM API requests must be authenticated. There are two main approaches depending on your use case.
+
+### OAuth 2.0 for interactive scripts
+
+Use OAuth 2.0 when the script acts on behalf of a specific user — running locally, using your own GTM access.
+
+### Service Account for automated workflows
+
+Use a Service Account when the script runs unattended (CI/CD, scheduled jobs, server-side tools). The service account needs GTM access granted in the GTM UI.
+
+<Steps>
+1. **Create a Google Cloud project** at [console.cloud.google.com](https://console.cloud.google.com/)
+
+2. **Enable the Tag Manager API**
+   - APIs & Services → Library → search "Tag Manager API" → Enable
+
+3. **Create a Service Account**
+   - APIs & Services → Credentials → Create Credentials → Service Account
+   - Name it (e.g., `gtm-automation`)
+   - Download the JSON key file
+
+4. **Grant GTM access to the Service Account**
+   - Copy the service account email (e.g., `gtm-automation@your-project.iam.gserviceaccount.com`)
+   - In GTM: Admin → User Management → Add User → paste the service account email
+   - Grant "Edit" permission (or "Read" for read-only scripts)
+</Steps>
+
+---
+
+## Python: Setup and Basic Operations
+
+```bash
+pip install google-auth google-auth-httplib2 google-api-python-client
+```
+
+### Authentication helper
+
+```python
+# gtm_client.py
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+
+SCOPES = ['https://www.googleapis.com/auth/tagmanager.readonly']
+# For write operations, use: 'https://www.googleapis.com/auth/tagmanager.edit.containers'
+# For publish operations: 'https://www.googleapis.com/auth/tagmanager.publish'
+
+def get_gtm_service(key_file_path: str, scopes: list = None):
+    """Build and return an authenticated GTM API service client."""
+    if scopes is None:
+        scopes = SCOPES
+
+    credentials = service_account.Credentials.from_service_account_file(
+        key_file_path,
+        scopes=scopes
+    )
+    service = build('tagmanager', 'v2', credentials=credentials)
+    return service
+```
+
+### List all accounts and containers
+
+```python
+# list_containers.py
+from gtm_client import get_gtm_service
+
+def list_all_containers(key_file_path: str):
+    """List all GTM accounts and containers the service account has access to."""
+    service = get_gtm_service(key_file_path)
+
+    # Get all accounts
+    accounts_response = service.accounts().list().execute()
+    accounts = accounts_response.get('account', [])
+
+    for account in accounts:
+        account_id = account['accountId']
+        account_name = account.get('name', 'Unknown')
+        print(f"\nAccount: {account_name} (ID: {account_id})")
+
+        # Get containers for this account
+        containers_response = service.accounts().containers().list(
+            parent=f"accounts/{account_id}"
+        ).execute()
+
+        containers = containers_response.get('container', [])
+        for container in containers:
+            print(f"  Container: {container.get('name')} | "
+                  f"ID: {container.get('containerId')} | "
+                  f"Public ID: {container.get('publicId')}")
+
+    return accounts
+
+if __name__ == '__main__':
+    list_all_containers('service-account-key.json')
+```
+
+### Get a container's workspaces and tags
+
+```python
+# audit_container.py
+from gtm_client import get_gtm_service
+
+def audit_container_tags(key_file_path: str, account_id: str, container_id: str):
+    """List all tags in a container's default workspace."""
+    service = get_gtm_service(key_file_path)
+
+    container_path = f"accounts/{account_id}/containers/{container_id}"
+
+    # Get workspaces
+    workspaces = service.accounts().containers().workspaces().list(
+        parent=container_path
+    ).execute().get('workspace', [])
+
+    # Use first workspace (usually Default Workspace)
+    workspace = workspaces[0]
+    workspace_path = workspace['path']
+    print(f"Workspace: {workspace.get('name')} ({workspace_path})")
+
+    # Get all tags
+    tags = service.accounts().containers().workspaces().tags().list(
+        parent=workspace_path
+    ).execute().get('tag', [])
+
+    print(f"\nFound {len(tags)} tags:")
+    for tag in tags:
+        print(f"  [{tag.get('type', 'unknown')}] {tag.get('name')} "
+              f"| Status: {tag.get('tagFiringOption', 'unknown')}")
+
+    return tags
+
+if __name__ == '__main__':
+    audit_container_tags('service-account-key.json', 'YOUR_ACCOUNT_ID', 'YOUR_CONTAINER_ID')
+```
+
+### Create a tag programmatically
+
+```python
+# create_tag.py
+from gtm_client import get_gtm_service
+
+WRITE_SCOPES = [
+    'https://www.googleapis.com/auth/tagmanager.edit.containers'
+]
+
+def create_ga4_event_tag(
+    key_file_path: str,
+    account_id: str,
+    container_id: str,
+    workspace_id: str,
+    event_name: str,
+    trigger_id: str,
+    measurement_id: str
+):
+    """Create a GA4 Event tag in the specified workspace."""
+    service = get_gtm_service(key_file_path, scopes=WRITE_SCOPES)
+
+    workspace_path = (
+        f"accounts/{account_id}/containers/{container_id}"
+        f"/workspaces/{workspace_id}"
+    )
+
+    tag_body = {
+        'name': f'GA4 - Event - {event_name}',
+        'type': 'gaawe',  # GA4 Event tag type identifier
+        'parameter': [
+            {
+                'type': 'TEMPLATE',
+                'key': 'eventName',
+                'value': event_name
+            },
+            {
+                'type': 'TAG_REFERENCE',
+                'key': 'measurementId',
+                'value': measurement_id
+            }
+        ],
+        'firingTriggerId': [trigger_id]
+    }
+
+    created_tag = service.accounts().containers().workspaces().tags().create(
+        parent=workspace_path,
+        body=tag_body
+    ).execute()
+
+    print(f"Created tag: {created_tag.get('name')} (Tag ID: {created_tag.get('tagId')})")
+    return created_tag
+
+if __name__ == '__main__':
+    create_ga4_event_tag(
+        key_file_path='service-account-key.json',
+        account_id='YOUR_ACCOUNT_ID',
+        container_id='YOUR_CONTAINER_ID',
+        workspace_id='YOUR_WORKSPACE_ID',
+        event_name='page_view',
+        trigger_id='TRIGGER_ID',
+        measurement_id='MEASUREMENT_TAG_ID'
+    )
+```
+
+### Bulk update: change Measurement ID across multiple tags
+
+A common real-world use case: a GA4 Measurement ID changes and you need to update it in every tag across a container.
+
+```python
+# bulk_update_measurement_id.py
+from gtm_client import get_gtm_service
+
+WRITE_SCOPES = ['https://www.googleapis.com/auth/tagmanager.edit.containers']
+
+def bulk_update_measurement_id(
+    key_file_path: str,
+    account_id: str,
+    container_id: str,
+    workspace_id: str,
+    old_measurement_id: str,
+    new_measurement_id: str
+):
+    """Find and update all tags referencing the old Measurement ID."""
+    service = get_gtm_service(key_file_path, scopes=WRITE_SCOPES)
+
+    workspace_path = (
+        f"accounts/{account_id}/containers/{container_id}"
+        f"/workspaces/{workspace_id}"
+    )
+
+    tags = service.accounts().containers().workspaces().tags().list(
+        parent=workspace_path
+    ).execute().get('tag', [])
+
+    updated_count = 0
+    for tag in tags:
+        parameters = tag.get('parameter', [])
+        tag_modified = False
+
+        for param in parameters:
+            if (param.get('type') == 'TEMPLATE' and
+                    param.get('value') == old_measurement_id):
+                param['value'] = new_measurement_id
+                tag_modified = True
+                print(f"Updating tag: {tag.get('name')}")
+
+        if tag_modified:
+            service.accounts().containers().workspaces().tags().update(
+                path=tag['path'],
+                body=tag
+            ).execute()
+            updated_count += 1
+
+    print(f"\nUpdated {updated_count} tags.")
+    return updated_count
+
+if __name__ == '__main__':
+    bulk_update_measurement_id(
+        key_file_path='service-account-key.json',
+        account_id='YOUR_ACCOUNT_ID',
+        container_id='YOUR_CONTAINER_ID',
+        workspace_id='YOUR_WORKSPACE_ID',
+        old_measurement_id='G-OLD12345',
+        new_measurement_id='G-NEW67890'
+    )
+```
+
+### Export container JSON
+
+```python
+# export_container.py
+import json
+from gtm_client import get_gtm_service
+from datetime import datetime
+
+def export_container(
+    key_file_path: str,
+    account_id: str,
+    container_id: str,
+    output_path: str = None
+):
+    """Export the live container version as JSON."""
+    service = get_gtm_service(key_file_path)
+
+    container_path = f"accounts/{account_id}/containers/{container_id}"
+
+    # Get the live container version
+    live_version = service.accounts().containers().versions().live(
+        parent=container_path
+    ).execute()
+
+    if output_path is None:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        container_public_id = live_version.get('container', {}).get('publicId', 'unknown')
+        output_path = f"gtm_{container_public_id}_{timestamp}.json"
+
+    with open(output_path, 'w') as f:
+        json.dump(live_version, f, indent=2)
+
+    version_number = live_version.get('containerVersionId', 'unknown')
+    print(f"Exported container version {version_number} to {output_path}")
+    return output_path
+```
+
+---
+
+## Node.js: Setup and Operations
+
+```bash
+npm install googleapis
+```
+
+### Authentication and container listing
+
+```javascript
+// gtm-client.js
+const { google } = require('googleapis');
+const path = require('path');
+
+/**
+ * Create an authenticated GTM API client.
+ * @param {string} keyFilePath - Path to service account JSON key file
+ * @param {string[]} scopes - OAuth scopes to request
+ */
+async function getGtmClient(keyFilePath, scopes = ['https://www.googleapis.com/auth/tagmanager.readonly']) {
+  const auth = new google.auth.GoogleAuth({
+    keyFile: keyFilePath,
+    scopes
+  });
+
+  const authClient = await auth.getClient();
+  return google.tagmanager({ version: 'v2', auth: authClient });
+}
+
+module.exports = { getGtmClient };
+```
+
+```javascript
+// list-containers.js
+const { getGtmClient } = require('./gtm-client');
+
+async function listContainers(keyFilePath) {
+  const tagmanager = await getGtmClient(keyFilePath);
+
+  // List all accounts
+  const { data: accountsData } = await tagmanager.accounts.list();
+  const accounts = accountsData.account || [];
+
+  for (const account of accounts) {
+    console.log(`\nAccount: ${account.name} (${account.accountId})`);
+
+    const { data: containersData } = await tagmanager.accounts.containers.list({
+      parent: `accounts/${account.accountId}`
+    });
+
+    const containers = containersData.container || [];
+    for (const container of containers) {
+      console.log(`  ${container.name} | GTM-${container.publicId} | ID: ${container.containerId}`);
+    }
+  }
+}
+
+listContainers('service-account-key.json').catch(console.error);
+```
+
+### Create a tag with Node.js
+
+```javascript
+// create-tag.js
+const { getGtmClient } = require('./gtm-client');
+
+const WRITE_SCOPES = ['https://www.googleapis.com/auth/tagmanager.edit.containers'];
+
+async function createCustomHtmlTag(config) {
+  const {
+    keyFilePath,
+    accountId,
+    containerId,
+    workspaceId,
+    tagName,
+    htmlContent,
+    triggerIds
+  } = config;
+
+  const tagmanager = await getGtmClient(keyFilePath, WRITE_SCOPES);
+
+  const workspacePath = `accounts/${accountId}/containers/${containerId}/workspaces/${workspaceId}`;
+
+  const tagBody = {
+    name: tagName,
+    type: 'html',
+    parameter: [
+      {
+        type: 'TEMPLATE',
+        key: 'html',
+        value: htmlContent
+      },
+      {
+        type: 'BOOLEAN',
+        key: 'supportDocumentWrite',
+        value: 'false'
+      }
+    ],
+    firingTriggerId: triggerIds
+  };
+
+  const { data: createdTag } = await tagmanager.accounts.containers.workspaces.tags.create({
+    parent: workspacePath,
+    requestBody: tagBody
+  });
+
+  console.log(`Created tag: "${createdTag.name}" (ID: ${createdTag.tagId})`);
+  return createdTag;
+}
+
+// Example usage
+createCustomHtmlTag({
+  keyFilePath: 'service-account-key.json',
+  accountId: 'YOUR_ACCOUNT_ID',
+  containerId: 'YOUR_CONTAINER_ID',
+  workspaceId: 'YOUR_WORKSPACE_ID',
+  tagName: 'Custom - Privacy Notice Script',
+  htmlContent: '<script>console.log("privacy notice loaded");</script>',
+  triggerIds: ['TRIGGER_ID_HERE']
+}).catch(console.error);
+```
+
+---
+
+## GitHub Actions: Auto-Export Container on Publish
+
+This workflow uses the GTM API to export the live container version to your repository every time a publish happens. Combined with a GitHub Actions trigger on a schedule, this gives you automatic version control of your GTM container.
+
+```yaml
+# .github/workflows/gtm-export.yml
+name: Export GTM Container
+
+on:
+  schedule:
+    # Run daily at 9 AM UTC — export the current live container
+    - cron: '0 9 * * *'
+  workflow_dispatch:  # Allow manual runs
+
+jobs:
+  export-container:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install google-auth google-auth-httplib2 google-api-python-client
+
+      - name: Write service account key
+        run: echo '${{ secrets.GTM_SERVICE_ACCOUNT_KEY }}' > /tmp/service-account.json
+
+      - name: Export GTM container
+        run: |
+          python - <<'EOF'
+          import json
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from datetime import datetime
+          import os
+
+          credentials = service_account.Credentials.from_service_account_file(
+              '/tmp/service-account.json',
+              scopes=['https://www.googleapis.com/auth/tagmanager.readonly']
+          )
+          service = build('tagmanager', 'v2', credentials=credentials)
+
+          account_id = os.environ['GTM_ACCOUNT_ID']
+          container_id = os.environ['GTM_CONTAINER_ID']
+          container_path = f"accounts/{account_id}/containers/{container_id}"
+
+          live_version = service.accounts().containers().versions().live(
+              parent=container_path
+          ).execute()
+
+          output_file = 'gtm-container/container.json'
+          os.makedirs('gtm-container', exist_ok=True)
+
+          with open(output_file, 'w') as f:
+              json.dump(live_version, f, indent=2)
+
+          version_id = live_version.get('containerVersionId')
+          print(f"Exported container version {version_id}")
+          EOF
+        env:
+          GTM_ACCOUNT_ID: ${{ secrets.GTM_ACCOUNT_ID }}
+          GTM_CONTAINER_ID: ${{ secrets.GTM_CONTAINER_ID }}
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name 'GTM Export Bot'
+          git config user.email 'bot@your-org.com'
+          git add gtm-container/container.json
+          git diff --staged --quiet || git commit -m "chore: export GTM container $(date +%Y-%m-%d)"
+          git push
+```
+
+---
+
+## Slack Notification on Container Publish
+
+GTM does not have webhooks, but you can poll the API for version changes and send Slack notifications when a new version is detected.
+
+```python
+# notify_on_publish.py
+import json
+import os
+import urllib.request
+from datetime import datetime
+from gtm_client import get_gtm_service
+
+def get_live_version_id(service, account_id: str, container_id: str) -> str:
+    """Get the current live container version ID."""
+    container_path = f"accounts/{account_id}/containers/{container_id}"
+    live_version = service.accounts().containers().versions().live(
+        parent=container_path
+    ).execute()
+    return live_version.get('containerVersionId', '0')
+
+def send_slack_notification(webhook_url: str, message: dict):
+    """Send a message to a Slack webhook."""
+    data = json.dumps(message).encode('utf-8')
+    req = urllib.request.Request(
+        webhook_url,
+        data=data,
+        headers={'Content-Type': 'application/json'}
+    )
+    urllib.request.urlopen(req)
+
+def check_and_notify(
+    key_file_path: str,
+    account_id: str,
+    container_id: str,
+    container_public_id: str,
+    slack_webhook_url: str,
+    last_version_file: str = '.last_gtm_version'
+):
+    """Check if container was published and send Slack notification if so."""
+    service = get_gtm_service(key_file_path)
+
+    current_version = get_live_version_id(service, account_id, container_id)
+
+    # Read the last known version
+    last_version = None
+    if os.path.exists(last_version_file):
+        with open(last_version_file, 'r') as f:
+            last_version = f.read().strip()
+
+    if current_version != last_version:
+        # A new version was published — send notification
+        message = {
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "GTM Container Published"
+                    }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Container:* `{container_public_id}`"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Version:* {current_version}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Time:* {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"<https://tagmanager.google.com/#/container/{account_id}/{container_id}/versions/{current_version}|View in GTM>"
+                        }
+                    ]
+                }
+            ]
+        }
+
+        send_slack_notification(slack_webhook_url, message)
+        print(f"Notified: container {container_public_id} updated to version {current_version}")
+
+        # Save the new version
+        with open(last_version_file, 'w') as f:
+            f.write(current_version)
+    else:
+        print(f"No change: still on version {current_version}")
+
+if __name__ == '__main__':
+    check_and_notify(
+        key_file_path='service-account-key.json',
+        account_id=os.environ.get('GTM_ACCOUNT_ID', ''),
+        container_id=os.environ.get('GTM_CONTAINER_ID', ''),
+        container_public_id='GTM-XXXXXXX',
+        slack_webhook_url=os.environ.get('SLACK_WEBHOOK_URL', ''),
+    )
+```
+
+---
+
+## API Scopes Reference
+
+| Scope | What it allows | When to use |
+|-------|----------------|-------------|
+| `tagmanager.readonly` | Read containers, tags, triggers, variables | Auditing, exporting, monitoring |
+| `tagmanager.edit.containers` | Create, update, delete workspaces, tags, triggers, variables | Automation scripts that modify containers |
+| `tagmanager.delete.containers` | Delete containers | Rarely needed |
+| `tagmanager.edit.containerversions` | Create container versions | Needed before publishing |
+| `tagmanager.manage.accounts` | Manage account users and permissions | Admin automation |
+| `tagmanager.manage.users` | Manage container user permissions | User management automation |
+| `tagmanager.publish` | Publish container versions | Automated publishing workflows |
+
+<Aside type="caution">
+The `tagmanager.publish` scope is powerful. Automated publishing can push changes to production without human review. Only use it in workflows with appropriate review gates — for example, a CI pipeline that requires a pull request approval before publishing.
+</Aside>
+
+---
+
+## Rate Limiting and Error Handling
+
+The GTM API has rate limits. For most use cases (auditing, exporting, occasional bulk updates) you will not hit them. For scripts that update hundreds of tags in a loop, add exponential backoff:
+
+```python
+import time
+from googleapiclient.errors import HttpError
+
+def api_request_with_retry(request_fn, max_retries=5):
+    """Execute an API request with exponential backoff on rate limit errors."""
+    for attempt in range(max_retries):
+        try:
+            return request_fn()
+        except HttpError as e:
+            if e.resp.status in (429, 500, 503):
+                wait_time = (2 ** attempt) + 1  # 2, 3, 5, 9, 17 seconds
+                print(f"Rate limited or server error. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                time.sleep(wait_time)
+            else:
+                raise  # Do not retry on non-retryable errors (e.g., 404, 403)
+
+    raise Exception(f"Request failed after {max_retries} retries")
+
+# Usage
+result = api_request_with_retry(
+    lambda: service.accounts().containers().list(parent=f"accounts/{account_id}").execute()
+)
+```
+
+---
+
+## Related Resources
+
+- [Community Tools](/resources/community-tools/) — `owntag/gtm-cli` and other open-source tools built on the GTM API
+- [Analytics Testing Framework](/resources/testing-framework/) — CI/CD integration patterns that complement API automation
+- [GTM & GA4 Audit Checklist](/resources/audit-checklist/) — Manual audit tasks this automation can help scale

@@ -1,6 +1,228 @@
 ---
 title: "Cross-Browser Tracking Differences"
-description: "How each major browser handles tracking differently."
+description: "How Safari, Firefox, Chrome, Brave, and Edge each handle tracking differently — with a comparison table showing what each blocks for GA4 and GTM."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Every major browser has a different philosophy and implementation for privacy and tracking restrictions. What works in Chrome may break silently in Safari. What Firefox blocks by default, Edge allows unless the user configures Strict mode. Understanding the browser landscape is not optional if you want accurate analytics data.
+
+This article gives you the practical breakdown of each browser's current behavior, with a comparison table for quick reference.
+
+## Browser market share context
+
+Before diving into restrictions, understand the scale of impact by browser:
+
+Global browser market share in 2024 (desktop + mobile combined):
+- Chrome: ~65%
+- Safari: ~19%
+- Edge: ~5%
+- Firefox: ~3%
+- Samsung Internet: ~3%
+- Other: ~5%
+
+For mobile only, Safari's share is much higher (~28%) because it dominates iPhone usage. For desktop only, Chrome's dominance is even larger (~70%). Your specific audience may vary significantly — B2B SaaS often has lower Safari share; consumer apps with iOS-heavy users often see Safari approaching 40-50%.
+
+## Safari: ITP (Intelligent Tracking Prevention)
+
+Safari's ITP is the most aggressive first-party tracking restriction of any major browser. See [ITP History & Impact](/privacy/itp-history-impact/) for the full evolution. The current state:
+
+**Third-party cookies:** Blocked entirely. No exceptions without explicit user action via the Storage Access API.
+
+**JavaScript-set first-party cookies:** Capped at 7 days. If a user does not visit your site for 7 consecutive days, their `_ga` cookie is deleted. Their next visit is treated as a new user.
+
+**Enhanced cap for ad-linked traffic:** If a user arrives from a domain classified as a tracker (including most ad networks) with URL parameters (`gclid`, `fbclid`, etc.), JavaScript-set cookies are capped at 24 hours.
+
+**CNAME cloaking:** Detected and restricted since ITP 2.3. Cookies set by CNAME-cloaked origins are also capped.
+
+**localStorage and sessionStorage:** localStorage is subject to the same 7-day cap as cookies for classified origins. SessionStorage clears on session end as expected.
+
+**Fingerprinting protection:** Safari returns simplified/generic values for many browser APIs that could be used for fingerprinting (canvas API, WebGL, audio, screen resolution).
+
+**Impact on GA4 specifically:**
+
+| GA4 feature | Safari behavior |
+|---|---|
+| `_ga` cookie (client_id) | 7-day cap; user appears new after 7 days inactive |
+| `_ga_XXXX` cookie (session) | 7-day cap |
+| Returning user attribution | Breaks after 7 days of inactivity |
+| Ad attribution (gclid-based) | 24-hour cap if arriving from ad click |
+| Server-set cookies | Full 2-year lifetime honored |
+
+**The fix:** Server-side cookie setting. See [Extending Cookie Lifetimes](/privacy/extending-cookie-lifetimes/).
+
+## Firefox: Enhanced Tracking Protection (ETP)
+
+Firefox's Enhanced Tracking Protection uses a combination of blocklists and behavioral analysis. Unlike ITP, which uses ML to classify domains, Firefox primarily relies on the Disconnect.me blocklist — a maintained list of known tracking domains.
+
+**Three protection levels:**
+
+**Standard (default for most users):**
+- Third-party cookies blocked for known trackers (from the Disconnect.me list)
+- Cryptominers and fingerprinters blocked
+- Cross-site cookies partitioned (state isolation)
+- Known tracking scripts blocked on most pages
+
+**Strict:**
+- All cross-site cookies blocked (not just known trackers)
+- All fingerprinting blocked
+- Higher chance of breaking legitimate site functionality
+
+**Custom:**
+- User-configured combination of the above
+
+**Total Cookie Protection (enabled since Firefox 86):** Firefox's Total Cookie Protection partitions cookies by site. A tracker's cookie set on Site A is separate from the same tracker's cookie on Site B. This prevents cookie-based cross-site tracking without blocking cookies entirely. It is more sophisticated than a simple block.
+
+**Firefox-specific behavior:**
+
+| Feature | Firefox ETP Standard behavior |
+|---|---|
+| Third-party cookies | Blocked for listed trackers; partitioned for others |
+| First-party cookies | No explicit cap (unlike Safari ITP) |
+| `_ga` cookie | Not capped — full lifetime honored |
+| GA4 script loading | Blocked if googletagmanager.com is on tracker list (varies) |
+| Tracking parameter stripping | Added in Firefox 102 for Enhanced Tracking Protection Strict mode |
+
+**Impact on GA4:** Firefox is less impactful than Safari for analytics accuracy. The main risk is that the GTM container script itself may be blocked in Strict mode. For Standard mode users, first-party GA4 cookies are unaffected.
+
+## Chrome: Privacy Sandbox and third-party cookie deprecation
+
+Chrome is in the process of the most consequential change in tracking history: deprecating third-party cookies. The timeline has slipped multiple times, but the direction is clear.
+
+**Current state (as of 2024-2025):**
+- Third-party cookies still enabled by default, but with Privacy Sandbox APIs being tested
+- 1% of users had third-party cookies blocked as a test in 2024
+- Full deprecation timeline remains in flux
+
+**Privacy Sandbox APIs replacing third-party cookie use cases:**
+- **Topics API:** Replaces interest-based advertising. The browser learns broad topic categories from browsing history and shares them with advertisers without sharing the URL or browsing history itself.
+- **Protected Audience API (formerly FLEDGE):** Remarketing without cross-site tracking. Ad auctions happen in the browser, not on servers.
+- **Attribution Reporting API:** Conversion attribution from ad clicks to conversions, reported with noise/aggregation to prevent individual user identification.
+
+**Impact on GA4 with Privacy Sandbox:**
+- GA4 itself does not rely on third-party cookies for core analytics — it uses first-party cookies, so Privacy Sandbox does not break basic analytics functionality.
+- Google Ads attribution and remarketing are more impacted — these rely on cross-site tracking that third-party cookies enabled.
+- The Attribution Reporting API provides some replacement functionality but with more aggregation and less granularity than third-party cookies offered.
+
+**Chrome's current first-party tracking behavior:**
+Chrome does not impose caps on JavaScript-set first-party cookies like Safari does. `_ga` retains its full 2-year lifetime in Chrome. This makes Chrome the "least restricted" major browser for analytics accuracy.
+
+## Brave: aggressive by default
+
+Brave is built on Chromium but ships with the most aggressive default tracking protections of any mainstream browser.
+
+**Default behaviors:**
+- All cross-site trackers blocked (more aggressive blocklist than Firefox Strict)
+- Fingerprinting protection: Brave injects randomized noise into canvas, WebGL, audio, and other fingerprinting APIs — not just blocking them
+- Third-party cookies blocked
+- Tracking script blocking: Google Analytics, GTM, Meta Pixel, and other analytics scripts are blocked by default
+- Cross-domain tracking parameters stripped from URLs
+
+**Impact on GA4:**
+Brave's default settings typically block the GTM container script entirely. Users on Brave are generally invisible to client-side analytics. Server-side tagging through a first-party domain (not through a domain Brave's lists identify as a tracker) has a better chance of reaching Brave users, but is not guaranteed.
+
+**Scale consideration:** Brave's market share is around 1-2% of desktop users. This is significant for developer and tech-focused audiences (where Brave adoption is higher) but not a primary focus for most measurement strategies.
+
+## Edge: tracking prevention levels
+
+Microsoft Edge offers three tracking prevention levels, configurable by users. The default is Balanced.
+
+**Basic:**
+- Blocks only known harmful trackers
+- Minimal impact on site functionality
+- Analytics largely unaffected
+
+**Balanced (default):**
+- Blocks trackers from sites you have not visited
+- May block some cross-site trackers
+- Similar to Firefox's Standard ETP
+- GA4 largely unaffected
+
+**Strict:**
+- Blocks most trackers regardless of site visit history
+- Higher chance of breaking site functionality
+- Similar behavior to Firefox Strict
+
+**Edge's cookie behavior:**
+Edge does not impose automatic expiration caps on JavaScript-set first-party cookies (unlike Safari). `_ga` retains its full lifetime on Edge across all protection levels.
+
+**Microsoft Clarity and Edge integration:**
+Edge bundles Microsoft Clarity (session recording tool) in some versions. Edge users may be tracked by Microsoft's own analytics independently of your GTM implementation.
+
+## Comparison table: browser behavior for GA4
+
+| Browser | Default | 3rd-party cookies | JS cookie cap | GTM script blocked | Server-set cookies |
+|---|---|---|---|---|---|
+| Chrome | Moderate | Currently allowed (deprecating) | No cap | No | Full lifetime |
+| Safari | Strict | Blocked | 7 days (24h for ad traffic) | No (unless ad blockers installed) | Full lifetime |
+| Firefox | Moderate | Blocked for trackers | No cap | Possible in Strict | Full lifetime |
+| Edge | Moderate | Blocked for some trackers | No cap | No (default) | Full lifetime |
+| Brave | Aggressive | Blocked | Effectively 0 (scripts blocked) | Yes (GTM blocked by default) | Partial (depends on lists) |
+| Samsung Internet | Moderate | Blocked for trackers | No cap | No | Full lifetime |
+
+## Testing across browsers
+
+You should test your implementation in at minimum Safari, Chrome, and Firefox. The minimum test set:
+
+**Safari ITP test:**
+1. Visit your site, look at the `_ga` cookie in Developer Tools → Storage
+2. Note the expiry date (should be today + 7 days if only JS-set, or today + 2 years if server-set)
+3. Verify the correct behavior: JS-set shows 7 days, server-set shows full lifetime
+
+**Firefox ETP test:**
+1. Enable Strict mode in Firefox Privacy settings
+2. Visit your site
+3. Check if the GTM container loaded (Network tab, look for `gtm.js`)
+4. Check if GA4 events are firing (DebugView)
+5. This tells you what Strict mode users experience
+
+**Brave test:**
+1. Open your site in Brave with default Shields settings
+2. Check the Brave Shields panel (lion icon) — it will show what was blocked
+3. Check if GTM loaded
+4. This gives you an accurate picture of Brave users' experience
+
+**Cross-browser attribution test:**
+For the same UTM-tagged campaign link, click it in Chrome, then in Safari, then wait 8 days and click the same link again in both browsers. GA4 should show Chrome as a returning user and Safari as a new user (if you are not using server-side cookie setting).
+
+## What you can do about it
+
+**Server-side cookie setting** is the primary solution for Safari's JavaScript cookie caps. By routing GA4 requests through sGTM and setting cookies via `Set-Cookie` response headers, you restore full cookie lifetimes for Safari users.
+
+**First-party domain routing** reduces the likelihood of your GTM and GA4 scripts being blocked by blocklists in Firefox and Brave. When your sGTM server lives at a subdomain of your own domain and your GTM container loads from there, it is less likely to match the patterns that blocklist-based protection uses.
+
+**Consent and cookieless measurement** is the right approach for users who actively block all tracking. Do not fight Brave users — they have made an explicit choice. Focus on improving measurement accuracy for the majority who have not.
+
+## Common mistakes
+
+### Treating Chrome behavior as the universal standard
+
+Chrome is the dominant browser but has the least restrictive tracking behavior. Testing only in Chrome gives a false sense of accuracy. Your Safari users — who may be 20-50% of your traffic — have a fundamentally different measurement experience.
+
+### Assuming Firefox and Safari behave the same way
+
+Both restrict tracking but through different mechanisms. ITP is ML-based and focuses on cookie expiry. Firefox ETP is list-based and focuses on blocking tracking scripts. A server-side implementation fixes Safari; fixing Firefox Strict requires ensuring your sGTM domain is not on the Disconnect.me list.
+
+### Not communicating browser-based data gaps to stakeholders
+
+Your analytics dashboards reflect what measurement can capture, not what actually happened. If your audience is 40% Safari, your analytics data has systematic gaps. Stakeholders making decisions based on this data should understand its limitations.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="ITP History & Impact"
+    description="Deep dive into Safari's ITP — the most impactful browser restriction for analytics."
+    href="/privacy/itp-history-impact/"
+  />
+  <LinkCard
+    title="Extending Cookie Lifetimes"
+    description="Server-side techniques to work around browser cookie caps."
+    href="/privacy/extending-cookie-lifetimes/"
+  />
+  <LinkCard
+    title="Ad Blocker Impact"
+    description="How ad blockers compound the browser restriction problem."
+    href="/privacy/ad-blocker-impact/"
+  />
+</CardGrid>

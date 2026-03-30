@@ -1,6 +1,159 @@
 ---
 title: "remove_from_cart"
-description: "DataLayer specification for removing products from the cart."
+description: "Complete dataLayer specification for the GA4 remove_from_cart event — tracking cart removals and quantity reductions."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The `remove_from_cart` event tracks when a user removes a product from their cart or reduces its quantity. This is your cart abandonment signal at the item level — before the session even ends.
+
+Remove-from-cart data lets you identify which products get added and then second-guessed, what price points cause hesitation, and which products have high add-to-cart rates but low purchase conversion. That's actionable product and pricing intelligence.
+
+## When to fire
+
+Fire `remove_from_cart` when:
+- A user clicks a "Remove" button in the cart
+- A user reduces quantity in the cart (fire for the delta removed)
+- A user clears the entire cart (fire for all items removed, or one event with all removed items)
+
+As with `add_to_cart`, fire after confirmation — after the cart API call succeeds, not on the button click.
+
+## Complete dataLayer push
+
+```javascript
+// User removes one item from cart
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'remove_from_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 89.99,    // value of what's being removed
+    items: [
+      {
+        item_id: 'SKU-001-BLK-L',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_category3: 'Jackets',
+        item_variant: 'Black / Large',
+        price: 89.99,
+        quantity: 1,    // quantity being removed
+        affiliation: 'Online Store'
+      }
+    ]
+  }
+});
+```
+
+## Event schema
+
+<EventSchema
+  event="remove_from_cart"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "remove_from_cart"' },
+    { name: 'ecommerce.currency', type: 'string', required: true, description: 'ISO 4217 currency code.' },
+    { name: 'ecommerce.value', type: 'number', required: true, description: 'Total value being removed — price × quantity of each item removed.' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'Array of items being removed.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'SKU or variant-level product identifier.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name.' },
+    { name: 'items[].item_brand', type: 'string', required: false, description: 'Brand or manufacturer.' },
+    { name: 'items[].item_category', type: 'string', required: false, description: 'Primary product category.' },
+    { name: 'items[].item_variant', type: 'string', required: false, description: 'Variant being removed.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Unit price at time of removal.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Number of units being removed — the delta, not the remaining cart quantity.' },
+  ]}
+/>
+
+## Partial removal: reducing quantity
+
+When a user reduces quantity from 3 to 1, they're removing 2 units. Fire `remove_from_cart` with `quantity: 2` and `value: price × 2`.
+
+```javascript
+// User reduces from 3 to 1 — removing 2 units
+const unitPrice = 24.99;
+const quantityRemoved = 2;
+
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'remove_from_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: unitPrice * quantityRemoved,  // 49.98
+    items: [{
+      item_id: 'SKU-047-WHT-M',
+      item_name: 'Cotton Crew T-Shirt',
+      item_brand: 'Heritage Co.',
+      item_category: 'Apparel',
+      item_variant: 'White / Medium',
+      price: unitPrice,
+      quantity: quantityRemoved  // 2 — not the new total of 1
+    }]
+  }
+});
+```
+
+## Multiple items removed simultaneously
+
+If a user clears their entire cart or removes multiple items in one action, include all removed items in a single event.
+
+```javascript
+// User clears entire cart with 3 items
+const removedItems = [
+  { item_id: 'SKU-001-BLK', item_name: 'Classic Leather Jacket', price: 89.99, quantity: 1 },
+  { item_id: 'SKU-047-WHT', item_name: 'Cotton Crew T-Shirt', price: 24.99, quantity: 2 },
+  { item_id: 'SKU-112-TAN', item_name: 'Woven Leather Belt', price: 34.50, quantity: 1 }
+];
+
+const totalValue = removedItems.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'remove_from_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: parseFloat(totalValue.toFixed(2)),
+    items: removedItems
+  }
+});
+```
+
+## GTM configuration
+
+<Steps>
+1. **Create a Custom Event trigger.** Event name: `remove_from_cart`. Name it `CE - remove_from_cart`.
+
+2. **Create Data Layer Variables** for `ecommerce.currency`, `ecommerce.value`, and `ecommerce.items`.
+
+3. **Create the GA4 Event tag.** Event name: `remove_from_cart`. Enable **Send Ecommerce data**. Add `currency` and `value` as explicit event parameters.
+
+4. **Test in Preview mode.** Add items to cart, then remove one. Check that `quantity` is the removed amount, not the total cart quantity.
+</Steps>
+
+## Common mistakes
+
+**Reporting the remaining cart quantity instead of the removed quantity.** After removing 2 of 3 units, the cart has 1 unit remaining. The event should have `quantity: 2` (what was removed) — not `quantity: 1` (what remains).
+
+**Not firing when quantity is reduced to zero.** Reducing quantity to 0 is functionally the same as clicking Remove. Make sure both paths trigger the event.
+
+**Using a stale price.** Capture the price at the time of removal, not at the time the item was originally added. Prices can change while items sit in a cart.
+
+<CardGrid>
+  <LinkCard
+    title="add_to_cart"
+    description="The counterpart event — tracking when items are added to the cart."
+    href="/datalayer/ecommerce/add-to-cart/"
+  />
+  <LinkCard
+    title="view_cart"
+    description="Cart page view with the full current cart contents."
+    href="/datalayer/ecommerce/view-cart/"
+  />
+  <LinkCard
+    title="Ecommerce Overview"
+    description="The full GA4 ecommerce funnel and items array structure."
+    href="/datalayer/ecommerce/ecommerce-overview/"
+  />
+</CardGrid>

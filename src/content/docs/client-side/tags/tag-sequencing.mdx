@@ -1,6 +1,223 @@
 ---
 title: "Tag Sequencing"
-description: "Controlling tag execution order with setup and cleanup tags."
+description: "Controlling the order GTM tags execute — setup tags, cleanup tags, and when to use sequencing versus restructuring your dataLayer."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Tag Sequencing lets you declare that one tag must execute before or after another, on the same trigger. Without sequencing, all tags on a given trigger fire in an order GTM does not guarantee — unless you set firing priority. Sequencing is different: it creates explicit before/after dependencies between specific tags.
+
+It solves a real class of problems: consent checks before marketing pixels fire, data enrichment before analytics events send, session setup before conversion tracking. But it is frequently over-applied. Many developers reach for tag sequencing when the correct fix is a better dataLayer architecture.
+
+## How tag sequencing works
+
+Tag Sequencing is configured in a tag's Advanced Settings. Every tag has two optional sequence slots:
+
+- **Setup Tag**: A tag that must fire *before* this tag
+- **Cleanup Tag**: A tag that fires *after* this tag
+
+When you configure a Setup Tag, GTM fires the setup tag first. When the setup tag completes (or fails), GTM fires the main tag. If you check "Don't fire [main tag] if setup tag fails or is paused," the main tag will not fire when the setup tag returns a failure state.
+
+<Aside type="tip">
+Tag Sequencing and Firing Priority are different tools. Priority controls the order of multiple tags on the same trigger. Sequencing creates a before/after dependency between two specific tags. You can combine them — but if you find yourself needing both extensively, the container's architecture may need rethinking.
+</Aside>
+
+## Configuring tag sequencing
+
+<Steps>
+1. Open the tag you want to add sequencing to.
+2. Expand the **Advanced Settings** section.
+3. Under **Tag Sequencing**, check **Fire a tag before [TagName] fires** to configure a Setup Tag.
+4. Click the dropdown and select an existing tag, or create a new one.
+5. Optionally check **Don't fire [TagName] if [Setup Tag] fails or is paused**.
+6. Do the same for **Fire a tag after [TagName] fires** if you need a Cleanup Tag.
+7. Save.
+</Steps>
+
+## The "don't fire if setup fails" option
+
+This checkbox controls what happens when the setup tag does not complete successfully:
+
+- **Checked**: The main tag is blocked. It will not fire if the setup tag was paused, failed to load, or was blocked.
+- **Unchecked**: The main tag fires regardless of the setup tag's outcome.
+
+For consent-gated tags, always check this box. If the consent verification setup tag returns "not consented," you want the main tag to be blocked.
+
+For data enrichment setup tags (where you are just pre-loading data, and the main tag should fire even if enrichment fails), leave it unchecked.
+
+## Practical use cases
+
+### Consent verification before marketing pixels
+
+The most important use case. Before firing a Meta Pixel or Google Ads tag, you want to verify that the user has consented to advertising cookies.
+
+Create a setup tag that checks consent state:
+
+```html
+<!-- Setup tag: Verify consent -->
+<script>
+(function() {
+  try {
+    // This tag must "fail" if consent is not granted
+    // One way: push to a variable, but the check must control flow
+    // Better: use Consent Mode and let GTM handle it natively
+    // Or: verify your custom consent flag
+    var consentGranted = {{CJS - ad_storage_granted}};
+    if (!consentGranted) {
+      // Signal failure — prevent the main tag from firing
+      // Note: Custom HTML tags don't have a built-in failure signal
+      // Use a "not granted" exception trigger instead for cleaner architecture
+    }
+  } catch(e) {}
+})();
+</script>
+```
+
+<Aside type="caution">
+Custom HTML tags do not have a native "success/failure" return mechanism. The "don't fire if setup tag fails" option works when the setup tag is **paused** (manually paused in GTM) or when it throws an uncaught error. If your consent logic is in a Custom HTML tag, throwing an intentional error is the mechanism — which is not ideal.
+
+**The better approach for consent control**: Use Consent Mode (which is built into GTM's tag consent settings) or exception triggers that prevent tags from firing based on consent variable values. Tag sequencing for consent is a workaround; Consent Mode is the right architecture.
+</Aside>
+
+### Data enrichment before analytics events
+
+When a tag needs data that is only available after an asynchronous initialization:
+
+```html
+<!-- Setup tag: Initialize user data -->
+<script>
+(function() {
+  try {
+    if (window._userDataLoaded) return;
+
+    // Synchronously read from a global initialized earlier by your app
+    if (window.pageData && window.pageData.user) {
+      window.dataLayer.push({
+        user_id: window.pageData.user.id,
+        user_tier: window.pageData.user.tier,
+        user_country: window.pageData.user.country
+      });
+    }
+
+    window._userDataLoaded = true;
+  } catch(e) {}
+})();
+</script>
+```
+
+Main tag (GA4 Event): configured with the data layer variables that the setup tag ensures are populated.
+
+### Cleanup after conversion tracking
+
+Use a cleanup tag to reset state after a conversion event fires:
+
+```html
+<!-- Cleanup tag: Clear conversion data -->
+<script>
+(function() {
+  try {
+    // Clear ecommerce data from the data model after purchase fires
+    window.dataLayer.push({ ecommerce: null });
+    // Reset any single-fire state flags
+    window._purchaseFired = true;
+  } catch(e) {}
+})();
+</script>
+```
+
+The cleanup tag fires after the conversion tag, ensuring the next event does not inherit stale purchase data.
+
+## How sequencing interacts with async tags
+
+Most tags are asynchronous — they inject a script that loads from a remote server, and the tag itself "completes" when the `<script>` element is injected, not when the remote script has loaded and initialized.
+
+This means: tag sequencing does not guarantee that the setup tag's external script is fully initialized before the main tag fires. It only guarantees that the setup tag's GTM execution (the DOM injection) completed.
+
+For cases where you need a vendor script to be fully initialized:
+
+```html
+<!-- Setup tag: Load vendor and wait for initialization -->
+<script>
+(function() {
+  try {
+    // If the vendor exposes a ready callback:
+    if (window.someVendorSDK) {
+      window.someVendorSDK.onReady(function() {
+        window.dataLayer.push({ event: 'vendor_sdk_ready' });
+      });
+    } else {
+      // Load the vendor and push the event when it initializes
+      var script = document.createElement('script');
+      script.src = 'https://vendor.example.com/sdk.js';
+      script.onload = function() {
+        window.dataLayer.push({ event: 'vendor_sdk_ready' });
+      };
+      document.head.appendChild(script);
+    }
+  } catch(e) {}
+})();
+</script>
+```
+
+Then your main tag fires on `CE - vendor_sdk_ready`, not through tag sequencing. This is more reliable because the trigger fires only when initialization is actually complete.
+
+## Alternatives to tag sequencing
+
+Before reaching for tag sequencing, consider whether these alternatives solve the problem more cleanly:
+
+**Dataayer event chaining**: Instead of Tag A → Tag B via sequencing, have Tag A push a new dataLayer event when it completes, and Tag B fires on that event. This is more explicit, more debuggable, and does not create hidden dependencies in tag configurations.
+
+**Trigger conditions**: If you need Tag B to wait for certain data to exist, put that condition in Tag B's trigger. When the data is not present, the trigger does not fire. When it is, the trigger fires.
+
+**Higher trigger priority**: If Tag A just needs to fire before Tag B and both are on the same trigger, set Tag A's priority higher. No sequence dependency needed.
+
+**Consent Mode**: For consent-gated tags, GTM's native Consent Mode handles the consent check without custom sequencing logic.
+
+## The complexity warning
+
+If your container has chains of sequencing three or more levels deep — Tag A is a setup for Tag B which is a setup for Tag C — stop and reconsider the architecture. This level of complexity creates:
+
+- Hard-to-debug failures (which link in the chain broke?)
+- Invisible dependencies (you cannot see sequencing when looking at a trigger's tag list)
+- Maintenance debt (editing any tag in the chain requires understanding all others)
+
+Three or more levels of tag sequencing almost always means the dataLayer architecture needs improvement. Push the right data at the right time, use Custom Event triggers, and let each tag respond to the event it needs rather than depending on a chain of execution.
+
+## Common mistakes
+
+### Using sequencing for tags that do not actually depend on each other
+
+Some practitioners apply "be safe" sequencing to all their tags. Tag A fires before Tag B because "that seems right." Unless there is an actual dependency, this creates unnecessary coupling and makes the container harder to understand.
+
+### Confusing sequencing with priority
+
+Priority controls the order of tags on the same trigger. Sequencing controls before/after dependencies for specific pairs. If you just want GA4 to fire before Meta Pixel when both are on the same trigger, use Tag Firing Priority — not sequencing.
+
+### Missing the "don't fire if setup fails" checkbox for consent gates
+
+If you have a consent setup tag and the "don't fire" box is unchecked, the marketing tag will fire even if the user has not consented. This is a compliance failure. Always check this box for consent-gated sequences.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Tag Firing Priority"
+    description="Controlling the order multiple tags fire on the same trigger — different from sequencing."
+    href="/client-side/tags/tag-firing-priority/"
+  />
+  <LinkCard
+    title="Custom HTML Tags"
+    description="Writing the setup and cleanup tags that sequencing depends on."
+    href="/client-side/tags/custom-html-tags/"
+  />
+  <LinkCard
+    title="Google Consent Mode"
+    description="The recommended alternative to manual consent sequencing for GTM tags."
+    href="/client-side/setup/google-consent-mode/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="Event chaining as an alternative to tag sequencing for complex execution flows."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+</CardGrid>

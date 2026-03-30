@@ -1,6 +1,387 @@
 ---
 title: "Measurement Protocol"
-description: "Complete guide to the GA4 Measurement Protocol for server-to-server event sending."
+description: "Send events to GA4 directly from your server, IoT devices, or any non-browser environment — complete implementation guide with code examples."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The GA4 Measurement Protocol lets you send events directly to Google Analytics from any environment that can make an HTTP request — servers, IoT devices, point-of-sale systems, kiosks, or any situation where a JavaScript tag cannot run. It is also the right tool for augmenting client-side data with server-side information that the browser cannot provide.
+
+The Measurement Protocol does not replace client-side tracking. It complements it. The two most common use cases are:
+
+1. **Enriching existing sessions** — a user triggers a `purchase` event on the client, but your payment processor sends the final confirmed transaction via server, ensuring you only count successful transactions
+2. **Tracking server-only events** — webhook deliveries, subscription renewals, offline conversions, refunds, API calls
+
+## How it works
+
+You make a POST request to `https://www.google-analytics.com/mp/collect` with your events in the request body. GA4 processes the payload and adds the events to your property — they appear in reports and BigQuery alongside client-side events.
+
+### Required parameters
+
+Every Measurement Protocol request requires:
+
+| Parameter | Location | Description |
+|-----------|----------|-------------|
+| `measurement_id` | Query string | Your stream's Measurement ID (`G-XXXXXXXXXX`) |
+| `api_secret` | Query string | A secret string you generate in GA4 Admin |
+| `client_id` | Body | The user's GA4 client ID (from the `_ga` cookie) |
+
+The `client_id` is critical. It is what links your server-side events to the user's existing client-side session. Without it, the server-side event creates an orphaned session with no attribution or user history.
+
+### Request format
+
+```
+POST https://www.google-analytics.com/mp/collect?measurement_id=G-XXXXXXXXXX&api_secret=YOUR_SECRET
+Content-Type: application/json
+
+{
+  "client_id": "123456789.987654321",
+  "events": [{
+    "name": "purchase",
+    "params": {
+      "transaction_id": "T-12345",
+      "value": 89.99,
+      "currency": "USD",
+      "items": [{
+        "item_id": "SKU-001",
+        "item_name": "Widget Pro",
+        "price": 89.99,
+        "quantity": 1
+      }]
+    }
+  }]
+}
+```
+
+## Creating an API secret
+
+<Steps>
+1. Go to **Admin → Data Streams → [your web stream]**.
+
+2. Click **Measurement Protocol API secrets**.
+
+3. Click **Create**.
+
+4. Give the secret a descriptive name (e.g., "Purchase confirmation webhook").
+
+5. Copy and store the secret value — it will only be shown once.
+</Steps>
+
+Keep API secrets server-side. Never expose them in client-side JavaScript or mobile apps. Anyone with your API secret can send arbitrary events to your GA4 property.
+
+## Implementation examples
+
+<Tabs>
+  <TabItem label="Python">
+```python
+import requests
+import json
+
+def send_ga4_event(client_id: str, events: list) -> bool:
+    """Send events to GA4 Measurement Protocol."""
+    measurement_id = "G-XXXXXXXXXX"
+    api_secret = "your-api-secret-here"
+
+    url = (
+        f"https://www.google-analytics.com/mp/collect"
+        f"?measurement_id={measurement_id}&api_secret={api_secret}"
+    )
+
+    payload = {
+        "client_id": client_id,
+        "events": events
+    }
+
+    response = requests.post(
+        url,
+        data=json.dumps(payload),
+        headers={"Content-Type": "application/json"}
+    )
+
+    # 204 = success (no content), 200 = also used
+    return response.status_code in (200, 204)
+
+
+# Example: confirmed purchase after payment webhook
+client_id = "123456789.987654321"  # from _ga cookie
+events = [{
+    "name": "purchase",
+    "params": {
+        "transaction_id": "T-12345",
+        "value": 89.99,
+        "currency": "USD",
+        "payment_method": "credit_card",
+        "items": [{
+            "item_id": "SKU-001",
+            "item_name": "Widget Pro",
+            "item_category": "Software",
+            "price": 89.99,
+            "quantity": 1
+        }]
+    }
+}]
+
+success = send_ga4_event(client_id, events)
+print(f"Event sent: {success}")
+```
+  </TabItem>
+  <TabItem label="Node.js">
+```javascript
+const https = require('https');
+
+async function sendGA4Event(clientId, events) {
+  const measurementId = 'G-XXXXXXXXXX';
+  const apiSecret = 'your-api-secret-here';
+
+  const payload = JSON.stringify({
+    client_id: clientId,
+    events: events
+  });
+
+  const url = new URL('https://www.google-analytics.com/mp/collect');
+  url.searchParams.set('measurement_id', measurementId);
+  url.searchParams.set('api_secret', apiSecret);
+
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: payload
+  });
+
+  return response.status === 204 || response.status === 200;
+}
+
+// Example: confirmed purchase
+const clientId = '123456789.987654321'; // from _ga cookie
+const events = [{
+  name: 'purchase',
+  params: {
+    transaction_id: 'T-12345',
+    value: 89.99,
+    currency: 'USD',
+    items: [{
+      item_id: 'SKU-001',
+      item_name: 'Widget Pro',
+      price: 89.99,
+      quantity: 1
+    }]
+  }
+}];
+
+sendGA4Event(clientId, events)
+  .then(success => console.log(`Event sent: ${success}`))
+  .catch(err => console.error('GA4 send failed:', err));
+```
+  </TabItem>
+</Tabs>
+
+## Getting the client_id
+
+The client ID is stored in the `_ga` cookie with the format `GA1.1.123456789.987654321`. Extract the numeric portion after the second dot:
+
+```javascript
+// Client-side: read the _ga cookie and pass it to your server
+function getGA4ClientId() {
+  const gaCookie = document.cookie
+    .split(';')
+    .find(row => row.trim().startsWith('_ga='));
+
+  if (!gaCookie) return null;
+
+  // _ga cookie format: GA1.1.XXXXXXXXXX.XXXXXXXXXX
+  const parts = gaCookie.split('=')[1].split('.');
+  return parts.slice(2).join('.'); // "123456789.987654321"
+}
+
+// Send to your server with the purchase request
+const clientId = getGA4ClientId();
+await fetch('/api/purchase', {
+  method: 'POST',
+  body: JSON.stringify({
+    orderId: 'T-12345',
+    ga4ClientId: clientId
+  })
+});
+```
+
+On the server, store the `client_id` with the transaction during checkout initiation, before the user completes the purchase. Trying to retrieve it from the browser after payment may fail if the user closes the browser or navigates away.
+
+## Batch sending
+
+You can send up to 25 events per request by including multiple objects in the `events` array:
+
+```json
+{
+  "client_id": "123456789.987654321",
+  "events": [
+    {
+      "name": "purchase",
+      "params": { "transaction_id": "T-001", "value": 50.00, "currency": "USD" }
+    },
+    {
+      "name": "generate_lead",
+      "params": { "lead_type": "email_signup", "lead_source": "checkout_upsell" }
+    }
+  ]
+}
+```
+
+Batching reduces HTTP overhead when you need to send multiple related events.
+
+## Backdating events
+
+You can backdate events up to 72 hours using the `timestamp_micros` parameter:
+
+```python
+import time
+
+# Send an event timestamped 2 hours ago
+two_hours_ago = int((time.time() - 7200) * 1_000_000)  # microseconds
+
+payload = {
+    "client_id": client_id,
+    "timestamp_micros": two_hours_ago,
+    "events": [{
+        "name": "subscription_renewed",
+        "params": {
+            "subscription_id": "SUB-456",
+            "renewal_amount": 29.99,
+            "currency": "USD"
+        }
+    }]
+}
+```
+
+Events timestamped more than 72 hours in the past are accepted but may not appear in reports or BigQuery correctly. Use the Measurement Protocol validation endpoint to check your payload before sending backdated events.
+
+## User ID
+
+If the user is logged in and you track User ID, include it to associate server-side events with the authenticated user:
+
+```json
+{
+  "client_id": "123456789.987654321",
+  "user_id": "authenticated-user-id-123",
+  "events": [...]
+}
+```
+
+The `user_id` value must match exactly what you set on the client side with `gtag('config', 'G-XXXXXXXXXX', { user_id: '...' })`.
+
+## User properties
+
+Set user properties alongside Measurement Protocol events:
+
+```json
+{
+  "client_id": "123456789.987654321",
+  "user_properties": {
+    "subscription_tier": {
+      "value": "pro"
+    },
+    "account_type": {
+      "value": "business"
+    }
+  },
+  "events": [...]
+}
+```
+
+User properties in the Measurement Protocol use an object with a `value` key, not a simple key-value pair.
+
+## Limits
+
+| Limit | Value |
+|-------|-------|
+| Events per request | 25 |
+| Event name length | 40 characters |
+| Event parameters per event | 25 |
+| Parameter name length | 40 characters |
+| Parameter string value length | 100 characters |
+| User properties per request | 25 |
+| Backdating window | 72 hours |
+
+## The validation endpoint
+
+Before sending events to your production property, test against the validation endpoint:
+
+```
+POST https://www.google-analytics.com/debug/mp/collect?measurement_id=G-XXXXXXXXXX&api_secret=YOUR_SECRET
+```
+
+This returns a JSON response with validation messages:
+
+```json
+{
+  "validationMessages": [
+    {
+      "fieldPath": "events[0].params.currency",
+      "description": "The value provided for 'currency' is not a valid ISO 4217 currency code.",
+      "validationCode": "VALUE_INVALID"
+    }
+  ]
+}
+```
+
+An empty `validationMessages` array means the payload is valid.
+
+<Aside type="tip">
+Always test against the validation endpoint during development. The production endpoint returns 204 with no body regardless of whether your events are valid — there is no error response for malformed payloads. Invalid events are silently dropped.
+</Aside>
+
+## App Measurement Protocol (Firebase)
+
+For mobile apps, the Measurement Protocol endpoint is different:
+
+```
+POST https://www.google-analytics.com/mp/collect?firebase_app_id=APP_ID&api_secret=SECRET
+```
+
+The body uses `app_instance_id` instead of `client_id`:
+
+```json
+{
+  "app_instance_id": "firebase-app-instance-id",
+  "events": [...]
+}
+```
+
+## Common mistakes
+
+### Not passing the client_id
+
+Sending Measurement Protocol events without a `client_id` (or with a random one unconnected to any existing session) creates orphan sessions attributed to Direct with no user history. These inflate your session count and skew acquisition reports.
+
+Always capture the `client_id` from the browser at checkout initiation and pass it through to your server.
+
+### Sending events for already-fired client-side events
+
+If your client-side code fires `purchase` on the thank-you page AND your server sends `purchase` via the Measurement Protocol, you will double-count conversions. Choose one: client-side OR server-side, not both. Server-side is more reliable for transaction confirmation; client-side is fine for behavioral events.
+
+### Exposing the API secret client-side
+
+Never include the `api_secret` in JavaScript, mobile app code, or any client-accessible file. It should only exist in server-side environment variables or secret management systems.
+
+### Ignoring the validation endpoint
+
+The production endpoint accepts anything that is syntactically valid JSON. Misspelled event names, invalid currency codes, and missing required parameters are accepted silently. Use the validation endpoint during development.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Measurement Protocol Debugging"
+    description="Validate your Measurement Protocol hits and diagnose why events aren't appearing."
+    href="/ga4/fundamentals/measurement-protocol-debugging/"
+  />
+  <LinkCard
+    title="Data Streams"
+    description="Creating and configuring streams, including Measurement Protocol API secrets."
+    href="/ga4/fundamentals/data-streams/"
+  />
+  <LinkCard
+    title="DebugView"
+    description="See Measurement Protocol events in real time using debug mode."
+    href="/ga4/troubleshooting/debugview/"
+  />
+</CardGrid>

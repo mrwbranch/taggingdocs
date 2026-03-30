@@ -1,6 +1,351 @@
 ---
 title: "Custom HTML Tags"
-description: "Running arbitrary HTML and JavaScript through GTM."
+description: "The power user guide to GTM's Custom HTML tag — what it can do, how to write it safely, and when to use it instead of native tag types."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Custom HTML tags let you inject arbitrary HTML and JavaScript into a page through GTM. They can do anything a developer can do with a `<script>` tag: load third-party libraries, modify the DOM, make API calls, push data to the dataLayer, fire tracking pixels, and run complex business logic.
+
+That unlimited scope is both the strength and the danger of Custom HTML tags. They are GTM's escape hatch — the right tool when no native tag type does what you need. But they come with real risks: security exposure, performance impact, and maintenance complexity. Use them deliberately, write them defensively, and reach for native tag types or Community Gallery templates first.
+
+## What Custom HTML tags can do
+
+Almost anything executable in a browser:
+
+- **Inject third-party scripts**: Load vendor tracking pixels, chat widgets, or A/B testing libraries
+- **Push computed data to the dataLayer**: Calculate values and push them as events
+- **Modify the DOM**: Insert elements, modify attributes, manipulate page content
+- **Make API calls**: Fetch data from your own endpoints and use the result in tracking
+- **Set cookies**: First-party cookie management
+- **Initialize vendor SDKs**: Any SDK that does not have a native GTM template
+- **Bridge old and new systems**: Convert legacy tracking calls to GA4-compatible events
+
+## How Custom HTML tags work
+
+A Custom HTML tag executes in the browser context with full access to `document`, `window`, `dataLayer`, and any JavaScript libraries loaded on the page. The code runs at the time the tag fires, based on its trigger.
+
+The execution context is:
+- **Synchronous by default** — your code runs inline, in order
+- **Not sandboxed** — unlike Custom JavaScript Variables, Custom HTML has full browser access
+- **Error-transparent** — unlike variables, errors thrown in Custom HTML may appear in the browser console (helpful for debugging, but still suppressed from affecting other tags)
+
+## The safe template
+
+Every Custom HTML tag you write should start from this template:
+
+```html
+<script>
+(function() {
+  'use strict';
+
+  try {
+    // Your code here
+
+  } catch(e) {
+    // Silent failure — log to console in debug mode
+    if ({{Debug Mode}}) {
+      console.error('GTM Custom HTML Error:', e);
+    }
+  }
+})();
+</script>
+```
+
+The IIFE (`(function() { ... })()`) creates a local scope, preventing variable name collisions with other scripts on the page. The try/catch prevents your error from crashing other tags.
+
+<Aside type="caution">
+Never write a Custom HTML tag without a try/catch. A JavaScript error in a Custom HTML tag that does not have error handling can throw an exception that propagates upward, potentially blocking other tags from firing. The catch block should be silent in production — logging to the console is acceptable in debug mode.
+</Aside>
+
+## Accessing GTM variables
+
+Inside Custom HTML, you access GTM variable values using double-brace syntax — the same way you reference variables in tag parameter fields:
+
+```html
+<script>
+(function() {
+  try {
+    var productId = '{{DLV - product_id}}';
+    var productName = '{{DLV - product_name}}';
+    var productPrice = {{DLV - product_price}}; // Number — no quotes
+
+    // Use these values in your code
+    console.log('Product:', productId, productName, productPrice);
+
+  } catch(e) {}
+})();
+</script>
+```
+
+<Aside type="caution">
+Variable substitution is text replacement. If `{{DLV - product_name}}` returns a string containing special characters like single quotes, apostrophes, or newlines, it can break your JavaScript if you embed it without escaping.
+
+For strings that might contain special characters, use a Custom JavaScript Variable to sanitize them first, or read them directly from the dataLayer:
+
+```html
+<script>
+(function() {
+  try {
+    // Safer: read from window.dataLayer or use a sanitizing JS variable
+    var dl = window.dataLayer;
+    // ... access the most recent relevant push
+  } catch(e) {}
+})();
+</script>
+```
+</Aside>
+
+## Common use cases
+
+### Pushing computed data to the dataLayer
+
+When you need to compute a value that your application code does not provide, a Custom HTML tag can run the computation and push the result:
+
+```html
+<script>
+(function() {
+  try {
+    // Calculate cart total from existing ecommerce data
+    var items = window.dataLayer
+      .filter(function(push) { return push.ecommerce && push.ecommerce.items; })
+      .reduce(function(_, push) { return push.ecommerce.items; }, []);
+
+    var total = items.reduce(function(sum, item) {
+      return sum + (item.price * item.quantity);
+    }, 0);
+
+    window.dataLayer.push({
+      event: 'cart_total_computed',
+      cart_total: total.toFixed(2),
+      cart_item_count: items.length
+    });
+
+  } catch(e) {}
+})();
+</script>
+```
+
+### Loading a third-party script
+
+When a vendor does not have a GTM Community Template and you need to inject their pixel:
+
+```html
+<script>
+(function() {
+  try {
+    // Check consent before loading — critical for GDPR compliance
+    if (!{{CJS - analytics_consent_granted}}) {
+      return;
+    }
+
+    // Load the vendor script if not already loaded
+    if (!window.vendorLoaded) {
+      var script = document.createElement('script');
+      script.src = 'https://vendor.example.com/pixel.js';
+      script.async = true;
+      document.head.appendChild(script);
+      window.vendorLoaded = true;
+    }
+
+  } catch(e) {}
+})();
+</script>
+```
+
+Always check consent before injecting third-party scripts. Always check whether the script is already loaded to avoid double-loading.
+
+### Conditional script injection based on data
+
+```html
+<script>
+(function() {
+  try {
+    var userTier = '{{DLV - user_tier}}';
+    var pageType = '{{LUT - page-type}}';
+
+    // Only load premium features for premium users on product pages
+    if (userTier === 'premium' && pageType === 'product') {
+      // Load the premium widget
+      var script = document.createElement('script');
+      script.src = 'https://features.example.com/premium-widget.js';
+      script.async = true;
+      document.body.appendChild(script);
+    }
+
+  } catch(e) {}
+})();
+</script>
+```
+
+### Initializing a vendor SDK with dynamic config
+
+```html
+<script>
+(function() {
+  try {
+    // Initialize Intercom with user data from the dataLayer
+    window.intercomSettings = {
+      app_id: 'YOUR_APP_ID',
+      user_id: '{{DLV - user_id}}',
+      user_hash: '{{DLV - user_hash}}',
+      name: '{{DLV - user_name}}',
+      email: '{{DLV - user_email}}',
+      created_at: '{{DLV - user_created_at}}'
+    };
+
+    // Load Intercom if not already loaded
+    (function(){
+      var w = window;
+      var ic = w.Intercom;
+      if(typeof ic === "function"){
+        ic('reattach_activator');
+        ic('update', w.intercomSettings);
+      } else {
+        var d = document;
+        var i = function(){ i.c(arguments); };
+        i.q = [];
+        i.c = function(args){ i.q.push(args); };
+        w.Intercom = i;
+        var l = function(){
+          var s = d.createElement('script');
+          s.type = 'text/javascript';
+          s.async = true;
+          s.src = 'https://widget.intercom.io/widget/YOUR_APP_ID';
+          var x = d.getElementsByTagName('script')[0];
+          x.parentNode.insertBefore(s, x);
+        };
+        l();
+      }
+    })();
+
+  } catch(e) {}
+})();
+</script>
+```
+
+## Async patterns
+
+Custom HTML tags are synchronous by default — GTM waits for them to complete before firing the next tag in sequence (when using Tag Sequencing). For network requests inside Custom HTML, you almost always want to use async patterns:
+
+```html
+<script>
+(function() {
+  try {
+    // Asynchronous API call — does not block other tags
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', 'https://api.example.com/tracking', true); // true = async
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState === 4 && xhr.status === 200) {
+        // Push result to dataLayer if needed
+        var response = JSON.parse(xhr.responseText);
+        window.dataLayer.push({
+          event: 'api_response_received',
+          api_data: response.value
+        });
+      }
+    };
+    xhr.send(JSON.stringify({
+      event: '{{Event}}',
+      page: '{{Page Path}}'
+    }));
+
+  } catch(e) {}
+})();
+</script>
+```
+
+For modern usage, `fetch` is cleaner than XHR but less compatible with very old browsers. For GTM-managed tracking that only needs to work in current browsers, fetch is fine.
+
+## Custom HTML vs. Community Gallery Templates
+
+When a third-party vendor has a Community Gallery Template available, always prefer it over Custom HTML. Templates:
+
+- Have a visual configuration UI (no code to write or maintain)
+- Are reviewed by Google or the vendor for security
+- Are sandboxed — they cannot access all browser APIs
+- Update when the template creator pushes changes
+
+Custom HTML is appropriate when:
+- No template exists for the vendor
+- The template does not expose the configuration options you need
+- You need complex conditional logic the template cannot express
+- You are building a one-off, site-specific implementation
+
+## Custom HTML vs. Custom JavaScript Variables
+
+A common source of confusion: should logic live in a Custom HTML tag or a Custom JavaScript Variable?
+
+| Use Custom HTML when... | Use Custom JavaScript Variable when... |
+|------------------------|--------------------------------------|
+| You need to execute code as a side effect (load a script, push to dataLayer) | You need to compute a value to use in tag parameters |
+| The code runs once per event | The value needs to be available in trigger conditions |
+| You are initializing something | You are reading or transforming something |
+| The logic is complex enough to justify a tag lifecycle | A simple function return is sufficient |
+
+**Rule**: If your code ends with `dataLayer.push()` or `document.createElement()`, it is a Custom HTML tag. If it ends with `return value;`, it is a Custom JavaScript Variable.
+
+## Security implications
+
+Custom HTML tags run arbitrary JavaScript in your users' browsers. This means:
+- **Supply chain risk**: A compromised GTM account or container leads to arbitrary code execution on your site
+- **Data exposure**: Custom HTML can read all page content, cookies, and local storage
+- **CSP complications**: Custom HTML tags must be whitelisted in your Content Security Policy
+
+Take GTM container access control seriously. Limit who can add or modify Custom HTML tags. Consider implementing GTM container change notifications (available in account settings).
+
+## Common mistakes
+
+### Not wrapping in try/catch
+
+The most important mistake. A JavaScript error in a Custom HTML tag without try/catch can:
+- Print an error in the console (which might reveal implementation details)
+- Block subsequent tags in a sequence from firing
+- On some browsers, cascade into breaking other page functionality
+
+Wrap everything in try/catch. Always.
+
+### Synchronous `document.write`
+
+Never use `document.write()` in a Custom HTML tag. After page load, `document.write()` clears the entire page. This is a catastrophic bug that is hard to notice in Preview mode (which loads after page load) but destroys the experience for real users.
+
+### Loading scripts without checking if they are already loaded
+
+If your Custom HTML tag fires multiple times (Unlimited firing, or the page fires the trigger multiple times), you might load the same third-party script multiple times. Check for existence before loading:
+
+```javascript
+if (!window.someVendorSDK) {
+  // Load the script
+}
+```
+
+### Missing consent checks
+
+Custom HTML tags that load third-party scripts should check consent state before executing. Use Tag Sequencing with a consent verification setup tag, or check your consent variable directly in the tag.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Tag Sequencing"
+    description="How to ensure your Custom HTML tags fire in the right order relative to other tags."
+    href="/client-side/tags/tag-sequencing/"
+  />
+  <LinkCard
+    title="JavaScript Variables"
+    description="When to use Custom JavaScript Variables instead of Custom HTML for computation logic."
+    href="/client-side/variables/javascript-variables/"
+  />
+  <LinkCard
+    title="Custom Image Tags"
+    description="A simpler alternative for pure pixel tracking — no JavaScript required."
+    href="/client-side/tags/custom-image-tags/"
+  />
+  <LinkCard
+    title="Meta Pixel Setup"
+    description="Practical example of implementing a third-party pixel via GTM."
+    href="/client-side/tags/meta-pixel-setup/"
+  />
+</CardGrid>

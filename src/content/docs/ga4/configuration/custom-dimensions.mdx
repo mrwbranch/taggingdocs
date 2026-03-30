@@ -1,6 +1,199 @@
 ---
 title: "Custom Dimensions"
-description: "Extending GA4 with custom event and user dimensions."
+description: "Register event parameters and user properties as custom dimensions in GA4 — scopes, limits, naming, and what happens when you run out."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Custom dimensions make event parameters and user properties available for analysis in GA4 reports and explorations. Without registering a parameter as a custom dimension, the data is collected (visible in BigQuery) but invisible in the GA4 reporting interface.
+
+This disconnect — where data is collected but not visible — is a frequent source of confusion. The fix is simple: register the dimension. But you need to do it before you need the data in GA4 reports, and you need to stay within the quotas.
+
+## Scopes
+
+Custom dimensions in GA4 have two scopes:
+
+**Event scope** — the dimension's value can change between events. Use this for parameters that describe the specific event: content type, button label, product category, form ID, video title, coupon code. Most custom dimensions are event-scoped.
+
+**User scope** — the dimension's value describes the user and persists across events. Use this for user properties: subscription tier, account type, user role, cohort membership.
+
+There is no session scope in GA4 (unlike Universal Analytics, which had hit, session, user, and product scopes).
+
+## Quotas
+
+| Scope | Limit |
+|-------|-------|
+| Event-scoped custom dimensions | 50 per property |
+| User-scoped custom dimensions | 25 per property |
+
+These limits are shared across all GA4 standard properties. GA4 360 has higher limits (125 event-scoped, 100 user-scoped).
+
+**50 event-scoped dimensions sounds generous until you are 6 months into implementation.** Plan your dimension list carefully. Not every parameter needs a custom dimension — only parameters you need to filter, segment, or pivot by in GA4 reports.
+
+## Creating a custom dimension
+
+<Steps>
+1. Go to **Admin → Custom definitions** (under the Property column).
+
+2. Click **Create custom dimensions**.
+
+3. Enter a **Dimension name** — this is what appears in the GA4 reporting interface. Use human-readable names: "Content Type", "Subscription Tier", "Button Location".
+
+4. Select a **Scope**: Event or User.
+
+5. Enter a **Description** — optional but valuable for documentation. Describe what this dimension measures and where it comes from.
+
+6. For event scope: enter the **Event parameter** name exactly as it is sent in your tracking code (e.g., `content_type`). Case-sensitive.
+
+7. For user scope: enter the **User property** name exactly as set in your tracking code.
+
+8. Click **Save**.
+</Steps>
+
+The dimension becomes active immediately but only shows data from the creation date forward. There is no backfilling of historical data in the GA4 reporting interface.
+
+## Event-scoped dimension examples
+
+```javascript
+// Sending event parameters that require custom dimensions
+gtag('event', 'content_view', {
+  content_type: 'blog_post',      // → custom dimension: "Content Type"
+  content_category: 'analytics',  // → custom dimension: "Content Category"
+  author: 'jane_smith',           // → custom dimension: "Author"
+  word_count: 1500                // → custom metric: "Word Count" (numeric)
+});
+
+gtag('event', 'form_submission', {
+  form_id: 'newsletter_signup',   // → custom dimension: "Form ID"
+  form_location: 'footer',        // → custom dimension: "Form Location"
+  has_promo_code: true            // → custom dimension: "Has Promo Code"
+});
+```
+
+For each of these, create a custom dimension in **Admin → Custom definitions** with the parameter name matching exactly (case-sensitive).
+
+## User-scoped dimension examples
+
+```javascript
+// Setting user properties after login
+gtag('set', 'user_properties', {
+  subscription_tier: 'pro',      // → custom dimension (user): "Subscription Tier"
+  account_type: 'business',      // → custom dimension (user): "Account Type"
+  years_as_customer: '3'         // Note: user properties must be strings
+});
+```
+
+User property values must be strings — numbers will be converted. Keep values concise (max 36 characters).
+
+## Naming conventions
+
+Use a consistent naming convention across your entire GA4 implementation:
+
+**Dimension names (display names in GA4 UI)**:
+- Title Case: "Content Type", "Subscription Tier", "Form Location"
+- Avoid abbreviations — "CTR" is less clear than "Click-Through Rate"
+- Include units for metrics: "Session Duration (seconds)", not "Session Duration"
+
+**Parameter names (technical names in tracking code)**:
+- snake_case: `content_type`, `subscription_tier`, `form_location`
+- Must match exactly what is sent in the `dataLayer.push()` or `gtag()` call
+- Maximum 40 characters
+
+## Managing the quota
+
+When you are approaching the 50 event-scope dimension limit, audit your existing dimensions:
+
+1. **Archive unused dimensions** — GA4 lets you archive custom dimensions you no longer need. Archived dimensions do not count against the limit. Historical data remains accessible in BigQuery.
+
+2. **Combine related dimensions** — Instead of `button_location_hero`, `button_location_footer`, and `button_location_sidebar` as separate dimensions (which is wrong anyway — these are values, not separate dimensions), use one dimension `button_location` with values `hero`, `footer`, `sidebar`.
+
+3. **Move low-priority analysis to BigQuery** — Not everything needs to be in the GA4 UI. Parameters used only for deep analysis can stay in BigQuery without a custom dimension.
+
+### Archiving a dimension
+
+<Steps>
+1. Go to **Admin → Custom definitions**.
+
+2. Find the dimension you want to archive.
+
+3. Click the three-dot menu → **Archive**.
+
+4. Confirm the archive.
+</Steps>
+
+Archived dimensions can be restored. Data collected while the dimension was active remains in reports for that period.
+
+## Dimensions vs. metrics
+
+Not everything should be a dimension. If the parameter is a count, amount, duration, or other numeric value you want to aggregate (sum, average, compare), register it as a **custom metric**, not a custom dimension.
+
+Examples:
+- `word_count: 1500` → custom metric (you want averages and sums)
+- `order_value: 89.99` → custom metric
+- `content_type: 'blog_post'` → custom dimension (you want to filter/segment by it)
+- `subscription_tier: 'pro'` → custom dimension
+
+Registering a numeric parameter as a dimension works but prevents meaningful aggregation — you will see individual values like "1500", "2300", "840" instead of "average: 1213" or "total: 45,000".
+
+## Using custom dimensions in reports
+
+Once registered, custom dimensions appear in:
+- **Standard reports** — add as a secondary dimension or swap as the primary dimension
+- **Explorations** — available in the dimension and metric pickers
+- **Segments** — filter segments by dimension values
+- **Audiences** — build audiences based on dimension conditions
+- **Comparisons** — compare two groups filtered by dimension values
+
+<Aside type="tip">
+Custom dimensions only populate for events collected after the dimension was registered. For analysis of historical data, use BigQuery. The BigQuery export contains all collected parameters regardless of whether they have been registered as custom dimensions.
+</Aside>
+
+## Dimensions and the Looker Studio connector
+
+Custom dimensions registered in GA4 are automatically available in the Looker Studio GA4 connector. No additional configuration is needed — they appear in the dimension list when you create a report.
+
+## Common mistakes
+
+### Not registering dimensions before you need them
+
+Decide what custom dimensions you need during implementation planning, not when a stakeholder asks "why can't I see this in reports?" The data is already in BigQuery — but for GA4 report access, you needed to register it before collecting.
+
+### Registering every parameter as a custom dimension
+
+You have 50 event-scoped dimensions. Every parameter you register consumes one slot permanently (or until archived). Do not register parameters you only analyze in BigQuery, parameters that are just debugging flags, or parameters with extremely high cardinality that produce useless reports.
+
+### Mismatched parameter name casing
+
+Custom dimension parameter names are case-sensitive. If your code pushes `contentType` but your custom dimension is configured with `content_type`, the dimension will always be empty. Use snake_case consistently in both your tracking code and GA4 configuration.
+
+### Treating user properties as event parameters and vice versa
+
+If a value describes the user (subscription tier, account type), it is a user property → user-scoped custom dimension.
+If a value describes a specific event (coupon code, button label, video title), it is an event parameter → event-scoped custom dimension.
+
+Mismatching scope means the dimension either shows incorrect values (event scope for user data shows the value from the last event, not the user's profile value) or is unavailable for session-level analysis.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Metrics"
+    description="Register numeric parameters for aggregation in GA4 reports."
+    href="/ga4/configuration/custom-metrics/"
+  />
+  <LinkCard
+    title="Data Limits and Cardinality"
+    description="Full quota reference and how to handle high-cardinality dimensions."
+    href="/ga4/configuration/data-limits-cardinality/"
+  />
+  <LinkCard
+    title="Events, Parameters, and User Properties"
+    description="How parameters and user properties work before registration."
+    href="/ga4/fundamentals/events-parameters-properties/"
+  />
+  <LinkCard
+    title="Schema Reference"
+    description="How custom dimensions appear in the BigQuery export."
+    href="/ga4/bigquery/schema-reference/"
+  />
+</CardGrid>

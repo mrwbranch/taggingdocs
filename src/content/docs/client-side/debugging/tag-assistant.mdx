@@ -1,6 +1,138 @@
 ---
 title: "Tag Assistant"
-description: "Google's Tag Assistant for validating tag implementations."
+description: "Google's Tag Assistant — the Chrome extension, the embedded debugger, and how to use them together to validate your tag implementation."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Tag Assistant has two forms: the Chrome browser extension and the embedded debugger that activates when you enter Preview mode. They serve different purposes and are most powerful when used together. Knowing which one to reach for — and what each one can and can't tell you — saves significant debugging time.
+
+## The Chrome extension
+
+The Tag Assistant Legacy extension (now deprecated and no longer updated) has been replaced by the Tag Assistant Companion extension, which works alongside the modern embedded debugger. What you're actually using when you click "Preview" in GTM is the embedded Tag Assistant, accessed at `tagassistant.google.com`.
+
+For quick container verification without entering Preview mode, use the **Tag Assistant Companion** Chrome extension:
+
+1. Install from the Chrome Web Store: search "Tag Assistant Companion"
+2. Navigate to any page
+3. Click the extension icon
+4. It shows whether Google tags are present, their IDs, and basic health status
+
+The extension is useful for:
+- Confirming a container is installed on a page
+- Quickly spotting duplicate container installations
+- Verifying GA4 Measurement IDs across pages
+- A quick first check before going deeper in Preview mode
+
+What it can't tell you:
+- Whether individual tags are configured correctly
+- Why a specific tag isn't firing
+- What data is in the dataLayer
+- Whether your triggers are matching
+
+## The embedded Tag Assistant (Preview mode)
+
+This is the debugging tool described fully in [Preview Mode](/client-side/debugging/preview-mode/). It activates when you click "Preview" in GTM and provides:
+
+- Full event timeline
+- Tags fired vs. not fired with reasons
+- Trigger condition evaluation
+- Variable values at each event
+- DataLayer state
+
+## Tag health indicators
+
+When using the embedded Tag Assistant, tags are color-coded:
+
+| Color | Meaning |
+|---|---|
+| Blue | Tag fired successfully |
+| Grey | Tag did not fire (no matching trigger) |
+| Yellow | Tag fired with a warning (non-critical issue) |
+| Red | Tag fired but encountered an error |
+
+A **yellow warning** is often more important than it looks. Common yellow warnings:
+- Tag fired with a debug hint suggesting a missing parameter
+- Ecommerce data missing required fields
+- Measurement ID format mismatch
+
+A **red error** means the tag threw a JavaScript exception or a required API call failed. Check the Errors tab for details.
+
+## Verifying GA4 implementation with Tag Assistant
+
+Tag Assistant has specific GA4 validation built in. When a GA4 Event tag fires, Tag Assistant checks:
+
+- Whether the Measurement ID matches a real GA4 property
+- Whether required parameters are present for standard events
+- Whether the event name uses reserved names (`page_view`, `session_start`, etc.) in ways that could cause issues
+- Parameter naming issues (names that start with numbers, contain special characters)
+
+To use this:
+1. Enter Preview mode
+2. Trigger the event you want to validate
+3. Click the event in the timeline
+4. Click the tag in the Tags panel
+5. Look for the GA4 Diagnostics panel — it shows parameter validation results
+
+## Diagnosing multiple containers
+
+If a site has multiple GTM containers (your container plus a marketing agency's container, for example), Tag Assistant shows all of them. Each container appears as a separate tab in the Tag Assistant interface.
+
+To check for duplicate containers without Preview mode, use the Chrome extension:
+1. Click the Tag Assistant Companion icon on the page
+2. Look for multiple entries under "Google Tag Manager"
+3. Each should have a distinct GTM-XXXXXXX ID
+
+Duplicate containers (same ID loaded twice) appear as a single container in Tag Assistant but you'll see tags firing twice. Check the network tab for duplicate `gtm.js` requests.
+
+## Tag Assistant for GA4 property verification
+
+Tag Assistant validates that your GA4 configuration tag is sending to a real, accessible GA4 property. If you see "Unable to connect to Google Analytics property" in the GA4 section, the most common causes are:
+
+- Wrong Measurement ID (G-XXXXXXXX format required, not the old UA- format)
+- Measurement ID belongs to a different Google account
+- The GA4 property has been deleted
+- Consent mode is blocking `analytics_storage` (Tag Assistant respects this)
+
+## Using Tag Assistant with server-side GTM
+
+When your GA4 traffic is routed through server-side GTM, Tag Assistant on the client side will show the GA4 Event tag firing to your sGTM endpoint — not directly to Google Analytics. This is correct behavior. The tag will show the tag firing to your custom domain rather than `analytics.google.com`.
+
+To verify the full chain in this case:
+1. Confirm the client-side tag fires to your sGTM URL (Tag Assistant)
+2. Check your sGTM Preview mode to confirm the event arrives at the server
+3. Use GA4 DebugView to confirm events arrive at the GA4 property
+
+## Common mistakes
+
+### Confusing "tag fired" with "data collected correctly"
+
+Tag Assistant confirming a tag fired means GTM executed the tag and the network request was sent. It does not mean GA4 received valid data. Always verify in GA4 DebugView or Realtime that the event and parameters appear correctly.
+
+### Assuming Tag Assistant shows all problems
+
+Tag Assistant shows problems it knows to look for — missing Measurement IDs, reserved event names, known parameter issues. It won't catch business logic errors like wrong revenue values, incorrect product IDs, or missing custom dimensions. Cross-reference with GA4 DebugView for complete validation.
+
+### Testing in a browser with the page cached
+
+If your site serves cached pages, GTM might be loading an older snippet or your JavaScript changes haven't been picked up. Hard refresh (Cmd+Shift+R) or test in a private window to ensure you're seeing the current state.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Preview Mode"
+    description="The full guide to GTM's embedded debugging interface — read this before diving into Tag Assistant details."
+    href="/client-side/debugging/preview-mode/"
+  />
+  <LinkCard
+    title="Console Debugging"
+    description="When Tag Assistant isn't enough — direct browser console techniques."
+    href="/client-side/debugging/console-debugging/"
+  />
+  <LinkCard
+    title="Why Isn't My Tag Firing?"
+    description="Systematic troubleshooting — walks through Tag Assistant alongside other tools."
+    href="/client-side/debugging/why-tag-not-firing/"
+  />
+</CardGrid>

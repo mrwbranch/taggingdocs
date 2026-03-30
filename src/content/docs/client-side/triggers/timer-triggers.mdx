@@ -3,4 +3,216 @@ title: "Timer Triggers"
 description: "Time-based triggers for engagement tracking and delayed tag firing."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+The Timer trigger fires a tag after a specified amount of time has elapsed on a page. It is one of the most niche trigger types in GTM — with legitimate uses that nothing else can replace, and tempting misuses that will add complexity without value. Use it sparingly and deliberately.
+
+## How the Timer trigger works
+
+When a Timer trigger is configured and its enabling conditions are met, GTM starts a JavaScript `setInterval` that fires the trigger every N milliseconds. The trigger can be configured to fire once (limit of 1) or repeatedly (unlimited, or up to a specified count).
+
+The GTM event name for timer triggers is `gtm.timer`. Variables available when the timer fires:
+
+| Variable | Value |
+|----------|-------|
+| `Timer Interval` | The configured interval in milliseconds |
+| `Timer Current Time` | Milliseconds elapsed since the timer started |
+| `Timer Fire Number` | How many times this timer has fired (1, 2, 3...) |
+| `Timer Unique Event ID` | Unique identifier for this timer event |
+
+## Configuration options
+
+### Interval
+
+Set in milliseconds. Common values:
+- `5000` — fires after 5 seconds
+- `10000` — fires after 10 seconds
+- `30000` — fires every 30 seconds (if limit is not set to 1)
+- `60000` — fires every 60 seconds
+
+### Limit
+
+The maximum number of times this timer can fire on a single page load. Set to `1` for a one-shot delay. Leave blank for unlimited (fires repeatedly until the user leaves). Most use cases benefit from a limit.
+
+### Enabling conditions
+
+Conditions that must be true for the timer to start. Without conditions, the timer starts on every page. With conditions, you can restrict it to specific pages or require a prior event (like scroll depth reaching 25%) before the timer starts.
+
+Enabling conditions are evaluated when the trigger is created — at page load. They are not re-evaluated on each interval. If the conditions are true at page load, the timer runs for the entire session.
+
+## When to use a Timer trigger
+
+### Delayed tag firing
+
+The most common legitimate use: fire a tag after a delay. Examples:
+
+- Show a feedback survey after 45 seconds on an article page
+- Fire an engagement event if the user has been on the page for 30 seconds
+- Trigger a re-engagement popup after 60 seconds of inactivity
+
+```
+Trigger configuration:
+- Interval: 45000 (45 seconds)
+- Limit: 1 (fire once)
+- Condition: Page Path contains /blog/
+```
+
+<TagConfig
+  name="Custom HTML - Survey - Delayed Display"
+  type="Custom HTML"
+  trigger="Timer - 45s - Blog Pages"
+  variables={['Page Path', 'Timer Current Time']}
+/>
+
+### Session keepalive for server-side sessions
+
+If your application has server-side sessions that expire after a period of inactivity, you can use a timer to ping a keepalive endpoint:
+
+```html
+<!-- Custom HTML tag on timer trigger (every 5 minutes) -->
+<script>
+  fetch('/api/keepalive', { method: 'POST', credentials: 'same-origin' })
+    .catch(function() { /* silent fail */ });
+</script>
+```
+
+```
+Trigger configuration:
+- Interval: 300000 (5 minutes)
+- Limit: (none — fire continuously)
+- Condition: Only when user is logged in (Page Path contains /dashboard)
+```
+
+### Sampling long-session engagement
+
+Fire an engagement event periodically to understand how long users are actively on the page:
+
+```javascript
+// GA4 event tag fired every 30 seconds
+// Event name: session_ping
+// Parameter: time_on_page = {{Timer Current Time}} / 1000
+```
+
+<Aside type="caution">
+GA4 already tracks engaged time through its own engagement measurement. Before you build time-based engagement tracking with Timer triggers, check whether GA4's built-in engagement metrics already answer your question. They often do. The Timer trigger adds event volume to your GA4 property — make sure the data you get back is worth it.
+</Aside>
+
+## What Timer triggers are NOT good for
+
+### General engagement time tracking
+
+GA4's `user_engagement` event and the engagement rate metric already measure engaged time. Building your own parallel engagement time system in GTM duplicates this work, adds event volume, and usually produces a metric that differs from GA4's definition in ways that cause confusion rather than clarity.
+
+### Replacing scroll tracking for content engagement
+
+"Did the user spend time on the page?" and "Did the user read to the bottom?" are different questions. A user can spend 5 minutes with the tab in the background, which a timer would fire for but which is not real engagement. Scroll depth is a better proxy for reading engagement than time.
+
+### Complex behavioral logic
+
+If you find yourself combining Timer triggers with multiple Custom JavaScript variables to build a multi-condition behavioral model, you are building application logic inside GTM. This is the right time to step back and push a custom `dataLayer` event from your application code instead. Your application has access to the state you need; GTM does not.
+
+## Combining with page conditions
+
+Timer triggers that fire everywhere are wasteful and noisy. Always add page conditions:
+
+<Steps>
+1. Create a Timer trigger with your interval and limit
+2. Switch from **All Pages** to **Some Pages** under "Enable this trigger when Event occurs and all these conditions are true"
+3. Add a condition: `Page Path contains /article/` or similar
+4. For more sophisticated conditions: add `Time on Site` measured by another variable
+</Steps>
+
+## Combining with other triggers for engagement scoring
+
+A powerful pattern: start tracking engagement time only after the user has scrolled to a meaningful depth.
+
+Unfortunately, GTM Timer triggers cannot dynamically start after another trigger fires on the same page — the enabling conditions are evaluated at trigger initialization, not dynamically. The workaround is to use a Custom HTML tag with your own JavaScript timing logic:
+
+```javascript
+// Custom HTML tag on 25% Scroll Depth trigger
+// This starts a timer only after the user has shown interest
+<script>
+  (function() {
+    if (window.__engagementTimerStarted) return;
+    window.__engagementTimerStarted = true;
+
+    var startTime = Date.now();
+    var milestones = [30000, 60000, 120000]; // 30s, 60s, 2min after scrolling
+    var fired = {};
+
+    function checkMilestones() {
+      var elapsed = Date.now() - startTime;
+      milestones.forEach(function(ms) {
+        if (elapsed >= ms && !fired[ms]) {
+          fired[ms] = true;
+          window.dataLayer = window.dataLayer || [];
+          window.dataLayer.push({
+            event: 'engaged_time_milestone',
+            seconds_engaged: ms / 1000,
+            page_path: window.location.pathname
+          });
+        }
+      });
+    }
+
+    setInterval(checkMilestones, 5000);
+  })();
+</script>
+```
+
+This gives you Custom Event triggers (`engaged_time_milestone`) that only fire for users who both scrolled and spent time — a much stronger engagement signal than either metric alone.
+
+## Common mistakes
+
+### Setting a timer with no page conditions
+
+A Timer trigger with no page conditions runs on every page of your site. On a multi-page site with significant traffic, this fires thousands of unnecessary events in GA4. Always add page conditions to scope timer triggers to the pages where time data is meaningful.
+
+### Not setting a limit on one-shot timers
+
+If you want to fire a tag once after 30 seconds, set the limit to `1`. Without a limit, the timer fires every 30 seconds indefinitely for as long as the user stays on the page. A 30-minute session would fire 60 events. This is rarely what you want and creates significant event bloat.
+
+### Building engagement scoring with timers when GA4 does it already
+
+Check your GA4 reports for `average_session_duration` and `engagement_rate` before building custom time-based tracking. In most cases, GA4's built-in engagement measurement is sufficient. Adding a parallel timer-based system creates two sources of truth that inevitably diverge.
+
+### Timers firing on hidden tabs
+
+JavaScript `setInterval` continues to run when the user switches to a different browser tab or minimizes the browser. A "30 seconds on page" timer will happily fire even if the user was actually looking at Twitter for 25 of those seconds. If you need accurate active engagement time, use the Page Visibility API to pause your timer when the document is hidden.
+
+```javascript
+// Pause timer when page is not visible
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden) {
+    clearInterval(myTimer);
+  } else {
+    myTimer = setInterval(trackEngagement, 10000);
+  }
+});
+```
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Scroll Triggers"
+    description="Often a better proxy for engagement than time — track how far users read, not just how long they stay."
+    href="/client-side/triggers/scroll-triggers/"
+  />
+  <LinkCard
+    title="Trigger Groups"
+    description="Combine scroll depth and time thresholds to fire a tag only when both are met."
+    href="/client-side/triggers/trigger-groups/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="For complex time-based logic, push a custom event from your own JavaScript rather than relying on GTM's timer."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Container Loading Strategies"
+    description="Deferring tag firing with lazy-loading as an alternative to timer-based delays."
+    href="/client-side/setup/container-loading-strategies/"
+  />
+</CardGrid>

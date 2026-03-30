@@ -1,6 +1,216 @@
 ---
-title: "Single Page App Tracking"
-description: "Complete SPA tracking recipe for React, Vue, and Angular."
+title: "Single-Page App Tracking"
+description: "Complete SPA tracking checklist — virtual pageviews, dataLayer cleanup between navigations, and framework-specific implementation for React, Vue, and Next.js."
+sidebar:
+  badge:
+    text: Intermediate
+    variant: note
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Single-page apps do not reload the page on navigation. The first load is the only real page load — everything after is a JavaScript route change. This breaks GA4's automatic page view tracking, which depends on the `page_location` value set when the page first loaded.
+
+This recipe covers virtual pageview implementation, dataLayer cleanup between routes, and framework-specific patterns for React Router, Next.js App Router, and Vue Router.
+
+## The two approaches
+
+**Approach A — GTM History Change trigger:** GTM watches for HTML5 History API changes (`pushState`, `replaceState`, `popstate`). Simple to set up, but unreliable: it fires when the URL changes, which is often before the new page component has finished rendering. `document.title` will be stale.
+
+**Approach B — Custom `page_view` events from the router (recommended):** Push a `page_view` event to the dataLayer from inside your router's navigation hooks, after the component has mounted and the title is set. More reliable, more data, correctly timed.
+
+## Approach B — Framework implementation
+
+<Tabs>
+<TabItem label="React Router v6">
+```javascript
+// hooks/usePageTracking.js
+import { useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
+
+export function usePageTracking() {
+  const location = useLocation();
+
+  useEffect(() => {
+    // Wait a tick to ensure document.title has been updated by the page component
+    const timer = setTimeout(() => {
+      window.dataLayer = window.dataLayer || [];
+
+      // Clear stale page-scoped data from the previous route
+      window.dataLayer.push({
+        page_path: undefined,
+        page_title: undefined,
+        page_category: undefined
+      });
+
+      window.dataLayer.push({
+        event: 'page_view',
+        page_path: location.pathname + location.search,
+        page_title: document.title,
+        page_location: window.location.href
+      });
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, [location]);
+}
+
+// App.js — use the hook inside BrowserRouter context
+function App() {
+  usePageTracking();
+  return <Routes>...</Routes>;
+}
+```
+</TabItem>
+<TabItem label="Next.js App Router">
+```javascript
+// app/layout.js — analytics wrapper
+'use client';
+import { useEffect } from 'react';
+import { usePathname, useSearchParams } from 'next/navigation';
+
+export function AnalyticsProvider({ children }) {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    const url = pathname + (searchParams.toString() ? '?' + searchParams.toString() : '');
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'page_view',
+      page_path: url,
+      page_title: document.title,
+      page_location: window.location.href
+    });
+  }, [pathname, searchParams]);
+
+  return <>{children}</>;
+}
+```
+</TabItem>
+<TabItem label="Vue Router">
+```javascript
+// router/index.js
+import { createRouter, createWebHistory } from 'vue-router';
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes: [...]
+});
+
+router.afterEach((to, from) => {
+  // afterEach fires after navigation is committed
+  // Use nextTick to ensure the component title update has run
+  import('vue').then(({ nextTick }) => {
+    nextTick(() => {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'page_view',
+        page_path: to.fullPath,
+        page_title: document.title,
+        page_name: to.name?.toString()
+      });
+    });
+  });
+});
+
+export default router;
+```
+</TabItem>
+</Tabs>
+
+## GTM Configuration
+
+<Steps>
+1. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `page_view`
+   - This triggers on every SPA navigation (not the initial page load, which uses `gtm.js`)
+
+2. **Create Data Layer Variables**
+
+   - `DLV - page_path` → `page_path`
+   - `DLV - page_title` → `page_title`
+   - `DLV - page_location` → `page_location`
+
+3. **Create a GA4 Configuration (Page View) tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `page_view`
+   - Parameters:
+     - `page_title` → `{{DLV - page_title}}`
+     - `page_location` → `{{DLV - page_location}}`
+   - Trigger: the Custom Event trigger above
+
+   <Aside type="note">
+   Do NOT also fire a GA4 Configuration tag on every SPA navigation. The initial page load sends the configuration. Only the `page_view` event tag is needed for subsequent navigations.
+   </Aside>
+
+4. **Prevent the initial page load from doubling up**
+
+   The initial page load triggers `gtm.js` and your GA4 Configuration tag fires a `page_view` automatically. Your custom `page_view` event should NOT fire on the initial load.
+
+   Add a condition to your Custom Event trigger: fire on **Some Custom Events** where `Event` equals `page_view` AND `Page Path` does NOT equal `{{DLV - initial_page_path}}` — or simply let the framework push the `page_view` event only on navigation, not on initial mount.
+
+5. **Test in Preview Mode**
+
+   Navigate between routes in your SPA. Each navigation should show a `page_view` event in the Summary pane with the correct `page_path` and `page_title` for the new route.
+</Steps>
+
+## DataLayer cleanup between routes
+
+Page-scoped data pushed on one route will persist in GTM's data model until it is overwritten. A product ID from a product page will still be accessible on the category page unless you explicitly clear it.
+
+Push a cleanup object before every navigation event:
+
+```javascript
+router.afterEach((to, from) => {
+  nextTick(() => {
+    window.dataLayer = window.dataLayer || [];
+
+    // Clear page-scoped variables
+    window.dataLayer.push({
+      // ecommerce data (ALWAYS clear this)
+      ecommerce: null,
+      // Custom page-level variables
+      page_category: undefined,
+      product_id: undefined,
+      product_name: undefined,
+      article_author: undefined
+    });
+
+    // Then push the new page data
+    window.dataLayer.push({
+      event: 'page_view',
+      page_path: to.fullPath,
+      page_title: document.title
+    });
+  });
+});
+```
+
+## Test it
+
+1. Open GTM Preview and navigate to your SPA
+2. Click through several routes
+3. Each route change should show a `page_view` event in the Summary pane
+4. Verify `page_path` and `page_title` reflect the new route, not the previous one
+5. Verify stale variables from the previous route are cleared (check the Variables tab)
+6. In GA4 DebugView, verify `page_view` events show correct paths
+
+## Common gotchas
+
+**`document.title` is the previous page's title.** If you push the `page_view` event synchronously in `afterEach`, the component that sets `document.title` may not have run yet. Use `setTimeout(0)` or `nextTick()` to defer the push until the render cycle completes.
+
+**Double page views on initial load.** The GA4 Configuration tag sends an initial `page_view` on `gtm.js`. If your framework also pushes a `page_view` on component mount for the initial route, you get two page views for the landing page. Guard against this: `if (to === from) return;` or only push in `afterEach` when `from.name !== null`.
+
+**History Change trigger vs. Custom Event.** If you switch from History Change to Custom Events, disable the History Change trigger. Running both will create duplicate page views.
+
+<CardGrid>
+  <LinkCard title="Track 404 Errors" href="/recipes/track-404-errors/" description="Catch soft 404s in SPA routing." />
+  <LinkCard title="dataLayer Deep Dive" href="/foundations/datalayer-deep-dive/" description="Understanding the sticky merge behaviour that causes stale data issues." />
+</CardGrid>

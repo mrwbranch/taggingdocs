@@ -1,6 +1,210 @@
 ---
 title: "Property Setup"
-description: "Creating and configuring a GA4 property from scratch."
+description: "Creating and configuring a GA4 property correctly — the non-obvious settings that matter for data quality, retention, and long-term analysis."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Setting up a GA4 property takes about ten minutes in the interface. Configuring it correctly — with the right data retention, BigQuery linking, time zone, currency, and traffic filtering — takes closer to an hour and prevents months of data quality problems. Do this right on day one.
+
+## Creating the property
+
+<Steps>
+1. Go to [analytics.google.com](https://analytics.google.com) and sign in.
+
+2. Click **Admin** (gear icon, bottom left).
+
+3. In the Account column, click **Create Account** if you need a new account, or select an existing one.
+
+4. In the Property column, click **Create Property**.
+
+5. Enter a property name. Use a descriptive, consistent naming convention: "[Brand] - [Platform] - [Environment]" works well. Example: "Acme Corp - Website - Production".
+
+6. Select your **reporting time zone**. This determines the day boundaries in your reports. Set this to the time zone where your business operates, not UTC. You can change it later, but changing it retroactively does not restate historical data — you will see a shift in the timeline.
+
+7. Select your **currency**. Choose the currency in which you report revenue. This affects ecommerce metrics in reports but not the raw values stored in BigQuery.
+
+8. Click **Next** and complete the business details.
+
+9. Click **Create**.
+</Steps>
+
+## Critical settings to configure immediately
+
+### 1. Data retention
+
+By default GA4 retains event data for **2 months**. For most analysis purposes, this is far too short. Increase it immediately.
+
+Go to **Admin → Data Settings → Data Retention** and set event data retention to **14 months** (the maximum for free GA4 properties).
+
+Why 14 months: it gives you 13 months of historical data plus the current partial month, which means you always have at least one full year of historical data available for year-over-year comparisons in the Explorer interface.
+
+<Aside type="caution">
+If you miss this setting and your property is more than 2 months old, you have already lost data. GA4 deletes event data that exceeds the retention window — it cannot be recovered. Set this on day one.
+</Aside>
+
+Data retention applies to user-level and event-level data used in Explorations. It does not affect aggregate data in standard reports (that data is stored indefinitely) and does not affect your BigQuery export (which retains data based on your BigQuery settings).
+
+### 2. BigQuery linking
+
+Link GA4 to BigQuery on the same day you create the property. The BigQuery export is retroactive only by one day — you cannot get BigQuery data for days before you linked it.
+
+Go to **Admin → Product Links → BigQuery Links → Link** and follow the setup wizard. See [BigQuery Export Setup](/ga4/bigquery/export-setup/) for the complete walkthrough.
+
+Even if you do not plan to use BigQuery immediately, link it. The daily export costs essentially nothing for most properties (cents to a few dollars per month) and the data cannot be reconstructed from GA4 if you link late.
+
+### 3. Internal traffic filtering
+
+Before you start accumulating data, set up a filter to exclude your own team's traffic. This prevents your internal browsing from skewing metrics, especially on a new site where team traffic may represent a significant percentage of total sessions.
+
+Go to **Admin → Data Streams → [stream] → Configure tag settings → Define internal traffic** and add your office IP ranges or developer IP addresses.
+
+Then go to **Admin → Data Filters → Create Filter → Internal Traffic** and set it to **Active**.
+
+See [Internal Traffic Filtering](/ga4/troubleshooting/internal-traffic-filtering/) for the full walkthrough.
+
+### 4. Google Search Console linking
+
+Link Search Console to see organic search queries alongside your GA4 data.
+
+Go to **Admin → Product Links → Search Console Links → Link** and select your Search Console property.
+
+This enables the "Google organic search queries" report and adds search query data to your acquisition analysis. It does not affect data collection — it just enables the combined reporting view.
+
+### 5. Google Ads linking
+
+If you run Google Ads, link it for:
+- Auto-tagging propagation (campaigns, keywords, match types in GA4)
+- Conversion import back to Google Ads
+- Audience sharing between GA4 and Ads
+
+Go to **Admin → Product Links → Google Ads Links → Link**.
+
+## Property-level settings
+
+### Reporting identity
+
+Controls how GA4 identifies users across devices and sessions.
+
+Go to **Admin → Reporting Identity** (or **Admin → Property Settings → Reporting Identity** depending on UI version).
+
+Options:
+- **Blended** (default) — uses User ID when available, falls back to Google signals, then device ID
+- **Observed** — uses only User ID and device ID, no Google signals
+- **Device-based** — uses only device ID
+
+For most properties, leave this at Blended. If your users do not consent to personalized advertising (common in EU implementations), Google signals will be suppressed by consent mode anyway, so the distinction matters less.
+
+### Attribution settings
+
+Set your default attribution model and lookback windows. See [Attribution Settings](/ga4/configuration/attribution-settings/) for the full guide.
+
+Recommended defaults:
+- **Attribution model**: Data-driven (if you have sufficient conversion volume), Last click otherwise
+- **Acquisition conversion window**: 30 days
+- **Other conversions window**: 90 days
+
+### Time zone and currency
+
+Both can be changed after creation, but changes do not apply to historical data. The day a time zone changes, you may see a gap or overlap in your data at midnight. Change these as infrequently as possible.
+
+## Configuring a web data stream
+
+After creating the property, create a web data stream:
+
+<Steps>
+1. Go to **Admin → Data Streams → Add stream → Web**.
+
+2. Enter your website URL.
+
+3. Enter a stream name.
+
+4. Configure Enhanced Measurement (recommended: enable selectively; disable "Outbound clicks" and "Scroll" if you plan to implement these custom).
+
+5. Click **Create stream**.
+
+6. Copy the Measurement ID (`G-XXXXXXXXXX`) for use in your site tag or GTM.
+</Steps>
+
+### Installing the tag
+
+**Via Google Tag Manager (recommended)**:
+1. Add a GA4 Configuration tag in GTM
+2. Set the Measurement ID to your `G-XXXXXXXXXX`
+3. Set trigger: All Pages
+4. Publish
+
+**Via gtag.js (direct)**:
+```html
+<!-- Add to <head> of every page -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-XXXXXXXXXX');
+</script>
+```
+
+## Verifying the setup
+
+After installing the tag:
+
+1. Open your website in a browser tab
+2. Go to **GA4 → Reports → Realtime** in another tab
+3. Verify you see at least one active user and a `page_view` event
+4. Check **Admin → DebugView** with `?gtm_debug=true` or GTM Preview mode to see individual events
+
+If you see events in Realtime and DebugView, the basic setup is working.
+
+## Property naming and organization
+
+For organizations with multiple properties:
+
+- Use consistent naming: `[Brand] - [Platform] - [Environment]`
+- Create separate properties for production and staging environments — never mix them
+- Use [GA4 property access controls](https://support.google.com/analytics/answer/9305587) to grant team-level access with appropriate roles
+- Document your property IDs and measurement IDs in a central location; team members often confuse different property IDs in queries and reports
+
+## Common mistakes
+
+### Leaving data retention at 2 months
+
+This is the most consequential initial configuration mistake. Two months of event data means no year-over-year comparisons in Explorations, no long-term cohort analysis, and no ability to build custom analyses more than 60 days back. Set retention to 14 months on day one.
+
+### Not linking BigQuery
+
+The BigQuery export cannot be retroactively filled for dates before linking. Properties that link BigQuery months after creation permanently lose that historical data at the raw event level. Standard report aggregates remain, but individual-event analysis is unavailable.
+
+### Using the same property for multiple environments
+
+Staging, QA, and development traffic mixed with production data is nearly impossible to clean up after the fact. Data filters help exclude internal traffic by IP, but they cannot reliably exclude all test sessions from multiple deployment environments. Use separate properties.
+
+### Wrong time zone
+
+If your property time zone does not match your business's operating hours, day boundaries in reports will be misaligned. An e-commerce business in New York using UTC will show sales shifting across days in unexpected ways. Set the time zone to where your business operates.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Data Streams"
+    description="Detailed guide to creating and configuring web and app streams."
+    href="/ga4/fundamentals/data-streams/"
+  />
+  <LinkCard
+    title="BigQuery Export Setup"
+    description="Link GA4 to BigQuery and configure your export."
+    href="/ga4/bigquery/export-setup/"
+  />
+  <LinkCard
+    title="Internal Traffic Filtering"
+    description="Exclude your team's traffic from GA4 reports."
+    href="/ga4/troubleshooting/internal-traffic-filtering/"
+  />
+  <LinkCard
+    title="Attribution Settings"
+    description="Configure default attribution models and lookback windows."
+    href="/ga4/configuration/attribution-settings/"
+  />
+</CardGrid>

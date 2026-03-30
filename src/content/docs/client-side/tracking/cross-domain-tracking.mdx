@@ -1,6 +1,153 @@
 ---
 title: "Cross-Domain Tracking"
-description: "Maintaining user sessions across multiple domains."
+description: "Maintain unified sessions when users move between domains — how the _gl linker parameter works, when you need it, and how to verify it's working."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Cross-domain tracking solves a specific problem: a user navigates from `yourstore.com` to `checkout.yourpaymentpartner.com` and back, and you want GA4 to treat this as one continuous session rather than two separate users. Without cross-domain tracking, the checkout step shows as a direct-to-checkout visit with no attribution, and your funnel data is fundamentally broken.
+
+Before configuring anything, confirm you actually need cross-domain tracking. Most "cross-domain" problems are actually subdomain problems, which are handled differently.
+
+## Do you actually need cross-domain tracking?
+
+**Subdomains (same parent domain):** `shop.example.com` → `checkout.example.com` → `account.example.com`. These share cookies at the parent domain level (`example.com`). You do **not** need cross-domain tracking. GA4 cookies are set on the root domain and are accessible across all subdomains. Just make sure your GA4 configuration uses `.example.com` as the cookie domain.
+
+**Separate domains:** `yourstore.com` → `checkoutplatform.com`. These have completely separate cookie namespaces. You **do** need cross-domain tracking.
+
+**Third-party checkout providers:** Shopify Payments, Stripe Checkout, PayPal — these hosted payment pages are on different domains. Cross-domain tracking into a fully hosted third-party payment page is usually not possible (they'd need to include your GTM container). Instead, use server-side conversion tracking and exclude the payment domain from your referrals list.
+
+## How cross-domain tracking works
+
+When a user clicks a link from Domain A to Domain B, GA4 appends a `_gl` parameter to the URL:
+
+```
+https://domainb.com/checkout?_gl=1*randomhash*...
+```
+
+The `_gl` parameter encodes the GA4 client_id and session information. When Domain B's GA4 tag initializes, it reads `_gl` from the URL and uses the encoded client_id instead of creating a new one. The session is preserved.
+
+This process is called "link decoration" and it happens automatically once you configure the domains.
+
+## Configuration via the Google Tag
+
+In GTM, the cross-domain configuration lives in your Google Tag (GA4 Configuration Tag):
+
+<Steps>
+1. Open your **Google Tag** in GTM.
+
+2. Under **Configuration Settings**, find **Cross Domain**. If you don't see it, click "Show more settings."
+
+3. **Add your domains.** List all domains that are part of the same user journey. Format: `example.com, checkoutsite.com, yourpartner.com`. Do not include `https://`, paths, or trailing slashes.
+
+4. **Accept Incoming Linker**: Ensure this is enabled (it usually is by default). This allows each domain to read the `_gl` parameter from incoming links.
+
+5. **Linker Decoration**: Leave on Automatic. This decorates links to your configured domains automatically.
+
+6. Publish the container (or update it on all relevant domains).
+</Steps>
+
+Both Domain A and Domain B must have this configuration with each other listed as cross-domain targets.
+
+## Verifying it works
+
+After setup, navigate from Domain A to Domain B by clicking a link. Check the URL in your browser's address bar on Domain B. You should see `?_gl=...` appended.
+
+If you don't see `_gl`, the most common causes are:
+1. The link navigates via JavaScript (`window.location.href = '...'`) rather than an `<a>` element
+2. The Google Tag isn't loading on Domain A (check Preview mode)
+3. The destination domain isn't listed in your cross-domain configuration
+4. A redirect is stripping the `_gl` parameter before the user reaches Domain B
+
+In GA4 DebugView, you can verify by watching events on Domain B. If `session_id` and the first `page_view` on Domain B show the same session ID as Domain A, it's working.
+
+## When _gl gets stripped by redirects
+
+A redirect chain `yourstore.com → redirect.example.com → checkout.com` loses the `_gl` parameter if the redirect server doesn't preserve query strings. This is a common failure point with:
+
+- Marketing redirect tools (UTM shorteners)
+- Affiliate link tracking systems
+- Server-side 301/302 redirects that strip query parameters
+- App deep link handling
+
+The solution: ensure your redirect logic preserves all query parameters, or use server-side session bridging (pass the client_id in a cookie or server-side parameter rather than in the URL).
+
+## Excluding referrals in GA4
+
+When cross-domain tracking is configured, the domains in your configuration should be excluded from GA4's referral traffic reports (otherwise, returning from your payment provider looks like a referral visit, restarting the session and breaking attribution).
+
+In GA4 → Admin → Data Streams → [your stream] → Configure Tag Settings → List unwanted referrals:
+
+Add all domains involved in your cross-domain setup:
+- `checkoutplatform.com`
+- `paymentprovider.com`
+
+Any session that starts with a referral from these domains will not start a new session.
+
+## Forms that cross domains
+
+Standard link decoration only works for `<a href>` elements. If users submit a form that posts to a different domain, the `_gl` parameter is not automatically added.
+
+For form-based cross-domain navigation:
+
+```javascript
+// Add _gl parameter to form action URL before submission
+document.querySelectorAll('form[data-cross-domain="true"]').forEach(function(form) {
+  form.addEventListener('submit', function(e) {
+    // GA4's linker API adds _gl to the action URL
+    if (window.ga && window.ga.getAll) {
+      var trackers = window.ga.getAll();
+      if (trackers.length > 0) {
+        var linker = new window.gaplugins.Linker(trackers[0]);
+        form.action = linker.decorate(form.action);
+      }
+    }
+  });
+});
+```
+
+With GA4 (via gtag.js), use the built-in linker:
+
+```javascript
+gtag('get', 'G-XXXXXXXXXX', 'linker', function(linker) {
+  form.action = form.action + (form.action.indexOf('?') !== -1 ? '&' : '?') + linker;
+});
+```
+
+## Common mistakes
+
+### Configuring cross-domain for subdomains
+
+`shop.example.com` and `account.example.com` share the same parent domain. GA4 cookies already work across these without cross-domain configuration. Adding them to the cross-domain list is harmless but unnecessary.
+
+### Only configuring one domain
+
+Cross-domain tracking is bilateral. If you add `checkoutpartner.com` to `yourstore.com`'s configuration but don't add `yourstore.com` to `checkoutpartner.com`'s configuration, the linker is only written on one side. Both domains need each other listed.
+
+### Forgetting the unwanted referrals list
+
+Without the referral exclusion, returning from your checkout provider to your main site creates a new session attributed to the checkout provider as a referral. Your funnel shows users "coming from checkoutplatform.com" in the middle of their session.
+
+### Assuming it works without testing
+
+Test cross-domain tracking with every browser, every redirect path, and — critically — with the payment provider completing a full checkout flow in staging. The `_gl` parameter is only as reliable as the weakest link in your redirect chain.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="User ID Tracking"
+    description="An alternative/complement to cross-domain: User-ID bridges identities across devices and sessions."
+    href="/client-side/tracking/user-id-tracking/"
+  />
+  <LinkCard
+    title="GA4 Configuration Tag"
+    description="The Google Tag where cross-domain settings live — full configuration reference."
+    href="/client-side/tags/ga4-configuration-tag/"
+  />
+  <LinkCard
+    title="Common Errors"
+    description="Cross-domain tracking issues appear here — referral problems, _gl stripping, session restarts."
+    href="/client-side/debugging/common-errors/"
+  />
+</CardGrid>

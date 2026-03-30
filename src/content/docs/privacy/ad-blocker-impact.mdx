@@ -1,6 +1,207 @@
 ---
 title: "Ad Blocker Impact"
-description: "How ad blockers affect GTM/GA4 and what you can do about it."
+description: "How ad blockers affect GTM and GA4, how to quantify the data gap, the legitimate approaches to working around them, and why fighting them with deception is a losing strategy."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Ad blockers do not just block ads. They block the infrastructure that delivers them — including analytics scripts, tracking pixels, and in many cases the GTM container itself. If you have a tech-savvy audience or a significant developer user base, ad blocker adoption could be affecting 30-50% of your traffic.
+
+This article covers how to measure the impact, what the legitimate technical responses are, and why some common "solutions" are either ineffective or ethically problematic.
+
+## What ad blockers actually block
+
+Ad blockers use several mechanisms, and the combination determines what gets blocked:
+
+**Domain-based blocklists:** Lists like EasyList, EasyPrivacy, and uBlock Origin's filter lists contain thousands of domains associated with advertising and tracking. `googletagmanager.com`, `google-analytics.com`, `doubleclick.net`, Meta's pixel domains, and most advertising platform domains are on these lists. Any network request to a listed domain is blocked.
+
+**Script pattern matching:** Beyond domains, some rules block scripts based on URL patterns, query parameters, or file names. A request to `/gtm.js?id=GTM-XXXX` can be blocked by pattern even if the domain is not explicitly listed.
+
+**Element hiding:** Ad blockers hide DOM elements matching known ad container patterns. Less relevant for analytics but can affect ad-funded content sites.
+
+**Cosmetic filtering:** JavaScript-level filtering that runs after page load to remove tracking code that escaped network-level blocking.
+
+**What typically gets blocked by a standard uBlock Origin installation:**
+- GTM container script (`googletagmanager.com`)
+- GA4 collection endpoint (`google-analytics.com/g/collect`)
+- Meta Pixel
+- TikTok Pixel
+- LinkedIn Insight Tag
+- Most advertising platform scripts
+
+**What typically does NOT get blocked:**
+- Requests to your own domain (unless your domain is specifically listed)
+- Server-side requests (the browser never makes these — your server does)
+- First-party analytics endpoints if the subdomain is not on any blocklist
+
+## Quantifying the impact
+
+Before deciding how to respond, measure the actual impact. There are two approaches:
+
+### Method 1: Comparison with server-side logs
+
+Your web server receives every page request, including from users with ad blockers. Your GA4 property does not receive any events from users whose GTM is blocked. Comparing server-side page request counts with GA4 session counts gives you a floor estimate of blocked traffic:
+
+```
+Block rate estimate = (Server pageviews - GA4 pageviews) / Server pageviews
+```
+
+This is an approximation because server logs include bots, crawlers, and other non-human traffic that GA4's bot filtering removes. But it gives a directional answer.
+
+### Method 2: The "before GA4" beacon trick
+
+You can add a minimal server-side beacon that fires on page load before the GA4 script, then compare its count with GA4:
+
+```html
+<!-- In your <head>, BEFORE any tag manager -->
+<!-- This lightweight beacon to your own server is unlikely to be blocked -->
+<script>
+  navigator.sendBeacon('/analytics-beacon', JSON.stringify({
+    path: window.location.pathname,
+    referrer: document.referrer,
+    ts: Date.now()
+  }));
+</script>
+```
+
+Count requests to `/analytics-beacon` vs. GA4 page_view events. The difference is roughly your ad-blocked traffic.
+
+### Method 3: Known blocklist monitoring
+
+Tools like PageSpy or custom audit scripts can test your page against popular blocklist rules and report which of your tags would be blocked by uBlock Origin, Adblock Plus, and other major blockers.
+
+## Typical block rates by audience
+
+Block rates vary significantly by audience type:
+
+| Audience type | Typical block rate |
+|---|---|
+| General consumer | 10-20% |
+| Tech/developer audience | 30-50% |
+| B2B SaaS | 20-35% |
+| News/media | 25-40% |
+| E-commerce (general) | 15-25% |
+| Mobile-first audience | 5-15% (mobile ad blocker adoption is lower) |
+
+If your measurement shows a block rate at the high end of these ranges, the impact on your analytics accuracy and advertising measurement is significant enough to warrant action.
+
+## The legitimate technical response: server-side tagging
+
+The most effective and legitimate approach to ad blocker impact is routing tracking requests through your own first-party domain via server-side GTM. The key insight: ad blockers block by domain. If your GTM container loads from `metrics.yourdomain.com` and your GA4 events send to `collect.yourdomain.com`, neither of these domains are on any blocklist.
+
+**How it works:**
+
+1. Configure a custom GTM loader endpoint on your own domain (e.g., `metrics.yourdomain.com`)
+2. Point this endpoint to your sGTM container
+3. Update the GTM snippet on your site to load from this custom endpoint
+4. Configure GA4 to send events to your sGTM endpoint instead of directly to Google
+
+Users with ad blockers see requests going to `*.yourdomain.com` — domains that match their site context — and most ad blockers do not block first-party domains.
+
+**Important limitation:** This does not work against Brave's Shields, which uses more sophisticated classification that can identify analytics behavior patterns even on first-party domains. And determined users who manually add your analytics domain to their blocklist will still be blocked. No solution achieves 100% coverage.
+
+### Custom GTM loader configuration
+
+In sGTM, the Container Settings has a field for "Serving Domain." Set this to your first-party subdomain:
+
+```
+Serving Domain: metrics.yourdomain.com
+```
+
+sGTM will serve the container JavaScript from this domain. Update your GTM snippet on the website to load from this domain:
+
+```html
+<!-- Standard GTM snippet (loads from googletagmanager.com — blocked by ad blockers) -->
+<script>(function(w,d,s,l,i){...j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;}...)</script>
+
+<!-- Modified snippet (loads from your own domain — not on blocklists) -->
+<script>(function(w,d,s,l,i){...j.src='https://metrics.yourdomain.com/gtm.js?id='+i+dl;}...)</script>
+```
+
+### DNS and SSL setup
+
+For `metrics.yourdomain.com` to serve your sGTM container, you need:
+
+1. A DNS record (CNAME or A record) pointing `metrics.yourdomain.com` to your sGTM host
+2. An SSL certificate covering `metrics.yourdomain.com`
+3. sGTM configured with this domain as the serving domain
+
+If you are using Google Cloud Run for sGTM, you configure this in the Cloud Run custom domain settings. If you are using Stape, they handle the SSL and DNS configuration as part of their setup.
+
+## The Stape custom loader approach
+
+Stape's managed sGTM hosting provides a built-in custom GTM loader feature that simplifies the domain configuration. You specify your custom subdomain, Stape provisions the SSL certificate and handles routing, and you update your GTM snippet.
+
+The setup is documented in Stape's help center. The outcome is the same as the self-hosted approach: your GTM container loads from your own domain.
+
+## What you should NOT do
+
+### Deceptive script renaming
+
+Some guides suggest renaming `gtm.js` to something like `main.js` or `app.js` to avoid pattern matching. This is deception: you are disguising tracking code to look like application code specifically to evade user privacy choices. It may technically work temporarily, but:
+
+- Blocklist maintainers detect and block these patterns quickly
+- It violates the spirit and potentially the letter of GDPR's transparency requirements
+- It damages user trust if discovered
+- Browser vendors may eventually take action against sites that use deceptive renaming
+
+The legitimate first-party domain approach achieves the same technical goal without deception.
+
+### Loading GTM from a CDN with a custom name
+
+Similar to above — if the purpose is to disguise what the script is, it is deceptive.
+
+### Using a known tracker's data to route around blocks
+
+Some implementations use third-party data enrichment (location, fingerprint) to track users who have opted out via ad blockers. This is not a gray area. It is a privacy violation.
+
+## Communicating data gaps to stakeholders
+
+The most important organizational response to ad blocker impact is honest communication. Your analytics data does not represent 100% of your traffic, and stakeholders making decisions based on that data need to understand the limitation.
+
+A practical approach:
+
+1. Measure your block rate using one of the methods above
+2. Document it: "Our GA4 data captures approximately 75% of actual traffic. Users with ad blockers (estimated 25% of our audience) are underrepresented."
+3. Apply a rough adjustment factor for headline metrics: if your GA4 shows 100,000 sessions, your actual traffic is approximately 133,000 sessions
+4. Be especially cautious about conversion rate analysis: ad blocker users may have different behavior and conversion patterns than measured users
+
+This is better than pretending your data is complete. The decisions made on incomplete data without knowing it is incomplete are worse than decisions made with a known adjustment factor.
+
+<Aside type="note">
+Server-side tagging through a first-party domain improves measurement completeness, but even with it, you will not capture Brave users or users with very aggressive custom filters. Plan your measurement strategy around accurate sampling and known limitations rather than pursuing 100% capture.
+</Aside>
+
+## Common mistakes
+
+### Ignoring ad blocker impact entirely
+
+The most common mistake. Analytics teams use GA4 data as if it is complete, make decisions about underperforming acquisition channels based on data that systematically undercounts ad-blocker users, and wonder why the data does not match business outcomes. Measuring the gap is step one.
+
+### Assuming server-side tagging solves the problem completely
+
+Server-side tagging through a first-party domain improves coverage significantly for most audiences. It does not eliminate the problem. Brave browsers, aggressive privacy configurations, and users who specifically block your domain are still invisible. Set expectations appropriately.
+
+### Treating all non-measured users as "lost"
+
+Users with ad blockers are still using your product. They are just not in your analytics. For product decisions, customer interviews, qualitative research, and operational metrics (orders, signups, revenue), they exist and matter. Analytics blind spots do not mean business blind spots if you have other data sources.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Cross-Browser Tracking Differences"
+    description="How Brave and Firefox's built-in blocking compares to dedicated ad blockers."
+    href="/privacy/cross-browser-tracking-differences/"
+  />
+  <LinkCard
+    title="ITP History & Impact"
+    description="Browser-native restrictions that combine with ad blockers to further reduce measurement coverage."
+    href="/privacy/itp-history-impact/"
+  />
+  <LinkCard
+    title="Extending Cookie Lifetimes"
+    description="Server-side first-party domain setup that also improves ad blocker resistance."
+    href="/privacy/extending-cookie-lifetimes/"
+  />
+</CardGrid>

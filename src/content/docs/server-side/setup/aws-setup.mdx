@@ -1,6 +1,282 @@
 ---
 title: "AWS Setup"
-description: "Running server-side GTM on AWS infrastructure."
+description: "Deploying server-side GTM on AWS using ECS Fargate — for teams already invested in Amazon's infrastructure."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+AWS is not the default choice for sGTM — Google's documentation and tooling center on GCP. But if your organization runs its infrastructure on AWS, forcing a GCP dependency for a single workload is an unnecessary complication. sGTM is a Docker container. It runs on ECS Fargate with reasonable setup effort, and you get the same first-party tracking capabilities with cost and operational patterns that fit your existing AWS footprint.
+
+<Aside type="note">
+This guide assumes familiarity with AWS — VPCs, IAM, ECS, and Application Load Balancers. If you are new to AWS, the GCP Cloud Run setup is significantly simpler.
+</Aside>
+
+## Architecture overview
+
+The recommended AWS architecture for sGTM:
+
+```
+Route 53 / Your DNS provider
+  ↓ CNAME
+  collect.yoursite.com
+  ↓
+Application Load Balancer (HTTPS, port 443)
+  ACM Certificate
+  ↓
+ECS Fargate Service
+  Task: gtm-cloud-image:stable
+  Environment: CONTAINER_CONFIG
+  Port: 8080
+```
+
+Alternatives exist — EC2, Elastic Beanstalk, App Runner — but ECS Fargate provides the best balance of autoscaling, managed infrastructure, and predictable cost for this workload.
+
+## Step 1: Prepare the container configuration
+
+Get your Container Config string from your GTM server container (the same base64-encoded string used in GCP setup):
+
+1. In GTM, open your server container
+2. **Admin** → **Container Settings** → find the **Container Config** value
+
+Store it in AWS Secrets Manager:
+
+```bash
+aws secretsmanager create-secret \
+  --name sgtm/container-config \
+  --secret-string "YOUR_CONTAINER_CONFIG_STRING" \
+  --region eu-west-1
+```
+
+## Step 2: Create an ECS cluster
+
+<Steps>
+1. AWS Console → **ECS** → **Clusters** → **Create Cluster**
+
+2. Choose **AWS Fargate** (serverless compute — no EC2 instances to manage)
+
+3. Name: `sgtm-cluster`
+
+4. Leave other settings at defaults, then create.
+</Steps>
+
+## Step 3: Create a Task Definition
+
+<Steps>
+1. **ECS** → **Task Definitions** → **Create new task definition** → **JSON** tab
+
+2. Paste the following, replacing the region, account ID, and secret ARN:
+
+```json
+{
+  "family": "sgtm-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "sgtm",
+      "image": "gcr.io/cloud-tagging-10302018/gtm-cloud-image:stable",
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "CONTAINER_CONFIG",
+          "valueFrom": "arn:aws:secretsmanager:eu-west-1:ACCOUNT_ID:secret:sgtm/container-config"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/sgtm",
+          "awslogs-region": "eu-west-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8080/healthz || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3
+      }
+    }
+  ]
+}
+```
+
+3. Create the log group in CloudWatch first:
+```bash
+aws logs create-log-group --log-group-name /ecs/sgtm --region eu-west-1
+```
+</Steps>
+
+## Step 4: Configure IAM roles
+
+The ECS task needs two IAM roles:
+
+**Execution role** (`ecsTaskExecutionRole`) — used by ECS to pull the container image and read secrets:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+<Aside type="note">
+Google's container image (`gcr.io/cloud-tagging-10302018/gtm-cloud-image:stable`) is hosted on Google Container Registry. ECS pulls it from GCR using the `ecsTaskExecutionRole`. No ECR repository is needed unless you want to host a copy yourself.
+</Aside>
+
+## Step 5: Create an Application Load Balancer
+
+<Steps>
+1. **EC2** → **Load Balancers** → **Create Load Balancer** → **Application Load Balancer**
+
+2. Settings:
+   - Name: `sgtm-alb`
+   - Scheme: Internet-facing
+   - Listeners: HTTPS on port 443
+   - Availability zones: at least 2
+
+3. SSL Certificate: **Request a certificate in ACM** for `collect.yoursite.com`. ACM certificate provisioning requires domain validation — either DNS CNAME records or email validation.
+
+4. Create a **target group**:
+   - Target type: IP (required for Fargate)
+   - Protocol: HTTP (the ALB terminates TLS, Fargate receives HTTP)
+   - Port: 8080
+   - Health check path: `/healthz`
+
+5. Attach the target group to your HTTPS listener.
+</Steps>
+
+## Step 6: Create the ECS service
+
+<Steps>
+1. **ECS** → your cluster → **Services** → **Create**
+
+2. Configuration:
+   - Launch type: Fargate
+   - Task definition: select `sgtm-task`
+   - Service name: `sgtm-service`
+   - Desired tasks: 2 (minimum for availability — no cold start risk with multiple running tasks)
+
+3. Networking:
+   - VPC: your VPC
+   - Subnets: private subnets (the ALB handles public traffic)
+   - Security group: allow inbound 8080 from the ALB's security group only
+
+4. Load balancing: select your ALB and target group
+
+5. Auto Scaling:
+   - Minimum tasks: 2
+   - Maximum tasks: 20
+   - Scale out policy: CPU utilization > 70%
+   - Scale in policy: CPU utilization < 30% for 5 minutes
+</Steps>
+
+## Step 7: Configure your custom domain
+
+Once the ALB is running:
+
+1. In Route 53 (or your DNS provider), create a CNAME record:
+   ```
+   collect.yoursite.com  CNAME  sgtm-alb-xxxxxxxxx.eu-west-1.elb.amazonaws.com
+   ```
+
+2. Verify:
+   ```bash
+   curl https://collect.yoursite.com/healthz
+   # Expected: ok
+   ```
+
+## Step 8: Connect client-side GTM
+
+Same as GCP: update your client-side GA4 tag's **Tagging Server URL** to `https://collect.yoursite.com`.
+
+## Cost comparison: AWS vs. GCP
+
+At typical sGTM traffic levels, AWS is modestly more expensive than GCP Cloud Run due to the fixed ALB cost:
+
+| Component | Monthly cost |
+|---|---|
+| ALB (base fee) | ~$16/month |
+| ALB LCUs (2M requests) | ~$5/month |
+| Fargate (2 tasks, 0.25 vCPU, 512 MB) | ~$25/month |
+| **Total at 2M requests** | ~$46/month |
+
+Compare to GCP Cloud Run at 2M requests: ~$35–60/month with min 1 instance. The costs are comparable at moderate scale, with GCP becoming slightly cheaper at very high request volumes due to the pay-per-request model.
+
+## CloudWatch monitoring
+
+CloudWatch automatically receives logs from the Fargate tasks (configured in the task definition). Set up an alarm:
+
+```bash
+# Create an alarm for task count dropping below minimum
+aws cloudwatch put-metric-alarm \
+  --alarm-name sgtm-task-count-low \
+  --alarm-description "sGTM running task count below 2" \
+  --metric-name RunningTaskCount \
+  --namespace ECS/ContainerInsights \
+  --statistic Average \
+  --period 60 \
+  --threshold 2 \
+  --comparison-operator LessThanThreshold \
+  --dimensions Name=ServiceName,Value=sgtm-service Name=ClusterName,Value=sgtm-cluster \
+  --evaluation-periods 2 \
+  --alarm-actions arn:aws:sns:eu-west-1:ACCOUNT_ID:sgtm-alerts
+```
+
+## Common mistakes
+
+**Single AZ deployment.** Running all Fargate tasks in one availability zone means a zonal outage takes down your tracking entirely. Always deploy across at least 2 AZs.
+
+**Target group protocol mismatch.** The ALB terminates TLS and forwards HTTP to Fargate on port 8080. If you set the target group to HTTPS, the ALB tries to establish TLS to the container, which fails. Protocol must be HTTP.
+
+**Insufficient container memory.** The default 512 MB works for basic deployments. With Firestore enrichment or multiple concurrent vendor API calls, increase to 1024 MB to prevent OOM errors.
+
+**Not testing health check path before launch.** Verify `/healthz` returns `ok` from the ALB target before directing production traffic. A misconfigured health check causes the ALB to mark all tasks unhealthy and return 503 to all requests.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GCP Setup"
+    description="The simpler path — Cloud Run is purpose-built for sGTM."
+    href="/server-side/setup/gcp-setup/"
+  />
+  <LinkCard
+    title="Hosting Comparison"
+    description="Full cost and capability comparison: GCP, AWS, Stape, and self-hosted options."
+    href="/server-side/operations/hosting-comparison/"
+  />
+  <LinkCard
+    title="Custom Domain Setup"
+    description="DNS configuration and SSL for your sGTM first-party endpoint."
+    href="/server-side/setup/custom-domain-setup/"
+  />
+  <LinkCard
+    title="Cost Management"
+    description="Estimating and optimizing infrastructure costs across hosting providers."
+    href="/server-side/operations/cost-management/"
+  />
+</CardGrid>

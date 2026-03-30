@@ -1,6 +1,193 @@
 ---
 title: "refund"
-description: "DataLayer specification for full and partial refunds."
+description: "Complete dataLayer specification for the GA4 refund event — full and partial refund tracking, server-side implementation, and Measurement Protocol."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The `refund` event tells GA4 to subtract revenue from a previously recorded `purchase`. It's the counterpart to `purchase` — and just as critical for accurate revenue reporting. Without refund tracking, your GA4 revenue figures will exceed your actual revenue by every refund you've issued.
+
+Refunds are unusual in one respect: they often happen server-side, initiated from your admin panel or payment processor, not from user action in the browser. For server-side refunds, you need the GA4 Measurement Protocol. For client-side refund confirmation pages, you can push to the dataLayer normally.
+
+## When to fire
+
+Fire `refund` when:
+- A user completes a refund request flow on the website (client-side — use dataLayer)
+- An admin issues a refund in your order management system (server-side — use Measurement Protocol)
+- A payment processor webhook confirms a refund (server-side — use Measurement Protocol)
+
+## Full refund — complete dataLayer push
+
+```javascript
+// Full refund of a complete order
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'refund',
+  ecommerce: {
+    transaction_id: 'TXN-2024-98765',   // must match the original purchase transaction_id
+    currency: 'USD',
+    value: 142.97,                       // full order value being refunded
+    tax: 28.59,
+    shipping: 5.99,
+    coupon: 'SUMMER15',
+    items: [
+      {
+        item_id: 'SKU-001-BLK-L',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_variant: 'Black / Large',
+        price: 89.99,
+        quantity: 1
+      },
+      {
+        item_id: 'SKU-047-WHT-M',
+        item_name: 'Cotton Crew T-Shirt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_variant: 'White / Medium',
+        price: 24.99,
+        quantity: 2
+      },
+      {
+        item_id: 'SKU-112-TAN-34',
+        item_name: 'Woven Leather Belt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Accessories',
+        item_variant: 'Tan / 34',
+        price: 34.50,
+        quantity: 1
+      }
+    ]
+  }
+});
+```
+
+## Partial refund — specific items only
+
+For partial refunds where only some items are returned, include only the refunded items in the `items` array with the refunded quantities.
+
+```javascript
+// Partial refund — only the jacket is being returned
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'refund',
+  ecommerce: {
+    transaction_id: 'TXN-2024-98765',   // same transaction ID as the original order
+    currency: 'USD',
+    value: 89.99,                        // only the refunded item's value
+    items: [
+      {
+        item_id: 'SKU-001-BLK-L',
+        item_name: 'Classic Leather Jacket',
+        item_category: 'Apparel',
+        price: 89.99,
+        quantity: 1     // only 1 jacket is being refunded
+      }
+    ]
+  }
+});
+```
+
+## Event schema
+
+<EventSchema
+  event="refund"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "refund"' },
+    { name: 'ecommerce.transaction_id', type: 'string', required: true, description: 'The transaction ID from the original purchase event. GA4 uses this to match and subtract from the purchase.' },
+    { name: 'ecommerce.currency', type: 'string', required: true, description: 'ISO 4217 currency code. Must match the original purchase currency.' },
+    { name: 'ecommerce.value', type: 'number', required: true, description: 'The monetary value being refunded. For partial refunds, this is only the refunded amount.' },
+    { name: 'ecommerce.tax', type: 'number', required: false, description: 'Tax amount being refunded.' },
+    { name: 'ecommerce.shipping', type: 'number', required: false, description: 'Shipping amount being refunded (if applicable).' },
+    { name: 'ecommerce.coupon', type: 'string', required: false, description: 'Coupon code from the original order.' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: false, description: 'Items being refunded. For a full refund, include all items. For partial refund, include only refunded items.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'Must match the item_id from the original purchase.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Unit price at time of refund.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Quantity being refunded.' },
+  ]}
+/>
+
+<Aside type="caution">
+The `transaction_id` in the refund event must exactly match the `transaction_id` from the original `purchase` event. GA4 uses this to attribute the refund to the correct purchase. If they don't match, GA4 records the refund as an unmatched event and the revenue subtraction doesn't work.
+</Aside>
+
+## Server-side refunds via Measurement Protocol
+
+Most refunds are not initiated by the user in a browser — they're triggered by admins, webhooks, or automated systems. For these, use the GA4 Measurement Protocol to send the refund event directly to GA4 from your server.
+
+```javascript
+// Node.js — server-side refund via GA4 Measurement Protocol
+async function sendRefundToGA4(refundData) {
+  const payload = {
+    client_id: refundData.clientId,   // original buyer's GA4 client_id
+    events: [{
+      name: 'refund',
+      params: {
+        transaction_id: refundData.orderId,
+        currency: refundData.currency,
+        value: refundData.refundAmount,
+        items: refundData.items.map(item => ({
+          item_id: item.sku,
+          item_name: item.name,
+          price: item.price,
+          quantity: item.refundQuantity
+        }))
+      }
+    }]
+  };
+
+  const response = await fetch(
+    `https://www.google-analytics.com/mp/collect?measurement_id=${GA4_MEASUREMENT_ID}&api_secret=${GA4_API_SECRET}`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }
+  );
+
+  return response.ok;
+}
+```
+
+<Aside type="note">
+Server-side Measurement Protocol refunds require the original buyer's `client_id` to properly attribute the refund. Store the GA4 `client_id` (the value of the `_ga` cookie) with each order at purchase time so you can include it when sending refund events from the server.
+</Aside>
+
+## GTM configuration
+
+For client-side refund flows (user-initiated refund confirmation pages):
+
+<Steps>
+1. **Create a Custom Event trigger.** Event name: `refund`. Name it `CE - refund`.
+
+2. **Create Data Layer Variables** for `ecommerce.transaction_id`, `ecommerce.currency`, `ecommerce.value`, and `ecommerce.items`.
+
+3. **Create the GA4 Event tag.** Event name: `refund`. Enable **Send Ecommerce data**. Add `transaction_id`, `currency`, and `value` as explicit event parameters.
+
+4. **Test by verifying in GA4 DebugView** — refund events should appear with the correct transaction_id and value. Check GA4 revenue reports to confirm the amount is being subtracted.
+</Steps>
+
+## Common mistakes
+
+**Wrong transaction_id.** Using a new ID, a refund-specific ID, or any value other than the exact original purchase transaction_id means GA4 cannot match the refund to the purchase. Always use the original order ID.
+
+**Not tracking partial quantities.** If a customer returns 1 of 2 T-shirts, the refund event should have `quantity: 1` for that item, not `quantity: 2`. The quantity must match exactly what's being refunded.
+
+**Sending refunds only from the frontend.** Customer-initiated returns via a web portal can use the dataLayer. Admin-initiated refunds, payment processor webhooks, and automated refunds must go through the Measurement Protocol. Relying only on frontend tracking means every admin refund is invisible in GA4.
+
+<CardGrid>
+  <LinkCard
+    title="purchase"
+    description="The original purchase event that refund subtracts from."
+    href="/datalayer/ecommerce/purchase/"
+  />
+  <LinkCard
+    title="Ecommerce Overview"
+    description="The full GA4 ecommerce event funnel."
+    href="/datalayer/ecommerce/ecommerce-overview/"
+  />
+</CardGrid>

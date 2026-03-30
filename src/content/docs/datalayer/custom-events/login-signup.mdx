@@ -1,6 +1,168 @@
 ---
-title: "Login & Signup"
-description: "DataLayer events for user authentication tracking."
+title: "Login & Sign Up"
+description: "GA4 recommended login and sign_up event specifications — method parameter, user_id, user properties, and privacy considerations."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+`login` and `sign_up` are GA4 recommended events. Implementing them correctly gives you authentication funnel data — how many users register vs. sign in, which authentication methods are most popular, and where in the funnel authenticated users convert differently from anonymous users.
+
+More importantly, `login` is the event where you should set `user_id` — GA4's mechanism for cross-device and cross-session user identification.
+
+## login event
+
+### When to fire
+
+Fire `login` after a successful authentication — after the server confirms the credentials are valid and the session is established. Not on form submission, not on button click — after success.
+
+```javascript
+// After successful authentication response
+dataLayer.push({
+  event: 'login',
+  method: 'email',         // how the user authenticated
+  user_id: '12345'         // hashed or anonymized user identifier
+});
+```
+
+### Login with user properties
+
+The login event is your opportunity to push user properties to GA4 — attributes that should persist across the user's session and inform your audience segmentation.
+
+```javascript
+dataLayer.push({
+  event: 'login',
+  method: 'google',
+  user_id: 'hashed_user_42813',
+
+  // User properties — these persist in GA4 as user-scoped dimensions
+  user_type: 'returning_customer',
+  user_loyalty_tier: 'gold',
+  account_created_year: '2022',
+  has_active_subscription: true
+});
+```
+
+### Event schema
+
+<EventSchema
+  event="login"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "login"' },
+    { name: 'method', type: 'string', required: false, description: 'Authentication method. Recommended values: email, google, facebook, apple, sso.' },
+    { name: 'user_id', type: 'string', required: false, description: 'Hashed user identifier. Never use PII. Must be consistent across sessions and devices.' },
+  ]}
+/>
+
+## sign_up event
+
+### When to fire
+
+Fire `sign_up` after a successful account creation — when the new account has been confirmed on the server, not when the user clicks Submit.
+
+```javascript
+// After successful account creation
+dataLayer.push({
+  event: 'sign_up',
+  method: 'email',         // registration method
+  user_id: 'hashed_user_new_98765'
+});
+```
+
+### sign_up with registration context
+
+```javascript
+dataLayer.push({
+  event: 'sign_up',
+  method: 'email',
+  user_id: 'hashed_user_new_98765',
+
+  // Optional: registration context
+  referral_source: 'friend_invite',
+  newsletter_opted_in: true,
+  account_type: 'personal'
+});
+```
+
+### Event schema
+
+<EventSchema
+  event="sign_up"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "sign_up"' },
+    { name: 'method', type: 'string', required: false, description: 'Registration method. Recommended values: email, google, facebook, apple.' },
+    { name: 'user_id', type: 'string', required: false, description: 'Hashed identifier for the newly created user.' },
+  ]}
+/>
+
+## Setting user_id in GA4
+
+The `user_id` parameter on `login` and `sign_up` is special in GA4. When you configure a GA4 Event tag in GTM to send a `user_id` parameter, GA4 uses it to stitch together sessions and events across devices.
+
+For GA4 to actually receive and use the `user_id`, you need to configure the GA4 Configuration tag (or Google Tag) to read it. Add a `user_id` parameter to the configuration tag that reads from a Data Layer Variable — not just as an event parameter on the login event.
+
+```javascript
+// GTM Data Layer Variable: DLV - user_id
+// Path: user_id
+
+// This variable should be read by the GA4 Configuration tag's "user_id" field
+// as well as included in the login/sign_up event parameters
+```
+
+<Aside type="caution">
+Never push actual user IDs, email addresses, names, or any PII to the dataLayer. The `user_id` you push must be a server-generated hash or pseudonymous identifier — not a value that could be used to identify an individual. Check your privacy policy and applicable regulations (GDPR, CCPA) before implementing user identification tracking.
+</Aside>
+
+## Recommended method values
+
+Use consistent, lowercase values for the `method` parameter:
+
+```javascript
+// Standard authentication methods
+method: 'email'
+method: 'google'
+method: 'facebook'
+method: 'apple'
+method: 'twitter'
+method: 'microsoft'
+method: 'sso'          // enterprise SSO
+method: 'magic_link'   // passwordless link
+method: 'phone'        // SMS/phone verification
+```
+
+## GTM configuration
+
+Both events follow the same pattern:
+
+1. Create a Custom Event trigger for `login` and another for `sign_up`.
+2. Create a Data Layer Variable for `method` and `user_id`.
+3. Create GA4 Event tags for each event, mapping `method` and `user_id` as event parameters.
+4. In your GA4 Configuration tag, also map `user_id` to the GA4 user_id field.
+
+## Common mistakes
+
+**Pushing PII.** Never push email addresses, names, or readable user IDs. Use a server-generated hash.
+
+**Firing on form submission instead of success.** If authentication fails (wrong password), the event should not fire. Fire only after server confirmation.
+
+**Not setting user_id on login.** If a user signs in and you don't push their `user_id`, you lose the cross-session stitching that makes user-level analysis possible in GA4. Login is the moment to set it.
+
+**Different user_id formats between devices.** The `user_id` must be the same string across all devices and sessions for the same user. If your web app generates `user_42813` but your mobile app generates `42813`, they won't stitch in GA4.
+
+<CardGrid>
+  <LinkCard
+    title="Form Submission"
+    description="Form event tracking — including login and registration form interactions."
+    href="/datalayer/custom-events/form-submission/"
+  />
+  <LinkCard
+    title="Error Events"
+    description="Tracking authentication failures and validation errors."
+    href="/datalayer/custom-events/error-events/"
+  />
+  <LinkCard
+    title="Custom Event Design"
+    description="How to design custom events when GA4 recommended events don't fit."
+    href="/datalayer/custom-events/custom-event-design/"
+  />
+</CardGrid>

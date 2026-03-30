@@ -1,6 +1,140 @@
 ---
 title: "begin_checkout"
-description: "DataLayer specification for checkout initiation."
+description: "Complete dataLayer specification for the GA4 begin_checkout event — capturing cart contents and coupon codes when users initiate checkout."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The `begin_checkout` event marks the moment a user crosses from browsing and cart management into the checkout funnel. It's a high-intent signal and the gate event for your checkout funnel analysis in GA4. Every checkout step event that follows — `add_shipping_info`, `add_payment_info`, `purchase` — should have consistent cart data, starting with what you push here.
+
+## When to fire
+
+Fire `begin_checkout` when:
+- The user clicks the "Checkout" or "Proceed to Checkout" button
+- The checkout page first loads (for multi-page checkouts)
+- The user enters step 1 of a single-page checkout form
+
+Do **not** fire multiple times if the user navigates back and forward through checkout steps. `begin_checkout` is the initiation event — it fires once per checkout session.
+
+## Complete dataLayer push
+
+```javascript
+// Always clear previous ecommerce data first
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'begin_checkout',
+  ecommerce: {
+    currency: 'USD',
+    value: 174.47,
+    coupon: 'SUMMER15',    // order-level coupon if applied
+    items: [
+      {
+        item_id: 'SKU-001-BLK-L',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_variant: 'Black / Large',
+        price: 89.99,
+        quantity: 1,
+        coupon: 'SUMMER15',    // item-level coupon if different from order coupon
+        discount: 13.50,
+        affiliation: 'Online Store'
+      },
+      {
+        item_id: 'SKU-047-WHT-M',
+        item_name: 'Cotton Crew T-Shirt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Tops',
+        item_variant: 'White / Medium',
+        price: 24.99,
+        quantity: 2,
+        coupon: '',
+        discount: 0,
+        affiliation: 'Online Store'
+      },
+      {
+        item_id: 'SKU-112-TAN-34',
+        item_name: 'Woven Leather Belt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Accessories',
+        item_category2: 'Belts',
+        item_variant: 'Tan / 34',
+        price: 34.50,
+        quantity: 1,
+        coupon: '',
+        discount: 0,
+        affiliation: 'Online Store'
+      }
+    ]
+  }
+});
+```
+
+<Aside type="note">
+The `coupon` parameter appears at two levels. `ecommerce.coupon` is the order-level coupon code (applies to the whole order). `items[].coupon` is an item-level coupon if specific items have individual discount codes. In most implementations, both carry the same code when one coupon applies to the whole cart. Include an empty string if no coupon is applied.
+</Aside>
+
+## Event schema
+
+<EventSchema
+  event="begin_checkout"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "begin_checkout"' },
+    { name: 'ecommerce.currency', type: 'string', required: true, description: 'ISO 4217 currency code.' },
+    { name: 'ecommerce.value', type: 'number', required: true, description: 'Cart total — sum of (price × quantity) for all items, after any discounts.' },
+    { name: 'ecommerce.coupon', type: 'string', required: false, description: 'Order-level coupon code if one has been applied.' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'All items in the cart at checkout initiation.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'SKU or variant-level product identifier.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name.' },
+    { name: 'items[].item_brand', type: 'string', required: false, description: 'Brand or manufacturer.' },
+    { name: 'items[].item_category', type: 'string', required: false, description: 'Primary product category.' },
+    { name: 'items[].item_variant', type: 'string', required: false, description: 'Selected variant.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Unit price.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Quantity in cart.' },
+    { name: 'items[].coupon', type: 'string', required: false, description: 'Item-level coupon code.' },
+    { name: 'items[].discount', type: 'number', required: false, description: 'Monetary discount applied to this item.' },
+    { name: 'items[].affiliation', type: 'string', required: false, description: 'Store or seller affiliation.' },
+  ]}
+/>
+
+## GTM configuration
+
+<Steps>
+1. **Create a Custom Event trigger.** Event name: `begin_checkout`. Name it `CE - begin_checkout`.
+
+2. **Create Data Layer Variables** for `ecommerce.currency`, `ecommerce.value`, `ecommerce.coupon`, and `ecommerce.items`.
+
+3. **Create the GA4 Event tag.** Event name: `begin_checkout`. Enable **Send Ecommerce data**. Add `currency`, `value`, and `coupon` as explicit event parameters.
+
+4. **Test in Preview mode.** Add items to cart, apply a coupon, then click Checkout. Verify the coupon code appears at both the event and item levels, and that the value reflects post-discount pricing.
+</Steps>
+
+## Common mistakes
+
+**Firing on every checkout page navigation.** If checkout is multi-page and the user goes back to cart and re-initiates checkout, should `begin_checkout` fire again? Technically yes — it's a new checkout initiation. But if your site counts each browser-forward click on the checkout button as a new session, use a `sessionStorage` flag to prevent duplicate fires within the same checkout attempt.
+
+**Not including coupon data.** The coupon parameter is one of the most valuable fields for promotion analysis. If you have a coupon system, always include the active coupon code. An empty string for no coupon is fine and expected.
+
+**Inconsistent cart value between `view_cart` and `begin_checkout`.** If the user doesn't change their cart between viewing it and clicking Checkout, these values should match. Discrepancies signal a calculation bug.
+
+<CardGrid>
+  <LinkCard
+    title="view_cart"
+    description="The event that precedes begin_checkout — cart page view."
+    href="/datalayer/ecommerce/view-cart/"
+  />
+  <LinkCard
+    title="add_shipping_info"
+    description="The next checkout step — shipping method selection."
+    href="/datalayer/ecommerce/add-shipping-info/"
+  />
+  <LinkCard
+    title="purchase"
+    description="The final checkout event — order confirmation."
+    href="/datalayer/ecommerce/purchase/"
+  />
+</CardGrid>

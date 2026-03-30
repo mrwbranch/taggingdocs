@@ -1,6 +1,192 @@
 ---
 title: "Stape Setup"
-description: "The easiest way to get started with server-side GTM using Stape.io."
+description: "Setting up server-side GTM with Stape — managed hosting that removes the GCP and AWS infrastructure burden."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Stape is a managed hosting provider that handles the cloud infrastructure for server-side GTM. Instead of creating a GCP project, configuring Cloud Run, managing SSL certificates, and monitoring instance health, you provide a GTM container ID and a domain — Stape handles everything else.
+
+For teams without dedicated DevOps resources, Stape is frequently the right choice. The tradeoff is monthly subscription cost in exchange for operational simplicity and predictable pricing.
+
+## What Stape manages for you
+
+- Cloud Run deployment and configuration on GCP
+- SSL certificate provisioning and renewal
+- Health monitoring and alerting
+- Automatic updates to the sGTM container image
+- Custom domain mapping
+- A dashboard showing request volume, errors, and container health
+
+What you still manage: your GTM server container configuration (tags, clients, triggers), your DNS records, and your consent architecture.
+
+## Pricing overview
+
+Stape uses request-based pricing with several tiers (pricing as of 2025, verify at stape.io/pricing):
+
+| Plan | Monthly requests | Price/month |
+|---|---|---|
+| Starter | 1M | ~$20 |
+| Small | 5M | ~$39 |
+| Medium | 15M | ~$79 |
+| Large | 50M | ~$199 |
+| Enterprise | Custom | Custom |
+
+Requests counted are inbound requests to your sGTM server (one request = one browser hit, typically one GA4 event). A site with 100,000 monthly users sending 5 events per session generates approximately 500,000 requests/month — well within the Starter plan.
+
+Compare this to self-managed GCP at similar volumes: approximately $15–40/month for Cloud Run compute plus minimal operational overhead. The premium over self-managed is $5–15/month at starter scale — reasonable for the operational simplicity.
+
+## Step 1: Create your Stape account and container
+
+<Steps>
+1. Go to [stape.io](https://stape.io) and create an account.
+
+2. Click **Add New Container**. You will be prompted for:
+   - **GTM Container ID**: This is the server container ID from GTM (format: `GTM-XXXXXXX`)
+   - Not the Container Config string — just the ID visible in the GTM header
+
+3. Choose your server region. Options vary but typically include US, EU, and Asia-Pacific. Select the region closest to the majority of your users. For GDPR compliance, EU region is strongly recommended for European users.
+
+4. Choose your plan based on estimated monthly request volume.
+</Steps>
+
+## Step 2: Configure your custom domain
+
+Stape requires a custom domain. Your sGTM endpoint needs to serve from a subdomain you own.
+
+<Steps>
+1. In the Stape dashboard, open your container → **Domains** → **Add Domain**
+
+2. Enter your subdomain: `collect.yoursite.com`
+
+3. Stape will display a CNAME record to create in your DNS provider:
+   ```
+   collect.yoursite.com  CNAME  cname.stape.io
+   ```
+   (The exact target hostname may vary — use whatever Stape displays)
+
+4. Add this record in your DNS provider. For Cloudflare, set to **DNS Only** (grey cloud) — do not proxy.
+
+5. Return to Stape and click **Verify Domain**. If DNS has propagated, Stape will auto-provision an SSL certificate.
+
+6. Verify the endpoint is live:
+   ```bash
+   curl https://collect.yoursite.com/healthz
+   # Expected: ok
+   ```
+</Steps>
+
+<Aside type="note">
+SSL certificate provisioning through Stape typically takes 5–30 minutes after DNS propagation. If it has not completed after an hour, check that your DNS record is correct and not proxied through a CDN.
+</Aside>
+
+## Step 3: Connect your GTM server container to Stape
+
+When Stape creates your hosted container, it generates a **Container Config** string and configures it in your Cloud Run instance automatically. You do not need to paste config strings anywhere.
+
+What you do need: make sure your GTM server container ID matches what you entered in Stape. Verify this:
+
+1. In Stape dashboard: **Container Settings** → note the GTM Container ID displayed
+2. In GTM: your server container → **Admin** → **Container Settings** → Container ID should match
+
+If they match, your server is serving the correct container configuration.
+
+## Step 4: Connect your client-side GA4 tag
+
+In your **client-side** GTM container:
+
+1. Open your GA4 Configuration tag (or Google Tag)
+2. Find **Tagging Server URL**
+3. Set to your Stape-configured custom domain:
+   ```
+   https://collect.yoursite.com
+   ```
+4. Preview and publish
+
+In GTM Preview, GA4 requests should now route to `collect.yoursite.com/g/collect`. In the sGTM Preview (accessible from your GTM server container), you should see incoming hits.
+
+## Step 5: Configure the GA4 server tag
+
+In your **server-side** GTM container (accessed from GTM, not from Stape):
+
+1. **New Tag** → **Google Analytics: GA4**
+2. Default settings forward all Event Model data to GA4
+3. Trigger: **All Events**
+4. Preview, verify data flows correctly, then publish
+
+## Stape-specific features
+
+### Power-Ups
+
+Stape offers add-on features they call Power-Ups. Relevant ones:
+
+**Cookie Keeper**: Automatically extends the lifetime of first-party cookies (particularly `_ga`) by re-reading and re-setting them on each request. Prevents ITP/Safari from expiring cookies during inactive periods without requiring custom sGTM cookie management logic.
+
+**Custom Loader**: Serves the client-side GTM container script from your first-party domain instead of `www.googletagmanager.com`. Helps bypass ad blockers that block the GTM script endpoint.
+
+**FPID Cookie**: Enables the FPID first-party identifier automatically.
+
+These Power-Ups add to the monthly cost but are often worth it for the cookie persistence improvement specifically.
+
+### Monitoring dashboard
+
+Stape provides a dashboard showing:
+- Request volume per day/week/month
+- Error rates
+- Response time distribution
+- Container health status
+
+This covers the basic monitoring needs. For detailed log inspection, you need to connect to the underlying GCP Cloud Logging (Stape provides instructions in their documentation for accessing logs from the GCP project they create).
+
+## Stape vs. self-managed GCP: the honest comparison
+
+**Choose Stape if:**
+- Your team has no cloud infrastructure experience
+- You want up and running in under an hour
+- Predictable monthly billing matters more than cost optimization
+- You do not need direct Cloud Logging access for debugging
+- Traffic is under 10M requests/month (Stape's pricing advantage disappears at scale)
+
+**Choose GCP self-managed if:**
+- Your team is comfortable with GCP or can be
+- You need direct access to Cloud Logging for production debugging
+- Traffic exceeds 10M requests/month (self-managed is cheaper at scale)
+- You need custom Cloud Run configuration (memory, CPU, concurrency beyond Stape's defaults)
+- Your organization's security policy requires you to own the cloud project where tracking data flows
+
+**The honest answer**: most analytics teams starting with sGTM should start with Stape, validate the architecture and data quality, then migrate to self-managed GCP if operational control becomes important. The GTM container configuration is portable — migrating from Stape to GCP means exporting your container and deploying to a new Cloud Run instance. Nothing is locked in.
+
+## Common mistakes
+
+**Confusing the container ID with the container config string.** Stape needs the container ID (`GTM-XXXXXXX`). GCP setup needs the container config (the long base64 string). They are different.
+
+**Proxying through Cloudflare.** Set the DNS record to DNS-only. Proxied requests get cached by Cloudflare's edge network, which prevents cookie setting and breaks sGTM's response headers.
+
+**Not testing the endpoint before switching GA4 traffic.** Always verify `https://collect.yoursite.com/healthz` returns `ok` before updating your client-side GA4 tag.
+
+**Forgetting to configure the server-side container.** Stape hosts the infrastructure, but you still need to configure tags, clients, and triggers in the GTM server container UI. A hosted but unconfigured server receives requests and does nothing with them.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GCP Setup"
+    description="Self-managed deployment on Google Cloud Platform — more control, similar cost at scale."
+    href="/server-side/setup/gcp-setup/"
+  />
+  <LinkCard
+    title="Hosting Comparison"
+    description="Full comparison of Stape, GCP, AWS, and self-hosted options."
+    href="/server-side/operations/hosting-comparison/"
+  />
+  <LinkCard
+    title="Custom Domain Setup"
+    description="Configuring your first-party subdomain — DNS, SSL, and verification."
+    href="/server-side/setup/custom-domain-setup/"
+  />
+  <LinkCard
+    title="First-Party Domain Config"
+    description="Cookie settings and FPID configuration for optimal first-party data collection."
+    href="/server-side/setup/first-party-domain-config/"
+  />
+</CardGrid>

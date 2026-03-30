@@ -1,6 +1,241 @@
 ---
 title: "Shadow DOM Tracking"
-description: "Tracking interactions inside Shadow DOM web components."
+description: "Track interactions inside Shadow DOM web components — why GTM's click triggers fail, which events escape shadow boundaries, and the workarounds that actually work."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Shadow DOM is an encapsulation mechanism for web components. It intentionally isolates the internals of a component from the outer page. That isolation is exactly why GTM's event listeners — which sit on the document — often can't see interactions that happen inside shadow roots.
+
+This is not a bug. It is Shadow DOM working as designed. The workarounds require understanding where the boundary is and which events can cross it.
+
+## Why GTM click triggers fail inside Shadow DOM
+
+GTM listens for events using delegation on the `document`. When a user clicks a button inside a shadow root, the click event bubbles up through the shadow DOM, crosses the shadow boundary, and continues bubbling through the regular DOM to the document.
+
+The problem: when the event crosses the shadow boundary, GTM's click event listeners see it — but the `target` has been **retargeted**. Instead of pointing to the button inside the shadow root, the `event.target` points to the host element (the custom element tag itself, like `<product-card>`). GTM reads `{{Click Element}}`, gets `<product-card>`, and your click triggers that check for button classes or IDs find nothing.
+
+```html
+<!-- What the DOM looks like -->
+<product-card id="item-101">
+  <!-- #shadow-root (open) -->
+    <div class="card">
+      <button class="add-to-cart">Add to Cart</button>  <!-- GTM can't target this directly -->
+    </div>
+  <!-- /shadow-root -->
+</product-card>
+```
+
+A trigger checking "Click Classes contains add-to-cart" will never fire, because by the time the event reaches the document, the target is `<product-card>`, not the button.
+
+## Which events bubble through shadow boundaries
+
+Events have a `composed` property. When `composed: true`, the event bubbles across shadow DOM boundaries. When `composed: false`, it stops at the shadow root.
+
+**Bubble through shadow DOM (composed: true):**
+- `click`, `dblclick`, `mousedown`, `mouseup`, `mouseover`, `mouseout`
+- `keydown`, `keyup`, `keypress`
+- `focus`, `blur` (as FocusEvent with composed: true)
+- `input`, `change`
+- `touchstart`, `touchend`, `touchmove`
+
+**Do NOT bubble through shadow DOM (composed: false):**
+- `submit` — This is why the built-in Form Submission trigger doesn't work inside shadow roots
+- `reset`
+- `select`
+- Custom events by default (unless you set `composed: true` manually)
+
+<Aside type="caution">
+The `submit` event does not cross shadow boundaries. If your form lives inside a web component, GTM's built-in Form Submission trigger will never fire. You must dispatch the dataLayer push from inside the component.
+</Aside>
+
+## Approach 1: Target the host element instead
+
+If you can't fix the component code, change your trigger to target the host element. When a click happens inside `<product-card>`, GTM sees `Click Element` as the `<product-card>` itself.
+
+Change your trigger condition from:
+- Click Classes — contains — `add-to-cart`
+
+To:
+- Click Element — matches CSS selector — `product-card`
+
+This fires for any click anywhere inside `<product-card>`. It's imprecise — you'll fire for every click on the component, not just the button. Add additional filtering using JavaScript variables that reach into the shadow root.
+
+## Approach 2: Read shadow internals from a Custom JS variable
+
+For open shadow roots, you can reach inside from a Custom JavaScript variable:
+
+```javascript
+// Custom JS Variable: "CJS - Shadow Click Target"
+function() {
+  // 'this' in GTM Custom JS variables doesn't give us the event
+  // We need to read the element differently
+  var event = arguments[0]; // Not available in standard GTM variables
+
+  // Alternative: look for a data attribute on the host element
+  var hostEl = document.querySelector('product-card:hover');
+  if (hostEl && hostEl.shadowRoot) {
+    var clickedEl = hostEl.shadowRoot.querySelector(':focus, :active');
+    if (clickedEl) return clickedEl.className;
+  }
+  return '';
+}
+```
+
+This approach is unreliable. The `:hover` and `:active` pseudo-classes are timing-dependent and won't always capture the right element.
+
+## Approach 3: Attach listeners inside the shadow root (Custom HTML tag)
+
+A more reliable approach for open shadow roots: attach event listeners directly inside the shadow root from a Custom HTML tag:
+
+```html
+<!-- Custom HTML tag, fires on Window Loaded -->
+<script>
+(function() {
+  function attachShadowListeners(hostElement) {
+    var shadow = hostElement.shadowRoot;
+    if (!shadow) return;
+
+    shadow.addEventListener('click', function(event) {
+      var target = event.target;
+      var button = target.closest('.add-to-cart');
+      if (!button) return;
+
+      var card = hostElement.closest('[data-product-id]') || hostElement;
+
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'add_to_cart_click',
+        product_id: card.dataset.productId || 'unknown',
+        product_name: card.dataset.productName || 'unknown',
+        click_source: 'shadow_dom'
+      });
+    });
+  }
+
+  // Attach to existing components
+  document.querySelectorAll('product-card').forEach(attachShadowListeners);
+
+  // Attach to dynamically added components
+  var observer = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+      mutation.addedNodes.forEach(function(node) {
+        if (node.tagName === 'PRODUCT-CARD') {
+          attachShadowListeners(node);
+        }
+      });
+    });
+  });
+
+  observer.observe(document.body, { childList: true, subtree: true });
+})();
+</script>
+```
+
+This requires open shadow roots (`attachShadow({ mode: 'open' })`). Closed shadow roots don't expose `shadowRoot`.
+
+## Approach 4: The attachShadow monkey-patch (closed shadow roots)
+
+For closed shadow roots, `hostElement.shadowRoot` returns `null`. The only way to intercept is to patch `attachShadow` before the component library calls it:
+
+```html
+<!-- Custom HTML tag, firing on DOM Ready — must fire BEFORE components initialize -->
+<script>
+(function() {
+  var originalAttachShadow = Element.prototype.attachShadow;
+
+  Element.prototype.attachShadow = function(options) {
+    // Create shadow root (ignore the mode for our interception)
+    var shadowRoot = originalAttachShadow.call(this, options);
+    var hostElement = this;
+
+    // Attach our listener to the shadow root
+    shadowRoot.addEventListener('click', function(event) {
+      var button = event.target.closest('[data-gtm-action]');
+      if (!button) return;
+
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: button.dataset.gtmEvent || 'shadow_click',
+        click_label: button.dataset.gtmLabel || '',
+        host_element: hostElement.tagName.toLowerCase()
+      });
+    });
+
+    return shadowRoot;
+  };
+})();
+</script>
+```
+
+<Aside type="caution">
+Monkey-patching `attachShadow` is fragile and can conflict with component libraries. It must fire before any component initializes its shadow root. If components load via lazy imports, this timing is very difficult to guarantee. Use it only when you cannot modify the component code.
+</Aside>
+
+## The best approach: tracking inside the component
+
+The cleanest long-term solution is to push tracking events from inside the web component:
+
+```javascript
+// Inside your web component
+class ProductCard extends HTMLElement {
+  connectedCallback() {
+    this.shadowRoot.querySelector('.add-to-cart').addEventListener('click', () => {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'add_to_cart',
+        product_id: this.dataset.productId,
+        product_name: this.dataset.productName
+      });
+    });
+  }
+}
+```
+
+When you own the component code, this is always the right approach. It bypasses all the shadow DOM boundary issues because the dataLayer push happens inside the component, where the full event context is available.
+
+## Common mistakes
+
+### Assuming GTM click triggers see inside shadow roots
+
+Testing a click trigger in Preview mode and seeing the event fire doesn't mean your trigger conditions are matching the right element. Check the Variables tab in Preview mode — `{{Click Element}}` will show the host element, not the shadow DOM element. Your trigger may be firing for clicks anywhere on the component.
+
+### Using the built-in Form Submission trigger for shadow DOM forms
+
+The `submit` event doesn't cross shadow boundaries. It won't work. Use the monkey-patch approach or push from inside the component.
+
+### Ignoring the `composed` event property in custom events
+
+If your web component dispatches custom events to communicate with the parent page, set `composed: true` in the event options, or the event will stop at the shadow boundary:
+
+```javascript
+// ❌ Stops at shadow boundary
+this.dispatchEvent(new CustomEvent('product-added', { detail: { id: '123' } }));
+
+// ✅ Crosses shadow boundary
+this.dispatchEvent(new CustomEvent('product-added', {
+  detail: { id: '123' },
+  bubbles: true,
+  composed: true
+}));
+```
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Click Triggers"
+    description="How click event delegation works — the mechanism that breaks inside Shadow DOM."
+    href="/client-side/triggers/click-triggers/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The pattern used when you dispatch events from inside web components."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Custom HTML Tags"
+    description="Writing the Custom HTML tags used for shadow DOM listener attachment."
+    href="/client-side/tags/custom-html-tags/"
+  />
+</CardGrid>

@@ -1,6 +1,169 @@
 ---
 title: "Custom Image Tags"
-description: "Pixel-based tracking with custom image tags."
+description: "Pixel-based tracking in GTM — how Custom Image tags work, when they are still useful, and modern alternatives."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Custom Image tags fire a 1x1 transparent tracking pixel — a GET request to a URL you specify. They work by loading an `<img>` element with your URL as the `src`, which causes the browser to make an HTTP GET request. The server at the other end logs that request as a hit.
+
+They are one of the oldest tracking mechanisms on the web, predating JavaScript-based analytics. In GTM's modern world, they are rarely the right tool — but for specific use cases involving legacy server-side logging and certain affiliate tracking systems, they still earn their place.
+
+## How Custom Image tags work
+
+When a Custom Image tag fires, GTM programmatically creates an `<img>` element:
+
+```html
+<img src="https://track.example.com/pixel?event=purchase&order_id=12345&value=199.99"
+     width="1"
+     height="1"
+     alt=""
+     style="display:none" />
+```
+
+The browser makes a GET request to that URL. The server receives the request, logs the parameters, and returns a 1x1 transparent GIF (or sometimes a 204 No Content response). The tracking data is in the URL parameters.
+
+## Creating a Custom Image tag
+
+<Steps>
+1. In GTM, go to **Tags** and click **New**.
+
+2. Select **Custom Image** as the tag type.
+
+3. Enter the **Image URL**. This is the pixel endpoint with your tracking parameters appended as query parameters. Use GTM variables in the URL: `https://track.example.com/pixel?order_id={{DLV - transaction_id}}&value={{DLV - ecommerce.value}}`
+
+4. **Enable Cache Busting** unless you have a specific reason not to. With cache busting enabled, GTM appends a random number as the `gtmcb` parameter to prevent browser caching from suppressing the pixel request.
+
+5. Configure the **Cache Busting Query Parameter** name if `gtmcb` conflicts with your endpoint's expected parameters.
+
+6. Set your trigger and save.
+</Steps>
+
+<TagConfig
+  name="Pixel - Affiliate Network"
+  type="Custom Image"
+  trigger="CE - purchase"
+  variables={['DLV - transaction_id', 'DLV - ecommerce.value', 'DLV - ecommerce.currency']}
+/>
+
+## URL construction
+
+The Image URL is the full pixel endpoint including query parameters. Combine static text with GTM variables:
+
+```
+https://tracking.affiliatenetwork.com/pixel?
+  type=conversion
+  &order_id={{DLV - transaction_id}}
+  &revenue={{DLV - ecommerce.value}}
+  &currency={{DLV - ecommerce.currency}}
+  &gtm=1
+```
+
+In practice, this goes in the Image URL field as one line:
+```
+https://tracking.affiliatenetwork.com/pixel?type=conversion&order_id={{DLV - transaction_id}}&revenue={{DLV - ecommerce.value}}&currency={{DLV - ecommerce.currency}}&gtm=1
+```
+
+## Cache busting: enable it
+
+Browsers cache image responses. Without cache busting, a browser that has previously loaded your pixel URL might serve the response from cache instead of making a new request — meaning your tracking hit never reaches the server.
+
+GTM's cache busting option appends a random number as a query parameter (by default `?gtmcb=1234567890`), making every request to a unique URL. Unique URLs are not cached.
+
+Always enable cache busting for tracking pixels. The only reason to disable it is if your server-side endpoint has strict parameter validation that rejects unknown parameters — in which case you can set a specific cache-busting parameter name that your endpoint expects.
+
+## Limitations of Custom Image tags
+
+Understanding why these tags are declining in use helps you know when to avoid them:
+
+**GET requests only**: No POST data. Everything must fit in the URL. GA4's standard hit URL can be several hundred characters. Long ecommerce data (many items) may exceed URL length limits (typically 8KB for a GET request).
+
+**No response handling**: You cannot read the server's response. If the pixel fails, you will not know. Contrast with `fetch()` in a Custom HTML tag, where you can handle errors.
+
+**Blocked by content blockers**: Ad blockers and privacy-focused browsers aggressively block pixel URLs, especially those on known tracking domains. The same is true for JavaScript-based tracking, but Custom Image pixels tend to have higher block rates.
+
+**Not suitable for important conversions**: For valuable conversion events (purchases, form submissions), use `navigator.sendBeacon()` via a Custom HTML tag — it is more reliable, works during page unload, and handles large payloads better.
+
+**HTTPS required on HTTPS pages**: If your page is HTTPS and your pixel URL is HTTP, browsers will block the request as mixed content.
+
+**No consent-aware behavior**: Custom Image tags load immediately when fired. They cannot check consent state. You must control consent at the trigger level — using tag sequencing with a consent setup tag, or exception triggers.
+
+## When Custom Image tags are still appropriate
+
+Despite their limitations, Custom Image tags are the right choice for:
+
+**Legacy affiliate tracking systems**: Many affiliate networks still operate primarily with pixel-based tracking. Their dashboards expect specific pixel URL patterns, and a Custom Image tag is the most direct implementation.
+
+**Server-side logging endpoints you control**: If you have a simple server endpoint that logs requests (for server-side deduplication, record-keeping, or backup tracking), a pixel is efficient and lightweight.
+
+**Simple acknowledgment signals**: Where you just need the server to know "this user reached this page" and you do not need response data or complex parameters.
+
+**Third-party systems with no API alternative**: Some ad networks, verification services, and data providers only support pixel integration.
+
+## Modern alternatives
+
+For most use cases where you might reach for a Custom Image tag, these alternatives are superior:
+
+**`navigator.sendBeacon()`** (Custom HTML tag): Sends a POST request asynchronously, works reliably during page unload, supports larger payloads. The modern replacement for beacon pixels.
+
+```html
+<script>
+(function() {
+  try {
+    var data = {
+      event: 'purchase',
+      order_id: '{{DLV - transaction_id}}',
+      value: {{DLV - ecommerce.value}}
+    };
+    navigator.sendBeacon(
+      'https://track.example.com/hit',
+      JSON.stringify(data)
+    );
+  } catch(e) {}
+})();
+</script>
+```
+
+**GA4 Measurement Protocol**: For conversions that are important enough to warrant server-side confirmation, use the GA4 Measurement Protocol from your server. Client-side hits can be blocked; server-side hits cannot.
+
+**Native vendor templates**: Most major advertising platforms (Google Ads, Meta, LinkedIn) have GTM Community Templates that handle consent, retries, and advanced features that a raw pixel cannot.
+
+## Common mistakes
+
+### Forgetting to enable cache busting
+
+A Custom Image tag without cache busting may never fire in practice for return visitors, because the browser returns the cached pixel without making a new network request. Enable cache busting.
+
+### Putting sensitive data in the URL
+
+GET request URLs appear in:
+- Browser history
+- Server access logs at every proxy and CDN between the browser and your server
+- Referrer headers when the user navigates away
+
+Never include email addresses, user identifiers, order details, or any PII in a pixel URL. For data that must be passed, use POST via `sendBeacon()` from a Custom HTML tag.
+
+### Using Custom Image tags for high-value conversions
+
+For a purchase confirmation pixel, use a more reliable mechanism. Custom Image tags can fail silently — the pixel request can be blocked, cached, or dropped without any indication. For revenue-reporting conversions, use a method with confirmation.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom HTML Tags"
+    description="The more powerful alternative for complex pixel logic, consent checking, and POST-based tracking."
+    href="/client-side/tags/custom-html-tags/"
+  />
+  <LinkCard
+    title="Conversion Linker"
+    description="The Google tag companion for Ads conversion tracking — more reliable than image pixels."
+    href="/client-side/tags/conversion-linker/"
+  />
+  <LinkCard
+    title="Tag Sequencing"
+    description="How to ensure consent is checked before your pixel fires."
+    href="/client-side/tags/tag-sequencing/"
+  />
+</CardGrid>

@@ -1,6 +1,207 @@
 ---
 title: "Cloud Run Scaling"
-description: "Auto-scaling configuration for Cloud Run sGTM deployments."
+description: "Autoscaling, concurrency, cold starts, and cost optimization for sGTM on Cloud Run."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Cloud Run scales automatically — from zero instances when idle to many instances under load. For sGTM, the default scaling behavior is functional but not optimal. Cold starts, concurrency limits, and scaling policies all affect latency, reliability, and your monthly bill. This article explains how Cloud Run scaling works and how to configure it for a production sGTM deployment.
+
+## How Cloud Run scaling works
+
+Cloud Run creates instances of your container in response to incoming requests. Each instance can handle multiple concurrent requests up to the concurrency limit you configure. When request volume exceeds the capacity of existing instances, Cloud Run starts new ones. When request volume drops, it scales down — eventually to zero if minimum instances is set to 0.
+
+For sGTM, the traffic pattern is typically:
+
+- **Predictable base load**: proportional to your site's regular visitor traffic
+- **Occasional spikes**: email campaigns, paid media bursts, sale events
+- **Quiet periods**: nights, weekends for B2B sites; consistent 24/7 for consumer sites with global audiences
+
+Understanding this pattern drives most of the scaling decisions.
+
+## Minimum instances: the most important setting
+
+The single configuration decision with the highest impact on sGTM reliability is minimum instances.
+
+**Minimum instances = 0** (Cloud Run default): When no requests arrive for a period, all instances scale down to zero. The next request that arrives hits a **cold start** — Cloud Run must provision a new container from scratch. The sGTM cold start takes 2–5 seconds. During those 2–5 seconds, the request either times out (lost event) or waits (delayed response visible to the browser).
+
+Mobile devices with slow connections often have request timeouts shorter than 5 seconds. Cold starts silently drop mobile tracking data.
+
+**Minimum instances = 1**: One container is always running. No cold start, guaranteed sub-200ms response time for the first request at any hour. Cost: approximately $15–20/month in idle compute (1 vCPU, 512 MiB, always running).
+
+**Recommendation: always set minimum instances to 1 for production sGTM.** The $15–20/month is negligible relative to the data quality improvement.
+
+For a development or staging sGTM environment, minimum 0 is acceptable — cold starts are tolerable in non-production.
+
+## Concurrency settings
+
+Each Cloud Run instance can handle multiple simultaneous requests. The concurrency setting controls how many.
+
+**Default concurrency**: 80 requests per instance (Cloud Run default).
+
+For sGTM, which does lightweight JSON processing and HTTP forwarding:
+- **80 concurrent requests per instance** is a good default for standard deployments
+- **Increase to 200-300** if your requests are simple (GA4 forwarding only, no Firestore enrichment)
+- **Decrease to 20-40** if each request makes multiple outbound API calls (enrichment, multiple CAPI calls) that hold the request open
+
+The tradeoff: higher concurrency means fewer instances are needed (lower cost), but each instance handles more simultaneous work. If you have CPU-intensive enrichment logic, too high a concurrency means requests queue behind each other on the same instance.
+
+Practical approach: start with the default 80, monitor CPU utilization in Cloud Monitoring, and adjust if instances consistently hit >70% CPU.
+
+## Maximum instances
+
+Maximum instances caps the scaling ceiling. Without a cap, Cloud Run scales indefinitely — which can generate unexpected costs during traffic spikes.
+
+**Recommendation**: set maximum instances based on your worst-case traffic scenario with headroom.
+
+```
+Max instances = (Peak requests/minute ÷ concurrency) × 1.5
+```
+
+Example: a site expecting up to 10,000 requests/minute at peak, with 80 concurrency:
+- Instances needed at peak: 10,000 / (80 × ~10 requests/second capacity) ≈ 13 instances
+- With 1.5× headroom: 20 maximum instances
+
+Start conservatively. You can increase the maximum without a deployment — it takes effect immediately.
+
+## CPU allocation
+
+Cloud Run has two CPU allocation modes:
+
+**CPU is only allocated during request processing** (default): The container's CPU is throttled to nearly zero between requests. This is the most cost-efficient mode — you only pay for CPU during actual request handling.
+
+**CPU is always allocated**: The container receives its allocated CPU continuously, even between requests. More expensive, but eliminates the CPU ramp-up time when a burst of requests arrives at an instance.
+
+For sGTM: use **CPU is always allocated** on your minimum instance. The additional cost is minimal (you are already paying for the idle instance), and it eliminates the subtle latency increase from CPU throttle on the first few requests in a burst.
+
+You can apply this setting selectively to minimum instances only by using a container revision configuration.
+
+## Memory sizing
+
+| Deployment type | Recommended memory |
+|---|---|
+| GA4 forwarding only | 512 MiB |
+| GA4 + 1-2 CAPI tags | 512 MiB |
+| GA4 + Firestore enrichment | 1 GiB |
+| Multiple enrichment calls + complex tags | 2 GiB |
+| High concurrency (200+ concurrent requests) | 2 GiB |
+
+Cloud Run memory cost is low — the difference between 512 MiB and 1 GiB is approximately $5–10/month at typical sGTM request volumes. Size generously rather than running close to the limit.
+
+Out-of-memory errors in Cloud Run terminate the container mid-request and drop the event. Memory errors appear in Cloud Logging as `OOMKilled` events.
+
+## Traffic patterns and scaling behavior
+
+### Steady traffic
+
+Sites with consistent 24/7 traffic (global e-commerce, SaaS) need fewer scaling adjustments. The load stays relatively flat, and minimum instances prevents cold starts. Set reasonable maximum instances as a cost cap.
+
+### Spike-based traffic (campaigns, sales events)
+
+Sites with large traffic bursts need more careful configuration:
+
+- **Pre-warm before events**: before a major email campaign or flash sale, temporarily increase minimum instances to 2-3. Prevents the autoscaler from being caught flat-footed by sudden load.
+- **Set maximum instances high enough**: a traffic spike that hits the maximum instances cap starts queuing requests. Queued requests add latency and eventually time out.
+- **Test your scaling**: run a load test before your first major traffic event. Tools like k6 or Apache Bench can simulate request spikes.
+
+### Scale-in delay
+
+Cloud Run scales in (down) by default after a quiet period. Aggressive scale-in means the server scales down between requests during off-peak hours, causing cold starts when traffic resumes. With minimum instances set to 1, scale-in never goes below 1 instance — eliminating this problem.
+
+## Request timeout
+
+Default timeout: 60 seconds. For sGTM, this is far more than needed. Most requests complete in 50–500ms. The timeout only matters if:
+
+- A tag is making a slow API call (Firestore, external enrichment)
+- A tag is performing a retry after a failed outbound request
+
+Keep the timeout at 60 seconds for safety. Setting it lower (say, 10 seconds) can cause sGTM to drop requests if a vendor API is temporarily slow.
+
+## Monitoring scaling behavior
+
+Cloud Run exposes scaling metrics in Cloud Monitoring:
+
+- **Instance count**: how many instances are running at any moment
+- **Request latency**: P50, P95, P99 latency — watch P99 for cold start spikes
+- **CPU utilization**: if consistently above 70%, increase concurrency or instances
+- **Memory utilization**: if approaching 90%, increase memory allocation
+
+Set up dashboards and alerts:
+
+```bash
+# Create an alerting policy for high P99 latency
+gcloud alpha monitoring policies create \
+  --notification-channels="projects/YOUR_PROJECT/notificationChannels/YOUR_CHANNEL" \
+  --display-name="sGTM high P99 latency" \
+  --conditions="..."
+```
+
+Or configure through the Cloud Monitoring Console UI.
+
+## Cost optimization
+
+### Request batching and deduplication
+
+Not applicable to sGTM — each browser request is a separate tracking event that must be processed independently.
+
+### Right-sizing instances
+
+Do not over-provision CPU or memory. Start with 1 vCPU and 512 MiB, monitor for 30 days, and adjust based on actual utilization. Cloud Run charges for allocated CPU and memory, not peak usage.
+
+### Regional optimization
+
+Serve sGTM from the region closest to the majority of your users. Cross-region request routing adds 50–200ms latency (unacceptable for a tracking endpoint) and network egress charges.
+
+For global sites, consider multi-region deployment with GeoDNS routing:
+- `europe-west1` for European users
+- `us-central1` for North American users
+- `asia-northeast1` for Asian users
+
+Multi-region adds operational complexity (separate Cloud Run services, separate monitoring) but eliminates cross-region latency for global audiences.
+
+## Summary: recommended production settings
+
+| Setting | Value | Rationale |
+|---|---|---|
+| Minimum instances | 1 | Eliminates cold starts |
+| Maximum instances | 10–30 | Cost cap with headroom |
+| Memory | 512 MiB – 1 GiB | Scale with enrichment complexity |
+| CPU | 1 vCPU | Adequate for standard loads |
+| Concurrency | 80 | Good default; tune based on CPU metrics |
+| CPU allocation | Always allocated | Consistent performance |
+| Request timeout | 60 seconds | Handles slow vendor API responses |
+
+## Common mistakes
+
+**Minimum instances at 0 in production.** Cold starts silently drop mobile tracking events. Always set to 1.
+
+**No maximum instances cap.** A traffic spike or misconfigured client flooding your endpoint with requests can scale to hundreds of instances before you notice. Set a reasonable maximum.
+
+**Ignoring P99 latency.** Average latency looks fine while cold starts spike P99 to 5+ seconds for 1% of requests — which happens to be the first request of every morning as the instance warms. Monitor P99, not just average.
+
+**Never testing under load.** The first time you discover your sGTM can't handle a traffic spike should not be during a major campaign. Load test once at setup, and again before any anticipated traffic spike.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GCP Setup"
+    description="Full Cloud Run deployment guide — start here before configuring scaling."
+    href="/server-side/setup/gcp-setup/"
+  />
+  <LinkCard
+    title="Cost Management"
+    description="Cloud Run cost breakdown, estimation, and optimization strategies."
+    href="/server-side/operations/cost-management/"
+  />
+  <LinkCard
+    title="Scaling Strategies"
+    description="Multi-region deployment, load testing, and handling traffic spikes."
+    href="/server-side/operations/scaling-strategies/"
+  />
+  <LinkCard
+    title="Monitoring & Logging"
+    description="Setting up dashboards and alerts for your sGTM infrastructure."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+</CardGrid>

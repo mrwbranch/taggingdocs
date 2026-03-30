@@ -1,6 +1,153 @@
 ---
 title: "add_shipping_info"
-description: "DataLayer specification for shipping information step."
+description: "Complete dataLayer specification for the GA4 add_shipping_info event — capturing shipping method selection and full cart contents at the shipping step."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The `add_shipping_info` event fires when a user completes the shipping step of checkout — when they've selected a shipping method and continued to the next step. The `shipping_tier` parameter captures which shipping option they chose, giving you data on how shipping preferences affect checkout completion.
+
+## When to fire
+
+Fire `add_shipping_info` when:
+- The user selects a shipping method and clicks "Continue" to proceed to payment
+- The shipping step is completed in a single-page checkout flow
+- The user confirms their shipping address and method
+
+Do **not** fire it when the user merely loads the shipping step — fire when they complete it and advance.
+
+## Complete dataLayer push
+
+```javascript
+// Always clear previous ecommerce data first
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'add_shipping_info',
+  ecommerce: {
+    currency: 'USD',
+    value: 174.47,
+    coupon: 'SUMMER15',
+    shipping_tier: 'Standard Shipping',   // the selected shipping method
+    items: [
+      {
+        item_id: 'SKU-001-BLK-L',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_variant: 'Black / Large',
+        price: 89.99,
+        quantity: 1,
+        coupon: 'SUMMER15',
+        discount: 13.50,
+        affiliation: 'Online Store'
+      },
+      {
+        item_id: 'SKU-047-WHT-M',
+        item_name: 'Cotton Crew T-Shirt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Tops',
+        item_variant: 'White / Medium',
+        price: 24.99,
+        quantity: 2,
+        coupon: '',
+        discount: 0,
+        affiliation: 'Online Store'
+      },
+      {
+        item_id: 'SKU-112-TAN-34',
+        item_name: 'Woven Leather Belt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Accessories',
+        item_category2: 'Belts',
+        item_variant: 'Tan / 34',
+        price: 34.50,
+        quantity: 1,
+        coupon: '',
+        discount: 0,
+        affiliation: 'Online Store'
+      }
+    ]
+  }
+});
+```
+
+## Event schema
+
+<EventSchema
+  event="add_shipping_info"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "add_shipping_info"' },
+    { name: 'ecommerce.currency', type: 'string', required: true, description: 'ISO 4217 currency code.' },
+    { name: 'ecommerce.value', type: 'number', required: true, description: 'Cart subtotal (before shipping cost is added).' },
+    { name: 'ecommerce.coupon', type: 'string', required: false, description: 'Order-level coupon code if applied.' },
+    { name: 'ecommerce.shipping_tier', type: 'string', required: false, description: 'The selected shipping method. Use your display labels: "Standard Shipping", "Express", "Next Day Delivery".' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'All items in the cart.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'SKU or variant-level product identifier.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name.' },
+    { name: 'items[].item_brand', type: 'string', required: false, description: 'Brand.' },
+    { name: 'items[].item_category', type: 'string', required: false, description: 'Primary category.' },
+    { name: 'items[].item_variant', type: 'string', required: false, description: 'Selected variant.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Unit price.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Quantity.' },
+    { name: 'items[].coupon', type: 'string', required: false, description: 'Item-level coupon.' },
+    { name: 'items[].discount', type: 'number', required: false, description: 'Item-level discount.' },
+  ]}
+/>
+
+## Shipping tier values
+
+The `shipping_tier` parameter is a free-form string. Use human-readable labels that match what users see in the checkout UI. Be consistent across your implementation — the same shipping option should always have the same `shipping_tier` value.
+
+```javascript
+// ✅ Consistent, readable
+shipping_tier: 'Standard Shipping'   // 5-7 business days
+shipping_tier: 'Express Shipping'    // 2-3 business days
+shipping_tier: 'Next Day Delivery'
+shipping_tier: 'Store Pickup'
+shipping_tier: 'Same Day Delivery'
+
+// ❌ Inconsistent or cryptic
+shipping_tier: 'standard'
+shipping_tier: 'std_ship_5d'
+shipping_tier: '2'    // an internal code
+```
+
+## GTM configuration
+
+<Steps>
+1. **Create a Custom Event trigger.** Event name: `add_shipping_info`. Name it `CE - add_shipping_info`.
+
+2. **Create Data Layer Variables** for `ecommerce.currency`, `ecommerce.value`, `ecommerce.coupon`, `ecommerce.shipping_tier`, and `ecommerce.items`.
+
+3. **Create the GA4 Event tag.** Event name: `add_shipping_info`. Enable **Send Ecommerce data**. Add `currency`, `value`, `coupon`, and `shipping_tier` as explicit event parameters.
+
+4. **Test in Preview mode.** Navigate through the shipping step, select a method, and continue. Confirm `shipping_tier` shows the selected method label.
+</Steps>
+
+## Common mistakes
+
+**Firing when the shipping step loads, not when it's completed.** If you fire on step entry, users who see the shipping options and go back are counted as if they completed the step. Fire on "Continue to Payment" click or equivalent step completion action.
+
+**Hardcoding a default shipping tier.** If you always push `shipping_tier: 'Standard'` regardless of what the user selected, your shipping preference analysis is meaningless. Dynamically set this value from the checkout form state.
+
+<CardGrid>
+  <LinkCard
+    title="begin_checkout"
+    description="The preceding checkout step."
+    href="/datalayer/ecommerce/begin-checkout/"
+  />
+  <LinkCard
+    title="add_payment_info"
+    description="The following checkout step — payment method selection."
+    href="/datalayer/ecommerce/add-payment-info/"
+  />
+  <LinkCard
+    title="purchase"
+    description="The final checkout event — order confirmation."
+    href="/datalayer/ecommerce/purchase/"
+  />
+</CardGrid>

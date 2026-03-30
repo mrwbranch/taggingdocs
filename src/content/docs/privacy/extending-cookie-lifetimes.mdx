@@ -1,6 +1,206 @@
 ---
 title: "Extending Cookie Lifetimes"
-description: "Server-side techniques for working with browser cookie restrictions."
+description: "Server-side techniques for bypassing browser cookie restrictions — the sGTM cookie refresh pattern, CDN-based extension, and the legal context for each approach."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Safari's ITP caps JavaScript-set cookies at 7 days. One technical fact makes this problem solvable: cookies set via HTTP `Set-Cookie` response headers from your own server are not subject to this cap. Safari honors the full `max-age` or `expires` you specify in server-set cookies, regardless of ITP.
+
+This article covers the practical implementations — from sGTM's built-in cookie refresh to Cloudflare Worker patterns — and the legal context that makes these approaches legitimate only when consent is present.
+
+## Why server-set cookies bypass ITP
+
+ITP's cookie caps specifically target JavaScript's `document.cookie` API. When JavaScript sets a cookie, ITP knows the cookie was set client-side and applies the cap. When a server sets a cookie in an HTTP response header, the browser treats it as a server decision and honors the specified expiry without modification.
+
+This distinction exists because ITP is targeting a specific attack vector: client-side JavaScript used by third-party trackers to set first-party cookies via CNAME cloaking or link decoration workarounds. The assumption is that a server setting a cookie on its own domain is doing so as a first party, not as a cross-site tracker.
+
+The practical result: if your sGTM server at `sgtm.yourdomain.com` sets a `_ga` cookie in its HTTP response with a 2-year expiry, Safari will keep that cookie for 2 years. The same cookie set by Google Analytics JavaScript would be deleted in 7 days.
+
+<Aside type="caution">
+Technical capability does not imply legal permission. These techniques require that the user has consented to analytics cookies under your applicable law (GDPR, ePrivacy, CCPA, etc.). Extending cookie lifetimes for users who have not consented is a privacy violation. The technique is only valid within a proper consent management framework.
+</Aside>
+
+## Method 1: The sGTM cookie refresh pattern
+
+Server-side GTM's GA4 client can automatically handle cookie refresh as part of normal request processing. When a GA4 request passes through your sGTM server, the server reads the incoming `_ga` value from the request and re-sets it in the response headers with the full 2-year expiry.
+
+This happens on every request that passes through sGTM — so every page view, event, or conversion that routes through your server refreshes the cookie lifetime. As long as users visit within 2 years, the cookie persists.
+
+**How to configure it:**
+
+In your sGTM GA4 Client tag, there is a setting for "Override Cookie on Response." When enabled, the GA4 client will write the `_ga` value back to the response as a `Set-Cookie` header.
+
+The key settings:
+- **Cookie name:** `_ga`
+- **Domain:** Your root domain (e.g., `.yourdomain.com` with the leading dot for all subdomains)
+- **SameSite:** `Lax` (required for cross-page navigation to work)
+- **Secure:** `true`
+- **HttpOnly:** `false` (must be false — GA4 JavaScript needs to read this cookie)
+- **Max-age:** `63072000` (2 years in seconds)
+
+After configuration, monitor the Network tab in Safari DevTools on your site. The cookie set in the server response should show the 2-year expiry, not the 7-day ITP cap.
+
+## Method 2: Cloudflare Worker cookie refresh
+
+If you are using Cloudflare, you can implement cookie refresh at the CDN edge without running sGTM. A Cloudflare Worker intercepts responses from your origin server and injects `Set-Cookie` headers that refresh the `_ga` cookie.
+
+```javascript
+// Cloudflare Worker: _ga cookie refresh
+// Deploy to a route pattern like *.yourdomain.com/*
+
+addEventListener('fetch', event => {
+  event.respondWith(handleRequest(event.request));
+});
+
+async function handleRequest(request) {
+  // Pass the request to your origin
+  const response = await fetch(request);
+
+  // Only refresh cookies for HTML page responses
+  const contentType = response.headers.get('Content-Type') || '';
+  if (!contentType.includes('text/html')) {
+    return response;
+  }
+
+  // Read the _ga cookie from the incoming request
+  const cookieHeader = request.headers.get('Cookie') || '';
+  const gaMatch = cookieHeader.match(/_ga=([^;]+)/);
+
+  if (!gaMatch) {
+    // No _ga cookie exists — nothing to refresh
+    return response;
+  }
+
+  const gaValue = gaMatch[1];
+
+  // Clone the response so we can modify headers
+  const newResponse = new Response(response.body, response);
+
+  // Set the _ga cookie with a full 2-year expiry via server response header
+  newResponse.headers.append('Set-Cookie',
+    `_ga=${gaValue}; Domain=.yourdomain.com; Path=/; Max-Age=63072000; Secure; SameSite=Lax`
+  );
+
+  return newResponse;
+}
+```
+
+**Deployment steps:**
+1. Go to Cloudflare Workers in your Cloudflare dashboard
+2. Create a new Worker with the code above
+3. Replace `.yourdomain.com` with your actual domain
+4. Deploy and assign a route that covers your site (`*.yourdomain.com/*`)
+5. Verify in Safari DevTools that the `_ga` cookie shows a 2-year expiry
+
+**AWS CloudFront Functions alternative:**
+
+```javascript
+// CloudFront Function: _ga cookie refresh (runs on viewer response)
+function handler(event) {
+  var response = event.response;
+  var request = event.request;
+
+  var cookies = request.cookies;
+
+  if (cookies && cookies['_ga']) {
+    var gaValue = cookies['_ga'].value;
+    var twoYears = 63072000;
+
+    response.cookies['_ga'] = {
+      value: gaValue,
+      attributes: `Domain=.yourdomain.com; Path=/; Max-Age=${twoYears}; Secure; SameSite=Lax`
+    };
+  }
+
+  return response;
+}
+```
+
+## Method 3: Stape's Cookie Keeper
+
+Stape is a managed sGTM hosting provider that offers a feature called Cookie Keeper — a pre-built implementation of the cookie refresh pattern. It handles the technical setup of reading incoming cookies and re-setting them in server responses without requiring you to write custom Worker code.
+
+Cookie Keeper is a "power-up" in Stape's pricing, meaning it costs extra beyond the base sGTM hosting plan. For teams that are already using Stape for sGTM hosting and want a turnkey solution, it is a reasonable option. For teams who want full control over the implementation, the Cloudflare Worker or sGTM native approach is preferable.
+
+## Method 4: The FPID cookie (server-side identifier)
+
+Beyond refreshing existing cookies, sGTM's GA4 client also sets an FPID (First Party ID) cookie. FPID is a first-party user identifier set entirely by the server, independent of the JavaScript-set `_ga` cookie.
+
+FPID provides a more durable identifier than `_ga` because:
+- It is server-set from the first visit — never subject to ITP's JavaScript cap
+- It has a 400-day lifetime by default
+- It is `HttpOnly: true` — JavaScript cannot read or modify it, which also means it survives attempts to clear it via JavaScript
+
+When FPID is present, the GA4 client in sGTM uses it as the primary identifier for the `client_id`, and the JavaScript-set `_ga` is used as a fallback. This means even if `_ga` expires after 7 days in Safari, the FPID survives and the user is still recognized. See [FPID Cookie Management](/privacy/fpid-cookie-management/) for full details.
+
+## Verifying your implementation
+
+After implementing any cookie refresh method, verify it is working in Safari:
+
+1. Open Safari on a real iPhone or Mac (or use Safari's Web Inspector with Responsive Design Mode)
+2. Clear all cookies and site data for your domain
+3. Visit your site — the `_ga` and FPID cookies should be set on the first page load
+4. Inspect the cookie expiry in Safari Developer Tools → Storage → Cookies
+5. If cookie refresh is working correctly, `_ga` should show an expiry date approximately 2 years from now (not 7 days)
+6. Simulate ITP's behavior: delete `_ga` and reload the page. The sGTM server should re-set `_ga` with the correct value
+
+```bash
+# Test cookie refresh with curl
+# This simulates what sGTM does: read the incoming cookie, write it back in the response
+
+curl -v -H "Cookie: _ga=GA1.1.123456789.1700000000" \
+  https://sgtm.yourdomain.com/g/collect \
+  2>&1 | grep -i "set-cookie"
+
+# Expected output should include:
+# < set-cookie: _ga=GA1.1.123456789.1700000000; Max-Age=63072000; ...
+```
+
+## Legal context
+
+**Server-set cookie lifetime extension is not a consent bypass.**
+
+The question of whether this technique is legal is separate from whether it is technically possible. GDPR and ePrivacy require consent before setting non-essential cookies — regardless of whether they are set via JavaScript or via server response headers. A server-set `_ga` cookie without prior consent is the same legal violation as a JavaScript-set `_ga` cookie without consent.
+
+What is different legally is the persistence. If a user has consented to analytics cookies, extending those cookies to their full 2-year lifetime (instead of being capped at 7 days by ITP) is entirely legitimate. You are not collecting new data — you are maintaining the user identifier that the user agreed to when they accepted your analytics cookies.
+
+**The legitimate use case:** User consents → you set `_ga` and FPID → sGTM refreshes them on each visit → user retains the same identifier for the full consented period.
+
+**The illegitimate use case:** User declines analytics cookies → you set `_ga` and FPID anyway via server headers → ITP cannot cap them → user is tracked against their explicit choice.
+
+Only the first scenario is acceptable. Your consent management platform should gate the sGTM GA4 client (and therefore the cookie refresh) on analytics consent.
+
+## Common mistakes
+
+### Refreshing cookies for all users regardless of consent state
+
+The sGTM cookie refresh should be conditional on consent. If a user has not consented to analytics cookies, the sGTM GA4 client should not be running — and therefore should not be setting or refreshing cookies. Configure your sGTM container to respect the consent state passed from the client.
+
+### Setting cookies on the wrong domain scope
+
+Cookies set by sGTM need to be accessible by the GA4 JavaScript on the client. If your sGTM server is at `sgtm.yourdomain.com` and you set the cookie with `Domain=sgtm.yourdomain.com`, the GA4 script on `www.yourdomain.com` cannot read it. Set the cookie with `Domain=.yourdomain.com` (leading dot) to cover all subdomains.
+
+### Using HttpOnly on the _ga cookie
+
+`_ga` must be readable by JavaScript because the GA4 script needs to read the `client_id` to include it in outbound requests. Setting `HttpOnly: true` on `_ga` breaks the GA4 JavaScript. Only the FPID cookie is correctly set with `HttpOnly: true` — it is read by the server, not by JavaScript.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="ITP History & Impact"
+    description="Why these techniques are necessary — the full ITP story."
+    href="/privacy/itp-history-impact/"
+  />
+  <LinkCard
+    title="FPID Cookie Management"
+    description="The server-set user identifier that works alongside cookie refresh."
+    href="/privacy/fpid-cookie-management/"
+  />
+  <LinkCard
+    title="Cross-Browser Tracking Differences"
+    description="How each browser handles cookies and what workarounds apply to each."
+    href="/privacy/cross-browser-tracking-differences/"
+  />
+</CardGrid>

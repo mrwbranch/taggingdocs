@@ -1,6 +1,151 @@
 ---
 title: "add_payment_info"
-description: "DataLayer specification for payment information step."
+description: "Complete dataLayer specification for the GA4 add_payment_info event — capturing payment method selection at the payment step of checkout."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The `add_payment_info` event fires when a user completes the payment step of checkout. The key parameter here is `payment_type` — which payment method did they select? Credit card, PayPal, Klarna, Apple Pay? This data helps you understand payment method preferences and whether certain payment options correlate with higher checkout completion rates.
+
+## When to fire
+
+Fire `add_payment_info` when:
+- The user selects a payment method and clicks "Continue" or "Place Order"
+- The payment step is completed in a single-page checkout
+- The user confirms their payment method selection
+
+Do **not** fire it when the payment step loads — fire when the user completes the step and advances.
+
+## Complete dataLayer push
+
+```javascript
+// Always clear previous ecommerce data first
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'add_payment_info',
+  ecommerce: {
+    currency: 'USD',
+    value: 174.47,
+    coupon: 'SUMMER15',
+    payment_type: 'credit_card',
+    items: [
+      {
+        item_id: 'SKU-001-BLK-L',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_variant: 'Black / Large',
+        price: 89.99,
+        quantity: 1,
+        coupon: 'SUMMER15',
+        discount: 13.50,
+        affiliation: 'Online Store'
+      },
+      {
+        item_id: 'SKU-047-WHT-M',
+        item_name: 'Cotton Crew T-Shirt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Tops',
+        item_variant: 'White / Medium',
+        price: 24.99,
+        quantity: 2,
+        coupon: '',
+        discount: 0,
+        affiliation: 'Online Store'
+      },
+      {
+        item_id: 'SKU-112-TAN-34',
+        item_name: 'Woven Leather Belt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Accessories',
+        item_category2: 'Belts',
+        item_variant: 'Tan / 34',
+        price: 34.50,
+        quantity: 1,
+        coupon: '',
+        discount: 0,
+        affiliation: 'Online Store'
+      }
+    ]
+  }
+});
+```
+
+## Event schema
+
+<EventSchema
+  event="add_payment_info"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "add_payment_info"' },
+    { name: 'ecommerce.currency', type: 'string', required: true, description: 'ISO 4217 currency code.' },
+    { name: 'ecommerce.value', type: 'number', required: true, description: 'Cart subtotal (before tax and shipping).' },
+    { name: 'ecommerce.coupon', type: 'string', required: false, description: 'Order-level coupon code if applied.' },
+    { name: 'ecommerce.payment_type', type: 'string', required: false, description: 'The selected payment method. Standardize values across your implementation.' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'All items in the cart at payment step.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'SKU or variant-level product identifier.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Unit price.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Quantity.' },
+    { name: 'items[].coupon', type: 'string', required: false, description: 'Item-level coupon.' },
+    { name: 'items[].discount', type: 'number', required: false, description: 'Item-level discount.' },
+  ]}
+/>
+
+## Payment type values
+
+Use consistent, lowercase values for `payment_type`. These are the recommended values:
+
+```javascript
+payment_type: 'credit_card'     // Visa, Mastercard, Amex
+payment_type: 'debit_card'
+payment_type: 'paypal'
+payment_type: 'apple_pay'
+payment_type: 'google_pay'
+payment_type: 'klarna'
+payment_type: 'afterpay'
+payment_type: 'bank_transfer'
+payment_type: 'gift_card'
+payment_type: 'store_credit'
+```
+
+If you need to distinguish credit card brands (Visa vs. Amex), you can include the brand: `payment_type: 'visa'`, `payment_type: 'amex'`.
+
+## GTM configuration
+
+<Steps>
+1. **Create a Custom Event trigger.** Event name: `add_payment_info`. Name it `CE - add_payment_info`.
+
+2. **Create Data Layer Variables** for `ecommerce.currency`, `ecommerce.value`, `ecommerce.coupon`, `ecommerce.payment_type`, and `ecommerce.items`.
+
+3. **Create the GA4 Event tag.** Event name: `add_payment_info`. Enable **Send Ecommerce data**. Add `currency`, `value`, `coupon`, and `payment_type` as explicit event parameters.
+
+4. **Test in Preview mode.** Select different payment methods and advance through the checkout. Confirm `payment_type` changes correctly for each selection.
+</Steps>
+
+## Common mistakes
+
+**Not capturing the actual payment method.** If your payment step has multiple options (credit card, PayPal, Klarna) but you always push `payment_type: 'credit_card'`, you're losing the distribution data. Dynamically read the selected payment option from the checkout form state.
+
+**Firing before the user selects a method.** If the payment step auto-selects a default payment method and you fire on step load, you're capturing the default — not the user's actual choice if they change it before advancing.
+
+<CardGrid>
+  <LinkCard
+    title="add_shipping_info"
+    description="The preceding checkout step."
+    href="/datalayer/ecommerce/add-shipping-info/"
+  />
+  <LinkCard
+    title="purchase"
+    description="The final checkout event — order confirmation."
+    href="/datalayer/ecommerce/purchase/"
+  />
+  <LinkCard
+    title="begin_checkout"
+    description="The checkout funnel starting point."
+    href="/datalayer/ecommerce/begin-checkout/"
+  />
+</CardGrid>

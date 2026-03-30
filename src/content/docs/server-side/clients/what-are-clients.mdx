@@ -1,6 +1,178 @@
 ---
 title: "What Are Clients?"
-description: "Understanding the client concept in server-side GTM."
+description: "The Client concept in sGTM — how they claim requests, build the Event Model, and determine what data tags can access."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Clients are the entry point for all incoming traffic to your sGTM server. Every request — whether from a browser's GA4 tag, a webhook from your CRM, or a mobile app — passes through a client before any tag fires. Understanding how clients work is prerequisite knowledge for every other aspect of sGTM configuration.
+
+## What a client does
+
+A client performs four functions for every incoming HTTP request:
+
+1. **Evaluates** whether it should handle this request
+2. **Claims** the request if it matches
+3. **Parses** the request data (headers, body, query parameters, cookies)
+4. **Builds the Event Model** — a structured data object that all tags and triggers read from
+
+If the client does not claim the request, sGTM moves on to the next client in priority order. If no client claims the request, sGTM uses a default fallback behavior (typically returns 200 OK with no processing).
+
+## The claiming mechanism
+
+Claiming is the mechanism by which a client asserts ownership of a request. Each client template contains claiming logic — typically checking the request path, a specific header, or the request format.
+
+The GA4 web client, for example, claims requests that arrive at the path `/g/collect` or `/mp/collect` — the standard GA4 Measurement Protocol endpoints. If a request arrives at any other path, the GA4 client does not claim it.
+
+Claiming is binary: a client either claims a request (and processes it exclusively) or does not claim it (and the next client gets evaluated). The first client in priority order that claims a request wins. No other client processes that request.
+
+## The Event Model
+
+The Event Model is the core output of a client's work. It is a structured, standardized data object that all tags, triggers, and variables read from.
+
+For a GA4 pageview request, the Event Model built by the GA4 client contains:
+
+```javascript
+{
+  "event_name": "page_view",
+  "client_id": "1234567890.1711900000",
+  "user_id": undefined,
+  "page_location": "https://yoursite.com/products/item-123",
+  "page_title": "Item 123 — YourSite",
+  "page_referrer": "https://google.com",
+  "ip_override": "203.0.113.42",
+  "user_agent": "Mozilla/5.0 ...",
+  // ...all other GA4 parameters from the Measurement Protocol request
+}
+```
+
+Tags access Event Model data through **Event Data variables** — a built-in variable type in sGTM that reads named fields from the Event Model. When a GA4 server tag fires, it reads `event_name`, `page_location`, and all other parameters from the Event Model.
+
+The Event Model is not persistent. It exists only during the processing of a single request. Each new request creates a new Event Model from scratch.
+
+## Built-in clients
+
+sGTM comes with two built-in client templates:
+
+### GA4 client (GA4)
+
+The primary client for most sGTM deployments. It handles:
+- Measurement Protocol v2 requests (the format sent by client-side GA4 tags)
+- The standard GA4 collection endpoint path (`/g/collect`)
+- Cookie reading and setting (`_ga`, `FPID`, `_ga_XXXXXXXX` session cookies)
+- Mapping GA4 request parameters to the Event Model
+
+The GA4 client is installed by default in every new sGTM container.
+
+### Universal Analytics client
+
+Handles Universal Analytics (GA3) Measurement Protocol requests. Relevant only for organizations still running Universal Analytics — deprecated and largely irrelevant for new implementations.
+
+## Why multiple clients exist
+
+A single sGTM server can receive data from multiple different sources. Each source sends data in a different format:
+
+- GA4 browser tags send Measurement Protocol v2 JSON
+- Shopify webhooks send Shopify's proprietary order JSON
+- Your mobile app might send a custom event format
+- A payment processor sends webhook notifications on purchase completion
+
+Each source needs its own client to parse its specific format and build the Event Model. The result: one sGTM server handles all your tracking data sources, regardless of format.
+
+```
+POST /g/collect          → GA4 client claims → GA4 Event Model
+POST /webhooks/crm       → Custom CRM client claims → CRM Event Model
+POST /webhooks/payment   → Custom payment client claims → Payment Event Model
+GET  /healthz            → Default client → 200 ok (unclaimed)
+```
+
+## Client configuration
+
+Most client configuration is minimal. The GA4 client has a few settings:
+
+- **Allowed origins**: restrict which domains can send requests to your sGTM endpoint
+- **Event data to process**: whitelist specific event types (leave empty to process all)
+- **Return request URL**: the URL to redirect the browser to after processing (rarely needed)
+
+For custom clients, the configuration is whatever fields you define in the template.
+
+## How to add a client
+
+In your sGTM container:
+
+1. **Clients** tab → **New**
+2. Choose a client template (built-in or from Community Gallery)
+3. Configure any required fields
+4. Set priority if you have multiple clients (lower number = higher priority)
+5. Save and publish
+
+## Client priority
+
+When you have multiple clients, priority determines which one gets to evaluate first. Lower priority number = evaluated first.
+
+Default priorities:
+- GA4 client: 10
+- Custom clients: typically assigned 20, 30, etc. during creation
+
+The recommendation: assign incrementing priorities (10, 20, 30) and leave gaps between them so you can insert new clients between existing ones later without renumbering.
+
+## What happens when no client claims a request
+
+If a request arrives and no configured client claims it, sGTM uses the default behavior:
+- Returns HTTP 200
+- No Event Model is built
+- No triggers fire
+- No tags execute
+
+This is the expected behavior for health checks (`/healthz`), robots.txt requests, or any request not destined for a tracking endpoint.
+
+You can inspect unclaimed requests in sGTM Preview mode — they appear as "No client claimed" in the request list, which helps diagnose misconfigured routing.
+
+## The client as a data transformation layer
+
+One of the most powerful aspects of the client architecture is that each client can transform data independently before it reaches tags.
+
+A CRM webhook client might:
+- Parse a Salesforce opportunity update
+- Map the CRM's field names to GA4-style parameter names
+- Set `event_name` to `crm_opportunity_updated`
+- Set `client_id` using the contact's known email hash
+
+The tags downstream do not know or care that the data came from a CRM webhook. They read `event_name`, `client_id`, and parameters from the Event Model exactly as they would for a GA4 browser event. Tags are source-agnostic. Clients handle source-specific parsing.
+
+This separation — clients for parsing, tags for distribution — is the key architectural insight of sGTM.
+
+## Common mistakes
+
+**Not understanding that the client builds the Event Model.** If a tag is receiving wrong or missing data, the first place to look is the client, not the tag. Check what the Event Model contains in Preview mode before debugging tag configuration.
+
+**Assigning duplicate priorities to multiple clients.** When two clients have the same priority, the order of evaluation is not guaranteed. Be explicit: each client gets a unique priority number.
+
+**Forgetting to publish after adding a new client.** Changes to clients (and all sGTM container elements) require a container publish to take effect in production. Preview mode shows unpublished changes; production traffic uses the last published version.
+
+**Building one client to handle all data formats.** Resist the temptation to write one giant custom client with branching logic for different request formats. One client per data source is easier to maintain, easier to debug, and avoids priority conflicts.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Client Claiming"
+    description="Deep dive on the claiming mechanism, priority order, and debugging which client handled a request."
+    href="/server-side/clients/client-claiming/"
+  />
+  <LinkCard
+    title="GA4 Web Client"
+    description="The default GA4 client — configuration, Event Model mapping, and cookie behavior."
+    href="/server-side/clients/ga4-web-client/"
+  />
+  <LinkCard
+    title="Custom Clients"
+    description="Building client templates for webhooks and non-GA4 data sources."
+    href="/server-side/clients/custom-clients/"
+  />
+  <LinkCard
+    title="Architecture Overview"
+    description="How clients fit into the broader sGTM request lifecycle."
+    href="/server-side/fundamentals/architecture-overview/"
+  />
+</CardGrid>

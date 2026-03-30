@@ -1,6 +1,158 @@
 ---
 title: "iFrame Tracking"
-description: "Tracking events inside iframes."
+description: "Track events inside iframes using the postMessage bridge — same-origin and cross-origin iframes, dataLayer forwarding, and form tracking."
+sidebar:
+  badge:
+    text: Advanced
+    variant: danger
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+iframes create a separate browsing context. GTM running on the parent page cannot access DOM elements or JavaScript inside a cross-origin iframe, and an iframe cannot directly push to the parent page's dataLayer. The solution is a `postMessage` bridge: the iframe sends messages to the parent, and the parent forwards them to the dataLayer.
+
+## Same-origin vs. cross-origin iframes
+
+**Same-origin iframes** (e.g., iframe and parent are both on `yoursite.com`) can share JavaScript directly: `window.parent.dataLayer.push({...})`. This is the simple case.
+
+**Cross-origin iframes** (e.g., iframe is on `payments-provider.com`, parent is on `yoursite.com`) cannot access each other's JavaScript due to the browser's same-origin policy. You need postMessage.
+
+<Aside type="note">
+You need access to the code inside the iframe to implement this recipe. If the iframe hosts third-party content you cannot modify (like a HubSpot form), use the third-party provider's own callback mechanism instead. See [Track Form Submissions](/recipes/track-form-submissions/) for HubSpot callbacks.
+</Aside>
+
+## Cross-origin postMessage implementation
+
+### Inside the iframe (code you add to the iframe's page)
+
+```javascript
+// Inside your iframe page — push this instead of dataLayer.push()
+function trackToParent(eventData) {
+  window.parent.postMessage({
+    type: 'GTM_EVENT',
+    payload: eventData
+  }, '*');  // Replace '*' with the parent domain for security: 'https://yoursite.com'
+}
+
+// Use anywhere you would normally call dataLayer.push()
+document.getElementById('contact-form').addEventListener('submit', function(e) {
+  e.preventDefault();
+  // ... form logic ...
+  trackToParent({
+    event: 'form_submission',
+    form_name: 'embedded_contact',
+    form_location: 'iframe'
+  });
+});
+```
+
+<Aside type="caution">
+Using `'*'` as the target origin in `postMessage` means any page can receive the message. Always specify the exact parent domain in production: `window.parent.postMessage(data, 'https://yoursite.com')`.
+</Aside>
+
+### On the parent page (Custom HTML tag in GTM)
+
+<DataLayerExample event="iframe_event" description="Listen for postMessage events from iframes and forward them to the dataLayer.">
+```javascript
+(function() {
+  var ALLOWED_ORIGINS = [
+    'https://checkout.payments-provider.com',
+    'https://forms.yourembeddedform.com'
+  ];
+
+  window.addEventListener('message', function(event) {
+    // Validate origin
+    if (ALLOWED_ORIGINS.indexOf(event.origin) === -1) return;
+
+    // Validate message structure
+    if (!event.data || event.data.type !== 'GTM_EVENT') return;
+
+    var payload = event.data.payload;
+    if (!payload || !payload.event) return;
+
+    // Forward to dataLayer
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(payload);
+  });
+})();
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add the postMessage listener** to the parent page as a Custom HTML tag
+   - Trigger: **DOM Ready** (All Pages where iframes appear)
+
+2. **Add `trackToParent()` calls** inside the iframe's JavaScript, replacing any dataLayer pushes
+
+3. **Create a Custom Event Trigger** on the parent page:
+   - Trigger type: **Custom Event**
+   - Event name: `form_submission` (or whatever event name the iframe sends)
+
+4. **Create a GA4 Event Tag** on the parent page:
+   - The tag reads from `DLV - form_name` etc., just like any other GA4 event
+   - Trigger: the Custom Event trigger above
+
+5. **Test in Preview Mode**
+
+   Open GTM Preview on the parent page. Interact with the iframe (e.g., submit the form). The event from the iframe should appear in the GTM Summary pane as if it were fired on the parent page.
+</Steps>
+
+## Same-origin iframe (simpler approach)
+
+If the iframe and parent page are on the same domain, push directly to the parent's dataLayer:
+
+```javascript
+// Inside the same-origin iframe
+window.parent.dataLayer = window.parent.dataLayer || [];
+window.parent.dataLayer.push({
+  event: 'form_submission',
+  form_name: 'embedded_quote',
+  form_origin: window.location.href
+});
+```
+
+No listener tag is needed on the parent page — the push goes directly into the parent's dataLayer and GTM picks it up immediately.
+
+## Tracking GTM inside the iframe itself
+
+If you have GTM installed inside the iframe as well as the parent page, you have two separate GTM containers running. Events in the iframe will fire tags in the iframe's GTM container, not the parent's. This is fine if you want separate analytics per iframe, but it means ecommerce events in the iframe will not automatically combine with the parent's session unless you set up cross-domain tracking or postMessage forwarding.
+
+For most cases, the postMessage bridge approach (events fire in the parent's GTM container) is simpler and leads to better unified attribution.
+
+## Debugging cross-origin postMessage
+
+Open the browser console on the parent page and watch for messages:
+
+```javascript
+// Temporary debug listener — remove after testing
+window.addEventListener('message', function(e) {
+  console.log('postMessage received:', e.origin, e.data);
+});
+```
+
+If you see messages but they are not forwarding to the dataLayer, check the `ALLOWED_ORIGINS` array.
+
+If you see no messages, the iframe code is not calling `postMessage`. Add `console.log` inside the iframe to verify the code is executing.
+
+## Test it
+
+1. Open GTM Preview on the parent page
+2. Interact with the iframe (submit a form, click a button)
+3. The event should appear in the GTM Summary pane on the parent page
+4. Verify the event name and parameters match what the iframe is sending
+5. Confirm Tags Fired shows your GA4 tag with correct parameter values
+
+## Common gotchas
+
+**Origin validation fails silently.** If the origin in `ALLOWED_ORIGINS` does not exactly match `event.origin` (including protocol and port), the message is silently dropped. Log `event.origin` during testing to see the exact string.
+
+**iframe sends events before listener is set up.** If the iframe loads and sends a message before the parent page's Custom HTML tag has run, the message will be lost. Use a **DOM Ready** trigger (not **Page View**) to ensure the listener is attached earlier.
+
+**Safari ITP blocks third-party cookies in iframes.** If the iframe is on a third-party domain, Safari Intelligent Tracking Prevention will block cookies set by that domain inside the iframe. This affects any GA4 tag running inside the cross-origin iframe — another reason to track from the parent page via postMessage.
+
+<CardGrid>
+  <LinkCard title="Cross-Domain Tracking Setup" href="/recipes/cross-domain-setup/" description="When users navigate between separate domains, not embeds." />
+  <LinkCard title="Track Form Submissions" href="/recipes/track-form-submissions/" description="Third-party form callback patterns for HubSpot and Marketo." />
+</CardGrid>

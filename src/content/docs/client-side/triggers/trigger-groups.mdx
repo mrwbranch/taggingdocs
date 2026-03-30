@@ -3,4 +3,187 @@ title: "Trigger Groups"
 description: "Combining multiple triggers to fire a tag only when all conditions are met."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Trigger Groups solve a specific problem: you need a tag to fire only after multiple separate trigger conditions have all been met on the same page. Built-in triggers fire independently — when their event occurs. But a Trigger Group fires a tag only when every trigger in the group has fired at least once during the current page session.
+
+This is the "AND across time" operator that standard trigger conditions cannot express.
+
+## What Trigger Groups are and are not
+
+Standard trigger conditions let you express AND logic within a single event:
+
+```
+Page View fires when:
+  Page Path contains /blog/
+  AND Page Path does not contain /blog/author
+```
+
+Both conditions are evaluated at the same moment, against the same event. This works fine.
+
+But what if you need:
+
+```
+Fire tag when:
+  User has scrolled to 50% depth
+  AND user has been on the page for 30 seconds
+```
+
+These two conditions happen at different moments in time. The scroll might happen at 10 seconds. The timer might fire at 30 seconds. A standard trigger with both conditions can never satisfy both simultaneously — they are evaluated on different events. A Trigger Group is the answer.
+
+## How Trigger Groups work
+
+<Steps>
+1. Create the individual triggers you want to combine (e.g., a Scroll Depth trigger at 50% and a Timer trigger at 30 seconds)
+2. Create a new trigger of type **Trigger Group**
+3. Select the triggers that must all fire for the group to activate
+4. Attach the Trigger Group to your tag instead of the individual triggers
+</Steps>
+
+GTM tracks whether each member trigger has fired during the current page session. When the last member fires (completing the set), the Trigger Group fires your tag.
+
+The order does not matter. If the timer fires before the scroll, that is fine. If the scroll fires before the timer, that is also fine. GTM waits until all members have fired, regardless of sequence.
+
+<Aside type="tip">
+Trigger Groups work within a single page session. If a user navigates to a new page in a SPA (triggering a virtual pageview), GTM resets the Trigger Group state. All member triggers must fire again on the new "page" for the group to complete.
+</Aside>
+
+## Use cases
+
+### High-engagement content
+
+Fire a tag (newsletter signup prompt, or a GA4 engagement event) only for users who have both read to the bottom AND spent meaningful time on the page:
+
+```
+Trigger Group members:
+  - Scroll Depth: 75% vertical
+  - Timer: 30 seconds, limit 1
+
+Tag: GA4 Event - engaged_reader
+```
+
+This identifies users who are genuinely engaged with your content — not just users who arrived and scrolled fast, and not users who left the tab open while they went to make coffee.
+
+### Consent plus interaction
+
+Fire a retargeting pixel only after the user has granted consent AND performed an interaction:
+
+```
+Trigger Group members:
+  - Custom Event: consent_granted (fired by your CMP callback)
+  - Scroll Depth: 25% (user has engaged with the page)
+
+Tag: Meta Pixel - PageView
+```
+
+This ensures the pixel fires only for users who have both consented and shown genuine interest.
+
+### Survey timing
+
+Show a feedback survey only after the user has read the content AND spent time on the page:
+
+```
+Trigger Group members:
+  - Scroll Depth: 90% (reached the bottom)
+  - Timer: 45 seconds, limit 1
+
+Tag: Custom HTML - Survey Widget Display
+```
+
+A user who reads quickly to the bottom and a user who spends 45 seconds on the page are both captured. Only a user who does both gets the survey.
+
+### Dependency satisfaction
+
+Fire a tag only after two independent prerequisites have been met:
+
+```
+Trigger Group members:
+  - Custom Event: user_data_loaded (your app has fetched user profile)
+  - Page View: DOM Ready (the page structure is in place)
+
+Tag: Custom HTML - Personalization Script
+```
+
+## Configuration example
+
+<TagConfig
+  name="GA4 - Event - Engaged Reader"
+  type="Google Analytics: GA4 Event"
+  trigger="TG - 75% Scroll + 30s Timer"
+  variables={['Page Path', 'Page Title']}
+/>
+
+Setting up the Trigger Group:
+
+1. **Create the Scroll Depth trigger**: Vertical, 75%, fire on Some Pages with `Page Path contains /blog/`
+2. **Create the Timer trigger**: Interval 30000ms, Limit 1, enabling condition `Page Path contains /blog/`
+3. **Create the Trigger Group**: Select both triggers above. Name it `TG - Engaged Reader - Blog`
+4. **Attach to your tag**: Use the Trigger Group as the firing trigger, not the individual triggers
+
+If you attach the individual triggers directly to the tag, the tag fires when either condition is met — not when both are met. The Trigger Group is the piece that enforces AND logic.
+
+## Limitations
+
+**Same-page requirement**: All member triggers must fire on the same page session. This is not a problem for most use cases, but be aware that Trigger Groups cannot span page navigations.
+
+**No OR logic**: Trigger Groups are AND-only. Every member trigger must fire. If you need OR logic ("fire if user scrolled OR spent 30 seconds"), use two separate tags, each with one trigger.
+
+**Maximum members**: GTM does not document a hard limit, but Trigger Groups with more than 3-4 members become difficult to reason about and debug. If you need more than 4 conditions, consider pushing a custom dataLayer event from your application code with all the conditions evaluated there.
+
+**Timer groups and hidden tabs**: If one of your Trigger Group members is a Timer trigger, remember that JavaScript timers continue running on hidden tabs. A user who opened your article, switched to another tab for 30 seconds, then came back can still complete the Trigger Group even though they were not actively reading. This is inherent to browser behavior, not a GTM bug.
+
+## Debugging Trigger Groups in Preview mode
+
+In GTM Preview mode, Trigger Groups have their own entry in the trigger evaluation panel. You can see:
+
+- Which member triggers have fired so far (check marks)
+- Which member triggers are still pending (empty circles)
+- When the group completes and your tag fires
+
+This makes debugging much easier than trying to infer state from multiple individual trigger entries. Open Preview, perform the actions that should satisfy both conditions, and watch the Trigger Group status update in the panel.
+
+If the Trigger Group never completes, Preview mode will show you exactly which member trigger has not fired — usually the first clue to what is wrong.
+
+## Common mistakes
+
+### Attaching individual triggers to the tag AND creating a Trigger Group
+
+A common mistake: creating a Trigger Group but also leaving the individual triggers attached to the tag. If you do this, the tag fires when either individual trigger fires (because they are directly attached), and also when the group completes. Remove the individual triggers from the tag and attach only the Trigger Group.
+
+### Using Trigger Groups when standard conditions work
+
+Trigger Groups add complexity. If your conditions can be evaluated at a single moment in time — "page path contains X AND user is logged in" — use standard trigger conditions, not a Trigger Group. Trigger Groups are for conditions that happen at different times.
+
+### Not adding page conditions to member triggers
+
+If you create a Timer trigger and a Scroll Depth trigger as Trigger Group members, but do not add page conditions to the individual triggers, they will fire (and contribute to the group) on every page. If the scroll trigger fires on a product page and the timer fires 30 seconds later on the same page, the group completes — even if that was not your intent. Add page conditions to every member trigger to scope the group correctly.
+
+### Expecting Trigger Groups to track state across page navigations
+
+In SPAs, virtual page navigations reset Trigger Group state. If a user scrolls 75% on page A, then navigates to page B without the timer firing, the scroll depth contribution is lost. The group starts fresh on page B. Design your Trigger Groups around behaviors that will occur on a single page within a reasonable session window.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Scroll Triggers"
+    description="One of the most useful Trigger Group members — track how far users read."
+    href="/client-side/triggers/scroll-triggers/"
+  />
+  <LinkCard
+    title="Timer Triggers"
+    description="The time-based counterpart for Trigger Groups — fire after a delay."
+    href="/client-side/triggers/timer-triggers/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="For complex multi-condition logic, consider pushing a custom event with all conditions evaluated in your application code."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Trigger Types Overview"
+    description="A complete reference for all GTM trigger types."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+</CardGrid>

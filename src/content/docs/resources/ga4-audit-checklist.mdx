@@ -1,6 +1,300 @@
 ---
-title: "GA4 Audit Checklist"
-description: "Systematic GA4 configuration audit checklist."
+title: "GA4 Configuration Audit Checklist"
+description: "A systematic checklist for auditing GA4 property configuration — data retention, Google Signals, custom dimensions, key events, BigQuery export, attribution, and more."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+GA4 property configuration decisions made at setup become invisible six months later — when data retention cuts off, when Google Signals thresholding hides segments in reports, when custom dimensions were never registered for parameters you have been collecting for a year.
+
+This checklist is a systematic review of every GA4 configuration decision. Work through it when you inherit a property, before major reporting periods (annual planning, quarterly reviews), or when your GA4 data produces unexpected results. The whole checklist takes under 90 minutes.
+
+<Aside type="note">
+This checklist covers GA4 property configuration specifically. For a broader review that includes your GTM container, consent implementation, data quality, and performance, use the [GTM & GA4 Audit Checklist](/resources/audit-checklist/).
+</Aside>
+
+---
+
+## Section 1: Data Retention and Basic Settings
+
+These are the settings people configure once and forget, which is exactly when they become problems.
+
+### Data Retention
+
+- [ ] **Data retention is set to 14 months**
+  - Location: Admin → Data Settings → Data Retention → Event data retention
+  - 2 months (the default) cuts off data for any Exploration report with a date range beyond two months
+  - 14 months is the maximum available on all properties (including free tier)
+  - This setting does not affect standard reports — only Explorations
+
+- [ ] **Reset user data on new activity is toggled based on your use case**
+  - If enabled: the retention window resets each time a user is active (extends data for active users)
+  - If disabled: the clock starts from first event regardless of subsequent activity
+  - For most implementations: leave enabled (the default)
+
+### Timezone and Currency
+
+- [ ] Property timezone matches the primary business timezone (not UTC by default)
+  - Timezone affects day boundaries in reports — a mismatch causes sessions to split at the wrong time
+  - Cannot be changed retroactively; changing it only affects future data
+- [ ] Reporting currency matches the currency of primary revenue transactions
+  - GA4 converts multi-currency purchases to the reporting currency using daily exchange rates
+
+### Industry Category
+
+- [ ] Industry category is set accurately
+  - Affects benchmark comparisons in Insights and some predictive modeling
+  - Low priority but worth confirming it is not set to the default "Other"
+
+---
+
+## Section 2: Google Signals
+
+Google Signals enables cross-device user counting and demographic reporting — but it comes with important trade-offs.
+
+- [ ] **Google Signals activation decision is intentional** (not left at default)
+  - Location: Admin → Data Settings → Data Collection → Google Signals data collection
+  - Enabling: provides cross-device user counts, age/gender demographics, and remarketing audiences that work without cookies
+  - Trade-off: activating Signals introduces **thresholding** — segments with fewer than a minimum number of users are suppressed in reports to prevent individual identification
+  - If Signals is enabled and some of your audience segments show "Thresholding applied" warnings, this is why
+
+- [ ] **Thresholding implications are understood by the team**
+  - If your properties have high traffic, thresholding rarely matters
+  - If you have small user segments you rely on for analysis, Signals thresholding will suppress those segments
+  - Mitigation: use BigQuery for granular analysis — BigQuery export is not affected by thresholding
+
+- [ ] **User Data Collection Acknowledgment is completed** (required to activate Signals)
+
+---
+
+## Section 3: Reporting Identity
+
+Reporting identity controls how GA4 determines whether two visits are from the same user.
+
+- [ ] **Reporting identity is configured intentionally**
+  - Location: Admin → Reporting Identity
+  - **Blended** (recommended for most): Uses User ID first, then Google Signals, then device-based
+  - **Observed**: Uses only signals GA4 can observe directly — User ID and Google Signals — no modeling
+  - **Device-based**: Traditional cookie-based identity, no cross-device matching
+  - Most properties should use **Blended** if User ID is implemented or if Signals is enabled
+
+- [ ] **User ID is implemented if your application has authenticated users**
+  - User ID lets GA4 associate sessions from the same logged-in user across devices and browsers
+  - Must be set via `user_id` parameter in GA4 (either in the config tag or via `set_user_properties`)
+  - **Critical**: Never send PII (email, name, phone) as the User ID — send a hashed or internal identifier only
+
+---
+
+## Section 4: Data Streams
+
+Each GA4 property can have multiple data streams (web, iOS, Android). Each needs its own review.
+
+For each data stream:
+
+- [ ] **Stream is active and receiving data** (check Realtime → no gaps in the last hour)
+- [ ] **No duplicate streams exist** (two streams for the same website doubles every event count)
+- [ ] **Stream name accurately identifies the source** (not "Web Stream 1")
+- [ ] **Measurement ID is implemented correctly** on the corresponding website or app
+
+### Enhanced Measurement (web streams)
+
+- [ ] **Enhanced Measurement settings have been reviewed deliberately** — not left on defaults
+  - Location: Data Streams → [stream] → Enhanced Measurement
+  - **Page Views**: Leave enabled (this is the base behavior)
+  - **Scrolls**: Review the 90% threshold — is this meaningful for your content?
+  - **Outbound Clicks**: Disable if you have custom click tracking to avoid double-counting
+  - **Site Search**: Enable and configure the correct query parameter (`q`, `s`, `query`, etc.)
+  - **Video Engagement**: Disable if you have custom video tracking; enable for YouTube embeds
+  - **File Downloads**: Appropriate file extensions listed?
+
+---
+
+## Section 5: Data Filters
+
+Data filters exclude or modify events before they are processed. Mistakes here permanently affect your data — they cannot be retroactively corrected.
+
+- [ ] **Internal traffic filter is active** (not just defined — check that status is "Active", not "Testing")
+  - Location: Admin → Data Filters → Internal Traffic
+  - Testing mode lets you preview the filter's impact in DebugView without applying it to real data
+  - Leave in Testing mode until you have verified it is working correctly, then switch to Active
+  - Common mistake: leaving the filter in Testing mode indefinitely — it does nothing in Testing mode
+
+- [ ] **The internal traffic IP range is complete**
+  - Covers office IP, VPN exit nodes, automated testing servers, development machines
+  - Check with your IT/DevOps team for the full list of IPs that should be excluded
+
+- [ ] **Developer traffic filter is configured** (for properties where developers use the production site)
+  - Uses `debug_mode: true` parameter to identify traffic
+  - Less reliable than IP-based filtering — use both
+
+- [ ] **No active filters are suppressing legitimate user traffic**
+  - An incorrect hostname filter, for example, can silently drop a large portion of traffic
+  - Validate by checking event counts before and after filter application in a test window
+
+---
+
+## Section 6: Custom Dimensions and Metrics
+
+Every parameter you want to use in reports must be registered. Unregistered parameters are collected but not reportable.
+
+- [ ] **All event parameters used in reporting are registered as Custom Dimensions**
+  - Location: Admin → Custom Definitions → Custom Dimensions
+  - Check your dataLayer specification: every parameter name there should have a corresponding custom dimension
+  - GA4 limits: 50 event-scoped, 25 user-scoped custom dimensions per property
+
+- [ ] **Custom Dimension scope is correct for each parameter**
+  - Event-scoped: data that changes per event (page_type, product_id, button_text)
+  - User-scoped: data that is relatively stable per user (subscription_tier, user_role, customer_segment)
+  - If user properties are registered as event-scoped, they work in event-level analysis but not in user-level audience building
+
+- [ ] **No custom dimensions are registered for parameters that are never sent**
+  - Wasted allocation — you only get 50 event-scoped dimensions
+  - Check by filtering GA4 Explorations by the custom dimension: if it always returns "(not set)", the parameter is not being sent
+
+- [ ] **Custom metric registration for numeric parameters** (if applicable)
+  - Numeric parameters you want to aggregate (sum, average) should be registered as Custom Metrics, not Dimensions
+  - Examples: article_word_count, video_watch_time_seconds, form_completion_time
+
+---
+
+## Section 7: Key Events (Conversions)
+
+- [ ] **All business-critical events are marked as key events**
+  - Location: Admin → Events → toggle "Mark as key event" for relevant events
+  - Every event you want to appear in conversion-focused reports needs to be marked
+
+- [ ] **Counting method is correct for each key event**
+  - "Once per event": counts every occurrence (appropriate for purchases, form submissions)
+  - "Once per session": counts once regardless of how many times the event fires in a session (appropriate for session engagement, article reads)
+
+- [ ] **No automatic events are accidentally marked as key events**
+  - `session_start`, `first_visit`, `user_engagement` as key events will produce meaningless conversion rates
+  - Check each marked key event and ask: "Does marking this as a conversion add business value?"
+
+- [ ] **Key event counts are being validated against source-of-truth data**
+  - Monthly: compare GA4 purchase counts to your order management system
+  - If GA4 shows 20% fewer purchases than your database, there is a tracking gap to investigate
+  - Document the expected discrepancy (returns, test orders, etc.) so the team knows what variance is normal
+
+---
+
+## Section 8: BigQuery Export
+
+Free for all GA4 properties. If you are not exporting to BigQuery, you are leaving the most powerful analysis capability on the table.
+
+- [ ] **BigQuery is linked**
+  - Location: Admin → Product Links → BigQuery Links
+  - Requires a Google Cloud project with the BigQuery API enabled
+
+- [ ] **Daily export is active** (check that export is "Active" not "Paused")
+
+- [ ] **Streaming export is considered** for near-real-time use cases
+  - Streaming incurs BigQuery costs (the daily export is free beyond storage)
+  - Most properties do not need streaming — daily is sufficient for reporting
+
+- [ ] **Intraday tables are being used for same-day analysis** (if needed)
+  - `events_intraday_YYYYMMDD` tables are available throughout the day
+  - They are replaced by the final daily table the next day
+
+- [ ] **BigQuery dataset region matches your data residency requirements**
+  - Cannot be changed after creation
+
+---
+
+## Section 9: Google Ads Link
+
+- [ ] **Google Ads is linked** (if you run Google Ads)
+  - Location: Admin → Product Links → Google Ads Links
+  - Enables: importing GA4 key events as Google Ads conversions, creating audiences in GA4 for Ads targeting, and seeing GA4 metrics in Ads reports
+
+- [ ] **Conversion import is configured in Google Ads** (if using GA4 key events as Ads conversions)
+  - In Google Ads: Tools → Measurement → Conversions → Import from Google Analytics
+  - Verify that the correct key events are imported and set to the right conversion value
+
+- [ ] **Auto-tagging is enabled in Google Ads** (essential for correct attribution)
+  - Auto-tagging appends the `gclid` parameter to Ads URLs, enabling GA4 to attribute sessions to the correct campaign
+  - Without auto-tagging, Google Ads traffic may appear as direct traffic in GA4
+
+---
+
+## Section 10: Search Console Link
+
+- [ ] **Search Console is linked** (if you have organic search traffic worth analyzing)
+  - Location: Admin → Product Links → Search Console Links
+  - Requires Search Console property ownership
+  - Enables: the "Organic Search Traffic" report in GA4, landing page performance with organic search metrics
+
+- [ ] **The correct Search Console property is linked** (domain property vs. URL prefix property)
+
+---
+
+## Section 11: Attribution Settings
+
+Attribution settings determine how GA4 assigns credit for conversions across the user journey.
+
+- [ ] **Attribution model is reviewed** and appropriate for your business
+  - Location: Admin → Attribution Settings
+  - **Data-driven** (default for properties with sufficient conversions): uses ML to assign fractional credit across touchpoints. Requires 50+ conversions per month and 1,000+ events to use
+  - **Last click**: 100% credit to last campaign before conversion (like UA's default)
+  - **Google paid channels last click**: last click credit only for Google paid channels; organic/direct uses data-driven
+  - Most properties with sufficient data should use data-driven. If your property is new or low-traffic, use last click
+
+- [ ] **Lookback windows match your business's decision cycle**
+  - Acquisition events lookback: 30 days (default). Increase if your users research for longer before converting
+  - Engagement events lookback: 90 days (default). The window for cross-channel credit
+  - Paid channels lookback: 30 days (default for non-YouTube), 60 days for YouTube
+
+---
+
+## Section 12: Audiences
+
+- [ ] **Predictive audiences are active** (if your property qualifies)
+  - Location: Admin → Audiences → Predictive
+  - Available for properties with sufficient purchase data (minimum signals required by Google)
+  - Predictive audiences: "Likely 7-day purchasers", "Likely 7-day churning users" — high value for remarketing
+
+- [ ] **No audiences are based on PII** (email, phone, name in event parameters)
+
+- [ ] **Existing audiences are still relevant** — delete stale audiences from past campaigns
+
+---
+
+## Audit Score Summary
+
+| Section | Status | Priority Issues | Notes |
+|---------|--------|----------------|-------|
+| Data Retention & Settings | | | |
+| Google Signals | | | |
+| Reporting Identity | | | |
+| Data Streams | | | |
+| Data Filters | | | |
+| Custom Dimensions | | | |
+| Key Events | | | |
+| BigQuery Export | | | |
+| Google Ads Link | | | |
+| Search Console Link | | | |
+| Attribution Settings | | | |
+| Audiences | | | |
+
+**Critical fixes (affects data accuracy today):**
+- Data retention set to 2 months — change immediately
+- Internal traffic filter in Testing mode — switch to Active
+- Key event misconfigured (wrong counting method, wrong event marked)
+
+**High priority (affects analysis quality):**
+- Missing custom dimension registrations
+- BigQuery not linked
+- Attribution model on default when data-driven is available
+
+**Medium priority (affects reporting completeness):**
+- Google Signals not considered for cross-device reporting
+- Search Console not linked
+- Predictive audiences not activated
+
+---
+
+## Related Resources
+
+- [GTM & GA4 Audit Checklist](/resources/audit-checklist/) — Broader audit including GTM container, consent, and performance
+- [Migration: UA to GA4](/resources/migration-ua-to-ga4/) — If this property was migrated from UA, verify migration-specific settings
+- [Tracking Documentation Template](/resources/documentation-template/) — Template 3 (GA4 Property Configuration Document) helps document what this audit finds

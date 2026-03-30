@@ -1,6 +1,201 @@
 ---
 title: "First-Party Domain Config"
-description: "DNS and SSL configuration for first-party server-side tracking."
+description: "Cookie settings, FPID, and the full first-party data collection configuration for server-side GTM."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Getting a custom domain pointing at your sGTM server is the foundation. Making that domain deliver maximum first-party value requires deliberate cookie configuration. This article covers how sGTM sets cookies, what the FPID identifier is, cookie attribute recommendations, and the common misconfigurations that undermine first-party benefits.
+
+## How sGTM sets cookies
+
+Client-side tracking sets cookies via JavaScript: `document.cookie = "_ga=..."; Max-Age=63072000"`. This is the mechanism that Safari's ITP attacks — JavaScript-set cookies classified as belonging to a tracker are capped at 7 days (or 24 hours if the domain is flagged).
+
+sGTM sets cookies via HTTP response headers:
+```
+Set-Cookie: _ga=GA1.1.1234567890.1711900000;
+  Max-Age=63072000;
+  Path=/;
+  Domain=.yoursite.com;
+  Secure;
+  SameSite=None
+```
+
+HTTP response header cookies from a first-party server are not subject to ITP's JavaScript cookie cap. A cookie set this way with `Max-Age=63072000` (2 years) will persist for 2 years on Safari, Firefox, and Chrome — not 7 days.
+
+This is the fundamental mechanism that makes sGTM's cookie persistence valuable.
+
+## The GA4 cookie and FPID
+
+Two cookies are relevant to GA4 user identification in an sGTM context:
+
+### The `_ga` cookie
+
+The `_ga` cookie contains the GA4 `client_id` — the persistent identifier that GA4 uses to recognize returning users and stitch sessions into user journeys. Without a stable `_ga` cookie, every Safari user who returns after more than 7 days appears as a new user.
+
+When sGTM's GA4 client processes an incoming request, it reads the `_ga` cookie from the request headers. If no `_ga` cookie exists, it creates a new `client_id` and sets the `_ga` cookie in the response.
+
+The key: because this cookie is set via HTTP response headers from `collect.yoursite.com`, it lives for the full `Max-Age` you configure — not the 7-day cap that applies to JavaScript-set cookies.
+
+### The FPID cookie
+
+FPID (First-Party ID) is a server-side identifier that sGTM's GA4 client generates and manages. When FPID is enabled:
+
+1. The GA4 client generates a UUID on the user's first visit and sets it as an HTTP cookie: `FPID=<uuid>; Max-Age=63072000; ...`
+2. On subsequent visits, the GA4 client reads the FPID cookie and uses it as the `client_id` for GA4 events
+3. The FPID takes precedence over the `_ga` cookie when both are present
+
+FPID provides more stable user identification than `_ga` because it is generated server-side (not susceptible to JavaScript restrictions) and is stored as an HTTP-only cookie (not accessible to browser JavaScript, making it harder for browser extensions to detect and delete).
+
+## Configuring cookie attributes
+
+The GA4 client in sGTM sets `_ga` and `FPID` automatically with reasonable defaults. However, you can and should verify the attributes being used.
+
+### Recommended cookie attributes
+
+```
+Set-Cookie: _ga=GA1.1.1234567890.1711900000;
+  Max-Age=63072000;       // 2 years
+  Path=/;                 // Available on all paths
+  Domain=.yoursite.com;   // Leading dot: available on all subdomains
+  Secure;                 // HTTPS only
+  SameSite=None          // Required for cross-site use (e.g., iframes)
+```
+
+For FPID:
+```
+Set-Cookie: FPID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx;
+  Max-Age=63072000;
+  Path=/;
+  Domain=.yoursite.com;
+  Secure;
+  HttpOnly;              // Not accessible to JavaScript
+  SameSite=Strict        // FPID is a first-party identifier — strict is fine
+```
+
+### The `Domain` attribute
+
+Setting `Domain=.yoursite.com` (with leading dot) makes the cookie available on all subdomains: `www.yoursite.com`, `shop.yoursite.com`, `blog.yoursite.com`. Without the leading dot, the cookie is only available on the exact hostname `yoursite.com`.
+
+For most sites, the leading dot is correct. For organizations with strict subdomain separation or multi-tenant architectures, consider whether cross-subdomain cookie access is appropriate.
+
+### The `HttpOnly` flag
+
+`HttpOnly` cookies cannot be read by JavaScript. For tracking cookies, this has a nuance: your client-side GA4 tag will not be able to read the FPID value from JavaScript. The sGTM GA4 client reads it from request headers — client-side code never needs it. Set `HttpOnly` on FPID; it is optional for `_ga`.
+
+### SameSite attribute
+
+- **`SameSite=None; Secure`**: Cookie is sent on cross-site requests. Required if your site is embedded in iframes on other domains or if tracking needs to work in third-party contexts. Requires `Secure` flag.
+- **`SameSite=Lax`**: Cookie is sent on same-site requests and top-level navigations from other sites. Appropriate for most analytics cookies.
+- **`SameSite=Strict`**: Cookie is only sent on same-site requests. Too restrictive for most tracking use cases.
+
+For `_ga`, use `SameSite=None; Secure` if you need cross-site tracking, or `SameSite=Lax` otherwise. For `FPID`, `SameSite=Strict` is appropriate since it is a pure first-party identifier.
+
+## Enabling FPID in sGTM
+
+FPID is enabled through the GA4 client configuration in your sGTM container:
+
+<Steps>
+1. In your sGTM container, navigate to **Clients**
+
+2. Click your **GA4** client (the built-in one)
+
+3. Look for the **Cookie Name** setting — by default it is `_ga`
+
+4. FPID is handled automatically by the GA4 client when it detects no `_ga` cookie. To verify FPID is working, check for the `FPID` cookie in DevTools → Application → Cookies after a first visit.
+</Steps>
+
+If you want to explicitly control FPID behavior, you can do so via a custom variable that reads the `x-sst-system-properties` event parameter — but this is advanced configuration not needed for most implementations.
+
+## Cookie refresh pattern
+
+On each request, sGTM should refresh the cookie's expiration date — not just read it. This prevents cookies from expiring on users who visit regularly.
+
+The GA4 client refreshes `_ga` and `FPID` on each request by re-setting the cookie in the response headers with the full `Max-Age`. This is automatic behavior you do not need to configure separately.
+
+Verify the refresh is happening:
+1. Open DevTools → Application → Cookies
+2. Note the expiration date of `_ga` before a pageview
+3. Trigger a pageview
+4. Refresh the cookie list — the expiration should have extended to full duration
+
+If the expiration is not refreshing, your sGTM server may not be setting the cookie in the response (check Preview mode to see if Set-Cookie headers appear in the response).
+
+## Privacy and consent compliance
+
+<Aside type="caution">
+Server-set first-party cookies are not exempt from consent requirements. GDPR and ePrivacy Directive regulations apply to tracking cookies regardless of whether they are set client-side or server-side. A first-party HTTP cookie used for analytics or advertising tracking requires the same consent as a third-party cookie.
+</Aside>
+
+What changes with server-side cookies: the mechanism, not the obligation. Your consent management platform must still capture and record consent before tracking cookies are set.
+
+In practice, implement consent enforcement at two layers:
+
+**Client-side**: Your CMP prevents GA4 tags from firing before consent is granted. This prevents the browser from sending requests to your sGTM server.
+
+**Server-side**: Your sGTM server checks the consent parameters included in incoming requests (typically forwarded by the GA4 client from Consent Mode signals) and does not set tracking cookies if consent has not been granted.
+
+The belt-and-suspenders approach is more defensible from a compliance standpoint than relying on either layer alone.
+
+## Verifying first-party cookie behavior
+
+After setup, verify that cookies are being set with the expected attributes:
+
+```bash
+# Check cookie attributes using curl
+curl -si https://collect.yoursite.com/g/collect \
+  -d "v=2&tid=G-XXXXXXXX&cid=1234&en=page_view&dl=https%3A%2F%2Fyoursite.com" \
+  | grep -i "set-cookie"
+
+# Expected output:
+# Set-Cookie: _ga=GA1.1.1234.1711900000; Max-Age=63072000; Path=/;
+#   Domain=.yoursite.com; Secure; SameSite=None
+# Set-Cookie: FPID=xxxxxxxx-xxxx-...; Max-Age=63072000; Path=/;
+#   Domain=.yoursite.com; Secure; HttpOnly; SameSite=Strict
+```
+
+In the browser:
+
+1. DevTools → Application → Cookies → select `yoursite.com`
+2. Find `_ga` cookie — verify:
+   - Domain: `.yoursite.com`
+   - Expires/Max-Age: 400 days or more from today (not 7 days)
+   - Secure: checked
+3. Find `FPID` cookie — verify:
+   - HttpOnly: checked
+   - Expires: 400 days or more
+
+## Common mistakes
+
+**Not setting `Domain` with leading dot.** Cookie set for `collect.yoursite.com` without a domain attribute is only available on that exact subdomain, not on `www.yoursite.com`. Your main site cannot read the cookie. Include `Domain=.yoursite.com`.
+
+**Relying on client-side GA4 to set cookies.** If your GA4 tag still sets the `_ga` cookie via JavaScript (before going through sGTM), the server-set cookie may conflict with the JavaScript-set one. The first one to arrive wins in some cases. Ensure only the server sets `_ga` in a server-side setup.
+
+**Conflating first-party context with consent exemption.** First-party server-set cookies for analytics and advertising require consent. Do not confuse the technical architecture with legal obligations.
+
+**Inconsistent `SameSite` settings.** If your main site uses `SameSite=Strict` on session cookies but your tracking cookies use `SameSite=None`, some security scanners will flag the inconsistency. Align your cookie policy across all cookies.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Domain Setup"
+    description="Configuring the subdomain and DNS that makes first-party cookies possible."
+    href="/server-side/setup/custom-domain-setup/"
+  />
+  <LinkCard
+    title="Server-Side Cookies"
+    description="Advanced cookie management — custom identifiers, cookie refresh strategies, and ITP context."
+    href="/server-side/advanced/server-side-cookies/"
+  />
+  <LinkCard
+    title="GA4 Web Client"
+    description="How the GA4 client reads and sets cookies as part of request processing."
+    href="/server-side/clients/ga4-web-client/"
+  />
+  <LinkCard
+    title="Data Redaction & PII"
+    description="Stripping sensitive data from cookies and request parameters before forwarding."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+</CardGrid>

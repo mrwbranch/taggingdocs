@@ -1,6 +1,163 @@
 ---
 title: "Enhanced Conversions"
-description: "Implementing enhanced conversions for better attribution."
+description: "Implement Google Ads Enhanced Conversions via GTM — user-provided data variables, SHA-256 hashing, tag configuration, and testing."
+sidebar:
+  badge:
+    text: Intermediate
+    variant: note
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Enhanced Conversions improve the accuracy of Google Ads conversion measurement by sending hashed user-provided data (email, phone, address) alongside conversions. Google matches this against signed-in Google accounts, recovering conversions that would otherwise be lost due to cookie blocking, ad blockers, and cross-device behavior. In practice, you can see 10–30% more conversions attributed.
+
+## How it works
+
+When a user converts, you push their contact details to the dataLayer. GTM hashes the data using SHA-256 before it leaves the browser. Google receives the hash, matches it against its signed-in user database, and attributes the conversion to the user who clicked your ad — even if the conversion cookie was blocked.
+
+The data never leaves the browser unhashed. Google only receives the SHA-256 hash, which cannot be reversed to recover the original email address.
+
+## What you need
+
+- A Google Ads conversion action configured in Google Ads
+- The user's email (minimum requirement), phone, or address — collected through a form
+- GTM installed on the conversion confirmation page
+
+## Step 1 — Push user data to the dataLayer
+
+Push this on your thank-you or order confirmation page, after the user converts:
+
+<DataLayerExample event="purchase" description="Include user-provided data alongside your conversion event.">
+```javascript
+window.dataLayer = window.dataLayer || [];
+
+// Clear ecommerce first
+window.dataLayer.push({ ecommerce: null });
+
+window.dataLayer.push({
+  event: 'purchase',
+  // Standard ecommerce data
+  ecommerce: {
+    transaction_id: 'ORDER-12345',
+    value: 149.99,
+    currency: 'USD',
+    items: [{
+      item_id: 'SKU-001',
+      item_name: 'Product Name',
+      price: 149.99,
+      quantity: 1
+    }]
+  },
+  // User-provided data for Enhanced Conversions
+  // Pass raw (unhashed) values — GTM hashes them
+  enhanced_conversion_data: {
+    email: 'customer@example.com',
+    phone_number: '+12125551234',
+    address: {
+      first_name: 'Jane',
+      last_name: 'Doe',
+      street: '123 Main St',
+      city: 'New York',
+      region: 'NY',
+      postal_code: '10001',
+      country: 'US'
+    }
+  }
+});
+```
+</DataLayerExample>
+
+<Aside type="caution">
+Only push data that the user has explicitly provided through your form. Never pull data from cookies or backend systems without explicit user consent. Enhanced Conversions must comply with your privacy policy and Google's terms.
+</Aside>
+
+## Step 2 — Configure the Google Ads Conversion Tag
+
+<Steps>
+1. **Create Data Layer Variables** for the user data fields:
+
+   - `DLV - enhanced_email` → Data Layer Variable name: `enhanced_conversion_data.email`
+   - `DLV - enhanced_phone` → `enhanced_conversion_data.phone_number`
+   - `DLV - enhanced_first_name` → `enhanced_conversion_data.address.first_name`
+   - `DLV - enhanced_last_name` → `enhanced_conversion_data.address.last_name`
+
+2. **Create or edit your Google Ads Conversion Tracking tag**
+
+   - Tag type: **Google Ads Conversion Tracking**
+   - Conversion ID and Conversion Label: from your Google Ads conversion action
+   - Enable **Enhanced Conversions**
+   - Select: **User-Provided Data Variable** method
+
+3. **Create a User-Provided Data Variable**
+
+   - Variable type: **User-Provided Data**
+   - Provide these fields:
+     - Email → `{{DLV - enhanced_email}}`
+     - Phone number → `{{DLV - enhanced_phone}}`
+     - First name → `{{DLV - enhanced_first_name}}`
+     - Last name → `{{DLV - enhanced_last_name}}`
+
+4. **Attach the variable to the Conversion tag**
+
+   In the Conversion tag, set **User-Provided Data** to the variable you just created.
+
+5. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `purchase`
+
+6. **Test with Tag Assistant**
+
+   Use Google Tag Assistant → open the tag details → check **Enhanced Conversions** section for a green checkmark.
+</Steps>
+
+<TagConfig
+  name="Google Ads - Conversion Tracking"
+  type="Google Ads Conversion Tracking"
+  trigger="Custom Event - purchase"
+  variables={["DLV - enhanced_email", "DLV - enhanced_phone", "DLV - enhanced_first_name", "DLV - enhanced_last_name"]}
+/>
+
+## Automatic method (alternative)
+
+GTM also supports **Automatic** enhanced conversion data collection — it scrapes form fields from the page automatically. This requires no dataLayer changes but is less reliable:
+- It may pick up incorrect form fields
+- It depends on HTML form structure staying consistent
+- It does not work with AJAX forms
+
+The **User-Provided Data Variable** method shown above is always preferable when you control the code.
+
+## Verifying Enhanced Conversions work
+
+In Google Ads:
+1. Go to **Tools → Conversions**
+2. Click your conversion action
+3. Check the **Diagnostics** tab — look for "Enhanced conversions detected"
+4. It takes 2-3 days after implementation to see data in reports
+
+In Tag Assistant:
+- Open the Conversion Tracking tag details
+- The **Enhanced Conversions** section should show the hashed data being sent
+
+## Test it
+
+1. Open GTM Preview on your thank-you page
+2. Verify the `purchase` event fires in the Summary pane
+3. Check the Google Ads Conversion Tracking tag is in Tags Fired
+4. Inspect the tag details — verify user-provided data fields are populated (they will show as hashed values)
+5. Install Google Tag Assistant and use the **Test** feature to see the full conversion hit
+
+## Common gotchas
+
+**Email not being hashed.** If you see the raw email address in the tag details, the user-provided data variable is not configured correctly. GTM handles SHA-256 hashing automatically when you use the User-Provided Data variable type — you do not need to hash it yourself.
+
+**Phone number format.** Google requires E.164 format: `+12125551234`. If your form collects `(212) 555-1234` or `212-555-1234`, normalise it before pushing to the dataLayer.
+
+**Missing conversion data.** If the user does not provide their email (anonymous checkout), the Enhanced Conversions tag will still fire — it will just not be able to match. This is expected behavior and does not cause errors.
+
+<CardGrid>
+  <LinkCard title="Enhanced Conversions Setup" href="/recipes/enhanced-conversions-setup/" description="Complete walkthrough including Google Ads account configuration." />
+  <LinkCard title="Offline Conversion Import" href="/recipes/offline-conversion-import/" description="Capture conversions that happen offline after the ad click." />
+</CardGrid>

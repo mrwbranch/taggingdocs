@@ -1,6 +1,157 @@
 ---
 title: "ITP History & Impact"
-description: "Comprehensive guide to Safari's Intelligent Tracking Prevention and its impact on analytics."
+description: "The complete evolution of Safari's Intelligent Tracking Prevention from version 1.0 to today, and its specific impact on GA4, cookie lifetimes, and analytics accuracy."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Safari's Intelligent Tracking Prevention is the single biggest reason server-side tagging exists. What started in 2017 as third-party cookie blocking evolved into restrictions that fundamentally changed how analytics data works for Safari users — which, depending on your audience, might be 20-50% of your traffic.
+
+If your Safari users look like 70% new visitors when the actual retention rate is much higher, ITP is probably the cause. This article explains what ITP does, how it evolved, and what impact each version has on your data.
+
+## What ITP is trying to accomplish
+
+ITP is Apple's mechanism for preventing cross-site tracking — the practice of identifying the same user across multiple websites to build behavioral profiles, serve targeted ads, and track activity outside a single site's context.
+
+Apple's concern is not with analytics in isolation. It is with the use of shared identifiers (third-party cookies, fingerprinting, redirect bouncing) to link user activity across unrelated sites without explicit consent. ITP targets the infrastructure that makes this possible.
+
+The collateral damage — and this is important — is that legitimate first-party analytics also gets caught in the net. Your `_ga` cookie and `_ga_XXXX` cookie are used to identify returning users on your own site. ITP caps or restricts them because they are set by JavaScript, which is the same mechanism third-party trackers use.
+
+## ITP version history
+
+### ITP 1.0 (June 2017)
+
+The first release targeted third-party cookies — cookies set by domains other than the one the user is currently visiting.
+
+**What changed:** Domains identified as cross-site trackers had their third-party cookies partitioned or blocked entirely. Safari's ML classifier identified tracker domains based on cross-site resource loading patterns.
+
+**Impact on GA4:** Limited at the time. GA4 (and Universal Analytics) primarily used first-party cookies, which were unaffected.
+
+### ITP 1.1 (October 2017)
+
+**What changed:** Tracker-classified domains had their cookies deleted if not actively used as a first party. The "storage access API" was introduced to give users a way to grant permission to specific cross-site scenarios.
+
+### ITP 2.0 (September 2018)
+
+This was the major escalation. ITP 2.0 extended restrictions to include domains that receive bounced navigations — a technique used by some trackers to gain first-party status by briefly sending users through a tracker domain.
+
+**What changed:**
+- Third-party cookies blocked entirely for classified domains (no grace period)
+- Bounce tracking protection: domains that users navigate to briefly but then bounce away from lose cookie access
+- `document.referrer` stripping to prevent referrer-based cross-site tracking
+
+**Impact on GA4:** Still primarily limited to third-party contexts. First-party `_ga` cookies were not yet affected.
+
+### ITP 2.1 (February 2019)
+
+ITP 2.1 was the turning point for analytics. For the first time, ITP imposed restrictions on **first-party cookies set by JavaScript** (`document.cookie`).
+
+**What changed:** All first-party cookies set via JavaScript (`document.cookie`) are capped at a **7-day expiration**. Regardless of the `max-age` or `expires` attribute you set in JavaScript, Safari will delete the cookie 7 days after it was last set.
+
+**Impact on GA4:**
+- The `_ga` cookie is set by the GA4 JavaScript library via `document.cookie`
+- Before ITP 2.1: `_ga` had a 2-year lifetime
+- After ITP 2.1: `_ga` is deleted 7 days after the user's last visit
+- A user who visited 8 days ago and visits again is treated as a new user
+- Returning user rates drop significantly; new user rates inflate
+
+<Aside type="danger">
+This is the most impactful ITP change for analytics. If you have not implemented server-side cookie setting, every Safari user who does not visit your site for 7 consecutive days loses their `_ga` cookie. Their next visit looks like a new session from a new user. Attribution is broken, returning user analysis is unreliable, and cohort analysis is distorted.
+</Aside>
+
+### ITP 2.2 (April 2019)
+
+ITP 2.2 went further, targeting sites that receive first-party navigations from classified tracker domains. The scenario: a user clicks an ad on a social media site (classified as a tracker), lands on your site, and your JavaScript-set cookies get the reduced expiry.
+
+**What changed:** For sites that receive navigations from classified tracker domains, JavaScript-set cookies are capped at **24 hours** (not 7 days) if the URL contains UTM parameters, click IDs, or other referral data that could be used for cross-site tracking.
+
+**Impact on GA4:** Any user who arrives from an ad click (which contains `fbclid`, `gclid`, `ttclid`, etc.) gets a 24-hour `_ga` cookie instead of 7 days. Their second visit the next day is attributed to direct traffic rather than the original ad. Marketing attribution accuracy for Safari users drops substantially.
+
+### ITP 2.3 (September 2019)
+
+ITP 2.3 closed the CNAME cloaking workaround. CNAME cloaking is a technique where a first-party subdomain (like `analytics.yourdomain.com`) is configured to point via DNS CNAME to a third-party analytics server. The theory: since the subdomain appears to be first-party, it bypasses third-party cookie restrictions.
+
+**What changed:** Safari detects CNAME-cloaked domains and applies the same restrictions as regular third-party tracker domains. Specifically, cookies set by CNAME-cloaked origins are also capped at 7 days.
+
+**Impact:** The CNAME workaround that some analytics vendors promoted as an ITP solution stopped working in Safari. Stape and other sGTM providers that route through a first-party domain via true server-side proxying (not CNAME) were not affected.
+
+### ITP 2.4+ and current state
+
+Subsequent ITP updates have continued to close specific workarounds without major new restrictions. The current key behaviors are:
+
+- **Third-party cookies:** Blocked entirely for classified domains
+- **JavaScript-set first-party cookies:** 7-day cap (24-hour cap if navigating from a classified tracker domain with tracking parameters)
+- **localStorage:** Subject to the same caps as cookies for classified origins
+- **IndexedDB:** Same restrictions
+- **CNAME cloaking:** Identified and restricted
+- **Link decoration tracking:** UTM parameter values written to localStorage are capped at 7 days
+
+**One important exception that has not changed:** Cookies set via HTTP `Set-Cookie` response headers from the actual first-party server are NOT subject to ITP caps. A cookie set by your server in a response header can have a 2-year lifetime and Safari will honor it. This is the foundation of the server-side cookie solution.
+
+## Specific impact on GA4 cookies
+
+GA4 uses two main cookies set via JavaScript:
+
+| Cookie | Purpose | ITP impact |
+|---|---|---|
+| `_ga` | Identifies the client_id (user identifier) | 7-day cap in Safari |
+| `_ga_XXXXXXXX` | Stores session information | 7-day cap in Safari |
+| `_gac_XXXXXXXX` | Google Ads click attribution | 7-day cap in Safari |
+
+The `_ga` cookie is the most critical. It is the persistent identifier that allows GA4 to recognize a returning user. With a 7-day cap, any Safari user who visits less frequently than weekly appears as a new user to GA4.
+
+**The measurement consequence:** If your e-commerce site's typical repurchase cycle is 30 days, nearly every returning customer appears as a new customer in GA4 for Safari users. Your "new vs. returning" breakdown is useless. Cohort analysis is broken for Safari. Lifetime value calculations are understated.
+
+## Diagnosing ITP impact in your data
+
+You can directly measure the impact of ITP by comparing browser segments in GA4:
+
+1. Create a custom segment for Safari users
+2. Create a custom segment for Chrome users (least affected by ITP)
+3. Compare new user rates, session-per-user averages, and returning user percentages between the two segments
+
+If Safari shows a significantly higher new user rate than Chrome (and your site is not asymmetrically popular on Safari), ITP is inflating your new user count.
+
+A useful diagnostic: compare the average sessions per user for Safari vs. Chrome users over a 90-day window. If the Safari average is dramatically lower, ITP is preventing Safari users' return visits from being recognized.
+
+## The server-side solution
+
+The fix for ITP's JavaScript cookie cap is straightforward: set the `_ga` cookie via an HTTP `Set-Cookie` response header from your server instead of via JavaScript. Server-set cookies are not subject to ITP's 7-day cap.
+
+This is what server-side GTM's GA4 client does. When a GA4 request passes through your sGTM server, the server can read the incoming `_ga` value and re-set it in the response headers with a full 2-year expiry. Even if ITP would otherwise cap the cookie, the server-set version survives.
+
+The implementation is covered in detail in [Extending Cookie Lifetimes](/privacy/extending-cookie-lifetimes/) and [FPID Cookie Management](/privacy/fpid-cookie-management/).
+
+## Common mistakes
+
+### Assuming ITP only affects advertising, not analytics
+
+Many teams focus on ITP's impact on ad attribution and ignore its impact on analytics accuracy. The inflated new user counts and broken returning user analysis have significant consequences for product analytics, lifecycle marketing, and any analysis that depends on recognized returning users.
+
+### Using a 30-day look-back window for Safari attribution
+
+If `_ga` is capped at 7 days, your GA4 attribution model has a de facto 7-day lookback window for Safari users regardless of your configured settings. Analyses that assume a 30-day lookback are overstating attribution accuracy for Safari.
+
+### Thinking CNAME cloaking is a valid workaround
+
+ITP 2.3 specifically addressed CNAME cloaking. Any vendor or agency that is still recommending CNAME cloaking as an ITP solution is either uninformed or misleading you. True server-side proxying (where requests hit your actual server infrastructure) is the legitimate approach.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Extending Cookie Lifetimes"
+    description="Server-side cookie refresh patterns to work around ITP's JavaScript cookie caps."
+    href="/privacy/extending-cookie-lifetimes/"
+  />
+  <LinkCard
+    title="FPID Cookie Management"
+    description="How sGTM's FPID cookie provides a server-set identifier that bypasses ITP restrictions."
+    href="/privacy/fpid-cookie-management/"
+  />
+  <LinkCard
+    title="Cross-Browser Tracking Differences"
+    description="How ITP compares to Firefox ETP, Brave, and Chrome's Privacy Sandbox in a single reference table."
+    href="/privacy/cross-browser-tracking-differences/"
+  />
+</CardGrid>

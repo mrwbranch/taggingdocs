@@ -1,6 +1,157 @@
 ---
 title: "Preview Mode"
-description: "Using GTM's preview mode to test tags before publishing."
+description: "GTM's Preview Mode is your primary debugging tool — learn to use every tab, read the event timeline, and understand what it's actually showing you."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Preview mode is the most important skill in GTM debugging. Most tag-not-firing problems can be diagnosed in under two minutes if you know where to look. Most people only check whether a tag fired or not. The real debugging happens in the Variables tab, the Data Layer tab, and the trigger condition details.
+
+## Entering preview mode
+
+<Steps>
+1. In GTM, click the **Preview** button in the top right. A new browser tab opens with Tag Assistant.
+
+2. Enter the URL of the site you want to debug. Tag Assistant opens your site in a new tab with a connection to GTM's debug infrastructure.
+
+3. Your site loads with a Tag Assistant overlay in the bottom right corner. The Tag Assistant tab in your other browser window starts filling with events.
+</Steps>
+
+<Aside type="tip">
+Preview mode connects to your **current workspace** — not the published container. You can test changes in your workspace before they go live. If a colleague publishes while you're in Preview, your session still reflects your workspace.
+</Aside>
+
+## The Tag Assistant interface
+
+The main Tag Assistant window has four key areas:
+
+**Event timeline (left panel):** A chronological list of every GTM event that fired. The sequence starts with `Initialization`, then `Consent Initialization`, then `Container Loaded`, then `DOM Ready`, then `Window Loaded`, then any custom events.
+
+**Summary panel (center):** Shows which tags fired and which didn't for the selected event.
+
+**Detail tabs (right panel):** Tags, Triggers, Variables, Data Layer, Errors — each gives a different view of the selected event.
+
+## Reading the event timeline
+
+Every item in the left panel corresponds to a moment GTM processed an event:
+
+| Event | When it fires |
+|---|---|
+| `Initialization` | Immediately when the GTM container initializes |
+| `Consent Initialization` | When consent mode defaults are processed |
+| `Container Loaded` | When `gtm.js` fires (earliest page event) |
+| `DOM Ready` | When HTML parsing completes |
+| `Window Loaded` | When all resources including images finish loading |
+| Custom events | Whenever your code calls `dataLayer.push({ event: '...' })` |
+
+When you interact with the page (clicking a button, submitting a form), new events appear at the bottom of the timeline. Click any event to see what happened at that specific moment.
+
+## The Tags tab — fired vs. not fired
+
+The Tags tab shows two sections: **Tags Fired** and **Tags Not Fired**.
+
+A tag appears in "Tags Not Fired" for one of these reasons:
+1. Its trigger conditions weren't met
+2. The trigger never evaluated (because the event didn't occur)
+3. A blocking trigger (exception) prevented it
+4. A setup tag failed and blocked it
+5. Consent mode blocked it
+
+Click a tag in "Not Fired" to see the reason. GTM will tell you which trigger condition failed.
+
+## The Triggers tab — finding unmet conditions
+
+This is where most debugging happens. Select any tag in the summary, then look at the Triggers tab in the right panel.
+
+Each trigger shows its status:
+- **Green checkmark** — trigger conditions met, tag fired
+- **Red X** — one or more conditions not met
+- Clicking a failed trigger condition shows the actual variable value vs. the expected value
+
+Example of what you'll see for a failed condition:
+```
+Trigger: CE - purchase
+Condition: Event equals "purchase"
+Actual value: "Purchase" (capital P)
+Expected value: "purchase"
+```
+
+That's a typo bug you can find in 30 seconds with the Triggers tab. Without Preview mode, you'd spend an hour in the console.
+
+## The Variables tab — the most underused tab
+
+The Variables tab shows the value of **every variable** in your container at the time of the selected event. This is invaluable for two scenarios:
+
+1. **Understanding why a trigger condition failed** — Look up the variable in the Variables tab and see what it actually resolved to.
+2. **Verifying your Data Layer Variables** — After a `dataLayer.push()`, check that your DLV variables are reading the expected values.
+
+For example, after a `purchase` event push, click the event in the timeline and check the Variables tab. Look for:
+- `DLV - ecommerce.transaction_id` — does it have the right order ID?
+- `DLV - ecommerce.value` — is it a number or a string?
+- `DLV - ecommerce.currency` — is it present?
+
+## The Data Layer tab — inspecting every push
+
+The Data Layer tab shows the cumulative state of the dataLayer at the point of the selected event. Crucially, it shows the **merged state** — not the raw array.
+
+When debugging ecommerce data, click the `purchase` event and look at the Data Layer tab. You should see the full `ecommerce` object. If you see data from a previous event (like an `add_to_cart` item appearing in your `purchase` event), you've found a missing `ecommerce: null` clearing step.
+
+## Sharing Preview mode with colleagues
+
+Preview mode generates a shareable URL. Click the **Share Preview** option in Tag Assistant to get a link. Your colleague can use this link to open the site with the same debug session active — useful for getting a second pair of eyes on a trigger that only fires in specific user flows.
+
+The share link expires after a few hours and only works in the same browser profile where it was generated.
+
+## Preview mode and GA4 DebugView
+
+When Preview mode is active, GA4 automatically activates Debug mode for events sent from that browser session. Open your GA4 property → Configure → DebugView while Preview mode is active. You'll see events appearing in real-time with their parameters.
+
+This is how you verify the end-to-end flow:
+1. Your `dataLayer.push()` fires correctly (Data Layer tab in Preview mode)
+2. GTM picks it up and fires the tag (Tags tab)
+3. GA4 receives the event with the right parameters (DebugView)
+
+If step 2 works but step 3 is empty, the problem is between GTM and GA4 — usually a misconfigured event tag or a parameter mapping issue.
+
+## Common Preview mode issues
+
+### Preview mode isn't connecting
+
+The most common cause: a browser extension (ad blocker, tracking blocker) is blocking the Tag Assistant script. Try in an incognito window without extensions.
+
+### Tags show as firing but GA4 doesn't receive them
+
+Preview mode shows GTM firing the tag, which means GTM's side is working. The issue is the GA4 tag configuration — check the Measurement ID, check that the Google Tag is loading, and verify there's no consent mode blocking `analytics_storage`.
+
+### The wrong container version loads
+
+If you recently published but Preview mode shows old data, hard refresh the page (Cmd+Shift+R / Ctrl+Shift+R). Preview mode caches the container — a hard refresh forces it to reload.
+
+### Events appear but with no trigger firing
+
+This happens when GTM receives a `dataLayer.push({ event: '...' })` but no triggers are configured to listen for that event name. Check for typos between your push and your trigger's event name condition.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Why Isn't My Tag Firing?"
+    description="Systematic diagnostic flowchart for tags that don't fire — uses Preview mode throughout."
+    href="/client-side/debugging/why-tag-not-firing/"
+  />
+  <LinkCard
+    title="Tag Assistant"
+    description="The Tag Assistant Chrome extension vs. embedded Tag Assistant — what each shows."
+    href="/client-side/debugging/tag-assistant/"
+  />
+  <LinkCard
+    title="DataLayer Debugging"
+    description="Advanced dataLayer inspection beyond what Preview mode's Data Layer tab shows."
+    href="/client-side/debugging/datalayer-debugging/"
+  />
+  <LinkCard
+    title="Console Debugging"
+    description="Browser console techniques to complement Preview mode debugging."
+    href="/client-side/debugging/console-debugging/"
+  />
+</CardGrid>

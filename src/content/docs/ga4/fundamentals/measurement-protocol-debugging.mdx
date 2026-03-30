@@ -1,6 +1,278 @@
 ---
 title: "Measurement Protocol Debugging"
-description: "Debugging Measurement Protocol events — validation, DebugView, and common failures."
+description: "Validate Measurement Protocol hits, use DebugView to see server-side events in real time, and diagnose why events are silently dropped."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Debugging the Measurement Protocol is harder than debugging client-side tracking because the production endpoint provides no feedback. Send a malformed payload and GA4 responds with `204 No Content` — the same response as a successful request. Events are dropped silently.
+
+This guide covers every tool available for validating Measurement Protocol events before and after sending them.
+
+## The validation endpoint
+
+The fastest way to validate a payload is the debug endpoint. It accepts the same payload as the production endpoint but returns a JSON response with validation errors:
+
+```
+POST https://www.google-analytics.com/debug/mp/collect?measurement_id=G-XXXXXXXXXX&api_secret=YOUR_SECRET
+```
+
+### Example validation response
+
+Valid payload:
+```json
+{
+  "validationMessages": []
+}
+```
+
+Invalid payload:
+```json
+{
+  "validationMessages": [
+    {
+      "fieldPath": "events[0].name",
+      "description": "Event name 'session_start' is reserved and cannot be used.",
+      "validationCode": "NAME_RESERVED"
+    },
+    {
+      "fieldPath": "events[0].params.currency",
+      "description": "The value '\"dollars\"' provided for 'currency' is not a valid ISO 4217 currency code.",
+      "validationCode": "VALUE_INVALID"
+    }
+  ]
+}
+```
+
+### Validation codes
+
+| Code | Meaning |
+|------|---------|
+| `NAME_RESERVED` | Event or parameter name is reserved by GA4 |
+| `NAME_INVALID` | Event or parameter name contains invalid characters |
+| `VALUE_INVALID` | Parameter value is the wrong type or format |
+| `VALUE_OUT_OF_BOUNDS` | Numeric value is outside the allowed range |
+| `EXCEEDED_MAX_ENTITIES` | Too many events or parameters |
+| `ANNOTATION_FAILED` | Internal validation failure |
+
+### Wrapping validation in your build pipeline
+
+Run validation checks as part of your CI/CD pipeline to catch Measurement Protocol payload errors before deployment:
+
+```python
+import requests
+import json
+
+def validate_ga4_payload(measurement_id: str, api_secret: str, payload: dict) -> list:
+    """
+    Validate a GA4 Measurement Protocol payload.
+    Returns list of validation messages (empty = valid).
+    """
+    url = (
+        f"https://www.google-analytics.com/debug/mp/collect"
+        f"?measurement_id={measurement_id}&api_secret={api_secret}"
+    )
+    response = requests.post(
+        url,
+        data=json.dumps(payload),
+        headers={"Content-Type": "application/json"}
+    )
+    return response.json().get("validationMessages", [])
+
+
+# In your tests
+def test_purchase_payload():
+    payload = {
+        "client_id": "test-client-id",
+        "events": [{
+            "name": "purchase",
+            "params": {
+                "transaction_id": "T-TEST",
+                "value": 29.99,
+                "currency": "USD"
+            }
+        }]
+    }
+
+    messages = validate_ga4_payload("G-XXXXXXXXXX", "test-secret", payload)
+    assert messages == [], f"Validation failed: {messages}"
+```
+
+<Aside type="tip">
+The validation endpoint does not check whether your measurement ID and API secret are valid credentials. It only validates the payload structure. An empty `validationMessages` array means the payload is structurally correct, not that it will actually reach your property.
+</Aside>
+
+## DebugView for Measurement Protocol events
+
+DebugView in GA4 Admin shows real-time event streams from debug-enabled sessions. You can route Measurement Protocol events to DebugView by setting `debug_mode: true` as an event parameter:
+
+```json
+{
+  "client_id": "123456789.987654321",
+  "events": [{
+    "name": "purchase",
+    "params": {
+      "transaction_id": "T-TEST-001",
+      "value": 49.99,
+      "currency": "USD",
+      "debug_mode": true
+    }
+  }]
+}
+```
+
+Events with `debug_mode: true` appear in **Admin → DebugView** within a few seconds. They also appear in the Realtime report.
+
+<Aside type="caution">
+Do not send events with `debug_mode: true` in production — they will appear in DebugView for all users and may be processed differently. Use it only for testing with test data and test credentials.
+</Aside>
+
+### Reading DebugView
+
+DebugView shows events in a timeline view. For each event you can see:
+- Event name and timestamp
+- All parameters (expand the event to see them)
+- User pseudo ID (hash of the client ID)
+
+If your Measurement Protocol event appears in DebugView, the payload was accepted and processed. If it does not appear within 30 seconds, the event was rejected or the payload had an issue not caught by the validation endpoint.
+
+## Realtime report validation
+
+For events without `debug_mode`, use the Realtime report in GA4 (**Reports → Realtime**) to verify events are arriving. Events should appear within 1-2 minutes.
+
+Filter the Realtime report by event name to isolate your Measurement Protocol events from regular traffic. If you are testing a `subscription_renewed` event, watch the "Event count by event name" card for that event to increment.
+
+## Step-by-step debugging checklist
+
+<Steps>
+1. **Validate the payload** against the debug endpoint. Fix any `validationMessages` before proceeding.
+
+2. **Check the HTTP response code**. You should receive `200` or `204`. A non-2xx response indicates an authentication or endpoint issue, not a payload issue.
+
+3. **Verify the API secret**. Confirm in **Admin → Data Streams → [stream] → Measurement Protocol API secrets** that your secret exists and has not been deleted or rotated.
+
+4. **Verify the Measurement ID**. It must be the stream's Measurement ID (`G-XXXXXXXXXX`), not the property ID (a plain number).
+
+5. **Check the client_id format**. The client ID should match what is in the user's `_ga` cookie: two numbers separated by a dot, like `123456789.987654321`. Not the full cookie value (`GA1.1.123456789.987654321`), just the numeric portion after the second dot.
+
+6. **Send with debug_mode** and check DebugView. This confirms whether GA4 received and processed the event.
+
+7. **Check the Realtime report** 1-2 minutes after sending a production event without debug_mode.
+
+8. **Check BigQuery** 24-48 hours later. If the event is in DebugView but not BigQuery, check that BigQuery export is still linked and the event is not filtered.
+</Steps>
+
+## Common failure scenarios
+
+### Events accepted but not appearing in reports
+
+**Cause**: The event arrived but is being filtered by a Data Filter (e.g., developer traffic filter matching the IP) or exceeds a daily quota.
+
+**Diagnose**: Check **Admin → Data Filters** for any active filters. Check DebugView to see if the event arrives with debug_mode. If DebugView shows it but reports don't, it's a filter issue.
+
+### Events not appearing in DebugView either
+
+**Cause**: The event was rejected. The validation endpoint may have passed but there was a credential issue or a quota exceeded.
+
+**Diagnose**: Check the raw HTTP response. A `400 Bad Request` means invalid credentials. A `204` that is not showing in DebugView despite using `debug_mode: true` may indicate the client_id is malformed.
+
+### Events appearing in reports but with wrong attribution
+
+**Cause**: The `client_id` does not match any existing session, so GA4 creates a new session attributed to Direct.
+
+**Diagnose**: In BigQuery, check the `traffic_source` fields on events for the affected `user_pseudo_id`. If all Measurement Protocol events show `(direct) / (none)`, the client_id is not being passed correctly.
+
+### Double-counted events
+
+**Cause**: Both client-side and server-side tracking are sending the same event (e.g., `purchase` fires on the thank-you page AND from a payment webhook).
+
+**Diagnose**: In BigQuery, count events per `transaction_id`:
+
+```sql
+SELECT
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id') AS transaction_id,
+  COUNT(*) AS event_count
+FROM `project.dataset.events_*`
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+GROUP BY transaction_id
+HAVING COUNT(*) > 1
+ORDER BY event_count DESC
+```
+
+Any `transaction_id` with `event_count > 1` is being double-counted.
+
+## Testing in a development GA4 property
+
+The safest way to test Measurement Protocol events is to maintain a separate development GA4 property. Create a development web stream, generate an API secret for it, and route all test payloads there.
+
+```python
+import os
+
+# Use environment variables to switch between dev and prod
+if os.getenv("ENVIRONMENT") == "production":
+    MEASUREMENT_ID = "G-PROD-XXXXXXXX"
+    API_SECRET = os.getenv("GA4_API_SECRET_PROD")
+else:
+    MEASUREMENT_ID = "G-DEV-XXXXXXXXX"
+    API_SECRET = os.getenv("GA4_API_SECRET_DEV")
+```
+
+This ensures test events never contaminate production data and you can validate freely without affecting reports.
+
+## curl for quick testing
+
+For one-off manual tests:
+
+```bash
+curl -X POST \
+  "https://www.google-analytics.com/debug/mp/collect?measurement_id=G-XXXXXXXXXX&api_secret=YOUR_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "test.123456",
+    "events": [{
+      "name": "purchase",
+      "params": {
+        "transaction_id": "T-CURL-TEST",
+        "value": 99.99,
+        "currency": "USD"
+      }
+    }]
+  }'
+```
+
+A clean response is `{"validationMessages":[]}`. Any messages in the array indicate payload errors.
+
+## Common mistakes
+
+### Testing against the production endpoint
+
+The production endpoint returns `204` for both valid and invalid payloads. If you test against it, you will never see error messages. Always use the debug endpoint during development.
+
+### Forgetting to strip debug_mode before deploying
+
+Shipping `debug_mode: true` in production routes all events through DebugView, may affect processing, and exposes your event stream to anyone with GA4 access. Remove it before deploying.
+
+### Using the full _ga cookie value as client_id
+
+The `_ga` cookie value is `GA1.1.123456789.987654321`. The `client_id` is just `123456789.987654321` — the two numbers after the second dot. Sending the full cookie value will be accepted by the validation endpoint but will not match any existing GA4 client, creating orphaned sessions.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Measurement Protocol"
+    description="Full guide to sending events via the Measurement Protocol."
+    href="/ga4/fundamentals/measurement-protocol/"
+  />
+  <LinkCard
+    title="DebugView"
+    description="Real-time event validation in GA4 Admin."
+    href="/ga4/troubleshooting/debugview/"
+  />
+  <LinkCard
+    title="Missing Data"
+    description="Diagnose why events are absent from GA4 reports."
+    href="/ga4/troubleshooting/missing-data/"
+  />
+</CardGrid>

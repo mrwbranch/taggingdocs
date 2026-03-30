@@ -1,6 +1,186 @@
 ---
-title: "view_promotion"
-description: "DataLayer specification for promotion impressions and clicks."
+title: "view_promotion / select_promotion"
+description: "Complete dataLayer specification for GA4 promotion tracking — view_promotion and select_promotion events for internal banners, featured offers, and recommendation modules."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+Promotion tracking measures the performance of internal marketing — your homepage hero banners, seasonal sale modules, featured collection widgets, and "top picks" recommendations. `view_promotion` fires when a promotion is visible to the user. `select_promotion` fires when they click it.
+
+Together, these two events give you impression-to-click rates for every internal promotion. Which banner drives the most clicks? Which creative slot position performs best? Promotion tracking answers these without needing a separate A/B testing tool for basic performance measurement.
+
+## view_promotion: when to fire
+
+Fire `view_promotion` when:
+- A promotional banner, hero image, or featured content block becomes visible to the user
+- A recommendation widget with promotional intent renders on the page
+- A "Featured Products" or "Sale" module is in the viewport
+
+Like `view_item_list`, fire once per promotion render — not on scroll events. If you have multiple promotions on a page, fire a separate event for each promotion (or batch multiple promotions in one event if they all appear simultaneously).
+
+## view_promotion: complete dataLayer push
+
+```javascript
+// Multiple promotions visible on the homepage
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'view_promotion',
+  ecommerce: {
+    items: [
+      {
+        item_id: 'SKU-001-BLK',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        promotion_id: 'PROMO_SUMMER24',
+        promotion_name: 'Summer Sale 2024',
+        creative_name: 'summer_sale_hero_v2',
+        creative_slot: 'homepage_hero'
+      },
+      {
+        item_id: 'SKU-023-NAV',
+        item_name: 'Wool Peacoat',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        promotion_id: 'PROMO_NEW_ARRIVALS',
+        promotion_name: 'New Arrivals - Fall Collection',
+        creative_name: 'new_arrivals_banner_a',
+        creative_slot: 'homepage_secondary'
+      },
+      {
+        item_id: 'SKU-088-BLK',
+        item_name: 'Leather Card Wallet',
+        item_brand: 'Heritage Co.',
+        item_category: 'Accessories',
+        promotion_id: 'PROMO_ACCESSORIES',
+        promotion_name: 'Accessories Sale',
+        creative_name: 'accessories_grid_module',
+        creative_slot: 'homepage_tertiary'
+      }
+    ]
+  }
+});
+```
+
+## select_promotion: when to fire
+
+Fire `select_promotion` when:
+- A user clicks on a promotional banner, hero image, or featured module
+- A user clicks a "Shop Now" CTA within a promotion
+- A user clicks a featured product within a promotional widget
+
+`select_promotion` should fire on the source page (where the promotion is), before navigation to the destination.
+
+## select_promotion: complete dataLayer push
+
+```javascript
+// User clicks the summer sale hero banner
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'select_promotion',
+  ecommerce: {
+    items: [
+      {
+        item_id: 'SKU-001-BLK',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        promotion_id: 'PROMO_SUMMER24',
+        promotion_name: 'Summer Sale 2024',
+        creative_name: 'summer_sale_hero_v2',
+        creative_slot: 'homepage_hero'
+      }
+    ]
+  }
+});
+```
+
+## Event schema
+
+<EventSchema
+  event="view_promotion / select_promotion"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: '"view_promotion" or "select_promotion"' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'Items associated with the promotion. Each item carries promotion metadata.' },
+    { name: 'items[].item_id', type: 'string', required: false, description: 'SKU of the featured product, if the promotion is product-specific.' },
+    { name: 'items[].item_name', type: 'string', required: false, description: 'Name of the featured product.' },
+    { name: 'items[].promotion_id', type: 'string', required: false, description: 'Unique identifier for the promotion campaign. e.g., PROMO_SUMMER24.' },
+    { name: 'items[].promotion_name', type: 'string', required: false, description: 'Human-readable promotion name. e.g., "Summer Sale 2024".' },
+    { name: 'items[].creative_name', type: 'string', required: false, description: 'The specific creative asset name. Use versioning: hero_banner_v1 vs hero_banner_v2.' },
+    { name: 'items[].creative_slot', type: 'string', required: false, description: 'The position or slot where the creative appears. e.g., homepage_hero, pdp_sidebar.' },
+    { name: 'items[].index', type: 'number', required: false, description: 'Position of the promotion in a list of promotions (0-based).' },
+  ]}
+/>
+
+## Promotion parameters explained
+
+### promotion_id vs. promotion_name
+
+`promotion_id` is the machine-readable identifier — what your CMS or campaign management tool uses internally. `promotion_name` is what humans call the campaign. Both should be consistent throughout the campaign lifecycle.
+
+```javascript
+promotion_id: 'SUMMER2024_SALE',
+promotion_name: 'Summer Sale 2024'
+```
+
+### creative_name: version your creatives
+
+When you A/B test banner designs or run multiple creative versions of the same campaign, use `creative_name` to distinguish them. This is where the value of promotion tracking becomes clear — you can compare click rates between `hero_v1` and `hero_v2` in GA4 reports.
+
+```javascript
+creative_name: 'summer_sale_hero_v1'   // control
+creative_name: 'summer_sale_hero_v2'   // test variant
+```
+
+### creative_slot: the position identifier
+
+`creative_slot` identifies where on the page the promotion lives, independent of what's in it. Slots are positions — the hero slot, the secondary banner slot, the sidebar widget slot. The same slot might run different promotions over time, but its position in the page layout stays constant.
+
+```javascript
+creative_slot: 'homepage_hero'
+creative_slot: 'homepage_secondary_banner'
+creative_slot: 'category_page_top'
+creative_slot: 'pdp_related_products'
+creative_slot: 'cart_cross_sell'
+```
+
+## GTM configuration
+
+<Steps>
+1. **Create two Custom Event triggers.** `CE - view_promotion` for `view_promotion`, and `CE - select_promotion` for `select_promotion`.
+
+2. **Create Data Layer Variables** for `ecommerce.items` (shared between both events).
+
+3. **Create two GA4 Event tags** — one for each event name. Both use **Send Ecommerce data**.
+
+4. **Test in Preview mode.** Navigate to a page with promotions. Confirm `view_promotion` fires when the promotion is visible. Click a promotion and confirm `select_promotion` fires with matching promotion parameters.
+</Steps>
+
+## Common mistakes
+
+**Not linking view to click with consistent IDs.** If `view_promotion` pushes `promotion_id: 'PROMO_SUMMER24'` but `select_promotion` pushes `promotion_id: 'promo_summer24'` (different case) or an entirely different ID, GA4 cannot connect the view to the click. Be exact.
+
+**Tracking image loads as promotions.** Not every hero image is a promotion. `view_promotion` is for deliberate marketing content — campaigns with defined objectives. A decorative image is not a promotion.
+
+**Using the same creative_slot for different positions.** If your "homepage hero" slot sometimes renders full-width and sometimes half-width depending on the campaign, use distinct slot names: `homepage_hero_fullwidth` vs `homepage_hero_halfwidth`. Mixing layouts under one slot name makes position analysis meaningless.
+
+<CardGrid>
+  <LinkCard
+    title="view_item_list"
+    description="Product list impressions — the complement to promotion tracking for organic product discovery."
+    href="/datalayer/ecommerce/view-item-list/"
+  />
+  <LinkCard
+    title="Ecommerce Overview"
+    description="The full GA4 ecommerce event specification."
+    href="/datalayer/ecommerce/ecommerce-overview/"
+  />
+  <LinkCard
+    title="select_item"
+    description="Product click tracking — similar pattern to select_promotion."
+    href="/datalayer/ecommerce/select-item/"
+  />
+</CardGrid>

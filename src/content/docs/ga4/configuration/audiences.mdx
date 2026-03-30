@@ -1,6 +1,220 @@
 ---
 title: "Audiences"
-description: "Building audiences for analysis and remarketing."
+description: "Build GA4 audiences for remarketing and reporting — conditions, membership duration, triggers, and how to use audiences in analysis."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+GA4 audiences are groups of users that match defined conditions. They serve two purposes: targeting (sending audience lists to Google Ads or Display & Video 360 for remarketing) and analysis (using audiences as segments and comparisons in GA4 reports).
+
+Unlike Universal Analytics segments, GA4 audiences persist over time. Once a user qualifies, they remain in the audience until they no longer meet the conditions or their membership duration expires.
+
+## Audience types
+
+**Rule-based audiences** — users who meet a set of conditions you define based on events, parameters, user properties, demographic data, or predicted behaviors.
+
+**Predictive audiences** (requires predictive metrics) — users predicted to perform an action, such as "likely 7-day purchasers" or "likely 7-day churning users." Available when your property has sufficient conversion volume for GA4 to train prediction models.
+
+**Suggested audiences** — GA4 pre-built templates for common use cases (all users, purchasers, non-purchasers, etc.).
+
+## Creating an audience
+
+<Steps>
+1. Go to **Admin → Audiences → New audience**.
+
+2. Choose a starting point: create a custom audience, use a suggested template, or use a predictive audience.
+
+3. Build your conditions in the audience builder.
+
+4. Set the **Membership duration** — how long a user stays in the audience after qualifying. Maximum 540 days.
+
+5. Add a **trigger** (optional) — fire a GA4 event when a user first enters the audience.
+
+6. Name the audience and save.
+</Steps>
+
+### Audience builder
+
+The audience builder has three condition modes:
+
+**Include conditions** — users must meet these conditions to enter the audience.
+
+**Exclude conditions** — users matching these conditions are removed from the audience, even if they meet include conditions.
+
+**Trigger conditions** — an optional event fires the first time a user enters the audience.
+
+### Condition types
+
+Each condition can filter by:
+- **Event** — user has triggered a specific event
+- **Event parameter** — an event with a specific parameter value
+- **User property** — current user property value
+- **GA4 dimensions** — device, geography, demographics
+- **Predicted probability** — likelihood of purchase or churn (predictive)
+
+### Within same session vs. any combination
+
+When you add multiple conditions, GA4 lets you specify whether they must occur within the same session or across any sessions:
+
+- **Within same session**: user must meet all conditions in a single session
+- **Across any sessions**: conditions can be met across different sessions
+
+For funnel-like audiences (user viewed product AND purchased), "within same session" is usually too restrictive. Use "across any sessions" with a time window unless you specifically want same-session qualification.
+
+## Useful audience examples
+
+### Cart abandoners
+
+```
+Include: event = add_to_cart in the last 14 days
+Exclude: event = purchase in the last 14 days
+Membership duration: 14 days
+```
+
+Users who added to cart but did not complete purchase within 14 days. Classic remarketing audience.
+
+### High-value users
+
+```
+Include: user property subscription_tier = pro OR premium
+Include: event = purchase, value >= 100 (at any point)
+Membership duration: 540 days
+```
+
+### Engaged readers (content site)
+
+```
+Include: event = page_view with content_type = blog_post, 3 or more times in last 30 days
+Membership duration: 30 days
+```
+
+### New users who have not converted
+
+```
+Include: event = first_visit in the last 7 days
+Exclude: event = purchase at any point
+Membership duration: 7 days
+```
+
+### SaaS trial users approaching expiration
+
+```
+Include: user property account_type = trial
+Include: user property trial_days_remaining between 1 and 5
+Membership duration: 5 days
+```
+
+## Membership duration
+
+Membership duration determines how long a user stays in the audience after they qualify, even if they no longer meet the conditions.
+
+- **Default**: 30 days for most custom audiences
+- **Maximum**: 540 days
+- **Minimum**: 1 day
+
+Choose duration based on your use case:
+- Cart abandonment remarketing: 14-30 days (after that, the intent has likely faded)
+- Long-term customer cohorts: 540 days (keep users in the audience for the analysis period)
+- Predictive "likely to purchase": 7 days (predictions are only relevant short-term)
+
+## Audience triggers
+
+An audience trigger fires a GA4 event the **first time** a user enters the audience. This lets you use the moment of audience qualification as a conversion event or analysis signal.
+
+Example use case: create an audience for users who have viewed 3+ product pages in a session and create a trigger event `high_intent_user`. Mark that event as a conversion. Now you can measure how many users reach this "high intent" threshold and analyze their subsequent behavior.
+
+<Steps>
+1. In the audience builder, expand the **Trigger** section.
+
+2. Check **Log an event when a user matches this audience**.
+
+3. Name the trigger event (follows standard event naming rules).
+
+4. Save the audience.
+</Steps>
+
+The trigger event fires once per user when they first qualify. It does not fire again if they re-qualify after their membership expires.
+
+## Sending audiences to Google Ads
+
+Audiences created in GA4 can be shared with linked Google Ads accounts for remarketing.
+
+<Steps>
+1. Link your Google Ads account in **Admin → Product Links → Google Ads Links**.
+
+2. When creating an audience, eligible audiences will automatically sync to linked Ads accounts.
+
+3. In Google Ads, find the GA4 audiences under **Tools & Settings → Audience Manager → Your Data Segments → Google Analytics**.
+</Steps>
+
+### Audience minimums for remarketing
+
+Google requires minimum audience sizes before serving ads:
+- Display Network: 100 users
+- Search Network: 1,000 users
+- YouTube: 1,000 users
+
+Small audiences are collected but cannot be used for ad targeting until they exceed these thresholds.
+
+<Aside type="caution">
+GA4 audiences use sampled data for audience building when properties have high traffic. The audience list sent to Google Ads may not perfectly reflect all qualifying users. For the highest-fidelity remarketing, use server-side audience building from your own data combined with Customer Match uploads.
+</Aside>
+
+## Audiences in analysis
+
+Audiences can be used as comparisons in GA4 reports:
+
+1. In any standard report, click **Add comparison** at the top
+2. Select **Audiences** as the filter type
+3. Select the audience to compare
+
+This lets you compare metrics between audience members and all users — see if cart abandoners have higher lifetime value than average, or whether your "engaged readers" convert more than casual visitors.
+
+Audiences are also available as segments in Explorations, allowing the same comparison in funnel, path, and cohort analyses.
+
+## Audience limits
+
+| Limit | Value |
+|-------|-------|
+| Audiences per property | 100 |
+| Conditions per audience | 10 |
+| Groups per audience | 5 |
+| Membership duration (max) | 540 days |
+
+## Common mistakes
+
+### Using audiences instead of cohorts for time-based analysis
+
+Audiences are not cohorts. An audience with 30-day membership duration continuously refreshes with new qualifying users. If you want to analyze a fixed group defined at a specific time (users who signed up in January), use cohort analysis in Explorations.
+
+### Short membership duration for long funnel analysis
+
+If your sales cycle is 60 days and your cart abandonment audience membership is 14 days, users who purchase after 15 days appear in neither the "purchased" nor the "abandoned" categories. Match membership duration to your actual conversion window.
+
+### Forgetting audience triggers for conversion tracking
+
+If you want to track a complex behavioral threshold (e.g., "users who have read 5 articles and visited the pricing page"), using an audience trigger is more reliable than trying to replicate the logic with a GA4 event tag. Create the audience, add a trigger event, and mark it as a conversion.
+
+### Creating audiences after you need them
+
+Like custom dimensions, audiences do not backfill. An audience you create today starts building from today forward. Create audiences for important segments (purchasers, trial users, high-engagement users) as early as possible so they have meaningful membership when you need to analyze them.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Conversions"
+    description="Mark events as conversions, including audience trigger events."
+    href="/ga4/configuration/conversions/"
+  />
+  <LinkCard
+    title="Explore Reports"
+    description="Use audiences as segments in free-form and funnel explorations."
+    href="/ga4/reporting/explore-reports/"
+  />
+  <LinkCard
+    title="Segment Overlap"
+    description="Analyze users who belong to multiple audiences simultaneously."
+    href="/ga4/reporting/segment-overlap/"
+  />
+</CardGrid>

@@ -3,4 +3,179 @@ title: "Scroll Triggers"
 description: "Tracking scroll depth with percentage and pixel-based thresholds."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Scroll depth tracking tells you how far down the page users are reading. It is one of the most useful engagement signals in content analytics — used to evaluate article quality, landing page effectiveness, and whether users are reaching your calls to action. GTM's built-in Scroll Depth trigger makes this easy to configure without writing JavaScript.
+
+## How the Scroll Depth trigger works
+
+The Scroll Depth trigger uses `requestAnimationFrame` to sample the user's scroll position at efficient intervals — not a raw `scroll` event listener, which would fire hundreds of times per second and cause performance problems. This makes it lightweight and safe to use on any page.
+
+When the user scrolls past a threshold you define, the trigger fires its associated tags. Each threshold fires only once per page load by default — scrolling back up and then down again does not re-fire a threshold that has already been reached.
+
+The GTM event name for scroll depth triggers is `gtm.scrollDepth`.
+
+## Configuration options
+
+### Vertical vs. horizontal scroll
+
+Most setups use vertical scroll — how far down the page the user has scrolled. Horizontal scroll is available for specialized cases like carousels or full-width scrolling layouts, but it is rarely needed.
+
+### Percentage-based thresholds
+
+The most common approach. Define threshold percentages and a trigger fires each time the user reaches one. Percentage is calculated relative to the full page height, including content below the fold.
+
+The standard set most teams use: **25, 50, 75, 90**. The choice of 90 rather than 100 is deliberate — reaching 100% requires the user to scroll through the very last pixel of the page, including footer padding. 90% is a practical proxy for "read to the bottom of the content."
+
+### Pixel-based thresholds
+
+Define specific pixel distances from the top of the page. Use this when you care about reaching a specific section rather than a percentage. For example: "did the user scroll past the product description?" is better answered by pixel thresholds than percentages, especially if the element is always at a consistent pixel offset.
+
+Pixel thresholds are also more stable on pages with dynamic content. If your page grows after initial load — through lazy-loaded images, infinite scroll, or content injected by JavaScript — the page height changes, making percentage thresholds unreliable. Pixels remain fixed regardless of how the page grows.
+
+## Scroll variables
+
+Enable under **Variables → Built-In Variables → Scrolling**:
+
+| Variable | Value |
+|----------|-------|
+| `Scroll Depth Threshold` | The threshold value that was just crossed (e.g., 25, 50, 75) |
+| `Scroll Depth Units` | `pixels` or `percent` |
+| `Scroll Direction` | `vertical` or `horizontal` |
+
+Use `Scroll Depth Threshold` in your GA4 Event tag to send the actual depth value as a parameter. When the user crosses 50%, your GA4 event receives `scroll_depth: 50`.
+
+## Standard scroll tracking setup
+
+<TagConfig
+  name="GA4 - Event - Scroll Depth"
+  type="Google Analytics: GA4 Event"
+  trigger="SD - Vertical 25/50/75/90 Percent"
+  variables={['Scroll Depth Threshold', 'Scroll Depth Units', 'Page Path']}
+/>
+
+<Steps>
+1. Create a new trigger with type **Scroll Depth**
+2. Select **Vertical Scroll Depths**
+3. Select **Percentages** and enter `25,50,75,90`
+4. Switch to **Some Pages** and add `Page Path contains /blog` (or the path of your content pages)
+5. Name it: `SD - Vertical 25/50/75/90 - Blog`
+6. Attach to a GA4 Event tag with event name `scroll` and parameter `scroll_depth` mapped to `{{Scroll Depth Threshold}}`
+</Steps>
+
+In GA4, you can mark the 75% or 90% scroll depth event as a key event to track users who deeply engage with your content.
+
+## Filtering by page type
+
+Not every page needs scroll tracking. Product listing pages are often short. Checkout and account pages are not content. Apply scroll triggers selectively to avoid inflating your event volume with meaningless data:
+
+```
+// Track scroll only on blog articles
+Page Path contains /blog/
+
+// Track scroll on multiple content section types
+Page Path matches RegEx /(blog|guides|documentation|resources|case-studies)/.*
+
+// Exclude utility pages
+Page Path does not contain /checkout
+Page Path does not contain /account
+Page Path does not contain /search
+```
+
+Creating separate scroll triggers per content type often produces more useful data. A 75% scroll on a 2,000-word article signals deep engagement. The same threshold on a 200-word landing page can be reached by anyone who scrolls past the hero section. Separate triggers let you interpret the signals correctly.
+
+## Pixel-based tracking for specific sections
+
+Use pixel thresholds to answer "did the user reach this section?":
+
+```
+// Did the user scroll past the product description?
+Scroll Depth: Pixel-based, threshold: 800
+
+// Did the user reach the comments section?
+Scroll Depth: Pixel-based, threshold: 3500
+```
+
+To find the right pixel value, use the browser console:
+
+```javascript
+// Get the pixel offset of a specific section
+document.querySelector('#comments-section').getBoundingClientRect().top + window.pageYOffset
+// Returns: e.g., 3421 — use 3400 as your threshold
+```
+
+## Using scroll depth for engagement scoring
+
+Scroll depth combined with time on page gives a richer engagement signal than either alone:
+
+```javascript
+// Custom JavaScript Variable: "Engaged User"
+// Returns true if user has scrolled 50%+ AND spent 30+ seconds
+function() {
+  try {
+    var deepScroll = false;
+    var dl = window.dataLayer || [];
+    for (var i = dl.length - 1; i >= 0; i--) {
+      if (dl[i]['gtm.scrollDepthThreshold'] >= 50) {
+        deepScroll = true;
+        break;
+      }
+    }
+    var timeOnPage = (Date.now() - performance.timing.navigationStart) / 1000;
+    return deepScroll && timeOnPage >= 30;
+  } catch(e) { return false; }
+}
+```
+
+Better yet, use a Trigger Group to fire a tag only when both a scroll threshold AND a timer event have occurred — see [Trigger Groups](/client-side/triggers/trigger-groups/).
+
+## Performance considerations
+
+The Scroll Depth trigger is efficient by design — `requestAnimationFrame` sampling is far lighter than raw scroll event listeners. However, performance problems arise when:
+
+- **Heavy tags fire on scroll thresholds**: A scroll trigger that loads a large external script or renders new DOM elements on threshold crossing creates a visible jank at the scroll point. Keep scroll-triggered tags to lightweight measurement calls.
+- **Tracking scroll on every page universally**: On a site with high page views, tracking 4 scroll thresholds on every page generates 4× the event volume with most of it being noise. Filter to pages where scroll data drives decisions.
+
+## Common mistakes
+
+### Using 100% as your bottom threshold
+
+Requiring 100% scroll means the user must scroll to the absolute last pixel of the page — including footer padding, copyright notices, and any other content below your main body. In practice, very few users trigger this. Use 90% as your "read to the bottom" threshold.
+
+### Applying scroll tracking to short pages
+
+A 400px landing page with a single CTA will show 90% scroll depth from every visitor who scrolls at all. This is not meaningful engagement data. Apply scroll triggers only to pages long enough that scroll depth differentiates engaged users from non-engaged ones.
+
+### No page filtering at all
+
+An All Pages scroll trigger with no conditions creates large event volumes in GA4 with significant noise from utility pages. Always add page path conditions to scope scroll tracking to content pages, product pages, and other pages where engagement depth matters.
+
+### Not using scroll data in analysis
+
+Scroll depth tracking is only valuable if someone actually looks at it. Set up GA4 explorations or reports that show scroll depth distribution by page or content type. If no one is analyzing the data, the events are overhead without return.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Timer Triggers"
+    description="Combine scroll depth with time on page for richer engagement signals."
+    href="/client-side/triggers/timer-triggers/"
+  />
+  <LinkCard
+    title="Trigger Groups"
+    description="Fire a tag only after the user has both scrolled a threshold AND spent time on the page."
+    href="/client-side/triggers/trigger-groups/"
+  />
+  <LinkCard
+    title="Element Visibility Trigger"
+    description="When you want to track whether a specific element was seen, not just how far down the page the user scrolled."
+    href="/client-side/triggers/element-visibility-trigger/"
+  />
+  <LinkCard
+    title="Trigger Types Overview"
+    description="A complete reference for all GTM trigger types."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+</CardGrid>

@@ -1,6 +1,144 @@
 ---
 title: "view_cart"
-description: "DataLayer specification for viewing the shopping cart."
+description: "Complete dataLayer specification for the GA4 view_cart event — cart page views with full cart contents and total value."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The `view_cart` event fires when a user views their shopping cart. It gives you a snapshot of the full cart at the moment of viewing — every item, every quantity, the total value. This data powers cart-to-checkout conversion rates and helps you understand the average order value composition before checkout begins.
+
+Unlike `add_to_cart` (which fires when individual items are added), `view_cart` reflects the complete current state of the cart when the user explicitly reviews it.
+
+## When to fire
+
+Fire `view_cart` when:
+- The cart page or cart drawer renders with cart contents visible
+- A cart summary popup/modal opens
+- The user navigates back to the cart page
+
+Fire once per cart view, not every time the cart is updated. If the cart updates in real-time (AJAX), you do not need to re-fire unless the user explicitly navigates to the cart view.
+
+## Complete dataLayer push
+
+```javascript
+// Always clear previous ecommerce data first
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'view_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 174.47,    // sum of (price × quantity) for all items
+    items: [
+      {
+        item_id: 'SKU-001-BLK-L',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_variant: 'Black / Large',
+        price: 89.99,
+        quantity: 1,
+        affiliation: 'Online Store'
+      },
+      {
+        item_id: 'SKU-047-WHT-M',
+        item_name: 'Cotton Crew T-Shirt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Tops',
+        item_variant: 'White / Medium',
+        price: 24.99,
+        quantity: 2,
+        affiliation: 'Online Store'
+      },
+      {
+        item_id: 'SKU-112-TAN-34',
+        item_name: 'Woven Leather Belt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Accessories',
+        item_category2: 'Belts',
+        item_variant: 'Tan / 34',
+        price: 34.50,
+        quantity: 1,
+        affiliation: 'Online Store'
+      }
+    ]
+  }
+});
+```
+
+`value: 174.47` is calculated as `89.99 × 1 + 24.99 × 2 + 34.50 × 1 = 174.47`.
+
+## Event schema
+
+<EventSchema
+  event="view_cart"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "view_cart"' },
+    { name: 'ecommerce.currency', type: 'string', required: true, description: 'ISO 4217 currency code. All items must be in the same currency.' },
+    { name: 'ecommerce.value', type: 'number', required: true, description: 'Total cart value — sum of (price × quantity) for all items.' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'All items currently in the cart.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'SKU or variant-level product identifier.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name.' },
+    { name: 'items[].item_brand', type: 'string', required: false, description: 'Brand or manufacturer.' },
+    { name: 'items[].item_category', type: 'string', required: false, description: 'Primary product category.' },
+    { name: 'items[].item_variant', type: 'string', required: false, description: 'Selected variant.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Unit price. Not the line total.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Quantity in cart.' },
+  ]}
+/>
+
+## Calculating cart value
+
+The `value` parameter should be the sum of all line totals: `Σ(price × quantity)` for every item in the cart. This is the pre-tax, pre-shipping cart subtotal.
+
+```javascript
+function calculateCartValue(items) {
+  return items.reduce((total, item) => {
+    return total + (item.price * item.quantity);
+  }, 0);
+}
+
+// Use with parseFloat to avoid floating-point precision issues
+const cartValue = parseFloat(calculateCartValue(cartItems).toFixed(2));
+```
+
+## GTM configuration
+
+<Steps>
+1. **Create a Custom Event trigger.** Event name: `view_cart`. Name it `CE - view_cart`.
+
+2. **Create Data Layer Variables** for `ecommerce.currency`, `ecommerce.value`, and `ecommerce.items`.
+
+3. **Create the GA4 Event tag.** Event name: `view_cart`. Enable **Send Ecommerce data**. Add `currency` and `value` as explicit event parameters.
+
+4. **Test in Preview mode.** Navigate to your cart page with items. Verify all items appear in the items array, `value` equals the correct total, and item-level prices and quantities are correct.
+</Steps>
+
+## Common mistakes
+
+**Omitting items that are out of stock in the cart.** Even out-of-stock cart items should be included — the user is seeing them and they're part of the cart state. Their presence might explain why checkout conversion is lower.
+
+**Calculating `value` as unit price instead of cart total.** `value` must reflect the full cart, not just one item's price.
+
+**Multi-currency carts.** If items in the cart have different currencies (rare but possible in marketplaces), standardize to the display currency before pushing.
+
+<CardGrid>
+  <LinkCard
+    title="add_to_cart"
+    description="Individual item additions — the events that built this cart."
+    href="/datalayer/ecommerce/add-to-cart/"
+  />
+  <LinkCard
+    title="begin_checkout"
+    description="The next step — user initiates checkout from the cart."
+    href="/datalayer/ecommerce/begin-checkout/"
+  />
+  <LinkCard
+    title="remove_from_cart"
+    description="Tracking cart removals and quantity reductions."
+    href="/datalayer/ecommerce/remove-from-cart/"
+  />
+</CardGrid>

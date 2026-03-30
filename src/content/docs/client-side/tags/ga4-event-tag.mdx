@@ -1,6 +1,287 @@
 ---
 title: "GA4 Event Tag"
-description: "Sending custom events to GA4 via GTM event tags."
+description: "Sending custom events to GA4 via GTM — configuration, parameters, and the reusable tag pattern that keeps containers manageable."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The GA4 Event tag is how you send custom events from GTM to Google Analytics 4. Every click you track, every form submission, every video play, every add-to-cart — if it becomes a GA4 event, a GA4 Event tag sends it.
+
+Getting the configuration right matters more than most practitioners realize. The decisions you make here — event naming, parameter structure, whether you hardcode or use variables — determine how useful and maintainable your analytics will be six months from now.
+
+## How the GA4 Event tag works
+
+When a GA4 Event tag fires:
+
+1. It references your **Google Tag** (the configuration tag with your Measurement ID) to know which GA4 property to send to.
+2. It sends an event with the name you specify in **Event Name**.
+3. It sends any **Event Parameters** you have configured as key-value pairs.
+4. If **Send Ecommerce Data** is checked, it reads from the `ecommerce` object in the dataLayer and sends it as standardized GA4 ecommerce parameters.
+
+GA4 Event tags require an initialized Google Tag to exist and have fired before they execute. If your Google Tag fires on All Pages (as it should), this dependency is satisfied on every page.
+
+## Creating a GA4 Event tag
+
+<Steps>
+1. In GTM, go to **Tags** and click **New**.
+
+2. Select **Google Analytics: GA4 Event** as the tag type.
+
+3. In the **Google Tag** field, enter your Measurement ID — using the same Constant Variable as your configuration tag: `{{CONFIG - GA4 Measurement ID}}`.
+
+4. Set the **Event Name**. Use snake_case to match GA4's naming convention: `purchase`, `add_to_cart`, `form_submission`.
+
+5. Add **Event Parameters** for the data you want to send with the event.
+
+6. Under **Triggering**, attach the trigger that should fire this tag.
+
+7. Name the tag descriptively: `GA4 - Event - add_to_cart`.
+</Steps>
+
+## Event naming: get this right from the start
+
+GA4 reserves a set of event names for standard ecommerce and engagement events. Use these names when you are tracking those behaviors — GA4 automatically knows how to process them for reports and the Shopping Behavior Analysis.
+
+**Use these exact names for standard behaviors:**
+
+```
+page_view
+scroll
+click
+file_download
+form_start
+form_submit
+video_start
+video_progress
+video_complete
+view_item_list
+select_item
+view_item
+add_to_cart
+remove_from_cart
+view_cart
+begin_checkout
+add_shipping_info
+add_payment_info
+purchase
+refund
+generate_lead
+login
+sign_up
+search
+share
+```
+
+**For custom behaviors**, use snake_case descriptive names:
+```
+cta_click
+banner_impression
+filter_applied
+product_comparison_added
+loyalty_points_redeemed
+live_chat_started
+```
+
+**What to avoid:**
+- camelCase (`addToCart`) — inconsistent with GA4's convention
+- Spaces (`add to cart`) — causes issues in BigQuery
+- Hyphens (`add-to-cart`) — creates awkward column names in BigQuery
+- Capital letters at start (`Purchase`) — inconsistent
+
+<Aside type="tip">
+GA4 event names are case-sensitive. `Add_To_Cart`, `add_to_cart`, and `ADD_TO_CART` are three different events in your property. Enforce snake_case from day one.
+</Aside>
+
+## Event parameters
+
+Parameters are key-value pairs sent alongside the event. They describe the context of the event — what product was added, what form was submitted, what value was transacted.
+
+### Adding parameters
+
+In the GA4 Event tag, click **Event Parameters → Add Row** for each parameter. Each row has:
+- **Parameter Name**: The key (snake_case, no spaces)
+- **Value**: A GTM variable reference like `{{DLV - product_id}}`
+
+### GA4 parameter limits
+
+| Limit | Value |
+|-------|-------|
+| Parameters per event | 25 |
+| Custom dimensions per property | 50 user-scoped, 50 event-scoped |
+| Parameter name character limit | 40 characters |
+| Parameter value character limit | 100 characters |
+| Parameter value (number) | Double precision float |
+
+The 25-parameter-per-event limit rarely causes problems in practice. The 50 custom dimension limit is the one that bites implementations with too many fine-grained parameters — plan your dimension strategy before you start registering them in GA4.
+
+### Automatically collected parameters
+
+GA4 automatically collects certain parameters on every event without configuration:
+- `page_location` (URL)
+- `page_title`
+- `page_referrer`
+- `language`
+- `screen_resolution`
+
+You do not need to add these in your event tag unless you want to override the automatically collected value.
+
+## The reusable tag pattern
+
+One of the most impactful choices you make in your GTM implementation is whether to create one GA4 Event tag per event, or a small number of reusable tags.
+
+### The many-tags anti-pattern
+
+```
+GA4 - Event - add_to_cart          // Trigger: CE - add_to_cart
+GA4 - Event - remove_from_cart     // Trigger: CE - remove_from_cart
+GA4 - Event - begin_checkout       // Trigger: CE - begin_checkout
+GA4 - Event - view_item            // Trigger: CE - view_item
+...
+```
+
+20 events = 20 tags. Every tag has slightly different parameter names because they were configured separately. When GA4's parameter spec changes, you update 20 tags. This is the anti-pattern.
+
+### The reusable tag approach
+
+Create one GA4 Event tag where the Event Name is a variable:
+
+```
+Event Name: {{DLV - event}} or {{Event}}
+```
+
+Configure it with the parameters that apply across all events. Attach it to a trigger that fires on multiple custom events.
+
+For parameters that vary by event type, push them all in the dataLayer under consistent key names:
+
+```javascript
+// All ecommerce events use these keys
+dataLayer.push({
+  ecommerce: null
+});
+dataLayer.push({
+  event: 'add_to_cart',
+  // Common parameter keys for all events
+  page_type: 'product',
+  user_logged_in: true,
+  ecommerce: {
+    currency: 'USD',
+    value: 199.99,
+    items: [...]
+  }
+});
+```
+
+The reusable tag reads `{{Event}}` as the event name, `{{DLV - page_type}}` and `{{DLV - user_logged_in}}` as common parameters, and uses "Send Ecommerce Data" to handle ecommerce automatically.
+
+<TagConfig
+  name="GA4 - Event - Ecommerce (Reusable)"
+  type="Google Analytics: GA4 Event"
+  trigger="CE - ecommerce_events (matches: add_to_cart, remove_from_cart, view_item, begin_checkout, purchase)"
+  variables={['{{Event}}', 'DLV - page_type', 'DLV - user_logged_in', 'Send Ecommerce Data: ✓']}
+/>
+
+This works when your events share consistent parameter names. For events with truly unique parameters (a `live_chat_started` event with parameters unrelated to all other events), a dedicated tag is fine.
+
+## Send Ecommerce Data
+
+This checkbox on the GA4 Event tag tells GTM to read the `ecommerce` object from the dataLayer and automatically map its properties to GA4's standard ecommerce parameters.
+
+When enabled, GTM looks for the `ecommerce` key in the dataLayer model and sends its contents as event parameters. You do not need to manually configure the ecommerce parameters in the tag — GA4 understands the standard GA4 ecommerce schema automatically.
+
+This is the right approach for all GA4 ecommerce events. The alternative — manually mapping every ecommerce parameter in the tag — is error-prone and unnecessary.
+
+**Critical:** Always push `{ ecommerce: null }` before each ecommerce push to clear stale data from the model:
+
+```javascript
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: 'T-98765',
+    value: 299.00,
+    tax: 24.00,
+    shipping: 0,
+    currency: 'USD',
+    items: [
+      {
+        item_id: 'SKU-001',
+        item_name: 'Leather Jacket',
+        item_brand: 'Acme',
+        item_category: 'Apparel',
+        price: 199.00,
+        quantity: 1
+      },
+      {
+        item_id: 'SKU-002',
+        item_name: 'Wool Scarf',
+        item_brand: 'Acme',
+        item_category: 'Accessories',
+        price: 100.00,
+        quantity: 1
+      }
+    ]
+  }
+});
+```
+
+## User Properties in Event tags
+
+GA4 Event tags can also set user properties — characteristics of the user rather than the specific event. However, user properties set in event tags only apply to that event and forward, whereas user properties in the Google Tag are established at page load.
+
+For most user properties (login status, user tier, country), set them in the Google Tag configuration. Use event tag user properties only when a property changes as a result of a specific action — like setting `first_purchase: true` after the purchase event fires.
+
+## Common mistakes
+
+### Creating a separate tag for every event
+
+Covered above in the reusable tag section. Before creating a new GA4 Event tag, ask whether an existing tag could handle the event with a wider trigger and variable-driven event name.
+
+### Using different parameter names for the same concept across events
+
+If `add_to_cart` sends `product_id` but `view_item` sends `item_id` for the same concept, your custom dimension reports are split across two columns. Decide on parameter names once and use them consistently across all events.
+
+```
+// Consistent parameter naming across all events
+item_id       // NOT product_id / product_sku / sku / id
+item_name     // NOT product_name / product_title / title
+page_type     // NOT pageType / page_category / content_type
+```
+
+### Sending string values where GA4 expects numbers
+
+GA4's `value` parameter for ecommerce events should be a number. If your dataLayer pushes `"199.99"` (a string) instead of `199.99` (a number), GA4 might accept it but your numeric calculations will behave unexpectedly.
+
+Ensure your backend or dataLayer implementation sends numeric values for `price`, `value`, `quantity`, `tax`, and `shipping` as numbers, not strings.
+
+### Not registering custom dimensions
+
+Custom event parameters are sent to GA4, but they are not visible in reports until you register them as custom dimensions in GA4's Admin → Custom Definitions panel. Parameters you send but never register are still stored in the raw event data (visible in BigQuery), but they will not appear in the standard GA4 interface.
+
+Register the custom dimensions you plan to use in reports as soon as you start sending them.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GA4 Configuration Tag"
+    description="The Google Tag your event tags depend on — must be configured first."
+    href="/client-side/tags/ga4-configuration-tag/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The triggers that fire your GA4 Event tags — how to configure them with dataLayer events."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Ecommerce Tracking"
+    description="The complete GA4 ecommerce dataLayer spec and tag configuration."
+    href="/client-side/tracking/ecommerce-tracking/"
+  />
+  <LinkCard
+    title="Data Layer Variables"
+    description="How to create variables that feed your GA4 Event tag parameters."
+    href="/client-side/variables/datalayer-variables/"
+  />
+</CardGrid>

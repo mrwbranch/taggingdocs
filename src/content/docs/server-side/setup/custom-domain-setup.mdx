@@ -1,6 +1,283 @@
 ---
 title: "Custom Domain Setup"
-description: "Configuring a first-party domain for your sGTM endpoint."
+description: "Configuring a first-party subdomain for your sGTM server — the step that enables first-party cookies and bypasses ad blockers."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The custom domain configuration is the single most important step in your sGTM setup. Without it, you have a working server with no first-party benefits. A custom subdomain on your own domain transforms your sGTM endpoint from a third-party tracking server (subject to browser restrictions) into a first-party data collection endpoint (trusted by browsers like your own API).
+
+This guide covers domain selection, DNS configuration for major providers, SSL setup, and client-side connection.
+
+## Why the custom domain matters
+
+When your sGTM server runs at `collect.yoursite.com`:
+
+- **Cookies are first-party.** The browser treats cookies set at `collect.yoursite.com` as belonging to `yoursite.com` — the same origin as your main site. Safari's ITP 7-day cookie cap applies only to JavaScript-set cookies classified as trackers. Server-set first-party cookies receive the full expiration you configure.
+- **Ad blockers have a harder time.** Most ad blockers match against lists of known tracking domains (`google-analytics.com`, `googletagmanager.com`, `connect.facebook.net`). A request to `collect.yoursite.com` does not match any tracking domain list. It looks like a first-party API call.
+- **Browser privacy features apply rules appropriate for first-party context.** Requests to your own domain are treated with the trust level your main site has, not the lower trust level for known third-party tracking scripts.
+
+Without a custom domain, your sGTM server at `*.a.run.app` is recognizable as a Google-hosted endpoint and provides none of these benefits.
+
+## Step 1: Choose your subdomain
+
+Good subdomain choices for sGTM:
+
+| Subdomain | Notes |
+|---|---|
+| `collect.yoursite.com` | Clean, functional, no tracking connotation |
+| `metrics.yoursite.com` | Works well, sounds like an internal API |
+| `data.yoursite.com` | Generic enough to avoid block lists |
+| `events.yoursite.com` | Good for event-focused architectures |
+| `api.yoursite.com` | Works if you do not already use this for your actual API |
+
+Avoid these:
+
+| Subdomain | Why to avoid |
+|---|---|
+| `analytics.yoursite.com` | Blocked by many filter lists |
+| `tracker.yoursite.com` | Obvious to browser privacy tools |
+| `gtm.yoursite.com` | The "gtm" string appears in some filter lists |
+| `pixel.yoursite.com` | Common block list pattern |
+| `stats.yoursite.com` | Some filter lists match this |
+
+There is no perfect subdomain that will never appear on any filter list. The goal is choosing something that does not obviously match known tracking patterns.
+
+## Step 2: Configure DNS
+
+The DNS configuration depends on your hosting provider.
+
+### Cloud Run (GCP)
+
+GCP provides a domain mapping tool that handles both DNS verification and SSL. The result is typically a `CNAME` record:
+
+```
+collect.yoursite.com  CNAME  ghs.googlehosted.com
+```
+
+Get the exact record by going to: **Cloud Run** → your service → **Manage Custom Domains** → **Add Mapping**.
+
+### Stape
+
+Stape provides a `CNAME` target in their dashboard under **Domains** → **Add Domain**:
+
+```
+collect.yoursite.com  CNAME  cname.stape.io
+```
+
+### AWS ALB
+
+Point to your ALB's DNS name:
+
+```
+collect.yoursite.com  CNAME  sgtm-alb-xxxxxxxxx.region.elb.amazonaws.com
+```
+
+Or use an `A` record via Route 53 Alias if you are managing DNS in Route 53:
+
+```
+collect.yoursite.com  ALIAS  sgtm-alb-xxxxxxxxx.eu-west-1.elb.amazonaws.com
+```
+
+### Self-hosted (VPS or other)
+
+Point directly to your server's IP:
+
+```
+collect.yoursite.com  A  YOUR_SERVER_IP
+```
+
+## DNS configuration by provider
+
+<Tabs>
+  <TabItem label="Cloudflare">
+
+<Steps>
+1. Log in to Cloudflare → select your domain → **DNS** → **Records**
+
+2. Click **Add Record**:
+   - Type: `CNAME`
+   - Name: `collect` (Cloudflare appends `.yoursite.com` automatically)
+   - Target: `ghs.googlehosted.com` (or your provider's target)
+   - **Proxy status: DNS only (grey cloud)** — this is critical
+
+3. Save the record
+
+4. Verify:
+   ```bash
+   dig collect.yoursite.com
+   # Should return CNAME pointing to your provider's target
+   ```
+</Steps>
+
+<Aside type="caution">
+The orange cloud (Cloudflare proxy) must be off for sGTM. When proxied, Cloudflare terminates the connection, potentially caches responses, and can strip or rewrite `Set-Cookie` headers. This breaks first-party cookie setting. Always use DNS-only mode for your sGTM subdomain.
+</Aside>
+
+  </TabItem>
+  <TabItem label="Route 53">
+
+<Steps>
+1. AWS Console → **Route 53** → **Hosted zones** → your domain
+
+2. **Create record**:
+   - Record name: `collect`
+   - Record type: `CNAME`
+   - Value: your provider's CNAME target (e.g., `ghs.googlehosted.com`)
+   - TTL: 300
+
+3. For AWS ALB targets, use **Alias** instead of CNAME:
+   - Record type: `A`
+   - Alias: Yes
+   - Route traffic to: Application and Classic Load Balancer
+   - Select your ALB
+
+4. Save and verify propagation.
+</Steps>
+
+  </TabItem>
+  <TabItem label="Namecheap">
+
+<Steps>
+1. Namecheap dashboard → **Domain List** → **Manage** → **Advanced DNS**
+
+2. **Add New Record**:
+   - Type: `CNAME Record`
+   - Host: `collect`
+   - Value: your provider's CNAME target
+   - TTL: Automatic
+
+3. Save and wait for propagation.
+</Steps>
+
+  </TabItem>
+</Tabs>
+
+## Step 3: Verify DNS propagation
+
+DNS changes propagate at the speed of your TTL setting — typically 5 minutes to 24 hours. Verify propagation before proceeding:
+
+```bash
+# Check from multiple locations
+dig collect.yoursite.com +short
+
+# Or use online tools
+# https://dnschecker.org
+# https://toolbox.googleapps.com/apps/dig/
+```
+
+You can also check directly from the command line against multiple DNS resolvers:
+```bash
+dig collect.yoursite.com @8.8.8.8    # Google
+dig collect.yoursite.com @1.1.1.1    # Cloudflare
+dig collect.yoursite.com @9.9.9.9    # Quad9
+```
+
+## Step 4: SSL certificate
+
+SSL setup varies by hosting provider:
+
+**GCP Cloud Run**: Google automatically provisions a managed SSL certificate when DNS resolves correctly. No action required. Certificate appears in **Cloud Run** → **Manage Custom Domains** when provisioning is complete (typically 5–30 minutes after DNS propagates).
+
+**Stape**: Automatic provisioning, same as GCP.
+
+**AWS ALB**: Use AWS Certificate Manager (ACM). Request a certificate for `collect.yoursite.com` in ACM, validate ownership via DNS CNAME (ACM provides the record to create), then attach the validated certificate to your ALB HTTPS listener.
+
+**Self-hosted**: Use Let's Encrypt with Certbot:
+```bash
+certbot certonly --standalone -d collect.yoursite.com
+# Certbot auto-renewal handles certificate refresh every 90 days
+```
+
+## Step 5: Verify the endpoint
+
+Once DNS has propagated and SSL is provisioned, verify:
+
+```bash
+# Health check
+curl -v https://collect.yoursite.com/healthz
+# Expected: HTTP 200, body: ok
+
+# Check SSL certificate
+curl -v https://collect.yoursite.com/healthz 2>&1 | grep "SSL connection"
+# Should show: SSL connection using TLSv1.3
+
+# Check cookies work (test cookie setting)
+curl -I https://collect.yoursite.com/g/collect?v=2&tid=G-XXXXXXXX&...
+# Response headers should include Set-Cookie if configured
+```
+
+## Step 6: Update client-side GTM
+
+With the endpoint verified, update your client-side GA4 tag:
+
+1. Open your client-side GTM container
+2. Find your **GA4 Configuration tag** (or Google Tag)
+3. Set **Tagging Server URL** to:
+   ```
+   https://collect.yoursite.com
+   ```
+4. Preview the change — network tab should show requests going to `collect.yoursite.com/g/collect`
+5. Publish when verified
+
+## Verifying first-party behavior
+
+After updating the client-side tag, confirm first-party behavior in the browser:
+
+1. Open DevTools → **Application** → **Cookies** → `yoursite.com`
+2. Trigger a pageview
+3. You should see a `_ga` cookie (and `FPID` if enabled) with:
+   - Domain: `.yoursite.com`
+   - Expires: full duration (400 days, not the 7-day ITP cap)
+   - SameSite: None or Lax (depending on sGTM configuration)
+
+If the cookie's expiration is 7 days or less, the cookie is being set by client-side JavaScript rather than the server. Check that your sGTM server tag is processing requests and setting cookies via response headers.
+
+## Multi-domain setups
+
+If you run sGTM across multiple domains, you have two options:
+
+**Separate subdomain per domain** (recommended):
+```
+collect.site-a.com → sGTM server
+collect.site-b.com → sGTM server (same server, different CNAME)
+```
+Cookies are scoped correctly to each domain. Cross-domain tracking requires explicit session linking.
+
+**Single subdomain for all domains** (not recommended for cookies):
+Using one `collect.example.com` for multiple unrelated domains prevents first-party cookie benefits on `site-b.com`. Use this only if you intentionally share a tracking infrastructure across related domains and understand the cookie scoping implications.
+
+## Common mistakes
+
+**Proxying through Cloudflare.** Orange cloud mode breaks cookie setting. Use grey cloud (DNS only) exclusively.
+
+**Choosing a subdomain that appears on filter lists.** `analytics.yoursite.com` is blocked by uBlock Origin and others regardless of being first-party. Choose a subdomain that could plausibly be a generic API endpoint.
+
+**Not waiting for SSL provisioning.** A domain mapped in Cloud Run but without a valid SSL certificate returns SSL errors to browsers. Wait for certificate provisioning to complete before switching GA4 traffic.
+
+**Forgetting to update the client-side GA4 tag.** DNS configured, server running, SSL valid — but if your client-side GA4 tag still points at `www.google-analytics.com`, none of this matters. The client-side tag update is the final activation step.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GCP Setup"
+    description="Full Cloud Run deployment guide including the custom domain mapping process."
+    href="/server-side/setup/gcp-setup/"
+  />
+  <LinkCard
+    title="First-Party Domain Config"
+    description="Cookie attributes, FPID setup, and optimizing first-party data collection."
+    href="/server-side/setup/first-party-domain-config/"
+  />
+  <LinkCard
+    title="Server-Side Cookies"
+    description="How sGTM sets cookies via HTTP response headers and why it matters."
+    href="/server-side/advanced/server-side-cookies/"
+  />
+  <LinkCard
+    title="Same-Origin Proxy"
+    description="Taking first-party further — routing sGTM through your main domain path."
+    href="/server-side/advanced/same-origin-proxy/"
+  />
+</CardGrid>

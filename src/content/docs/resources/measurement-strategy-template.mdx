@@ -1,6 +1,323 @@
 ---
 title: "Measurement Strategy Template"
-description: "Template for planning a measurement strategy before implementation."
+description: "A structured template for planning your analytics measurement strategy before implementation — from business objectives to events, custom dimensions, stakeholder sign-off, and launch readiness."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+The most expensive analytics mistakes happen before a single line of code is written. Tracking is implemented, custom dimensions are allocated, events are sent — and then someone asks "but can we tell if users who visit the pricing page convert better?" and the answer is no, because that data was never planned for.
+
+A measurement strategy document forces the right conversations upfront. What are we actually trying to learn? What decisions will this data inform? What do we need to track to answer those questions? Fill in this template before implementation, circulate it for stakeholder review, and use it as the specification your developers work from.
+
+<Aside type="tip">
+This template works best as a live document in Confluence, Notion, or Google Docs. Share it with marketing, product, development, and analytics stakeholders before implementation begins. The goal is sign-off — not consensus on every detail, but explicit acknowledgment from each stakeholder that the plan covers their needs.
+</Aside>
+
+---
+
+## Part 1: Business Context
+
+### 1.1 Project Overview
+
+```
+Project name: _______________________
+Property/Website: _______________________
+Implementation type: [ ] New implementation  [ ] Migration  [ ] Expansion of existing
+Timeline: Start ____________  Launch ____________
+Primary analytics platform: [ ] GA4  [ ] Other: _______________
+Tag management: [ ] GTM  [ ] Other: _______________
+
+Document owner: _______________________
+Last updated: _______________________
+Status: [ ] Draft  [ ] In Review  [ ] Approved  [ ] Implemented
+```
+
+### 1.2 Business Objectives
+
+List the top 3-5 business objectives this measurement strategy supports. These should come directly from stakeholders, not be invented by the analytics team.
+
+| # | Business Objective | Owner | Time Horizon |
+|---|-------------------|-------|-------------|
+| 1 | e.g., Increase trial signup conversion rate by 15% this quarter | Product | Q3 2024 |
+| 2 | | | |
+| 3 | | | |
+| 4 | | | |
+| 5 | | | |
+
+### 1.3 Key Questions the Data Must Answer
+
+Before defining events, define the questions. Each question maps to specific data points.
+
+| Business Question | Who needs this answer | Decision it informs |
+|------------------|----------------------|-------------------|
+| Which traffic sources drive qualified leads? | Marketing | Budget allocation |
+| Where do users drop off in the signup flow? | Product | UX prioritization |
+| Which product features correlate with retention? | Product / Growth | Roadmap |
+| What content drives users to start a trial? | Content / Marketing | Content strategy |
+| [Add your questions] | | |
+
+---
+
+## Part 2: KPI and Metric Hierarchy
+
+Map business objectives to measurable KPIs, then to the specific GA4 metrics and events that feed those KPIs.
+
+### 2.1 Primary KPIs
+
+These are the metrics your leadership team tracks. They are usually outcomes, not activities.
+
+| KPI | Definition | Current Baseline | Target | Measured In |
+|-----|-----------|-----------------|--------|------------|
+| Trial Signup Rate | Trials / Total Visitors | 2.3% | 2.8% | GA4 Conversions |
+| Activation Rate | Activated Users / Trial Signups | 45% | 55% | GA4 + CRM |
+| Revenue | Monthly recurring revenue | $X | $Y | Finance / CRM |
+| [Add KPI] | | | | |
+
+### 2.2 Leading Metrics
+
+These predict KPI outcomes and are actionable at the team level.
+
+| Leading Metric | Correlation to KPI | Measured Via Event |
+|---------------|-------------------|-------------------|
+| Pricing page visits | → Trial signups | `page_view` + page_type = 'pricing' |
+| Feature demo views | → Activation | `video_play` + video_context = 'demo' |
+| Documentation reads | → Activation | `article_read` |
+| [Add metric] | | |
+
+---
+
+## Part 3: Event Taxonomy
+
+### 3.1 Event Planning Worksheet
+
+Complete one row per planned event. This becomes the input for your dataLayer specification.
+
+| Event Name | Trigger | Priority | Key Parameters | GA4 Key Event? | Owner |
+|-----------|---------|----------|---------------|---------------|-------|
+| `page_view` | Every page load | P0 | page_location, page_type, page_category | No | Dev |
+| `trial_signup_complete` | Signup confirmation page | P0 | plan, source, signup_method | Yes | Dev |
+| `trial_started` | First login after signup | P0 | plan, signup_date, activation_date | Yes | Dev |
+| `pricing_page_view` | Pricing page load | P1 | variant (A/B test), plan_highlighted | No | Dev |
+| `feature_used` | Key feature interactions | P1 | feature_name, feature_category, user_tier | No | Dev |
+| `video_play` | Video starts | P2 | video_title, video_type (demo/tutorial), video_duration | No | Dev |
+| `article_read` | Scroll to 75% on docs/blog | P2 | article_title, article_category, article_author | No | Dev |
+| `cta_click` | Primary CTA buttons | P2 | cta_text, cta_location, page_type | No | Dev |
+| [Add events] | | | | | |
+
+**Priority guide:**
+- **P0**: Core business events. Block launch without these.
+- **P1**: Important for key business questions. Implement in first sprint post-launch.
+- **P2**: Nice-to-have engagement data. Implement when P1 is complete.
+
+### 3.2 Event Naming Conventions
+
+Document your naming rules here so everyone follows the same pattern.
+
+```
+Convention: snake_case, all lowercase, verb + noun (where applicable)
+Maximum length: 40 characters
+Reserved prefixes: Do not start with underscore (reserved by GA4 automatic events)
+
+Examples:
+  ✓ trial_signup_complete
+  ✓ add_to_cart
+  ✓ feature_used
+  ✗ TrialSignup (wrong case)
+  ✗ button_click (too generic)
+  ✗ _custom_event (reserved prefix)
+```
+
+### 3.3 Parameter Naming Conventions
+
+```
+Convention: snake_case, all lowercase, noun (descriptive)
+Maximum length: 40 characters
+
+Standard parameters used across all events:
+  page_type: Type of page (homepage, product, pricing, blog, docs, etc.)
+  user_tier: User subscription tier (free, starter, pro, enterprise)
+  logged_in: Boolean, whether user is authenticated
+
+Parameter types:
+  String parameters: max 100 characters for GA4 UI, unlimited for BigQuery
+  Numeric parameters: integer or float, used when you need to aggregate
+```
+
+---
+
+## Part 4: Custom Dimension and Metric Allocation
+
+GA4 limits: **50 event-scoped dimensions, 25 user-scoped dimensions, 50 event metrics, 5 user metrics**.
+
+Plan your allocation before registering. Once allocated, you cannot easily rearrange without data loss.
+
+### 4.1 Event-Scoped Custom Dimensions
+
+| # | Dimension Name (in GA4) | Parameter Name | Example Values | Priority | Registered? |
+|---|------------------------|----------------|---------------|---------|------------|
+| 1 | Page Type | page_type | homepage, product, pricing | P0 | [ ] |
+| 2 | User Tier | user_tier | free, starter, pro, enterprise | P0 | [ ] |
+| 3 | Feature Name | feature_name | export, integration, dashboard | P1 | [ ] |
+| 4 | CTA Location | cta_location | hero, header, sidebar, footer | P1 | [ ] |
+| 5 | Content Category | content_category | tutorial, case-study, announcement | P2 | [ ] |
+| ... | | | | | |
+| **Reserve 10 slots for future use** | | | | | |
+
+### 4.2 User-Scoped Custom Dimensions (Properties)
+
+| # | Dimension Name | Parameter Name | Example Values | Notes |
+|---|---------------|----------------|---------------|-------|
+| 1 | Subscription Tier | subscription_tier | free, starter, pro | Set on login |
+| 2 | Account Type | account_type | individual, team, enterprise | Set from CRM |
+| 3 | Registration Date | registration_date | 2024-01 (month precision) | Set once |
+| ... | | | | |
+
+### 4.3 Custom Metrics
+
+| # | Metric Name | Parameter Name | Type | Example | Use Case |
+|---|------------|----------------|------|---------|----------|
+| 1 | Scroll Depth | scroll_depth_pct | Integer (0-100) | 75 | Content engagement |
+| 2 | Video Watch Time | video_watch_seconds | Integer | 180 | Video engagement |
+| 3 | Form Completion Time | form_completion_ms | Integer | 45000 | UX analysis |
+
+---
+
+## Part 5: DataLayer Specification Summary
+
+This is a high-level summary. The detailed specification (with full parameter tables and code examples) lives in the [Tracking Documentation Template](/resources/documentation-template/).
+
+### P0 Events — Must be live at launch
+
+For each P0 event, complete the full dataLayer spec in the documentation template before development begins.
+
+```javascript
+// Example P0 event spec summary:
+// Event: trial_signup_complete
+// Fires: On the signup confirmation page after successful form submission
+// Key parameters:
+//   plan: string — 'free' | 'starter' | 'pro' (plan selected)
+//   signup_method: string — 'email' | 'google' | 'github'
+//   source: string — referring source from UTM or referrer
+// Key event in GA4: Yes
+// Developer: [Name]
+// Status: [ ] Spec written  [ ] Dev reviewed  [ ] QA tested  [ ] Live
+
+window.dataLayer.push({
+  event: 'trial_signup_complete',
+  plan: 'starter',
+  signup_method: 'email',
+  source: 'google_cpc'
+});
+```
+
+---
+
+## Part 6: Implementation Priority Matrix
+
+Not everything can be built at once. Use this matrix to agree with stakeholders on what ships at launch vs. what comes next.
+
+| Event / Feature | Business Impact | Implementation Effort | Priority | Target Sprint |
+|----------------|----------------|----------------------|----------|--------------|
+| trial_signup_complete | Very High | Low | P0 — Launch | Sprint 1 |
+| page_view with page_type | High | Low | P0 — Launch | Sprint 1 |
+| GA4 custom dimensions setup | High | Low | P0 — Launch | Sprint 1 |
+| feature_used events | High | Medium | P1 | Sprint 2 |
+| video tracking | Medium | Medium | P1 | Sprint 2 |
+| article_read (scroll) | Medium | Low | P2 | Sprint 3 |
+| A/B test dimension | High | Medium | P1 | Sprint 2 |
+| BigQuery export configured | High | Low | P0 — Launch | Sprint 1 |
+
+---
+
+## Part 7: QA Testing Plan
+
+This section outlines what needs to be verified before launch. For the full testing framework, see the [Analytics Testing Framework](/resources/testing-framework/).
+
+### Pre-launch verification checklist
+
+**Technical verification (development team):**
+- [ ] All P0 dataLayer events push with correct structure (unit tests pass)
+- [ ] Event parameters match the specification exactly (correct names, correct types)
+- [ ] `ecommerce: null` is pushed before every ecommerce event
+- [ ] User ID is set on authenticated pages (if implemented)
+
+**GTM configuration (analytics team):**
+- [ ] All P0 events have corresponding GTM tags configured
+- [ ] GTM Preview shows correct tag firing for each P0 event
+- [ ] No duplicate tags firing on any trigger
+- [ ] Consent mode is correctly implemented — no tags fire before consent
+
+**GA4 verification (analytics team):**
+- [ ] P0 events appear in GA4 DebugView with correct parameters
+- [ ] All required custom dimensions are registered
+- [ ] P0 key events are marked correctly
+- [ ] Internal traffic filter is active (not in Testing mode)
+
+**Data quality check (analytics + product):**
+- [ ] Purchase/signup event count matches expected volume from test orders
+- [ ] Parameter values are human-readable and correct
+- [ ] No PII is being sent in any event parameter
+
+---
+
+## Part 8: Stakeholder Sign-Off
+
+This section formalizes that each stakeholder has reviewed the strategy and agrees it covers their needs.
+
+| Stakeholder | Role | Review Date | Sign-Off | Notes |
+|-------------|------|------------|---------|-------|
+| [Name] | Marketing Director | | [ ] Approved | |
+| [Name] | Product Manager | | [ ] Approved | |
+| [Name] | Engineering Lead | | [ ] Approved | |
+| [Name] | Analytics Lead | | [ ] Approved | |
+| [Name] | Legal / Privacy | | [ ] Approved | |
+
+**Open questions to resolve before implementation:**
+
+| # | Question | Owner | Due Date | Resolution |
+|---|----------|-------|----------|-----------|
+| 1 | What page_type values do we use for the new feature pages? | Product | | |
+| 2 | Does the CRM user tier match the four tiers defined here? | Engineering | | |
+| 3 | Is PII review required before sending user_id to GA4? | Legal | | |
+
+---
+
+## Part 9: Launch Readiness Review
+
+Complete this immediately before launching the implementation to production.
+
+### Technical readiness
+
+- [ ] All P0 unit tests pass in CI
+- [ ] Integration tests pass on staging environment
+- [ ] GTM container published to staging, not yet to production
+- [ ] Staging smoke test: all P0 events appear correctly in GA4 DebugView
+- [ ] Rollback plan documented: what to do if data looks wrong in first 24 hours
+
+### Documentation readiness
+
+- [ ] Detailed dataLayer specification written for all P0 events
+- [ ] GTM container inventory updated
+- [ ] GA4 configuration document up to date
+- [ ] Team briefed on launch and what to monitor
+
+### Monitoring readiness
+
+- [ ] GA4 alerts configured for anomalous drops in P0 key events
+- [ ] Realtime report bookmarked for immediate post-launch monitoring
+- [ ] BigQuery export confirmed active and receiving data
+
+### Post-launch review scheduled
+
+- [ ] 24-hour review: check Realtime data for obvious issues
+- [ ] 7-day review: confirm event volumes match historical expectations
+- [ ] 30-day review: validate that measurement strategy answers the business questions defined in Part 1
+
+---
+
+## Related Resources
+
+- [Tracking Documentation Template](/resources/documentation-template/) — The detailed per-event documentation this strategy references
+- [GTM & GA4 Audit Checklist](/resources/audit-checklist/) — Audit the implementation after it is live
+- [GA4 Configuration Audit Checklist](/resources/ga4-audit-checklist/) — Verify the GA4 property configuration defined in this strategy
+- [Analytics Testing Framework](/resources/testing-framework/) — Formalize the QA process in Part 7

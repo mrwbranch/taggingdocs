@@ -1,6 +1,204 @@
 ---
 title: "view_item"
-description: "DataLayer specification for product detail page views."
+description: "Complete dataLayer specification for the GA4 view_item event — product detail page views with the full item parameter set."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The `view_item` event fires when a user views a product detail page. This is your product demand signal — it tells you which products get attention, how variant selection affects engagement, and where in the funnel users drop off before adding to cart.
+
+`view_item` is the destination event for `select_item`. The item data you push here should be the most complete version of the product record you have: full category hierarchy, brand, variant, and price. The detail page is where you have all this data available, so use it.
+
+## When to fire
+
+Fire `view_item` when:
+- The product detail page loads (for traditional multi-page sites)
+- The product detail view renders in a SPA (after component mount, not on route change)
+- A quick-view modal opens with product detail content
+
+Fire it **once per product view**, not on every render. For SPAs, use a ref guard or check to prevent re-firing on component re-renders.
+
+## Complete dataLayer push
+
+```javascript
+// Always clear previous ecommerce data first
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    value: 89.99,
+    items: [
+      {
+        item_id: 'SKU-001-BLK',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_category3: 'Jackets',
+        item_category4: 'Leather',
+        item_variant: 'Black / Large',
+        price: 89.99,
+        quantity: 1,
+        index: 0,
+        affiliation: 'Online Store',
+        coupon: '',
+        discount: 0,
+        // List context — preserve from select_item if navigated from a list
+        item_list_id: 'mens_outerwear',
+        item_list_name: "Men's Outerwear"
+      }
+    ]
+  }
+});
+```
+
+The `value` on `view_item` is the price of the product being viewed — the same value as `items[0].price`. For a standard single-product view, `value = price`.
+
+## Event schema
+
+<EventSchema
+  event="view_item"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "view_item"' },
+    { name: 'ecommerce.currency', type: 'string', required: true, description: 'ISO 4217 currency code. Required for GA4 to attribute monetary value.' },
+    { name: 'ecommerce.value', type: 'number', required: true, description: 'Monetary value — the product price. Must be a number.' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'Array containing one item — the product being viewed.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'SKU or unique product identifier.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name.' },
+    { name: 'items[].item_brand', type: 'string', required: false, description: 'Brand or manufacturer.' },
+    { name: 'items[].item_category', type: 'string', required: false, description: 'Primary product category.' },
+    { name: 'items[].item_category2', type: 'string', required: false, description: 'Second-level category.' },
+    { name: 'items[].item_category3', type: 'string', required: false, description: 'Third-level category.' },
+    { name: 'items[].item_category4', type: 'string', required: false, description: 'Fourth-level category.' },
+    { name: 'items[].item_variant', type: 'string', required: false, description: 'Currently selected variant (color, size, style). Update when user changes variant selection.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Current price of the selected variant. Must match the ecommerce.value.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Always 1 for view_item.' },
+    { name: 'items[].affiliation', type: 'string', required: false, description: 'Store affiliation for marketplace scenarios.' },
+    { name: 'items[].coupon', type: 'string', required: false, description: 'Active coupon code if one is applied to this item.' },
+    { name: 'items[].discount', type: 'number', required: false, description: 'Discount amount if item is on sale.' },
+    { name: 'items[].item_list_id', type: 'string', required: false, description: 'The list the user navigated from — preserves funnel path context.' },
+    { name: 'items[].item_list_name', type: 'string', required: false, description: 'Human-readable name of the list the user navigated from.' },
+  ]}
+/>
+
+## Handling variant selection
+
+When a product has variants (color, size, material) and the user changes the selected variant, you have two options:
+
+**Option A: Fire once on page load with the default variant.** Simpler to implement. Loses the information about which variant the user actually considered.
+
+**Option B: Fire again when the variant selection changes.** More work, but captures variant-level demand signal. Which color is most viewed? Which size runs out of stock because it's most desired?
+
+```javascript
+// Option B: re-fire when variant changes
+function trackVariantView(product, selectedVariant) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push({
+    event: 'view_item',
+    ecommerce: {
+      currency: product.currency,
+      value: selectedVariant.price,
+      items: [{
+        item_id: selectedVariant.sku,       // variant-level SKU
+        item_name: product.name,
+        item_brand: product.brand,
+        item_category: product.category,
+        item_variant: selectedVariant.label, // e.g., 'Navy / Medium'
+        price: selectedVariant.price,
+        quantity: 1
+      }]
+    }
+  });
+}
+
+// Fire on page load with default variant
+trackVariantView(product, product.defaultVariant);
+
+// Re-fire when user changes variant
+colorSelector.addEventListener('change', () => {
+  const variant = getSelectedVariant();
+  trackVariantView(product, variant);
+});
+```
+
+<Aside type="note">
+If your SKU system has variant-level IDs (e.g., `SKU-001-BLK-M` for black medium), use the variant-level SKU in `item_id` rather than the parent product ID. This gives you the most precise product performance data. If you only have a parent product ID, still include the variant information in `item_variant`.
+</Aside>
+
+## Preserving list context
+
+If the user navigated to this product detail page from a list (via `select_item`), carry the list context forward in `item_list_id` and `item_list_name`. This enables GA4 to build path reports showing "users who viewed items from Men's Outerwear are X% more likely to purchase."
+
+For server-rendered pages, pass the list context via a query parameter or session storage, and read it back on the product page.
+
+```javascript
+// On select_item (list page) — store context for the product page
+sessionStorage.setItem('last_item_list', JSON.stringify({
+  item_list_id: 'mens_outerwear',
+  item_list_name: "Men's Outerwear"
+}));
+
+// On view_item (product detail page) — restore context
+const listContext = JSON.parse(sessionStorage.getItem('last_item_list') || '{}');
+
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    value: 89.99,
+    items: [{
+      item_id: 'SKU-001-BLK',
+      item_name: 'Classic Leather Jacket',
+      price: 89.99,
+      quantity: 1,
+      item_list_id: listContext.item_list_id || '',
+      item_list_name: listContext.item_list_name || ''
+    }]
+  }
+});
+```
+
+## GTM configuration
+
+<Steps>
+1. **Create a Custom Event trigger.** Event name: `view_item`. Name it `CE - view_item`.
+
+2. **Create Data Layer Variables.** Variables for `ecommerce.currency`, `ecommerce.value`, and `ecommerce.items`.
+
+3. **Create the GA4 Event tag.** Event name: `view_item`. Enable **Send Ecommerce data**. Add `currency` and `value` as explicit event parameters (they don't flow through the ecommerce checkbox automatically).
+
+4. **Test in Preview mode.** Load a product page. Confirm one `view_item` fires with all parameters populated.
+</Steps>
+
+## Common mistakes
+
+**Firing on component re-render in SPAs.** In React, a `useEffect` without a ref guard fires on every render. Wrap the push in a `useRef(false)` guard, or use `useEffect` with a dependency array that only changes when the product ID changes.
+
+**Sending the cart quantity instead of 1.** `view_item` describes viewing the product, not purchasing a quantity. `quantity: 1` on this event. The actual purchase quantity goes on `add_to_cart` and `purchase`.
+
+**Missing `currency`.** Without `currency`, GA4 ignores the `value` parameter entirely. Your product performance reports will show views but zero revenue contribution.
+
+**Not updating the push when variant changes.** If you implement Option A and fire only on page load, accept that you're losing variant-level demand data. Don't half-implement Option B by firing the initial push with a default variant but never re-firing — that's worse than Option A because it looks like you have variant data but it's unreliable.
+
+<CardGrid>
+  <LinkCard
+    title="select_item"
+    description="The event that precedes view_item — user clicks a product in a list."
+    href="/datalayer/ecommerce/select-item/"
+  />
+  <LinkCard
+    title="add_to_cart"
+    description="The event that follows view_item — user adds the product to their cart."
+    href="/datalayer/ecommerce/add-to-cart/"
+  />
+  <LinkCard
+    title="Ecommerce Overview"
+    description="The complete GA4 ecommerce funnel and items array structure."
+    href="/datalayer/ecommerce/ecommerce-overview/"
+  />
+</CardGrid>

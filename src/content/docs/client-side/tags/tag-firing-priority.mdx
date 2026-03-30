@@ -1,6 +1,185 @@
 ---
 title: "Tag Firing Priority"
-description: "Understanding and controlling the order tags fire within a trigger."
+description: "Understanding and controlling the order tags fire within a trigger — firing priority, tag firing options, and when pausing tags makes sense."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+When multiple GTM tags share the same trigger, their firing order is not random — but it is not guaranteed either, unless you use Tag Firing Priority. Priority is a numeric value assigned to each tag that determines its place in the execution queue when multiple tags fire simultaneously.
+
+Understanding priority, along with tag firing options and what "pausing" means, gives you full control over when and how often tags execute.
+
+## Default priority: 0
+
+Every tag you create starts with a firing priority of 0. Tags with the same priority fire in an unspecified order when they share a trigger. On a given page load, they might fire in the order they were created. They might fire in the order they appear in your tag list. GTM does not document the exact behavior, which is why "unspecified" is the accurate description.
+
+For most tags, this non-determinism does not matter. A GA4 event tag and a Meta Pixel tag can fire in any order — they are independent, and the result is the same either way.
+
+Priority matters when:
+- Tag A must complete before Tag B can use data that A produces
+- You need a configuration or initialization tag to run before the tags it configures
+- A consent or data enrichment setup needs to happen before tracking tags execute on the same trigger
+
+## Setting firing priority
+
+<Steps>
+1. Open the tag you want to prioritize.
+2. Expand the **Advanced Settings** section.
+3. Find the **Tag firing priority** field. It accepts positive and negative integers.
+4. Enter your priority value. Higher numbers fire first.
+5. Save and repeat for any other tags you want to sequence by priority.
+</Steps>
+
+Priority values are relative. What matters is the difference between tags on the same trigger, not the absolute values. Common conventions:
+
+| Priority | Purpose |
+|----------|---------|
+| `100` | Critical initialization tags (consent, data layer setup) |
+| `50` | Configuration tags (Google Tag) |
+| `0` | Standard event tags (default) |
+| `-10` | Cleanup or post-processing tags |
+
+**Higher number fires first.** If Tag A has priority `10` and Tag B has priority `0`, Tag A fires before Tag B.
+
+## Priority vs. tag sequencing
+
+These are related but different tools:
+
+| | Firing Priority | Tag Sequencing |
+|--|----------------|----------------|
+| **Scope** | Applies when tags share a trigger | Applies between a specific setup and main tag |
+| **Configuration** | Single number on each tag | Per-tag before/after dependency |
+| **Conditional blocking** | No — all tags fire regardless | Yes — can block main tag if setup fails |
+| **Best for** | Loose ordering of independent tags | Hard before/after dependencies with optional failure blocking |
+
+If Tag A should roughly fire before Tag B but you do not need to block B when A fails, use Priority. If A must succeed for B to fire, use Tag Sequencing.
+
+## Tag firing options
+
+Beyond priority, each tag has a **Tag Firing Options** setting that controls how often the tag fires:
+
+### Unlimited (default)
+The tag fires every time its trigger conditions are met. If the trigger fires 5 times, the tag fires 5 times.
+
+Use Unlimited for: event tags that should fire every time the event occurs (`add_to_cart`, `click`, form submissions, etc.).
+
+### Once per event
+The tag fires at most once per GTM event. Subsequent evaluations of the same event are ignored.
+
+In GTM, an "event" corresponds to a dataLayer push with an `event` key. "Once per event" means: for this specific trigger evaluation, fire the tag only once, even if the trigger would evaluate multiple times for the same event push.
+
+This is rarely needed because a single `dataLayer.push()` typically generates one event, and one event typically evaluates each trigger once.
+
+### Once per page
+The tag fires at most once per page load, regardless of how many times the trigger fires.
+
+Use Once per page for:
+- Initialization tags that should run only once (loading a vendor SDK)
+- Tags that set up listeners or modify the DOM in a way that should not be repeated
+- Tags that track a "first view" of something — though use session-level deduplication in GA4 for this when possible
+
+Once per page resets on a full page load. For SPAs where there is no full page reload, "once per page" becomes "once per container initialization" — which means once per session until the user manually refreshes.
+
+## Pausing tags
+
+Paused tags appear in your container but never fire. They are suspended from execution regardless of triggers.
+
+Use pausing for:
+- **Temporarily disabling a tag** during debugging without deleting it
+- **Rolling back a problematic tag** quickly without reverting the entire container version
+- **Staging a new tag** that is not ready to be live but needs to be in the container
+
+When a tag is paused:
+- It does not fire
+- It shows as "paused" in the Tag Assistant panel during Preview
+- It is preserved with all its configuration
+- It does not affect container size or performance significantly
+
+<Aside type="tip">
+Pausing is a good emergency response. If a vendor pixel is causing errors, pause it immediately while you investigate. It takes two clicks and does not require a container publish to take effect (wait — it does require a publish, because container state lives in published versions). Pre-stage your rollback: before publishing a risky change, make sure you can quickly publish a previous version.
+</Aside>
+
+## Priority for the Google Tag and GA4 Event tags
+
+A common question: does the Google Tag (GA4 configuration) need to fire before GA4 Event tags?
+
+Technically, GA4 Event tags send their hits via `gtag()`, which queues commands if `gtag.js` has not loaded yet. The queue is processed once the library loads. So in theory, you do not need to force the Google Tag to fire before event tags — the browser's natural loading behavior handles it.
+
+In practice, setting the Google Tag's priority to `50` and leaving event tags at `0` is a reasonable belt-and-suspenders approach that causes no harm and documents the intended execution order.
+
+## When priority actually matters: a concrete example
+
+You have a Custom HTML tag that reads user data from a window object and pushes it to the dataLayer. You have a GA4 Event tag that fires on the same Page View trigger and reads that user data as parameters.
+
+If the Custom HTML fires first:
+```
+Custom HTML fires → pushes { user_id: '12345', user_tier: 'premium' } → dataLayer model updated
+GA4 Event tag fires → reads DLV - user_id → gets '12345' ✓
+```
+
+If the GA4 Event tag fires first:
+```
+GA4 Event tag fires → reads DLV - user_id → gets undefined (not yet pushed)
+Custom HTML fires → pushes data → too late
+```
+
+Set the Custom HTML tag's priority to `10`, the GA4 Event tag stays at `0`. Problem solved.
+
+```
+Priority 10: Custom HTML - Initialize User Data
+Priority 0:  GA4 - Event - page_view
+```
+
+## Rate limiting and firing caps
+
+GTM does not have native rate limiting built into Tag Firing Priority. Rate limiting (preventing a tag from firing more than N times in a session) is typically handled by:
+
+- **Once per page** firing option: Limits to once per page load
+- **GA4 session-level deduplication**: Use GA4's `session_id` to deduplicate in analysis
+- **Custom JavaScript logic**: Check and set a window variable to track fire count
+- **Server-side deduplication**: Handle at the data warehouse/attribution layer
+
+True rate limiting in client-side GTM is complex. For important conversion events, deduplicate server-side.
+
+## Common mistakes
+
+### Assuming default (0) means "fires last"
+
+Priority 0 does not mean "fires after everything else." It means "fires in an unspecified order with all other 0-priority tags." If you need to explicitly fire something last, give it a negative priority like `-10`.
+
+### Setting very large priority numbers "just in case"
+
+Some practitioners use priority `999` for their initialization tags. This works, but it creates an implicit assumption about maximum priority that becomes a problem when someone else needs `1000`. Use modest values — `100`, `50`, `0`, `-10` — that leave room in both directions.
+
+### Confusing "Once per event" with "Once per page"
+
+"Once per page" means once per page load (hard navigation). For SPAs, this means once per container initialization. "Once per event" means once per GTM event evaluation (one dataLayer push). Most of the time, "Once per event" and "Unlimited" behave identically — they differ only if a single trigger evaluation somehow triggers multiple evaluations (which is unusual).
+
+### Using priority instead of sequencing when failure blocking is needed
+
+If you need Tag B to be blocked when Tag A fails, Priority cannot do that. Priority only controls order, not conditional blocking. Use Tag Sequencing's "don't fire if setup tag fails" option.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Tag Sequencing"
+    description="Before/after dependencies with optional failure blocking — the complement to firing priority."
+    href="/client-side/tags/tag-sequencing/"
+  />
+  <LinkCard
+    title="GA4 Configuration Tag"
+    description="The Google Tag that typically gets priority treatment in a well-ordered container."
+    href="/client-side/tags/ga4-configuration-tag/"
+  />
+  <LinkCard
+    title="Custom HTML Tags"
+    description="Setup and initialization tags that often need higher priority than the tags they prepare for."
+    href="/client-side/tags/custom-html-tags/"
+  />
+  <LinkCard
+    title="Page View Triggers"
+    description="The triggers where priority most commonly matters — multiple tags on a single page view."
+    href="/client-side/triggers/page-view-triggers/"
+  />
+</CardGrid>

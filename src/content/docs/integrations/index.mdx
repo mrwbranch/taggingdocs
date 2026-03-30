@@ -1,6 +1,87 @@
 ---
 title: "Ad Platforms"
-description: "Setting up conversion tracking correctly for every major ad platform via GTM."
+description: "Setting up conversion tracking correctly for every major ad platform via GTM — client-side pixels, server-side APIs, and event deduplication."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Ad platform conversion tracking is the highest-stakes tag management work you will do. A GA4 event that fires incorrectly might skew a report. A broken purchase conversion tag means your ad platform is optimizing toward signals that do not reflect reality — which means wasted spend at best, and systematically poor campaign decisions at worst.
+
+This section covers every major ad platform: the client-side pixel setup, the server-side API alternative where it exists, and the deduplication patterns required when using both simultaneously.
+
+## The client-side vs. server-side choice
+
+Every major platform now offers two paths to conversion tracking:
+
+**Client-side pixels** run in the browser. They are simple to implement, fire immediately when an event occurs, and are well-documented. The downsides: browser blocking removes the event entirely, ITP caps attribution windows for Safari users, and your ad platforms see fewer conversions as privacy restrictions tighten.
+
+**Server-side APIs** (CAPI, Events API, UET, etc.) send conversion data from your server to the ad platform. They bypass browser blocking entirely, are unaffected by ITP, and tend to have higher match rates. The downsides: require server infrastructure (sGTM), take more time to implement correctly, and need deduplication to prevent counting events twice when both client and server send the same conversion.
+
+**The recommendation for most implementations:** Run both, deduplicate correctly. Use the client-side pixel for real-time data and browser-side signals (like `fbp`, `fbclid`). Use the server-side API for data completeness and to fill in what browser-side tracking misses. Use a shared `event_id` to deduplicate — the platform will count the conversion only once.
+
+## What this section covers
+
+<CardGrid>
+  <LinkCard
+    title="Meta Pixel (Client-Side)"
+    description="Complete Meta Pixel setup via GTM — base code, standard events, Advanced Matching, and consent integration."
+    href="/integrations/meta-pixel-client-side/"
+  />
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="Meta Conversions API via sGTM — access token setup, event mapping, user data, and Event Match Quality optimization."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Pinterest Tag"
+    description="Pinterest Tag base code, standard events, Enhanced Match, and deduplication with Pinterest Conversions API."
+    href="/integrations/pinterest-tag/"
+  />
+  <LinkCard
+    title="TikTok Pixel & Events API"
+    description="TikTok Pixel via community template, standard events, Advanced Matching, and server-side Events API deduplication."
+    href="/integrations/tiktok-pixel-and-api/"
+  />
+  <LinkCard
+    title="LinkedIn Insight Tag"
+    description="LinkedIn Insight Tag installation, conversion tracking for lead gen, and event-specific conversion setup."
+    href="/integrations/linkedin-insight-tag/"
+  />
+  <LinkCard
+    title="Microsoft Ads UET"
+    description="Universal Event Tracking tag via GTM, conversion goals, revenue tracking, and remarketing audiences."
+    href="/integrations/microsoft-ads-uet/"
+  />
+  <LinkCard
+    title="Snapchat Pixel"
+    description="Snapchat Pixel client-side setup, standard events, and server-side Conversions API with deduplication."
+    href="/integrations/snapchat-pixel/"
+  />
+</CardGrid>
+
+## Common implementation principles
+
+Regardless of which platform you are implementing, the same principles apply:
+
+**Every purchase conversion tag needs an event_id.** If you are running any server-side companion to a client-side pixel, you must generate a unique event ID per event and include it in both the client-side and server-side payloads. Without this, you will double-count conversions. This is not optional.
+
+**Consent mode matters.** All ad platform pixels should be gated on the appropriate consent category. Meta Pixel needs `marketing` consent. LinkedIn needs `marketing` consent. Implement your CMP before any of these pixels fire, not after.
+
+**Test in the platform's event diagnostic tool first.** Every platform has a test events tool (Meta Events Manager, TikTok Pixel Helper, etc.). Always verify events are flowing correctly in the diagnostic tool before connecting to campaigns.
+
+**Dynamic revenue values must be numbers, not strings.** Every platform has a `value` or `revenue` parameter for purchase events. Pass it as a JavaScript number (`29.99`), not a string (`"29.99"`). Some platforms silently fail to register the value if it is passed as a string.
+
+## Related resources
+
+<CardGrid>
+  <LinkCard
+    title="Server-Side GTM Overview"
+    description="Setting up the sGTM infrastructure required for CAPI and Events API implementations."
+    href="/server-side/"
+  />
+  <LinkCard
+    title="Consent Mode"
+    description="Gating ad platform tags on user consent correctly."
+    href="/consent/"
+  />
+</CardGrid>

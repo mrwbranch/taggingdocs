@@ -1,6 +1,215 @@
 ---
 title: "add_to_cart"
-description: "DataLayer specification for adding products to the cart."
+description: "Complete dataLayer specification for the GA4 add_to_cart event — tracking when users add products to their shopping cart, including quantity handling and quick-add patterns."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The `add_to_cart` event is your most actionable funnel event. It's the moment of commercial intent — the user has moved from browsing to buying. The conversion rate from `view_item` to `add_to_cart` is one of the most important product performance metrics you have.
+
+Get the details right: `value` must reflect the actual quantity added (price × quantity), not just unit price. The `item_id` should be the variant-level SKU when variants exist. And the event should fire on successful cart addition, not on button click — if your cart is API-based, fire after a successful API response.
+
+## When to fire
+
+Fire `add_to_cart` when:
+- User clicks "Add to Cart" on a product detail page (after success confirmation)
+- User uses a quick-add button on a category page or recommendation widget
+- User increases quantity in the cart (for the delta added, not the total)
+- User moves a wishlist item to the cart
+
+Fire **after confirmation**, not on button click. If your add-to-cart is an API call, fire after the successful response — not before, in case the call fails.
+
+## Complete dataLayer push
+
+```javascript
+// Always clear previous ecommerce data first
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 179.98,   // price × quantity: 89.99 × 2
+    items: [
+      {
+        item_id: 'SKU-001-BLK-L',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_category3: 'Jackets',
+        item_category4: 'Leather',
+        item_variant: 'Black / Large',
+        price: 89.99,
+        quantity: 2,          // user added 2 units
+        index: 0,
+        affiliation: 'Online Store',
+        coupon: '',
+        discount: 0
+      }
+    ]
+  }
+});
+```
+
+Notice `value: 179.98` — this is `89.99 × 2`, reflecting the total value being added to the cart. `value` on this event represents the monetary value of the add action, not just the unit price.
+
+## Event schema
+
+<EventSchema
+  event="add_to_cart"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "add_to_cart"' },
+    { name: 'ecommerce.currency', type: 'string', required: true, description: 'ISO 4217 currency code.' },
+    { name: 'ecommerce.value', type: 'number', required: true, description: 'Total value being added — price × quantity for each item. Must be a number.' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'Array of items being added to cart. Usually one item, but can be multiple for bundle add.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'SKU or variant-level product identifier.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name.' },
+    { name: 'items[].item_brand', type: 'string', required: false, description: 'Brand or manufacturer.' },
+    { name: 'items[].item_category', type: 'string', required: false, description: 'Primary product category.' },
+    { name: 'items[].item_variant', type: 'string', required: false, description: 'Selected variant — color, size, style.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Unit price at time of add. Not the line total.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Number of units being added in this action.' },
+    { name: 'items[].affiliation', type: 'string', required: false, description: 'Store or seller affiliation.' },
+    { name: 'items[].coupon', type: 'string', required: false, description: 'Item-level coupon code if active.' },
+    { name: 'items[].discount', type: 'number', required: false, description: 'Monetary discount applied.' },
+  ]}
+/>
+
+## Handling different add-to-cart patterns
+
+### Quick-add from a product list
+
+When a user adds a product directly from a category page or search results without visiting the PDP, include the list context from the list they were viewing.
+
+```javascript
+// Quick-add from category page
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 24.99,
+    items: [{
+      item_id: 'SKU-047-WHT-M',
+      item_name: 'Cotton Crew T-Shirt',
+      item_brand: 'Heritage Co.',
+      item_category: 'Apparel',
+      item_variant: 'White / Medium',
+      price: 24.99,
+      quantity: 1,
+      item_list_id: 'mens_tops',       // list context preserved
+      item_list_name: "Men's Tops"
+    }]
+  }
+});
+```
+
+### Adding multiple items at once (bundles)
+
+For bundle products or "complete the look" features that add multiple items simultaneously:
+
+```javascript
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 154.48,   // sum of all items: 89.99 + 24.99 + 34.50 + 5.00
+    items: [
+      {
+        item_id: 'SKU-001-BLK',
+        item_name: 'Classic Leather Jacket',
+        price: 89.99,
+        quantity: 1
+      },
+      {
+        item_id: 'SKU-047-WHT-M',
+        item_name: 'Cotton Crew T-Shirt',
+        price: 24.99,
+        quantity: 1
+      },
+      {
+        item_id: 'SKU-112-TAN',
+        item_name: 'Woven Leather Belt',
+        price: 34.50,
+        quantity: 1
+      },
+      {
+        item_id: 'SKU-088-BLK',
+        item_name: 'Leather Card Wallet',
+        price: 5.00,
+        quantity: 1
+      }
+    ]
+  }
+});
+```
+
+### Incrementing quantity in cart
+
+If a user changes quantity in the cart from 1 to 3, fire `add_to_cart` for the delta (2 units added), not the new total. If a user decreases quantity, fire `remove_from_cart` for the delta removed.
+
+```javascript
+// User changes quantity from 1 → 3 (added 2 more)
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 49.98,    // 24.99 × 2 (the 2 units being added)
+    items: [{
+      item_id: 'SKU-047-WHT-M',
+      item_name: 'Cotton Crew T-Shirt',
+      price: 24.99,
+      quantity: 2    // the delta — not the new total of 3
+    }]
+  }
+});
+```
+
+## GTM configuration
+
+<Steps>
+1. **Create a Custom Event trigger.** Event name: `add_to_cart`. Name it `CE - add_to_cart`.
+
+2. **Create Data Layer Variables** for `ecommerce.currency`, `ecommerce.value`, and `ecommerce.items`.
+
+3. **Create the GA4 Event tag.** Event name: `add_to_cart`. Enable **Send Ecommerce data**. Add `currency` and `value` as explicit event parameters.
+
+4. **Test in Preview mode.** Add a product to cart. Check that `quantity` reflects how many were added, `price` is the unit price, and `value` is the product of the two.
+</Steps>
+
+## Common mistakes
+
+**`value` equals `price` regardless of quantity.** If the user adds 3 items at $24.99 each, `value` must be `74.97`, not `24.99`. GA4 uses `value` to measure the monetary impact of each add event.
+
+**Firing on button click before API confirmation.** If the API call fails (item out of stock, session expired), you've tracked a cart add that didn't happen. Fire after the success response.
+
+**Using the parent product ID instead of the variant SKU.** If the user selects "Blue / Large," the `item_id` should be the variant-level SKU. Using the parent ID means you can't analyze which variants are most popular by add-to-cart behavior.
+
+**Treating cart quantity update as a new `add_to_cart`.** If the user already has 2 units and increases to 5, you're adding 3 — not adding 5. Fire for the delta. Firing for the total quantity overstates add-to-cart value.
+
+<CardGrid>
+  <LinkCard
+    title="view_item"
+    description="The event that precedes add_to_cart — product detail page view."
+    href="/datalayer/ecommerce/view-item/"
+  />
+  <LinkCard
+    title="remove_from_cart"
+    description="Tracking cart removals and quantity reductions."
+    href="/datalayer/ecommerce/remove-from-cart/"
+  />
+  <LinkCard
+    title="view_cart"
+    description="Cart page view with full cart contents."
+    href="/datalayer/ecommerce/view-cart/"
+  />
+  <LinkCard
+    title="begin_checkout"
+    description="When the user initiates checkout — the next major funnel step."
+    href="/datalayer/ecommerce/begin-checkout/"
+  />
+</CardGrid>

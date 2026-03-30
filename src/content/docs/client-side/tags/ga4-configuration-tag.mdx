@@ -1,6 +1,173 @@
 ---
 title: "GA4 Configuration Tag"
-description: "Setting up the Google tag for GA4 data collection."
+description: "Setting up the Google Tag for GA4 — the foundation of your analytics setup. One tag, configured correctly, powers everything else."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+The GA4 Configuration Tag — now officially called the **Google Tag** — is the foundation of your GA4 implementation. It loads the Google Analytics library, establishes the connection to your GA4 property, and optionally sends a page view hit. Every other GA4 Event tag in your container depends on it.
+
+You should have exactly one of these in any GTM container. Not one per page type. Not one for production and a separate one for staging. One.
+
+## What the Google Tag does
+
+When the Google Tag fires, it:
+
+1. Loads `https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX` asynchronously
+2. Initializes the `gtag()` function on the page
+3. Sends a `config` command to GA4, which registers your Measurement ID
+4. Optionally sends a `page_view` event (enabled by default)
+5. Applies any Fields to Set you have configured as parameters on all subsequent events
+
+All GA4 Event tags in your container inherit from this configuration — they reference this tag as their Google Tag and use it to know which property to send data to.
+
+## Creating the Google Tag
+
+<Steps>
+1. In GTM, go to **Tags** and click **New**.
+
+2. Click **Tag Configuration** and select **Google Tag** from the tag type chooser. (If you see "Google Analytics: GA4 Configuration" in an older container, that is the legacy name — it works the same way.)
+
+3. In the **Tag ID** field, enter your GA4 Measurement ID. Use a Constant Variable — not the raw ID string. Create a variable named `CONFIG - GA4 Measurement ID` with the value `G-XXXXXXXXXX`.
+
+4. Under **Triggering**, add the trigger **All Pages (Page View)**. This ensures the Google Tag fires on every page load.
+
+5. Name the tag clearly: `Google Tag - GA4` or `GAT - GA4 Configuration`.
+
+6. Save.
+</Steps>
+
+<TagConfig
+  name="Google Tag - GA4"
+  type="Google Tag"
+  trigger="All Pages (Page View)"
+  variables={['CONFIG - GA4 Measurement ID']}
+/>
+
+## Measurement ID: always use a variable
+
+Hardcoding `G-XXXXXXXXXX` directly in the tag is a common mistake. Instead, store the Measurement ID in a Constant Variable and reference it in the tag.
+
+When you need to:
+- Migrate to a new GA4 property
+- Switch between development and production properties
+- Share the Measurement ID across multiple tags
+
+...you change one variable instead of hunting through every tag configuration.
+
+If you run multiple environments (production, staging, development), replace the Constant with a Lookup Table keyed to `{{Page Hostname}}` that returns the appropriate Measurement ID for each environment.
+
+## Fields to Set
+
+The "Fields to Set" section lets you add parameters that automatically attach to every event sent from your container — not just the page view. Think of these as default event parameters.
+
+Common fields to configure here:
+
+| Field Name | Value | Purpose |
+|-----------|-------|---------|
+| `page_location` | `{{Page URL}}` | Ensures clean URL is sent (some implementations need explicit override) |
+| `page_referrer` | `{{Referrer}}` | Explicit referrer tracking |
+| `content_group` | `{{LUT - page-type}}` | Content grouping for all events |
+| `user_id` | `{{DLV - user_id}}` | User ID for cross-device tracking |
+
+<Aside type="tip">
+User-scoped custom dimensions — values like user tier, membership status, or A/B test variant that describe the user rather than the specific event — belong here, not in individual GA4 Event tags. Set them once in the Google Tag and they apply everywhere.
+</Aside>
+
+## User Properties
+
+User Properties describe the user, not the event. GA4 limits you to 25 user properties per property.
+
+Configure user properties in the Google Tag by clicking **User Properties → Add Row**:
+
+| Property Name | Value |
+|--------------|-------|
+| `user_tier` | `{{DLV - user_tier}}` |
+| `user_country` | `{{DLV - user_country}}` |
+| `signup_date` | `{{DLV - signup_date}}` |
+
+User Properties persist in Google's systems and are applied to all events from a given user. Setting them in the configuration tag means they are established early on page load.
+
+## Send Page View: yes or no
+
+The Google Tag has a "Send Page View" option (enabled by default). When checked, it sends a `page_view` event as part of the configuration hit.
+
+**Leave it enabled** in most cases. GA4 needs a `page_view` event to populate basic session and engagement metrics. If you are building a custom SPA-aware page view solution that fires `page_view` manually from a Custom Event trigger, you might want to disable this to avoid double-counting — but that requires deliberate SPA configuration.
+
+<Aside type="caution">
+For Single-Page Applications, the built-in page view on All Pages fires only on the initial hard load. Subsequent client-side navigations do not trigger a new page view. You need a History Change trigger (or a custom `page_view` dataLayer push) for virtual pageviews in SPAs. See the SPA setup guide.
+</Aside>
+
+## Server Container URL
+
+If you are running Server-Side GTM (sGTM), you can configure the Google Tag to send data to your sGTM container endpoint instead of directly to Google's servers.
+
+Under **Configuration Settings → Server Container URL**, enter your sGTM endpoint URL: `https://gtm.yourdomain.com`
+
+When this is set, the Google Tag sends data to your server container, which then routes it to GA4 and other destinations. This is the core routing mechanism for server-side data collection.
+
+## Consent settings
+
+The Google Tag respects Consent Mode. If you have implemented Consent Mode (which you should for GDPR compliance), configure the tag's consent requirements:
+
+- **Additional Consent Checks**: By default, the Google Tag respects `analytics_storage` consent. With Consent Mode v2, it also handles `ad_personalization` and `ad_user_data` signals.
+
+The Google Tag will send cookieless pings when consent is denied but the tag is still configured to fire. These pings support modeled conversions in GA4 and Google Ads.
+
+## Interaction with GA4 Event tags
+
+GA4 Event tags must be linked to a Google Tag. When you create a GA4 Event tag, the "Google Tag" field references the Measurement ID — it must match the Measurement ID configured in your Google Tag.
+
+This linking is what tells GA4 which property to send the event to, and it ensures the Google Tag is loaded before any event tags fire. GA4 Event tags will not fire before their Google Tag is initialized.
+
+## One Google Tag per container — no exceptions
+
+The "one Google Tag" rule comes from a real problem: if you have two Google Tags in your container both firing on All Pages, you send two `page_view` events. Your session counts double. Your engagement metrics are wrong. This can take weeks to diagnose.
+
+The only scenario where two Google Tags might appear in one container is when you intentionally send data to two separate GA4 properties (a main property and a rollup property, for example). Even then, consider whether sGTM, GA4 data streams, or property linking is a cleaner solution.
+
+## Common mistakes
+
+### Hardcoding the Measurement ID
+
+Covered above, but worth repeating: the Measurement ID in the tag should always be `{{CONFIG - GA4 Measurement ID}}`, not `G-XXXXXXXXXX`. The five minutes you spend creating the variable saves hours of future confusion.
+
+### Firing on something other than All Pages
+
+Some practitioners try to optimize by firing the Google Tag only on certain pages. This breaks everything downstream — GA4 Event tags on other pages have no initialized tracker to send to.
+
+Fire the Google Tag on All Pages. Always.
+
+### Setting event-scoped parameters in Fields to Set
+
+Fields to Set in the Google Tag attach to every event, including the `page_view` sent by the tag itself. This is what you want for user properties and content grouping. It is *not* what you want for event-specific parameters like `product_id` — those belong in the individual GA4 Event tags.
+
+### Duplicating the configuration tag with different settings for different environments
+
+Two Google Tags, one for production pointing to `G-PROD12345` and one for staging pointing to `G-STG67890`, both firing on All Pages — except you cannot have both fire simultaneously without double-counting. Use a Lookup Table variable for the Measurement ID instead.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GA4 Event Tag"
+    description="The companion to the configuration tag — how to send custom events to GA4."
+    href="/client-side/tags/ga4-event-tag/"
+  />
+  <LinkCard
+    title="Constant Variables"
+    description="How to store your GA4 Measurement ID as a reusable variable."
+    href="/client-side/variables/constant-variables/"
+  />
+  <LinkCard
+    title="SPA Setup"
+    description="Configuring GTM for single-page applications — virtual pageviews and history change triggers."
+    href="/client-side/setup/spa-setup/"
+  />
+  <LinkCard
+    title="Google Consent Mode"
+    description="Configuring the Google Tag to respect user consent signals."
+    href="/client-side/setup/google-consent-mode/"
+  />
+</CardGrid>

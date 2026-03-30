@@ -1,6 +1,275 @@
 ---
-title: "Community Tools"
-description: "Curated list of community tools for GTM and GA4."
+title: "Community Tools & Extensions"
+description: "Curated list of 15+ browser extensions, Chrome DevTools techniques, open-source tools, and learning resources for GTM and GA4 practitioners."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The GTM and GA4 ecosystem has excellent tooling — but most practitioners know three tools and use one. This is a curated list of the tools actually worth your time, organized by what you are trying to do.
+
+No vendor relationships, no affiliate links. This list reflects what experienced practitioners actually use daily.
+
+---
+
+## Browser Extensions for Debugging
+
+These are the core tools for verifying that tags fire and dataLayer events look correct.
+
+### Tag Assistant (Google)
+
+**URL**: [Chrome Web Store](https://chrome.google.com/webstore/detail/tag-assistant-legacy-by-g/kejamplciddkpngdmohngdbdkaajkjfe) | **Free**
+
+The official Google Tag Manager debug tool. When connected to a GTM Preview session, it shows every event that fires, every tag that fires (and which triggers caused it), the dataLayer state at every point, and every error in your container. This is your primary debugging tool.
+
+Tag Assistant also shows GA4 DebugView integration, Consent Mode state, and which tags are blocked by consent. Use it for every GTM implementation session.
+
+### GA4 DebugView
+
+**Built into GA4 Admin** | **Free**
+
+Not an extension but essential: GA4 DebugView (found in Admin → DebugView) shows real-time events from any device with debug mode enabled. In GTM Preview, debug mode is automatically set. In production, append `?gtm_debug=x` to any URL to enable it.
+
+DebugView shows each event as it arrives in GA4, with all parameters. Use it to verify that parameters are reaching GA4 correctly — not just that they are being pushed to the dataLayer.
+
+### DataLayer Inspector+ (Adswerve)
+
+**URL**: [Chrome Web Store](https://chrome.google.com/webstore/detail/datalayer-inspector%2B/kmcbdogdandhihllalknlcjfpdjcleom) | **Free**
+
+A dataLayer viewer that presents the full dataLayer queue in a readable, filterable UI directly in Chrome DevTools. Each push is shown as a separate entry with its full object structure expanded. The "+" version from Adswerve is more feature-complete than similar tools.
+
+Particularly useful for debugging SPA applications where multiple pushes happen quickly and you need to see the sequence.
+
+### Omnibug
+
+**URL**: [Chrome Web Store](https://chrome.google.com/webstore/detail/omnibug/bknpehncffejahipecakbfkomebjmokl) | **Free** | [GitHub](https://github.com/MisterPhilip/omnibug)
+
+A universal tag debugger that intercepts and decodes network requests from 65+ analytics and marketing platforms. Where Tag Assistant shows you what GTM is doing, Omnibug shows you what the tags are actually sending to their respective platforms.
+
+Useful when you need to verify what parameters are being sent to Meta Pixel, LinkedIn Insight Tag, TikTok Pixel, and other platforms beyond Google's tools. Open source.
+
+### WASP (Web Analytics Solution Profiler)
+
+**URL**: [Chrome Web Store](https://chrome.google.com/webstore/detail/wasp-web-analytics-soluti/niaoghengfohplclhbjnjheodgkejpih) | **Free**
+
+An alternative to Omnibug that decodes network beacon requests. Particularly good for verifying GA4 Measurement Protocol requests and seeing the exact payload being sent. Shows a side-by-side comparison of what was sent versus what is expected for various event types.
+
+### Ghostery
+
+**URL**: [ghostery.com](https://www.ghostery.com/) | **Free**
+
+Not primarily an analytics tool, but essential for testing consent implementations. Ghostery shows every third-party tracker loading on the page, which is how you verify that tags are correctly blocked before consent and enabled after. Use it to quickly spot unexpected tracking that is loading without consent.
+
+---
+
+## Chrome DevTools Techniques
+
+You do not always need an extension. Chrome DevTools has powerful built-in capabilities for analytics debugging.
+
+### Network tab filtering for analytics requests
+
+In the Network tab, filter by these patterns to isolate analytics traffic:
+
+```
+# Filter patterns in the Network tab search box:
+
+google-analytics.com    # GA4 hits
+gtm.js                  # GTM container
+g/collect               # GA4 Measurement Protocol
+gtag                    # Any Google tag
+analytics               # Broad match
+pixel                   # Meta and similar pixels
+```
+
+Click on any `g/collect` request and look at the Payload tab to see the full parameter set GA4 received.
+
+### Console commands for dataLayer inspection
+
+```javascript
+// View the full dataLayer array
+console.log(window.dataLayer);
+
+// View just custom event pushes (filter out GTM internals)
+window.dataLayer.filter(e => e.event && !e.event.startsWith('gtm.'));
+
+// Get the current state of the GTM internal data model
+// (Replace GTM-XXXXXXX with your container ID)
+google_tag_manager['GTM-XXXXXXX'].dataLayer.get('ecommerce');
+
+// Watch for new dataLayer pushes in real-time
+(function() {
+  var originalPush = window.dataLayer.push;
+  window.dataLayer.push = function() {
+    console.log('[dataLayer push]', arguments[0]);
+    return originalPush.apply(this, arguments);
+  };
+})();
+```
+
+### Performance profiling for tag impact
+
+To measure how much time GTM and its tags consume:
+
+1. Open DevTools → Performance tab
+2. Check "CPU: 4x slowdown" to simulate mobile
+3. Click Record → refresh the page → click Stop
+4. In the timeline, look for long tasks attributed to GTM scripts
+
+Long tasks (>50ms) attributed to third-party scripts loaded by GTM are your optimization targets.
+
+---
+
+## GTM Container Tools
+
+### GTM Tools (Simo Ahava)
+
+**URL**: [gtmtools.com](https://www.gtmtools.com/) | **Free & paid tiers**
+
+A web-based tool for analyzing GTM container exports. Paste in your exported container JSON and get a visual breakdown of: all tag types, trigger types, variable types, potential issues (unused items, overlapping triggers, missing consent settings), and dependency graphs showing which variables are used by which tags.
+
+The free tier covers most use cases. Essential when auditing a container you did not build.
+
+### Container Diff (various implementations)
+
+No single canonical tool, but several practitioners have built container diff tools that compare two GTM container exports and highlight exactly what changed. Useful when investigating "something changed and I don't know what":
+
+```bash
+# Simple diff using jq and standard diff tools
+# Export two container versions from GTM, then:
+jq '.containerVersion.tag[] | {name: .name}' old-container.json | sort > old-tags.txt
+jq '.containerVersion.tag[] | {name: .name}' new-container.json | sort > new-tags.txt
+diff old-tags.txt new-tags.txt
+```
+
+### owntag/gtm-cli
+
+**URL**: [github.com/owntag/gtm-cli](https://github.com/owntag/gtm-cli) | **Free, open source**
+
+A command-line interface for the GTM API. Lets you export containers, compare versions, and automate common GTM management tasks from the terminal. Particularly useful for teams that want to version-control their GTM configuration in Git. See the [GTM API Automation](/resources/gtm-api-automation/) article for context on the API itself.
+
+---
+
+## GA4 Configuration & Analysis Tools
+
+### GA4 Event Builder (Google)
+
+**URL**: [ga-dev-tools.google.com/ga4/event-builder/](https://ga-dev-tools.google.com/ga4/event-builder/) | **Free**
+
+A Google-maintained tool that lets you construct GA4 Measurement Protocol requests and validate them. Useful for testing server-side event sends and verifying that your Measurement Protocol implementation sends correctly shaped payloads.
+
+### GA4 Query Explorer
+
+**URL**: [ga-dev-tools.google.com/ga4/query-explorer/](https://ga-dev-tools.google.com/ga4/query-explorer/) | **Free**
+
+An interactive interface for the GA4 Data API. Build queries, run them, and see the raw JSON response. Excellent for learning the API structure before writing code against it, and for quick data validation ("Is this event actually in GA4 with the right parameters?").
+
+### Looker Studio (formerly Data Studio)
+
+**URL**: [lookerstudio.google.com](https://lookerstudio.google.com/) | **Free**
+
+Free dashboarding tool with native GA4 connector. For analytics practitioners, the main use case is building monitoring dashboards: daily key event counts, conversion rates, anomaly highlights. A simple Looker Studio dashboard checking yesterday's event volumes is an effective early-warning system for tracking breakage.
+
+### BigQuery Sandbox
+
+**URL**: Available in any Google Cloud project | **Free tier**
+
+GA4's BigQuery export is free. BigQuery's sandbox tier (no credit card required) provides sufficient compute for most analytics queries. If you are not already querying your GA4 data in BigQuery, start — it gives you access to every parameter of every event and bypasses GA4's sampling.
+
+---
+
+## Open-Source Tools
+
+### analytics.js (Segment)
+
+**URL**: [github.com/segmentio/analytics-next](https://github.com/segmentio/analytics-next) | **Open source**
+
+Segment's open-source analytics library. If you are considering whether GTM is the right tool for your application (particularly SPAs), analytics.js provides a structured alternative where tracking is managed in code rather than a tag manager. Well-maintained and production-proven.
+
+### Rudderstack (open-source CDP)
+
+**URL**: [github.com/rudderlabs/rudder-sdk-js](https://github.com/rudderlabs/rudder-sdk-js) | **Open source with paid tiers**
+
+An open-source Customer Data Platform that can replace or complement GTM for structured event tracking. The JavaScript SDK provides a dataLayer-like interface with built-in integrations for GA4, Segment, and 200+ destinations. Worth evaluating if you want infrastructure-level control over where your data goes.
+
+### Datalayer Checker
+
+**URL**: [datalayerchecker.com](https://www.datalayerchecker.com/) | **Free**
+
+A web tool where you paste a URL, and it loads the page in a headless browser and returns the full dataLayer state. Useful for quick checks on pages you do not have easy access to, or for sharing a dataLayer snapshot with a colleague without needing to set up a browser session.
+
+---
+
+## Learning Resources
+
+### Blogs and Newsletters
+
+**Simo Ahava's blog** — [simoahava.com](https://www.simoahava.com/)
+The canonical technical reference for GTM internals. Simo Ahava goes deeper than anywhere else on topics like the dataLayer data model, custom templates, privacy sandbox integrations, and GTM architecture. If you have a hard technical question about GTM, search here first.
+
+**Analytics Mania** — [analyticsmania.com](https://www.analyticsmania.com/)
+Julius Fedorovicius writes practical, step-by-step guides covering GA4 configuration, GTM implementations, and tracking patterns. Excellent for finding implementation walkthroughs for specific use cases.
+
+**MeasureSchool** — [measureschool.com](https://measureschool.com/)
+Julian Juenemann's site focuses on tutorials and YouTube content for marketing analytics practitioners. Good for learners moving from UA to GA4, or getting started with GTM.
+
+**Stape blog** — [stape.io/blog](https://stape.io/blog/)
+Server-side GTM focused content. Good technical depth on sGTM implementation, tagging server configuration, and privacy-preserving measurement patterns.
+
+**Tanelytics** — [tanelytics.com](https://tanelytics.com/)
+Focused on the intersection of GA4 and BigQuery. Good for practitioners who want to move beyond the GA4 UI and into SQL-based analysis.
+
+### YouTube Channels
+
+**MeasureSchool** — [@MeasureSchool](https://www.youtube.com/@MeasureSchool)
+Strong tutorial videos covering GTM setup, GA4 implementation, and ecommerce tracking. Good production quality with practical walkthroughs.
+
+**Analytics Mania** — [@AnalyticsMania](https://www.youtube.com/@AnalyticsMania)
+Complementary to the blog. Particularly good for GA4 configuration guides and GTM recipes.
+
+**Loves Data** — [@LovesData](https://www.youtube.com/@LovesData)
+Ben Mangold's channel covers GA4 reporting, BigQuery integration, and GTM. Good for reporting and analysis use cases beyond just implementation.
+
+### Communities
+
+**Measure Slack** — [measure.chat](https://www.measure.chat/)
+The largest analytics practitioner Slack community. Multiple channels covering GTM, GA4, server-side, BigQuery, consent, and attribution. Active community with practitioners who have seen every edge case. Free to join.
+
+**GA4 Community** — [support.google.com/analytics/community](https://support.google.com/analytics/community)
+Google's official GA4 community forum. Useful for officially documented answers to configuration questions. Response quality varies.
+
+**Reddit r/analytics** — [reddit.com/r/analytics](https://www.reddit.com/r/analytics/)
+Broad analytics discussion. Lower signal-to-noise ratio than Measure Slack, but useful for collecting diverse perspectives on ambiguous questions.
+
+---
+
+## Measurement Protocol Testers
+
+### Google Analytics Measurement Protocol Validation Server
+
+For GA4 Measurement Protocol (server-side hits), use the validation endpoint to check your payload before sending to production:
+
+```bash
+# Validate a GA4 Measurement Protocol hit (does not record data)
+curl -X POST "https://www.google-analytics.com/debug/mp/collect?measurement_id=G-XXXXXXXXXX&api_secret=YOUR_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "test-client-id",
+    "events": [{
+      "name": "purchase",
+      "params": {
+        "transaction_id": "TEST-001",
+        "value": 29.99,
+        "currency": "USD"
+      }
+    }]
+  }'
+```
+
+The `/debug/mp/collect` endpoint returns a JSON response describing any validation errors — whether required fields are missing, whether field types are wrong, and whether your API secret is valid. Use this before connecting a server-side pipeline to production.
+
+---
+
+## Related Resources
+
+- [GTM API Automation](/resources/gtm-api-automation/) — Building automation workflows with the GTM API
+- [Analytics Testing Framework](/resources/testing-framework/) — Playwright and automated testing tools
+- [GTM & GA4 Audit Checklist](/resources/audit-checklist/) — Using these tools systematically during audits

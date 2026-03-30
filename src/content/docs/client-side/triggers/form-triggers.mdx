@@ -3,4 +3,281 @@ title: "Form Triggers"
 description: "Capturing form submissions reliably with GTM's built-in form trigger."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+GTM's built-in Form Submission trigger works reliably for traditional HTML forms — the kind where submitting navigates to a new page or causes a visible browser action. For modern web applications, it is unreliable at best and completely broken at worst. This article covers when the built-in trigger works, when it fails, and what to use instead for React, Vue, and AJAX-powered forms.
+
+## How the built-in Form Submission trigger works
+
+GTM uses event delegation to listen for `submit` events that bubble up to the document. When a form submit event is captured, GTM evaluates any Form Submission triggers in your container and fires associated tags.
+
+Three conditions must be true for the built-in trigger to fire:
+1. The form's submit event fires and bubbles up to `document`
+2. The form passes GTM's validation check (if "Check Validation" is enabled)
+3. Any filter conditions on the trigger match
+
+### Trigger options
+
+**Check Validation**: When enabled, GTM will not fire the trigger if the form's native HTML5 validation indicates the form is invalid (required fields missing, email format wrong, etc.). This is based on the browser's built-in constraint validation API — it does not check custom JavaScript validation. If your forms use only HTML5 validation attributes, this option works correctly. If your forms use custom JavaScript validation, disable it and let your own code decide when to push the tracking event.
+
+**Wait for Tags**: When enabled, GTM delays the form's default submission behavior (navigating to the form's `action` URL) until all triggered tags have had a chance to fire. Without this option, the page may navigate away before your GA4 tag sends its network request.
+
+Enable Wait for Tags if the form navigates to a different page on submission. Do not enable it for AJAX forms — it adds an unnecessary delay and may conflict with your JavaScript handler.
+
+## Form variables
+
+Enable these under **Variables → Built-In Variables → Forms**:
+
+| Variable | Value |
+|----------|-------|
+| `Form Element` | The `<form>` DOM element itself |
+| `Form Classes` | Space-separated class names |
+| `Form ID` | The `id` attribute |
+| `Form Target` | The `target` attribute |
+| `Form URL` | The `action` attribute |
+| `Form Text` | All visible text inside the form |
+
+The most useful variables for filtering are `Form ID` (if your forms have IDs) and the "matches CSS selector" condition against `Form Element`.
+
+## Basic form trigger configuration
+
+<TagConfig
+  name="GA4 - Event - Lead Form Submission"
+  type="Google Analytics: GA4 Event"
+  trigger="FS - Contact Form"
+  variables={['Form ID', 'Page Path']}
+/>
+
+<Steps>
+1. Create a new trigger with type **Form Submission**
+2. Choose **Some Forms** to add filtering conditions
+3. Add a condition: `Form ID equals contact-form` (or `Form Element matches CSS selector form#contact-form`)
+4. Enable **Check Validation** if you use HTML5 form validation
+5. Enable **Wait for Tags** if the form navigates away on submission
+6. Name it clearly: `FS - Contact Form`
+</Steps>
+
+For basic forms that navigate to a success page, this setup works reliably:
+
+```html
+<form id="contact-form" action="/thank-you" method="post">
+  <input type="text" name="name" required>
+  <input type="email" name="email" required>
+  <textarea name="message"></textarea>
+  <button type="submit">Send Message</button>
+</form>
+```
+
+The form submits, GTM captures the event, tags fire, and the Wait for Tags option ensures data is sent before the browser navigates to `/thank-you`.
+
+## When the built-in trigger fails
+
+The built-in Form Submission trigger breaks in several common scenarios:
+
+**AJAX form submissions**: Modern forms typically submit via JavaScript fetch/XHR without navigating the page. Even if the HTML `submit` event fires, once your JavaScript calls `event.preventDefault()`, the form does not actually submit in the traditional sense. GTM may or may not capture the event depending on the timing of your `preventDefault()` call. More critically: with AJAX forms, you need to know whether the submission *succeeded* (got a 200 response) before tracking the conversion. The built-in trigger fires on form submit, not on form success.
+
+**React and Vue forms**: React and Vue controlled forms often bypass the browser's native `submit` event entirely. React's synthetic event system and Vue's event handling intercept form submissions in ways that may not bubble to `document`, or that completely replace the form submission mechanism. If you have a React or Vue form, test in Preview mode first — if `gtm.formSubmit` never appears when you submit, the trigger is not seeing your form.
+
+**Forms rendered after page load**: If your form is rendered by JavaScript after the initial page load (common in SPAs, modals, and lazy-loaded sections), GTM may not have set up event delegation correctly, depending on timing.
+
+## The correct approach: dataLayer events
+
+For any form in a modern web application, use a Custom Event trigger with a `dataLayer.push()` call from your form's success handler. This is more reliable, more data-rich, and tracks actual submission success rather than submission attempt.
+
+```javascript
+// AJAX form submission pattern
+async function handleFormSubmit(event) {
+  event.preventDefault();
+
+  const formData = new FormData(event.target);
+
+  try {
+    const response = await fetch('/api/contact', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!response.ok) throw new Error('Submission failed');
+
+    // Push ONLY on successful submission
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submission',
+      form_id: event.target.id || 'contact',
+      form_name: 'Contact Form',
+      form_location: 'contact_page'
+    });
+
+  } catch (error) {
+    // Do NOT track failed submissions
+    console.error('Form submission error:', error);
+  }
+}
+
+document.getElementById('contact-form').addEventListener('submit', handleFormSubmit);
+```
+
+<TagConfig
+  name="GA4 - Event - Form Submission (AJAX)"
+  type="Google Analytics: GA4 Event"
+  trigger="CE - form_submission"
+  variables={['DLV - form_id', 'DLV - form_name', 'DLV - form_location']}
+/>
+
+### React form tracking
+
+```tsx
+import { useState } from 'react';
+
+export function ContactForm() {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsSubmitting(true);
+
+    const formData = new FormData(event.currentTarget);
+
+    try {
+      const response = await fetch('/api/contact', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) throw new Error('Submission failed');
+
+      // Track on success only
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'form_submission',
+        form_id: 'contact',
+        form_name: 'Contact Form',
+        form_location: 'contact_page'
+      });
+
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input type="text" name="name" required />
+      <input type="email" name="email" required />
+      <textarea name="message" />
+      <button type="submit" disabled={isSubmitting}>
+        {isSubmitting ? 'Sending...' : 'Send Message'}
+      </button>
+    </form>
+  );
+}
+```
+
+## Multi-step form tracking
+
+For multi-step forms or form wizards, track step completion rather than only the final submission:
+
+```javascript
+function trackFormStep(formId, stepNumber, stepName) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_step_complete',
+    form_id: formId,
+    form_step: stepNumber,
+    form_step_name: stepName
+  });
+}
+
+// Call after each step's validation passes
+function handleStep1Complete() {
+  if (validateStep1()) {
+    trackFormStep('checkout-wizard', 1, 'account_info');
+    showStep(2);
+  }
+}
+```
+
+Create Custom Event triggers for `form_step_complete` with conditions on `form_step` to track each step individually in GA4, or use a single trigger that fires for all steps and differentiates them via event parameters.
+
+## Form abandonment tracking
+
+The built-in trigger cannot track abandonment — that requires a separate approach. Detect when a user starts filling out a form but navigates away without submitting:
+
+```javascript
+(function() {
+  let formStarted = false;
+  let formSubmitted = false;
+
+  const form = document.getElementById('contact-form');
+  if (!form) return;
+
+  form.addEventListener('focusin', function() {
+    if (!formStarted) {
+      formStarted = true;
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'form_start',
+        form_id: 'contact'
+      });
+    }
+  });
+
+  form.addEventListener('submit', function() {
+    formSubmitted = true;
+  });
+
+  window.addEventListener('beforeunload', function() {
+    if (formStarted && !formSubmitted) {
+      navigator.sendBeacon('/api/track', JSON.stringify({
+        event: 'form_abandon',
+        form_id: 'contact',
+        page_path: window.location.pathname
+      }));
+    }
+  });
+})();
+```
+
+## Common mistakes
+
+### Tracking submission attempts instead of submission success
+
+The built-in form trigger — and a naively placed dataLayer push in the `submit` handler before an async call — fires when the user clicks Submit, before knowing whether the submission succeeded. For AJAX forms, always push the dataLayer event inside the success block, not in the submit handler before the request completes.
+
+### Not testing with Preview mode
+
+Always open Preview mode and actually submit the form. You should see `gtm.formSubmit` (or your custom event) appear in the event list. If nothing appears when you submit, the trigger is not capturing the event — and you need the dataLayer approach.
+
+### Relying on Form ID when forms lack IDs
+
+If your HTML form does not have an `id` attribute, the `Form ID` variable returns an empty string. Filtering by `Form ID equals contact` will never match. Use `Form Element matches CSS selector` with a selector that uniquely identifies the form: `form.contact-form` or `form[action="/contact"]`.
+
+### Enabling Wait for Tags on AJAX forms
+
+Wait for Tags calls `event.preventDefault()` and then re-submits the form after tags fire. On an AJAX form where your JavaScript handler already calls `event.preventDefault()`, this creates a conflict — the form may submit twice or behave unexpectedly. Only enable Wait for Tags for forms that do traditional page-navigation submissions.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The reliable alternative to the built-in form trigger for modern web applications."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Click Triggers"
+    description="When you only need to track a button click rather than a full form submission."
+    href="/client-side/triggers/click-triggers/"
+  />
+  <LinkCard
+    title="SPA Setup"
+    description="React and Vue form handling often requires SPA-aware tracking patterns."
+    href="/client-side/setup/spa-setup/"
+  />
+  <LinkCard
+    title="Trigger Types Overview"
+    description="A reference for all trigger types, including when to use each."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+</CardGrid>

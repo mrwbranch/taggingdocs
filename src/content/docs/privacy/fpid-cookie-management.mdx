@@ -1,6 +1,193 @@
 ---
 title: "FPID Cookie Management"
-description: "Understanding and controlling the FPID cookie in server-side GTM."
+description: "How the FPID cookie works in server-side GTM, how it interacts with client_id, when to suppress it, and how to control its behavior."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The FPID (First Party ID) cookie is a first-party user identifier set by server-side GTM's GA4 client. It is distinct from the JavaScript-set `_ga` cookie and provides a more durable user identifier that is not subject to Safari's ITP cookie caps.
+
+Understanding how FPID works — and when it interacts with or overrides the standard `client_id` — is essential for anyone running sGTM with GA4.
+
+## What the FPID cookie is
+
+The FPID cookie is set by the sGTM GA4 client during request processing. When a GA4 event request arrives at your sGTM server, the GA4 client:
+
+1. Reads any existing `FPID` cookie from the incoming request
+2. If no `FPID` exists, generates a new UUID-based identifier
+3. Sets the `FPID` cookie in the HTTP response with the following attributes:
+   - **Name:** `FPID`
+   - **Value:** A UUID-format string (e.g., `FPID1.1.a1b2c3d4e5f6...`)
+   - **Domain:** Your sGTM server's domain (or your configured first-party domain)
+   - **Path:** `/`
+   - **Max-Age:** 34560000 seconds (~400 days, aligning with Chrome's storage limit)
+   - **Secure:** `true`
+   - **HttpOnly:** `true`
+   - **SameSite:** `Lax`
+
+The `HttpOnly: true` attribute is significant: JavaScript cannot read or modify the FPID cookie. It exists purely for server-side processing. This means ad blockers that use JavaScript to clear cookies cannot remove it, and it cannot be accessed or leaked via XSS attacks.
+
+## How FPID interacts with client_id
+
+GA4 uses `client_id` to identify users across sessions. In a standard client-side-only implementation, `client_id` comes from the `_ga` cookie, which is set by JavaScript.
+
+When sGTM is in the picture, there are two potential sources for `client_id`:
+
+1. The `_ga` cookie from the incoming request (set by client-side JavaScript)
+2. The `FPID` cookie from the incoming request (set by sGTM on a previous visit)
+
+**The precedence rule:** When both `_ga` and `FPID` are present, the sGTM GA4 client uses **FPID** as the `client_id` sent to Google Analytics. The `_ga` cookie value is ignored in favor of FPID.
+
+This matters because:
+- FPID is server-set — not subject to ITP's 7-day cap
+- FPID has a 400-day lifetime — much more durable than a JavaScript-set cookie in Safari
+- A user who has lost their `_ga` cookie to ITP but has an intact `FPID` is still recognized as a returning user
+
+**What happens on first visit:**
+1. No `_ga` or `FPID` cookies exist
+2. GA4 JavaScript generates a new `client_id` and sets the `_ga` cookie
+3. The page sends a GA4 pageview event to your sGTM server
+4. sGTM reads the `client_id` from the incoming event (from `_ga`)
+5. sGTM sets a new `FPID` cookie with the same underlying identifier
+6. Future visits use the `FPID` as the primary identifier
+
+**What happens after ITP deletes `_ga`:**
+1. User returns after 8 days; Safari has deleted `_ga`
+2. GA4 JavaScript cannot find `_ga` — it generates a NEW `client_id` and sets a new `_ga`
+3. The page sends a GA4 pageview to sGTM
+4. **sGTM reads the existing `FPID` cookie from the request** (ITP cannot cap it — server-set)
+5. sGTM uses the FPID value as the `client_id` — the original user identifier
+6. The event is sent to GA4 with the original user identifier, not the new one JavaScript generated
+7. GA4 correctly recognizes this as a returning user
+
+This is why FPID is so valuable: it provides continuity of user identity in Safari even when ITP forces GA4 JavaScript to generate a new `client_id`.
+
+## FPID vs. `_ga`: when they diverge
+
+FPID and `_ga` can diverge in specific scenarios:
+
+**After ITP deletion (described above):** `_ga` contains a new ID; `FPID` contains the original ID. sGTM uses FPID, so the original identity is preserved.
+
+**After clearing cookies via browser settings:** If a user manually clears all cookies (Preferences → Privacy → Clear History), both `_ga` and `FPID` are deleted. On the next visit, both are freshly generated — the user starts a new identity. This is expected and correct behavior.
+
+**After using private browsing mode:** Private browsing sessions do not persist cookies between sessions. The user gets a new identity for each private browsing session. This is intentional browser behavior — not an implementation problem.
+
+**Cross-device:** FPID is a per-device, per-browser identifier. It does not link the same user across devices. Cross-device identity requires authenticated user IDs pushed to the `user_id` GA4 parameter.
+
+## Cookie attributes in detail
+
+Understanding each FPID attribute helps you configure it correctly:
+
+```
+Set-Cookie: FPID=FPID1.1.abc123; Domain=.yourdomain.com; Path=/; Max-Age=34560000; Secure; HttpOnly; SameSite=Lax
+```
+
+**`HttpOnly`:** The most important security attribute. Prevents JavaScript access. You cannot read `document.cookie` to get FPID value. This is correct — FPID should only be processed server-side.
+
+**`Secure`:** Cookie only sent over HTTPS. Required for any analytics cookie on a production site. Do not disable this.
+
+**`SameSite=Lax`:** Cookie is sent with top-level navigations (user clicking a link to your site) but not with embedded requests. This is the correct setting for a first-party analytics identifier. `SameSite=Strict` would prevent the cookie from being sent on first visit from another site, breaking the FPID reading on entry pages.
+
+**`Domain=.yourdomain.com`:** The leading dot makes the cookie available on all subdomains. If your sGTM is at `sgtm.yourdomain.com` and your main site is at `www.yourdomain.com`, this domain setting ensures the FPID cookie is sent with requests to both.
+
+**`Max-Age=34560000`:** Approximately 400 days — aligning with Chrome's maximum cookie storage duration (also 400 days). Setting a longer value would have no effect in Chrome.
+
+## Reading FPID in server-side variables
+
+You can read the FPID value in sGTM using a Cookie Variable:
+
+1. In sGTM container, create a new Variable
+2. Choose "Cookie" as the variable type
+3. Set Cookie Name: `FPID`
+4. This variable returns the current FPID value for the incoming request
+
+You can use this variable in server-side tags that need the user identifier — for example, sending FPID as a user identifier to a CRM or data warehouse alongside GA4 events.
+
+```javascript
+// In a Custom Template or Custom HTML tag in sGTM,
+// access the FPID via the Cookie variable:
+const fpid = data.fpidCookieVariable; // value of your Cookie variable
+
+// Use FPID as a stable user identifier for:
+// - CRM enrichment
+// - User stitching across data sources
+// - Server-side audience building
+```
+
+## Suppressing FPID when consent is not granted
+
+If a user has not consented to analytics cookies, FPID should not be set. The sGTM GA4 client respects consent state passed from the client, but you should verify this is configured correctly.
+
+**Consent-gated FPID configuration:**
+
+The sGTM GA4 client checks for `analytics_storage` consent state before processing events. If `analytics_storage` is denied, the GA4 client:
+- Does not process the event
+- Does not set FPID
+- Does not refresh `_ga`
+
+For this to work correctly, your client-side Consent Mode implementation must correctly pass the consent state to sGTM with every event. If you are using GTM Consent Mode, verify that:
+
+1. The consent state is being sent as an event parameter
+2. Your sGTM GA4 client is configured to honor consent state
+3. Test by explicitly denying analytics consent and verifying no FPID cookie is set
+
+**Explicit FPID suppression via `x-sst-system-properties`:**
+
+The sGTM GA4 client respects an event parameter called `x-sst-system-properties` that can control FPID behavior programmatically:
+
+```javascript
+// In client-side GTM, add this parameter to your GA4 events
+// to suppress FPID setting (for example, when consent is uncertain)
+gtag('event', 'page_view', {
+  'x-sst-system-properties': {
+    'disableFPID': true
+  }
+});
+```
+
+This is a low-level override. In most cases, properly configured Consent Mode handles FPID suppression automatically. Use this only when you need programmatic control for specific scenarios.
+
+## FPID and server-to-server integrations
+
+FPID can serve as a stable user identifier for server-to-server data enrichment. Because it is set by the server and not subject to ITP, it provides a more durable cross-session identifier than `_ga` for server-side processing.
+
+Use cases:
+- **Data warehouse user stitching:** Join FPID to session data in BigQuery to stitch sessions across ITP-affected periods
+- **Offline enrichment:** When offline conversion data comes back to your server (from CRM, order management), FPID can link it to the correct user identity
+- **Custom CDPs:** Firestore-based or Redis-based user profiles keyed by FPID
+
+Note that FPID is still a browser-level identifier. It identifies a user on a specific browser on a specific device. For true cross-device identity, authenticated user IDs are required.
+
+## Common mistakes
+
+### Treating FPID as a privacy-neutral identifier
+
+FPID is a persistent user tracking cookie. It is subject to the same consent requirements as `_ga`. Do not treat it as "just a technical cookie" that is exempt from consent rules. It enables user identification across sessions — which is exactly what GDPR and ePrivacy require consent for.
+
+### Not configuring the domain scope correctly
+
+If FPID is scoped to `sgtm.yourdomain.com` instead of `.yourdomain.com`, the main site at `www.yourdomain.com` will never send the FPID cookie with GA4 requests, and the sGTM server cannot read it. Always set the domain to your root domain with the leading dot.
+
+### Assuming FPID solves cross-device tracking
+
+FPID is a per-browser identifier. A user on iPhone Safari and MacBook Chrome has two different FPIDs. Cross-device identity requires the user to authenticate on both devices so you can link them via `user_id`.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Extending Cookie Lifetimes"
+    description="The broader context of server-set cookies and ITP bypass techniques."
+    href="/privacy/extending-cookie-lifetimes/"
+  />
+  <LinkCard
+    title="ITP History & Impact"
+    description="Why FPID exists — the ITP restrictions that make server-set cookies necessary."
+    href="/privacy/itp-history-impact/"
+  />
+  <LinkCard
+    title="Cross-Browser Tracking Differences"
+    description="How FPID helps with Safari specifically, and how it does not help with Brave."
+    href="/privacy/cross-browser-tracking-differences/"
+  />
+</CardGrid>

@@ -1,6 +1,196 @@
 ---
 title: "Comprehensive Link Tracking"
-description: "Track and categorize ALL link clicks in a single system."
+description: "Build one unified link tracking system that categorizes every click — outbound, download, email, phone, anchor, and internal — using a single GA4 event."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Most GTM containers have a separate trigger for outbound links, another for downloads, maybe one for email clicks, and so on. Each one has its own tag, its own conditions, its own maintenance burden. A comprehensive link tracking system collapses all of this into a single trigger and a single tag that categorizes every link click automatically.
+
+The result is a cleaner container, consistent data in GA4, and a single place to add new link types.
+
+## The classification architecture
+
+The strategy: one All Clicks trigger that fires on every click → one Custom JavaScript variable that classifies the link type → one GA4 Event tag that reads the classification.
+
+Link types to classify:
+- `outbound` — links to external domains
+- `download` — links to file types you want to track
+- `email` — `mailto:` links
+- `phone` — `tel:` links
+- `anchor` — same-page `#fragment` links
+- `social` — links to social media platforms
+- `internal` — links within your site (optionally track these too)
+
+## Step 1: The link classification variable
+
+Create a **Custom JavaScript variable** named `CJS - Link Type`:
+
+```javascript
+function() {
+  var url = {{Click URL}};
+  if (!url) return 'unknown';
+
+  var currentHost = window.location.hostname;
+
+  // Email links
+  if (url.indexOf('mailto:') === 0) return 'email';
+
+  // Phone links
+  if (url.indexOf('tel:') === 0) return 'phone';
+
+  // Anchor links (same-page)
+  if (url.indexOf('#') === 0) return 'anchor';
+
+  // File downloads
+  var downloadExtensions = /\.(pdf|xlsx?|docx?|pptx?|csv|zip|rar|7z|mp3|mp4|mov|exe|dmg|pkg|deb|apk)(\?|$)/i;
+  if (downloadExtensions.test(url)) return 'download';
+
+  // Social media
+  var socialDomains = /(twitter|x)\.com|linkedin\.com|facebook\.com|instagram\.com|youtube\.com|tiktok\.com|pinterest\.com/i;
+  if (socialDomains.test(url)) return 'social';
+
+  // Outbound: external domain
+  try {
+    var linkHost = new URL(url).hostname;
+    if (linkHost && linkHost !== currentHost && linkHost !== 'www.' + currentHost) {
+      return 'outbound';
+    }
+  } catch (e) {
+    // URL parsing failed — relative URL or malformed
+    return 'internal';
+  }
+
+  return 'internal';
+}
+```
+
+## Step 2: The trigger
+
+Create an **All Clicks** trigger (not Link Click — All Clicks fires on every click, giving the variable more reliable access to the element):
+
+- Trigger type: All Elements
+- This trigger fires on: Some Clicks
+- Condition: Click URL — does not equal — `` (not empty)
+
+<Aside type="tip">
+Using All Clicks instead of Link Click gives you more reliable access to the Click URL variable. Link Click triggers use a slightly different element resolution that can miss clicks on child elements inside `<a>` tags (like clicking an `<img>` inside a link). All Clicks uses event delegation at the document level and handles the bubbling correctly.
+</Aside>
+
+Optionally, filter to exclude clicks that are clearly not links:
+
+- Condition: Click Tag — matches RegEx — `^(a|button)$` (fire only on anchors and buttons)
+
+## Step 3: The GA4 Event tag
+
+<TagConfig
+  name="GA4 - Event - Link Click"
+  type="Google Analytics: GA4 Event"
+  trigger="All Clicks - With URL"
+  variables={['CJS - Link Type', 'Click URL', 'Click Text', 'Page URL']}
+/>
+
+Set event name to `link_click` and parameters:
+- `link_type` → `{{CJS - Link Type}}`
+- `link_url` → `{{Click URL}}`
+- `link_text` → `{{Click Text}}`
+- `page_location` → `{{Page URL}}`
+- `outbound` → (optional Custom JS variable returning `true` for outbound and social)
+
+## Step 4: Optionally exclude internal link tracking
+
+If you don't want every internal navigation tracked (this is a lot of events for large sites), add a blocking condition:
+
+- Add trigger condition: `CJS - Link Type` — does not equal — `internal`
+- Or add a blocking trigger to the GA4 tag: a trigger that fires when `CJS - Link Type` equals `internal`
+
+## Handling missing Click URL on child element clicks
+
+A common problem: the user clicks an `<img>` or `<span>` inside an `<a>` tag. GTM's `{{Click URL}}` may be empty because the click landed on the child element, not the anchor.
+
+Add a fallback Custom JavaScript variable for the link URL:
+
+```javascript
+// Custom JS Variable: "CJS - Link URL With Fallback"
+function() {
+  var url = {{Click URL}};
+  if (url) return url;
+
+  // Walk up the DOM to find the nearest anchor
+  var el = {{Click Element}};
+  while (el && el !== document.body) {
+    if (el.tagName === 'A' && el.href) {
+      return el.href;
+    }
+    el = el.parentElement;
+  }
+  return '';
+}
+```
+
+Use `{{CJS - Link URL With Fallback}}` instead of `{{Click URL}}` in both your classification variable and your GA4 tag.
+
+## Capturing the link's parent context
+
+For product links, call-to-action tracking, and anything where you want to know which section of the page the link was in:
+
+```javascript
+// Custom JS Variable: "CJS - Link Section"
+function() {
+  var el = {{Click Element}};
+  while (el && el !== document.body) {
+    var section = el.getAttribute('data-section') || el.getAttribute('data-block');
+    if (section) return section;
+    el = el.parentElement;
+  }
+  return 'unknown';
+}
+```
+
+Add `data-section="hero"`, `data-section="footer"`, `data-block="product_grid"` to your page sections. Now every link click includes which section the user was in.
+
+## What this looks like in GA4
+
+After implementing, every link click fires as a `link_click` event with a `link_type` dimension. In GA4 Explorations, you can:
+
+- See all outbound destinations by domain
+- Compare email link clicks vs. phone link clicks by page
+- Identify top-performing download pages
+- Segment social media clicks by social platform and source traffic
+
+The single event approach also simplifies conversion setup in GA4 — mark `link_click` events where `link_type = download` as a key event, and you have download conversions without a separate tag.
+
+## Common mistakes
+
+### Using the Link Click trigger instead of All Clicks
+
+Link Click triggers rewrite the event target to the closest `<a>` ancestor when you click a child element. This is useful but changes timing slightly. For the classification approach above where you need reliable access to the raw element, All Clicks is more predictable.
+
+### Not handling relative URLs in the classification variable
+
+The `new URL(url)` constructor in the classification variable will throw on relative URLs like `/about` or `#section`. The try/catch handles this, but test your implementation with relative links.
+
+### Triggering on every mouseenter event
+
+Ensure your trigger fires on Click events only. If you accidentally set it to fire on mouseovers or other events, you'll get enormous event volumes in GA4.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Outbound Link Tracking"
+    description="The focused approach for just outbound link tracking, without the full classification system."
+    href="/client-side/tracking/outbound-link-tracking/"
+  />
+  <LinkCard
+    title="File Download Tracking"
+    description="More detail on file download patterns, including authenticated downloads."
+    href="/client-side/tracking/file-download-tracking/"
+  />
+  <LinkCard
+    title="Click Triggers"
+    description="How All Clicks and Just Links triggers differ — important for understanding the approach above."
+    href="/client-side/triggers/click-triggers/"
+  />
+</CardGrid>

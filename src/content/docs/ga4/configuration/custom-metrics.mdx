@@ -1,6 +1,207 @@
 ---
 title: "Custom Metrics"
-description: "Creating custom metrics for specialized measurement."
+description: "Register numeric event parameters as custom metrics in GA4 — unit types, limits, and when to use metrics vs. calculated metrics vs. BigQuery."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Custom metrics register numeric event parameters so they can be aggregated — summed, averaged, and compared — in GA4 reports and explorations. If you are sending a number with an event and you need to analyze it beyond "this number existed," you need a custom metric.
+
+## When to use custom metrics
+
+Custom metrics are for numeric values you want to aggregate:
+
+- **Sum**: total revenue from custom sources, total items viewed, total search results returned
+- **Average**: average article word count, average video watch time (when you have your own calculation), average score
+- **Count**: these become possible through Calculated Metrics
+
+Do not use custom metrics for:
+- Identifiers that happen to be numbers (order IDs, user IDs) — these are dimensions
+- Booleans (0/1 flags) — register as a dimension if you need to segment by them
+- Numeric values you only analyze in BigQuery
+
+## Custom metric limit
+
+GA4 allows **50 custom metrics per property** (GA4 360 allows 125).
+
+This is the same limit as event-scoped custom dimensions. Between custom dimensions and custom metrics, plan carefully — both draw from a single implementation effort but separate pools.
+
+## Creating a custom metric
+
+<Steps>
+1. Go to **Admin → Custom definitions**.
+
+2. Click the **Custom metrics** tab.
+
+3. Click **Create custom metrics**.
+
+4. Enter a **Metric name** — the display name in reports. Use descriptive names with units: "Word Count", "Video Watch Seconds", "Score Points".
+
+5. Enter a **Description** — document what this metric measures and which event sends it.
+
+6. Enter the **Event parameter** name exactly as sent in tracking code (case-sensitive).
+
+7. Select a **Unit of measurement**:
+   - **Standard** — a plain number, no unit display
+   - **Currency** — formatted as currency, uses the property's currency setting
+   - **Feet**, **Miles**, **Meters**, **Kilometers** — distance units
+   - **Milliseconds**, **Seconds**, **Minutes**, **Hours** — time units
+
+8. Click **Save**.
+</Steps>
+
+## Implementation examples
+
+### Article engagement tracking
+
+```javascript
+// Track reading progress on articles
+function trackArticleComplete(wordCount, readTime, scrollDepth) {
+  gtag('event', 'article_complete', {
+    word_count: wordCount,          // custom metric: Word Count
+    read_time_seconds: readTime,    // custom metric: Read Time (Seconds)
+    max_scroll_depth: scrollDepth   // custom metric: Max Scroll Depth
+  });
+}
+
+// Call when article is fully read
+trackArticleComplete(1850, 247, 98);
+```
+
+Register:
+- Custom metric: "Word Count", parameter `word_count`, unit Standard
+- Custom metric: "Read Time (Seconds)", parameter `read_time_seconds`, unit Seconds
+- Custom metric: "Max Scroll Depth", parameter `max_scroll_depth`, unit Standard
+
+### Search result quality
+
+```javascript
+gtag('event', 'search', {
+  search_term: 'leather boots',
+  results_count: 47,       // custom metric: Search Results Count
+  result_rank_clicked: 3   // custom metric: Result Rank Clicked (on click event)
+});
+```
+
+### Custom revenue tracking
+
+For non-standard revenue streams that should not go through the standard `purchase` event:
+
+```javascript
+gtag('event', 'ad_revenue', {
+  ad_revenue_usd: 0.42,    // custom metric: Ad Revenue (USD), unit Currency
+  ad_unit: 'sidebar_300x250',
+  ad_network: 'adsense'
+});
+```
+
+### Video engagement depth
+
+```javascript
+// Fire when user pauses or stops watching
+gtag('event', 'video_engagement', {
+  video_id: 'vid-001',
+  watch_time_seconds: 183,     // custom metric: Watch Time (Seconds)
+  percent_watched: 62          // custom metric: Percent Watched
+});
+```
+
+## Unit types in practice
+
+**Standard** — displays as a raw number. Use for counts, scores, depths.
+
+**Currency** — GA4 formats the value using the property's currency. Only use this for values that represent monetary amounts in your property's currency. If your property currency is USD and you send `0.42`, it displays as `$0.42`. Sending values in a different currency without conversion will produce incorrect formatted output.
+
+**Time units** — GA4 will display the value in the selected unit. If you choose "Seconds" and send `183`, reports show `183s` or convert to minutes/hours depending on the interface. Be consistent: always send the value in the unit you selected.
+
+## Custom metrics vs. calculated metrics
+
+**Custom metrics** aggregate raw numeric values from events. They sum, average, or count the values you send.
+
+**Calculated metrics** derive new metrics from existing metrics using formulas. They do not require additional data collection — they compute from data already in GA4.
+
+Use custom metrics when you need to collect and aggregate a new numeric value. Use calculated metrics when you want to compute a ratio or transformation of existing metrics (e.g., revenue per session = revenue / sessions).
+
+See [Calculated Metrics](/ga4/configuration/calculated-metrics/) for the full guide.
+
+## Using custom metrics in reports
+
+Custom metrics appear in:
+- **Explorations** — available in the metric picker for any visualization
+- **Standard reports** — can be added as a metric column in customized reports
+- **Audiences** — filter audiences by metric conditions (e.g., "word_count > 1000")
+- **Segments** — segment by metric ranges
+
+### Example exploration: average word count by content category
+
+1. Open **Explore → Free form**
+2. Add dimension: **Content Category** (custom dimension)
+3. Add metric: **Word Count** (custom metric)
+4. GA4 shows the average word count per content category
+
+This type of analysis — correlating a content property with an engagement metric — is only possible with custom metrics. Without the custom metric, word count is just a number in your BigQuery export.
+
+<Aside type="tip">
+Custom metrics in GA4 standard reports display the sum of all values by default. In explorations, you can choose aggregation: sum, average, min, max. If your metric represents a rate or score that should be averaged rather than summed, always use explorations rather than standard reports.
+</Aside>
+
+## Custom metrics in BigQuery
+
+Custom metrics stored in BigQuery are just event parameters — stored in `event_params` like any other parameter. The custom metric registration in GA4 Admin does not change how data is stored in BigQuery.
+
+```sql
+-- Average word count for articles with more than 500 reads
+SELECT
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'content_type') AS content_type,
+  AVG((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'word_count')) AS avg_word_count,
+  COUNT(*) AS article_views
+FROM `project.dataset.events_*`
+WHERE event_name = 'article_complete'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY content_type
+HAVING COUNT(*) > 500
+ORDER BY avg_word_count DESC
+```
+
+## Common mistakes
+
+### Registering identifiers as metrics
+
+If you send `order_id: 12345`, registering it as a metric means GA4 will sum order IDs together — producing a meaningless sum of your numeric order IDs. Identifiers should be dimensions.
+
+### Wrong unit type
+
+Sending seconds but selecting "Milliseconds" as the unit means GA4 will display and potentially convert values incorrectly. Choose the unit that matches exactly what you send.
+
+### Not accounting for missing events
+
+Custom metrics sum values across events where the parameter was sent. If `read_time_seconds` is only sent on `article_complete` events (not on all page views), the metric only represents completed reads. That is usually correct, but verify your metric definition matches your event implementation.
+
+### Overusing custom metrics when calculated metrics suffice
+
+If you need "revenue per user," you can compute it as a calculated metric from existing revenue and user metrics. You do not need to add a custom event parameter. Check if a Calculated Metric can give you what you need before creating a new custom metric.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Dimensions"
+    description="Register non-numeric event parameters and user properties for segmentation."
+    href="/ga4/configuration/custom-dimensions/"
+  />
+  <LinkCard
+    title="Calculated Metrics"
+    description="Derive new metrics from existing ones without additional data collection."
+    href="/ga4/configuration/calculated-metrics/"
+  />
+  <LinkCard
+    title="Data Limits and Cardinality"
+    description="Full quota reference for GA4 properties."
+    href="/ga4/configuration/data-limits-cardinality/"
+  />
+  <LinkCard
+    title="Explore Reports"
+    description="Use explorations to analyze custom metrics with full aggregation control."
+    href="/ga4/reporting/explore-reports/"
+  />
+</CardGrid>

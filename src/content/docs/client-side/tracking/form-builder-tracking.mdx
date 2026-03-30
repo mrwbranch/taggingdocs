@@ -1,6 +1,321 @@
 ---
 title: "Form Builder Tracking"
-description: "Tracking specific form builders — Gravity Forms, HubSpot, Typeform, and more."
+description: "Track form submissions from Gravity Forms, Contact Form 7, HubSpot Forms, Typeform, Webflow, and Calendly — tested patterns for each builder."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Popular form builders all have AJAX-based submission flows that bypass GTM's built-in Form Submission trigger. Each one exposes a different hook for detecting successful submissions — some through DOM events, others through postMessage or JavaScript SDK callbacks.
+
+This guide covers the six most common builders with tested, production-ready patterns for each.
+
+## Gravity Forms (WordPress)
+
+Gravity Forms fires a JavaScript event on the DOM when each form successfully submits or confirmation content loads.
+
+**For standard AJAX submissions:**
+
+```html
+<!-- Custom HTML tag, fires on DOM Ready -->
+<script>
+jQuery(document).on('gform_confirmation_loaded', function(event, formId) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_builder: 'gravity_forms',
+    form_id: formId,
+    form_name: 'GF Form ' + formId // Enhance: use a lookup table to map IDs to names
+  });
+});
+</script>
+```
+
+**For non-AJAX (page-redirect) submissions**, use a page-view-based approach: fire a custom event when the user lands on the confirmation page URL:
+- Page View trigger with condition: Page URL contains `?gf_confirmation=`
+
+**For multi-page forms**, track each page advance:
+
+```html
+<script>
+jQuery(document).on('gform_page_loaded', function(event, formId, currentPage) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_step_complete',
+    form_builder: 'gravity_forms',
+    form_id: formId,
+    form_step: currentPage
+  });
+});
+</script>
+```
+
+## Contact Form 7 (WordPress)
+
+Contact Form 7 fires the `wpcf7mailsent` custom DOM event after a successful mail send. This event bubbles to the document, making it easy to catch from a Custom HTML tag:
+
+```html
+<!-- Custom HTML tag, fires on DOM Ready -->
+<script>
+document.addEventListener('wpcf7mailsent', function(event) {
+  var detail = event.detail;
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_builder: 'contact_form_7',
+    form_id: detail.contactFormId,
+    form_unit_tag: detail.unitTag // Unique ID for this form instance on the page
+  });
+});
+</script>
+```
+
+CF7 also fires `wpcf7invalid` (validation failure) and `wpcf7mailfailed` (mail sending error). Track validation failures for form UX analysis:
+
+```html
+<script>
+document.addEventListener('wpcf7invalid', function(event) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_validation_error',
+    form_builder: 'contact_form_7',
+    form_id: event.detail.contactFormId
+  });
+});
+</script>
+```
+
+## HubSpot Forms
+
+HubSpot forms are loaded in an iframe from `forms.hubspot.com`. Cross-origin iframe submissions are communicated to the parent page via `window.postMessage`.
+
+```html
+<!-- Custom HTML tag, fires on DOM Ready -->
+<script>
+window.addEventListener('message', function(event) {
+  // Only process messages from HubSpot
+  if (event.origin !== 'https://forms.hubspot.com') return;
+
+  var data;
+  try {
+    data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+  } catch (e) {
+    return;
+  }
+
+  // HubSpot sends type 'hsFormCallback' with eventName 'onFormSubmitted'
+  if (data.type === 'hsFormCallback' && data.eventName === 'onFormSubmitted') {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submission',
+      form_builder: 'hubspot',
+      form_id: data.id,
+      form_target: data.target
+    });
+  }
+
+  // Also track form ready (displayed to user)
+  if (data.type === 'hsFormCallback' && data.eventName === 'onFormReady') {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_view',
+      form_builder: 'hubspot',
+      form_id: data.id
+    });
+  }
+});
+</script>
+```
+
+<Aside type="caution">
+If you use the HubSpot embed via their JavaScript SDK (`hbspt.forms.create()`), the forms may not be in iframes. In that case, use HubSpot's `onFormSubmit` callback directly in the `hbspt.forms.create()` options object — this is cleaner than the postMessage approach.
+</Aside>
+
+## Typeform
+
+Typeform's embeds support an SDK for event listening. The approach differs between embedded forms and popup forms.
+
+**Installed via Typeform's embed script:**
+
+```html
+<!-- Assuming Typeform Embed SDK is loaded -->
+<script>
+// For embedded typeforms (in an iframe on the page)
+var tf = window.tf;
+if (tf) {
+  tf.createWidget({
+    id: 'your-typeform-id', // Your form ID
+    onSubmit: function(payload) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'form_submission',
+        form_builder: 'typeform',
+        form_id: payload.formId,
+        response_id: payload.responseId
+      });
+    }
+  });
+}
+</script>
+```
+
+**For popup typeforms (opened via a button):**
+
+```html
+<script>
+// After the Typeform popup script has loaded
+document.querySelectorAll('[data-tf-popup]').forEach(function(button) {
+  var formId = button.dataset.tfPopup;
+  button.addEventListener('data-tf-submit', function(event) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submission',
+      form_builder: 'typeform',
+      form_id: formId
+    });
+  });
+});
+</script>
+```
+
+If you use the Typeform postMessage API directly:
+
+```html
+<script>
+window.addEventListener('message', function(event) {
+  if (event.origin !== 'https://form.typeform.com') return;
+
+  var data;
+  try {
+    data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+  } catch (e) { return; }
+
+  if (data && data.type === 'form-submit') {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submission',
+      form_builder: 'typeform',
+      form_id: data.formId || 'unknown'
+    });
+  }
+});
+</script>
+```
+
+## Webflow Forms
+
+Webflow fires a custom DOM event on the form element after successful submission:
+
+```html
+<!-- Custom HTML tag, fires on DOM Ready -->
+<script>
+document.addEventListener('submit', function(event) {
+  var form = event.target;
+  if (!form || form.tagName !== 'FORM') return;
+
+  // Webflow form detection — look for Webflow's own submission handler
+  // Webflow adds a 'w-form' class to its form containers
+  var formBlock = form.closest('.w-form');
+  if (!formBlock) return;
+
+  // Wait for Webflow to process the submission and show success state
+  var successEl = formBlock.querySelector('.w-form-done');
+  if (!successEl) return;
+
+  // MutationObserver to detect when the success message appears
+  var observer = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+      if (mutation.target.style.display !== 'none') {
+        observer.disconnect();
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({
+          event: 'form_submission',
+          form_builder: 'webflow',
+          form_name: form.getAttribute('data-name') || form.id || 'unknown'
+        });
+      }
+    });
+  });
+
+  observer.observe(successEl, { attributes: true, attributeFilter: ['style'] });
+});
+</script>
+```
+
+A simpler approach if Webflow is configured to redirect to a thank-you page: use a Page View trigger on the thank-you page URL.
+
+## Calendly
+
+Calendly communicates booking events via postMessage from its iframe embed:
+
+```html
+<!-- Custom HTML tag, fires on DOM Ready -->
+<script>
+window.addEventListener('message', function(event) {
+  if (event.origin !== 'https://calendly.com') return;
+
+  var data;
+  try {
+    data = event.data;
+  } catch (e) { return; }
+
+  if (!data || !data.event) return;
+
+  // 'calendly.event_scheduled' fires when a booking is completed
+  if (data.event === 'calendly.event_scheduled') {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'calendly_booking',
+      form_builder: 'calendly',
+      event_type_name: data.payload && data.payload.event_type
+        ? data.payload.event_type.name
+        : 'unknown',
+      invitee_email: undefined // Do not push PII — track the event, not the person
+    });
+  }
+
+  // 'calendly.date_and_time_selected' fires when a time slot is selected
+  if (data.event === 'calendly.date_and_time_selected') {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'calendly_time_selected',
+      form_builder: 'calendly'
+    });
+  }
+});
+</script>
+```
+
+## Common mistakes across all form builders
+
+### Firing on form load, not form success
+
+The most critical rule: fire your conversion event only after the server confirms the submission was successful. Most of the patterns above wait for the success callback, success message display, or confirmation event. Don't push `form_submission` on the initial click or form render.
+
+### Not handling form builders loaded asynchronously
+
+If the form builder's script loads after your Custom HTML tag has already executed (because you fired on DOM Ready but the form builder loads on Window Loaded), your event listener setup code runs before the form builder is available. Move your Custom HTML tag to Window Loaded if you're experiencing setup timing issues.
+
+### Storing PII from form fields
+
+Resist the temptation to capture what the user typed — especially email addresses. The dataLayer is accessible to anyone who opens the browser console. Push form metadata (form ID, step, success) but not field values.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Form Tracking"
+    description="General form tracking approaches — built-in trigger, dataLayer patterns, and AJAX detection."
+    href="/client-side/tracking/form-tracking/"
+  />
+  <LinkCard
+    title="Custom HTML Tags"
+    description="Writing and maintaining Custom HTML tags for third-party integration."
+    href="/client-side/tags/custom-html-tags/"
+  />
+  <LinkCard
+    title="iframe Debugging"
+    description="Debugging GTM inside iframes — relevant for HubSpot Forms and Typeform iframe embeds."
+    href="/client-side/debugging/iframe-debugging/"
+  />
+</CardGrid>
