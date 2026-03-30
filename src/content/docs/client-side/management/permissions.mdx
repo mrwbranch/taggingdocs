@@ -1,6 +1,177 @@
 ---
 title: "Permissions"
-description: "Managing user access and publish permissions."
+description: "GTM user permissions — account vs. container levels, the four permission tiers, recommended structures for different team types, and agency access patterns."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+GTM's permission model is straightforward but frequently misconfigured — usually in the direction of too much access. Every GTM publish deploys code to your production website. The people who can publish should be a short, deliberate list.
+
+## Account vs. container permissions
+
+GTM has two permission levels:
+
+**Account level:**
+- **Administrator** — can manage account settings, add/remove users, create containers. Admin at the account level gets admin access to all containers in the account.
+- **User** — can access containers within the account based on their container-level permissions.
+
+**Container level** (what most people configure):
+- **No access** — Can't see the container at all
+- **View** — Can browse the container and use Preview mode, but cannot make changes
+- **Edit** — Can create and edit tags, triggers, variables, and workspaces, but cannot publish
+- **Approve** — Can edit and create versions, but cannot publish directly. Must use the approval workflow.
+- **Publish** — Can edit and publish. This is the highest level of container access.
+
+## Who should get what
+
+**Publish access** — Reserved for people who understand the security implications. Publishing runs arbitrary code on your production site. Limit this to senior analytics engineers, lead developers, or designated analytics leads. The goal is a very short list.
+
+**Edit access** — The working level for most implementers. Developers adding dataLayer pushes can verify their work with Preview mode. Analytics team members can build tags and triggers. Neither group needs publish.
+
+**View access** — For stakeholders who need visibility: product managers who want to understand what's tracked, developers who need to check existing tag configurations, or analysts who need to debug their GA4 reports without editing capabilities.
+
+**Admin access** — One or two people. Never give admin to contractors or external agencies. Admin can export your entire container, delete containers, and add new users with any permission level.
+
+## Recommended permission structures
+
+**Small team (startup, 1-5 person analytics team):**
+```
+Admin:    Analytics Lead (1 person)
+Publish:  Senior Analytics Engineer (1-2 people)
+Edit:     Analytics team, developers who implement dataLayer
+View:     Product managers, data analysts
+```
+
+**Mid-size company:**
+```
+Admin:    Analytics Lead + IT Admin
+Publish:  Analytics Lead + Senior Analytics Engineer
+Approve:  Analytics Engineers (changes go through a review before publish)
+Edit:     Analytics team, contractors, development team
+View:     Marketing team, product team
+```
+
+**Enterprise (separate GTM containers per team or brand):**
+```
+Account Admin:  IT/Governance team only
+Container Admin:  Per-container owners
+Publish:  Approved list per container (goes through change management)
+Edit:     Platform-specific teams
+View:     Broad stakeholder access
+```
+
+## Adding users
+
+<Steps>
+1. In GTM, go to **Admin → User Management** (at the account level) or the container-specific user management.
+
+2. Click **+** to add a user.
+
+3. Enter their Google account email address.
+
+4. Set account-level permissions (User or Administrator).
+
+5. Under Container Permissions, select the container(s) and the permission level for each.
+
+6. Save.
+</Steps>
+
+The user receives an email invitation and gains access immediately on acceptance.
+
+## Agency access
+
+When working with an external agency:
+
+1. **Never give admin access to agencies.** They don't need it, and it creates unnecessary risk.
+
+2. **Create a dedicated workspace** for agency work so their changes are isolated and reviewable before publishing.
+
+3. **Give Edit-only access** to their team. Only your internal lead should have Publish access.
+
+4. **Grant access at the container level, not account level** — the agency only needs to see the specific container(s) they're working on.
+
+5. **Time-box the access.** Document when the access was granted. Set a calendar reminder to review quarterly.
+
+6. **Revoke access immediately when the engagement ends.** This is the step most often forgotten. The day the contract ends, remove the users.
+
+```
+Agency team: Edit access on Container A only
+No account-level access
+No access to Container B (other brands/products)
+```
+
+## The approval workflow (GTM 360 only)
+
+Standard GTM doesn't enforce an approval workflow — anyone with Publish can publish without review. GTM 360 adds an Approve permission tier that enforces a review step before publishing:
+
+- Users with Edit access can create changes
+- Users with Approve access can review and create versions (but not publish)
+- Only users with Publish access can push versions live
+
+For standard GTM, approximate this with process: require that all changes be reviewed in Preview mode by a second person before the author submits. Make this a team norm, not an enforced technical control.
+
+## Audit trail
+
+GTM maintains a change history that shows who changed what and when. Access it via **Admin → Activity History** at the container level.
+
+Each entry shows:
+- What changed (tag name, trigger type, etc.)
+- Who made the change (Google account email)
+- When it happened
+
+This is invaluable for debugging ("why is this tag different from last week?") and for accountability in regulated environments. GTM's audit history cannot be deleted or edited.
+
+## Two-factor authentication
+
+GTM uses Google account authentication. If someone's Google account is compromised, their GTM access is compromised. Require that all users with Edit or Publish access to GTM have two-factor authentication enabled on their Google account.
+
+This is not enforceable from within GTM — it's a Google account security setting. Make it a team requirement and verify during access reviews.
+
+## Quarterly access review
+
+Schedule a quarterly review of GTM permissions:
+1. Export the user list (you can do this via the GTM API or by manually checking Admin → User Management)
+2. Remove anyone who has left the company
+3. Remove anyone whose role no longer requires GTM access
+4. Downgrade anyone who has more access than they currently need
+5. Document the review
+
+This sounds like overhead, but a former employee's GTM account being used after they leave is a real security risk. Their account may have been compromised, or they may still have access through shared credentials.
+
+## Common mistakes
+
+### Giving agencies admin access
+
+Admin access lets them create new users, export the container, and manage your account structure. They need Edit access to do their job. They don't need admin.
+
+### Everyone in Edit because it's easier
+
+When everyone has Edit access, anyone can accidentally publish (if they meant to click something else) or make changes that affect other people's work. Maintain distinct tiers — it takes two minutes to set up and prevents significant problems.
+
+### Not revoking access when contractors leave
+
+This is the most common security gap in GTM implementations. Build a process: when a contractor's engagement ends, the access removal is part of the offboarding checklist.
+
+### Shared logins for GTM access
+
+Some agencies share a single Google account for all GTM access. This means you can't distinguish between team members in the audit log and you can't revoke one person's access without revoking the whole agency's. Require individual accounts.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Workspaces"
+    description="How workspaces relate to permissions — agencies get Edit-only access to dedicated workspaces."
+    href="/client-side/management/workspaces/"
+  />
+  <LinkCard
+    title="Version Control"
+    description="The publish workflow — only Publish-level users can complete the final step."
+    href="/client-side/management/version-control/"
+  />
+  <LinkCard
+    title="Multi-Container Strategy"
+    description="When separate containers make sense — and how permissions apply to each."
+    href="/client-side/management/multi-container-strategy/"
+  />
+</CardGrid>

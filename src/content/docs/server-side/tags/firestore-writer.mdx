@@ -1,6 +1,186 @@
 ---
 title: "Firestore Writer"
-description: "Writing event data to Google Firestore from sGTM."
+description: "Writing event data to Google Firestore from sGTM — configuration, document structure, use cases, and cost considerations."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Firestore is Google Cloud's managed NoSQL database, and it integrates naturally with sGTM running on GCP. Writing events directly to Firestore from your server container enables use cases that pure tag-based integrations cannot: building a real-time event log, accumulating user behavior profiles for enrichment, implementing a lightweight CDP, and creating an audit trail for compliance.
+
+## What the Firestore Writer tag does
+
+The Firestore Writer tag writes a Firestore document from the data in the Event Model. Each tag execution creates or updates one Firestore document. The tag maps Event Model fields to Firestore document fields you configure.
+
+This is a Community Template Gallery tag — not built-in. Search the Gallery for **Firestore Writer** (the most commonly used version is from Simo Ahava or Google's official templates).
+
+## When to use Firestore vs. other storage
+
+| Use case | Best choice |
+|---|---|
+| Real-time event log | Firestore |
+| User profile store for enrichment | Firestore |
+| Historical analytics, large-scale querying | BigQuery |
+| File-based exports | Cloud Storage |
+| Queue for async processing | Pub/Sub → BigQuery |
+
+Firestore is the right choice when you need:
+- Sub-50ms reads (for enrichment on subsequent requests)
+- Real-time updates (profiles updated as events arrive)
+- Document-based storage (user profiles, order records)
+
+Firestore is the wrong choice for:
+- High-volume event logs (>100M+ events/month — cost becomes significant)
+- Complex analytical queries (BigQuery is orders of magnitude better)
+- Large payloads (Firestore has a 1 MiB document size limit)
+
+## Configuration
+
+Install the Firestore Writer tag from the Community Template Gallery, then configure:
+
+**GCP Project ID**: Your Google Cloud project where Firestore is provisioned.
+
+**Collection**: The Firestore collection to write to. Use descriptive names:
+- `events` — for raw event logging
+- `users` — for user profile accumulation
+- `purchases` — for order records
+
+**Document ID**: The unique identifier for the document. Common choices:
+- `{{Event Data - transaction_id}}` — for purchase events (one doc per order)
+- `{{Event Data - client_id}}` — for user profiles (one doc per user, updated on each event)
+- `auto` — Firestore auto-generates a unique ID (for append-only logs)
+
+**Fields to write**: Map Event Model fields to Firestore document fields:
+
+| Firestore field | Value |
+|---|---|
+| `event_name` | `{{Event Data - event_name}}` |
+| `client_id` | `{{Event Data - client_id}}` |
+| `user_id` | `{{Event Data - user_id}}` |
+| `value` | `{{Event Data - value}}` |
+| `timestamp` | Server timestamp |
+
+**Merge vs. overwrite**: When writing to an existing document ID:
+- **Merge**: Updates specified fields without deleting existing fields (use for user profiles — preserves previously written data)
+- **Overwrite**: Replaces the entire document (use for event logs or when you want a clean snapshot)
+
+## Use case: user profile accumulation
+
+The most valuable Firestore Writer use case is building user profiles that accumulate data from multiple sessions and events.
+
+Configure the tag with Document ID = `{{Event Data - client_id}}` and Merge = true. Each event writes the latest known values to the user's document:
+
+```javascript
+// Firestore document after several events:
+{
+  client_id: "1234567890.1711900000",
+  user_id: "user-uuid-123",
+  email: "user@example.com",  // written on login event
+  last_seen: Timestamp,
+  first_seen: Timestamp,       // only written once (merge preserves it)
+  total_purchases: 3,          // requires a counter increment, not just a write
+  last_purchase_value: 99.99,
+  subscription_tier: "premium",
+  country: "US",
+}
+```
+
+<Aside type="note">
+Simple Firestore writes cannot atomically increment counters. Writing `total_purchases: 3` directly would require reading the current value first. For counter patterns, use Firestore's `FieldValue.increment()` via the REST API in a Custom HTTP Request tag, or maintain counts in BigQuery from exported event data.
+</Aside>
+
+## Use case: purchase event log
+
+For audit trails or compliance records, write each purchase event to a dedicated collection:
+
+```
+Collection: purchases
+Document ID: auto (or {{Event Data - transaction_id}})
+Fields:
+  - order_id: {{Event Data - transaction_id}}
+  - user_id: {{Event Data - user_id}}
+  - value: {{Event Data - value}}
+  - currency: {{Event Data - currency}}
+  - items: {{Event Data - items}}
+  - received_at: server timestamp
+```
+
+This creates a server-side purchase log that exists independently of GA4 or any ad platform data. Useful for reconciliation, compliance, and debugging attribution discrepancies.
+
+## Use case: enrichment store (read, not write)
+
+The complement to the Firestore Writer tag is the Firestore Lookup variable. Once user data is stored in Firestore, other tags can read it back to enrich outgoing events.
+
+The typical workflow:
+1. **Firestore Writer tag** writes user profile on `login` events
+2. **Firestore Lookup variable** reads the profile on `purchase` events
+3. **Meta CAPI tag** uses the enriched profile data (email, phone) to improve match quality
+
+This creates a self-reinforcing system: user activity updates the profile, the profile enriches conversion signals.
+
+## Firestore permissions
+
+The sGTM container running on GCP needs Firestore write permissions. Cloud Run uses the Compute Engine default service account. Grant this service account the Firestore role:
+
+```bash
+# Grant Firestore write access to the Cloud Run service account
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+  --role="roles/datastore.user"
+```
+
+The `datastore.user` role grants both read and write access to Firestore — appropriate for an enrichment architecture where your sGTM server needs both.
+
+## Cost considerations
+
+Firestore charges per operation:
+- Document reads: $0.06 per 100,000 reads
+- Document writes: $0.18 per 100,000 writes
+- Document deletes: $0.02 per 100,000 deletes
+- Storage: $0.18 per GiB/month
+
+For a site with 500,000 monthly events:
+- If you write every event: 500,000 writes/month = ~$0.90
+- If you also read for enrichment on every event: 500,000 reads/month = ~$0.30
+- Total Firestore cost: ~$1.20/month at this scale
+
+Cost scales linearly with event volume. At 50M events/month, Firestore costs become significant ($90–180/month). At that scale, evaluate whether BigQuery or a different storage strategy is more appropriate.
+
+**Cost optimization:**
+- Only write to Firestore for events that benefit from storage (purchases, logins — not pageviews)
+- Use the TTL (time-to-live) feature to automatically delete old documents
+- Batch writes using the Firestore batch API for high-volume scenarios (requires a Custom HTTP Request tag, not the standard Firestore Writer)
+
+## Common mistakes
+
+**Writing pageview events to Firestore.** A high-traffic site with 10M pageviews/month and a Firestore write on every pageview generates $18/month in Firestore write costs alone — plus storage. Only write events that you will actually read back for enrichment.
+
+**Using overwrite mode for user profiles.** Overwrite deletes all existing fields and replaces them with only the fields you specify in the current tag execution. The first pageview would wipe out the email written on the previous login. Always use Merge mode for user profile documents.
+
+**Not setting a document TTL.** Firestore charges for storage. Old event records accumulate indefinitely without a TTL policy. Configure a TTL on your collections to automatically delete documents older than 90 days.
+
+**Assuming Firestore writes are instant.** Firestore writes are fast (50–200ms typical latency) but not zero-latency. The Firestore Writer tag adds this latency to your sGTM request processing time. For the server's response to the browser, this is invisible — tags execute asynchronously. But it is worth knowing when troubleshooting slow sGTM response times.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Event Enrichment"
+    description="Reading from Firestore in variables to enrich outgoing events with user data."
+    href="/server-side/advanced/event-enrichment/"
+  />
+  <LinkCard
+    title="Building a Custom CDP"
+    description="Using Firestore + sGTM as a lightweight customer data platform."
+    href="/server-side/advanced/building-custom-cdp/"
+  />
+  <LinkCard
+    title="User Stitching"
+    description="Using Firestore to connect anonymous sessions to authenticated users."
+    href="/server-side/advanced/user-stitching/"
+  />
+  <LinkCard
+    title="Custom HTTP Requests"
+    description="Alternative for non-Firestore endpoints and more complex request patterns."
+    href="/server-side/tags/custom-http-requests/"
+  />
+</CardGrid>

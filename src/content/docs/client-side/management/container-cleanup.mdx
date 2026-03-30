@@ -1,6 +1,138 @@
 ---
 title: "Container Cleanup"
-description: "Systematic process for cleaning up bloated GTM containers."
+description: "Systematic process for cleaning up a bloated GTM container — finding dead tags, orphaned triggers, unused variables, and building a prevention system."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Every container accumulates debt over time. Tags added for a one-time campaign that nobody cleaned up. Paused tags from two years ago that everyone is afraid to delete. Triggers that fire on pages that no longer exist. Variables that refer to dataLayer keys nobody pushes anymore.
+
+A bloated container has measurable costs: larger JavaScript payload, more triggers evaluated on every event, longer debug sessions, and a higher chance of accidental interactions between tags. Cleaning up is worth doing quarterly.
+
+## Step 1: Identify dead tags
+
+Dead tags are tags that haven't fired in a meaningful time period. The most useful signal is the **Last Fired** column in the GTM Tags list view — click "Add Column" to add it if it's not visible.
+
+A tag that hasn't fired in 90+ days is a candidate for review. Work through this decision tree for each:
+
+| Status | Last Fired | Action |
+|---|---|---|
+| Active, fired recently | Within 30 days | Keep |
+| Active, hasn't fired | 30-90 days | Investigate — wrong trigger? |
+| Active, hasn't fired | 90+ days | Strong deletion candidate |
+| Paused | Any | Almost always delete |
+| Paused, named "test" or "Copy of" | Any | Delete immediately |
+
+Paused tags deserve particular attention. They are often tags someone was afraid to delete — "I'll just pause it in case we need it later." After 90 days of being paused, they are no longer "in case we need it" — they are clutter.
+
+## Step 2: Audit triggers
+
+Orphaned triggers are triggers not attached to any tag. They still evaluate on every matching event — wasting execution time — but they produce no output.
+
+To find orphaned triggers in GTM: there's no native "unused triggers" view. You need to check manually, or use the GTM API to script this check.
+
+Manual approach:
+1. Open the Triggers view
+2. For each trigger, check the "Used In" column (if visible) or click into the trigger to see which tags reference it
+3. Triggers with 0 tags are orphaned
+
+Additionally, look for triggers that target pages or events that no longer exist:
+- Triggers with Page Path conditions pointing to deleted page URLs
+- Triggers for dataLayer events that are no longer pushed by the site
+- Click triggers targeting CSS selectors for elements that were removed in a redesign
+
+## Step 3: Audit variables
+
+Variables cost time to evaluate on every GTM event. Unused variables are pure overhead.
+
+Look for:
+- **Variables not referenced by any tag or trigger** — if the variable value isn't used in a trigger condition or tag parameter, it runs on every event for no reason
+- **Variables referencing deleted dataLayer keys** — a Data Layer Variable for `ecommerce.old_currency_field` that hasn't been in your dataLayer pushes for a year
+- **Duplicate variables** — `DLV - user_id` and `DLV - userId` and `DLV - User ID` all reading the same key
+
+A Common JavaScript variable that's 40 lines long and referenced in one tag from three years ago is a maintenance liability. Consolidate and simplify.
+
+## Step 4: Check container size
+
+Container size affects page performance. The GTM container is downloaded on every page load (until cached). Large containers mean longer load times on first visit.
+
+To check container size:
+- Export the container (Admin → Container → Export)
+- The exported JSON file size is a rough indicator
+- Network tab: look at the gtm.js response size
+
+Average healthy container: 30-80KB. A 200KB+ container usually indicates significant bloat. The most common causes: multiple large Custom JavaScript variables, many unused tag configurations, or Community Template code that was imported but misconfigured and is never used.
+
+## Step 5: The cleanup workflow
+
+Don't delete everything you think is unused in one pass. Work systematically:
+
+<Steps>
+1. **Inventory.** Export the container to JSON. Create a spreadsheet listing every tag, with columns: Name, Last Fired, Status (Active/Paused), Current Purpose.
+
+2. **Categorize.** Mark each tag as: Keep, Investigate, Delete Candidate.
+
+3. **Verify "Investigate" tags.** For tags that haven't fired recently — check whether they should have fired. A purchase tag that hasn't fired in 60 days on an active ecommerce site is a real problem. A seasonal campaign tag from 8 months ago is a candidate for deletion.
+
+4. **Confirm deletions.** For each deletion candidate, verify with the original requester (if findable) or a stakeholder that it's no longer needed. Document the decision.
+
+5. **Delete in a workspace.** Create a cleanup workspace. Delete the items. Enter Preview mode and verify the remaining tags still work.
+
+6. **Publish with a descriptive version name.** `Container Cleanup Q1 2025 - Removed 23 unused tags and 11 orphaned triggers`
+</Steps>
+
+<Aside type="caution">
+Always delete in a workspace and test with Preview mode before publishing. Deleting a trigger that you thought was orphaned, when it was actually a shared trigger used by a tag in a different folder, will break tags on publish. Verify before deleting.
+</Aside>
+
+## Documenting what you remove
+
+Before deleting, record in your documentation system:
+- What was deleted (tag name, tag type, what it tracked)
+- When it was last active
+- Why it was removed
+- Who approved the removal
+
+This documentation is essential when someone asks "whatever happened to the Pinterest tag?" six months later. "We removed it during the Q1 cleanup because Pinterest left the programme" is a complete answer.
+
+## Building a prevention system
+
+Cleanup is reactive. Prevention is better. Establish these team norms:
+
+**Tag expiry dates.** For campaign tags or one-off implementation tags, add a review date to the tag description when you create it. "Campaign ends 2025-03-31 — DELETE OR EXTEND BEFORE THEN." Add a calendar reminder. When the date arrives, evaluate whether to extend or delete.
+
+**The "Copy of" rule.** No tag named "Copy of X" goes to production. When you duplicate a tag, rename it immediately. This one rule prevents most naming debt.
+
+**Quarterly audit calendar reminder.** Schedule a 90-minute container review every quarter. Invite whoever has publish access. Work through the tags list, delete obviously dead items, and plan follow-up investigations.
+
+**Delete before you create.** When someone requests a new campaign tag, check first whether an existing paused tag could be repurposed. This limits container growth.
+
+## Container size reduction techniques
+
+Beyond deleting unused items:
+
+**Audit Custom JavaScript variables.** Large `CJS -` variables with complex logic add to payload size and CPU time. Can any be simplified? Combined? Replaced with Lookup Tables (which are smaller)?
+
+**Remove unused Community Template instances.** If you installed a template from the Community Gallery, configured it incorrectly, abandoned it, and never deleted the tag — it's adding template code to your container. Delete unused template-based tags.
+
+**Consolidate redundant tags.** Five separate GA4 Event tags that each fire for one specific event can often be consolidated into one reusable tag using `{{Event}}` as the event name and a Custom Event trigger with regex matching.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Naming Conventions"
+    description="Prevention starts with naming — a good convention makes identifying dead tags easier."
+    href="/client-side/management/naming-conventions/"
+  />
+  <LinkCard
+    title="Version Control"
+    description="Document cleanup in version names and descriptions — essential for the audit trail."
+    href="/client-side/management/version-control/"
+  />
+  <LinkCard
+    title="Folder Organization"
+    description="Cleaning up is easier when items are organized — cleanup is a good time to also fix folder structure."
+    href="/client-side/management/folder-organization/"
+  />
+</CardGrid>

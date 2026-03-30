@@ -1,6 +1,195 @@
 ---
 title: "Shopify Custom Pixels"
-description: "Shopify's Custom Pixel system — capabilities, limitations, and GTM integration."
+description: "Shopify's Custom Pixel sandboxed environment — what GTM can and cannot do inside it, the Customer Events API, and when to use Custom Pixels vs. theme-based tracking."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Shopify's Custom Pixels are sandboxed JavaScript environments that run inside a restricted iframe during checkout and on storefront pages. They're Shopify's answer to the tracking limitations created by Checkout Extensibility — a controlled way to run third-party JavaScript in the checkout while maintaining security and performance guarantees.
+
+Understanding what Custom Pixels can and cannot do is the difference between a working checkout tracking implementation and hours of debugging.
+
+## What Custom Pixels are
+
+Custom Pixels run in a web worker-like sandbox. You create them in Shopify Admin under Marketing > Customer Events. Each pixel is a JavaScript file that Shopify loads in a restricted iframe.
+
+The sandbox has strict limitations:
+- **No DOM access** — no `document.querySelector`, no `document.getElementById`
+- **No `window.location`** — you cannot read the current URL directly
+- **No direct cookie access** — cookies are restricted
+- **No `localStorage` or `sessionStorage`**
+- **Fetch is available** — you can make network requests
+- **`analytics` API is available** — Shopify's Customer Events subscription API
+
+## GTM inside a Custom Pixel
+
+You can load GTM inside a Custom Pixel, but the restrictions affect what GTM can do.
+
+```javascript
+// Custom Pixel script
+// GTM loads in the sandbox
+(function(w,d,s,l,i){
+  w[l]=w[l]||[];
+  w[l].push({'gtm.start': new Date().getTime(), event:'gtm.js'});
+  var f=d.getElementsByTagName(s)[0],
+    j=d.createElement(s),
+    dl=l!='dataLayer'?'&l='+l:'';
+  j.async=true;
+  j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;
+  f.parentNode.insertBefore(j,f);
+})(window,document,'script','dataLayer','GTM-XXXXXXX');
+```
+
+**GTM triggers that work in Custom Pixels:**
+- Custom Event triggers (the only reliable option)
+- Page View trigger (fires on pixel initialization)
+
+**GTM triggers that do NOT work:**
+- Click triggers (no DOM access — no click delegation)
+- Form triggers (no DOM access)
+- Scroll triggers (no scroll events)
+- DOM Ready / Window Loaded (restricted environment)
+
+The practical implication: if you load GTM in a Custom Pixel, build your entire checkout tracking on Custom Event triggers fired by the `analytics.subscribe()` API.
+
+## The Customer Events API
+
+The `analytics.subscribe()` API is the correct way to receive Shopify checkout events inside a Custom Pixel.
+
+```javascript
+// Subscribe to Shopify's ecommerce events
+analytics.subscribe('checkout_completed', (event) => {
+  const checkout = event.data.checkout;
+
+  const items = checkout.lineItems.map((item, index) => ({
+    item_id: item.variant?.sku || item.variant?.id || item.id,
+    item_name: item.title,
+    item_variant: item.variant?.title !== 'Default Title' ? item.variant?.title : '',
+    price: parseFloat(item.variant?.price?.amount || 0),
+    quantity: item.quantity,
+    index: index,
+  }));
+
+  window.dataLayer = window.dataLayer || [];
+  dataLayer.push({ ecommerce: null });
+  dataLayer.push({
+    event: 'purchase',
+    ecommerce: {
+      transaction_id: checkout.order?.id || checkout.token,
+      value: parseFloat(checkout.totalPrice?.amount || 0),
+      tax: parseFloat(checkout.totalTax?.amount || 0),
+      shipping: parseFloat(checkout.shippingLine?.price?.amount || 0),
+      currency: checkout.currencyCode,
+      coupon: checkout.discountApplications?.[0]?.title || '',
+      items: items,
+    },
+  });
+});
+```
+
+## Available Customer Events
+
+Shopify provides these standard events via the `analytics.subscribe()` API:
+
+| Event | When it fires |
+|-------|--------------|
+| `page_viewed` | Any page view in the checkout flow |
+| `cart_viewed` | Cart page view |
+| `checkout_started` | Checkout initiation |
+| `checkout_address_info_submitted` | Shipping address completed |
+| `checkout_shipping_info_submitted` | Shipping method selected |
+| `checkout_contact_info_submitted` | Contact info completed |
+| `payment_info_submitted` | Payment info entered |
+| `checkout_completed` | Order confirmed |
+| `product_viewed` | Product detail page view (storefront pixel only) |
+| `product_added_to_cart` | Add to cart (storefront pixel only) |
+| `product_removed_from_cart` | Remove from cart (storefront pixel only) |
+
+## Mapping Shopify events to GA4 events
+
+```javascript
+// checkout_started → begin_checkout
+analytics.subscribe('checkout_started', (event) => {
+  const checkout = event.data.checkout;
+
+  dataLayer.push({ ecommerce: null });
+  dataLayer.push({
+    event: 'begin_checkout',
+    ecommerce: {
+      currency: checkout.currencyCode,
+      value: parseFloat(checkout.subtotalPrice?.amount || 0),
+      items: checkout.lineItems.map((item, i) => ({
+        item_id: item.variant?.sku || String(item.variant?.id),
+        item_name: item.title,
+        price: parseFloat(item.variant?.price?.amount || 0),
+        quantity: item.quantity,
+        index: i,
+      })),
+    },
+  });
+});
+
+// checkout_shipping_info_submitted → add_shipping_info
+analytics.subscribe('checkout_shipping_info_submitted', (event) => {
+  const checkout = event.data.checkout;
+  const shippingLine = checkout.shippingLine;
+
+  dataLayer.push({ ecommerce: null });
+  dataLayer.push({
+    event: 'add_shipping_info',
+    ecommerce: {
+      currency: checkout.currencyCode,
+      value: parseFloat(checkout.subtotalPrice?.amount || 0),
+      shipping_tier: shippingLine?.title || '',
+      items: checkout.lineItems.map((item, i) => ({
+        item_id: item.variant?.sku || String(item.variant?.id),
+        item_name: item.title,
+        price: parseFloat(item.variant?.price?.amount || 0),
+        quantity: item.quantity,
+        index: i,
+      })),
+    },
+  });
+});
+```
+
+## Custom Pixel vs. theme-based GTM vs. server-side
+
+| Approach | Storefront | Checkout | Reliability | Setup complexity |
+|----------|-----------|---------|-------------|-----------------|
+| Theme-based GTM | ✅ Full | ❌ Non-Plus only | High | Low |
+| Custom Pixel (GTM inside) | ✅ Limited | ✅ Standard & Plus | Medium | Medium |
+| Custom Pixel (no GTM) | ✅ Good | ✅ Standard & Plus | High | Low-Medium |
+| Server-side (sGTM) | ✅ Yes | ✅ Yes | Very High | High |
+
+For most standard Shopify merchants: use theme-based GTM for the storefront and Custom Pixels for checkout events.
+
+<Aside type="tip">
+For checkout tracking, the cleanest approach is to use Custom Pixels without GTM — subscribe directly to Customer Events and make fetch requests to your server or directly to GA4 Measurement Protocol. This avoids the GTM sandbox complexity entirely.
+</Aside>
+
+## Common mistakes
+
+**Trying to use DOM-based GTM triggers in Custom Pixels.** Click triggers, form triggers, and scroll triggers all fail silently. You won't see errors — the triggers just never fire because GTM's click delegation can't attach to the DOM.
+
+**Not handling the `Default Title` variant.** Shopify uses "Default Title" as the variant title for products with no variants. Always filter this out when constructing your items array.
+
+**Duplicating checkout_completed and order-status.liquid.** If you have a Custom Pixel that tracks `checkout_completed` AND an `order-status.liquid` script that also tracks purchase, you'll get duplicate purchase events. Implement one or the other, not both.
+
+<CardGrid>
+  <LinkCard
+    title="Shopify"
+    description="Base Shopify implementation — theme.liquid GTM and storefront tracking."
+    href="/datalayer/platforms/shopify/"
+  />
+  <LinkCard
+    title="Shopify Checkout Extensibility"
+    description="How the checkout.liquid deprecation affects your tracking strategy."
+    href="/datalayer/platforms/shopify-checkout-extensibility/"
+  />
+  <LinkCard
+    title="Shopify Advanced"
+    description="Post-purchase upsells, subscriptions, multi-currency, server-side tracking."
+    href="/datalayer/platforms/shopify-advanced/"
+  />
+</CardGrid>

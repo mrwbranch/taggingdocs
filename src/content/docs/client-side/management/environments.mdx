@@ -1,6 +1,162 @@
 ---
 title: "Environments"
-description: "Testing with GTM environments before going live."
+description: "GTM environments for staging, development, and QA — how to install different container versions on different site environments and test before going live."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+GTM environments solve the "I can't test on production before publishing" problem. They let you load a specific, unpublished version of your container on your staging or development environment, test it fully, and only then push it to the live container.
+
+If your team deploys significant tracking changes, environments are not optional — they're how you know that what you tested is what you shipped.
+
+## Built-in environments
+
+Every GTM container has three built-in environments you can't delete:
+
+**Live** — The published container version. What your production users see.
+
+**Latest** — The most recently published version. Same as Live unless you've republished from an older version (in which case Live is the older version and Latest is the most recent version).
+
+**Now Editing** — A dynamic environment that always reflects the current state of the Default Workspace. As you edit the Default Workspace, this environment updates in real-time.
+
+## Creating custom environments
+
+Custom environments let you associate specific pages or site environments with specific container states:
+
+<Steps>
+1. In GTM, go to **Admin → Environments**.
+
+2. Click **New**.
+
+3. Name the environment (e.g., `Staging`, `Development`, `QA`, `UAT`).
+
+4. GTM generates a unique container snippet for this environment. The snippet is different from your production snippet — it includes the environment ID and authorization code:
+
+```html
+<!-- Example: Staging environment snippet -->
+<!-- Google Tag Manager -->
+<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+'https://www.googletagmanager.com/gtm.js?id='+i+dl+
+'&gtm_auth=YOUR_STAGING_AUTH_CODE&gtm_preview=env-2&gtm_cookies_win=x';
+f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer','GTM-XXXX');
+</script>
+<!-- End Google Tag Manager -->
+```
+
+5. Install the environment-specific snippet on your staging site. Keep the production snippet on your production site.
+</Steps>
+
+## How environments and workspaces connect
+
+Environments load a specific version of the container. Custom environments start pointing to the last published version. To test a workspace's changes on staging before publishing:
+
+<Steps>
+1. Create your workspace and make your changes.
+
+2. In **Admin → Environments**, find your Staging environment.
+
+3. Click **Edit** next to the environment.
+
+4. Under "Workspace to associate," select the workspace you want to test.
+
+5. Save. Now your staging site loads the GTM container with your workspace changes.
+
+6. Test on staging. Verify everything works.
+
+7. When ready, submit and publish your workspace to the Live environment.
+
+8. Return to the Staging environment configuration and update it to point to a workspace or the latest version.
+</Steps>
+
+<Aside type="tip">
+You don't have to update the staging environment after every publish — it can remain pointing to a workspace. But once a workspace is published and the workspace is reset, the environment's association becomes stale. Build a habit of checking environment associations after publishing.
+</Aside>
+
+## Environment authorization codes
+
+Each custom environment has an authorization code. This code is embedded in the container snippet for that environment. The authorization code serves as a security token — without it, the container snippet won't load the environment-specific version.
+
+Treat the authorization code with care:
+- Don't commit environment snippets to public repositories (the authorization code is embedded)
+- Regenerate the authorization code if you suspect it's been exposed
+- In GTM: Admin → Environments → [Environment] → Actions → Generate new auth codes
+
+## Multiple environments strategy
+
+A typical setup for a development team:
+
+```
+Live environment:       Production website (your published container)
+Staging environment:    Staging website (workspace under test or last published)
+Dev environment:        Development website (work-in-progress workspace)
+```
+
+For simpler teams or simpler sites, just Live and Staging is sufficient. Don't over-engineer this — one custom environment that maps to staging is dramatically better than none.
+
+## Preview mode vs. environments
+
+Both let you test unpublished changes. They serve different purposes:
+
+**Preview mode** — Quick testing in your own browser. Connects to your workspace in real-time. Best for verifying specific tag behavior, checking trigger conditions, inspecting variables.
+
+**Environments** — Testing the full site experience as your users will see it. Loads a specific container version on a persistent URL (your staging site). Best for pre-release QA, testing by people who don't have GTM access, and sharing with stakeholders for sign-off.
+
+A good workflow uses both: Preview mode during development, environments for pre-release QA.
+
+## Verifying which environment is loaded
+
+To confirm which environment a page is loading, check the URL of the `gtm.js` network request:
+
+```
+https://www.googletagmanager.com/gtm.js?id=GTM-XXXX&gtm_auth=abc123&gtm_preview=env-2&gtm_cookies_win=x
+```
+
+- `gtm_preview=env-2` — the environment ID (env-1 is Live)
+- `gtm_auth=abc123` — the authorization code for this environment
+
+If a page shows `gtm_preview=env-1` or no `gtm_preview` parameter at all, it's loading the Live environment.
+
+You can also check in the console:
+```javascript
+// Find the gtm.js script tag and read the src
+var gtmScript = document.querySelector('script[src*="googletagmanager.com/gtm.js"]');
+if (gtmScript) {
+  console.log('GTM src:', gtmScript.src);
+}
+```
+
+## Common mistakes
+
+### Installing the same snippet on all environments
+
+This is the most common mistake. If you paste the production GTM snippet on your staging site, your staging site loads the live published container — not your unpublished changes. You need the environment-specific snippet on each environment.
+
+### Forgetting to update the environment association after publishing
+
+After publishing, the workspace your staging environment pointed to is reset (it now matches the live container). Your staging environment might now be pointing to an empty or reset workspace, meaning staging loads the same container as production. Update the staging environment association after each publish.
+
+### Not regenerating auth codes for former contractors
+
+When a contractor's access ends, regenerate the authorization code for any environments they had access to. This invalidates any cached knowledge of the environment snippet.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Workspaces"
+    description="The workspaces that environments point to — how they relate."
+    href="/client-side/management/workspaces/"
+  />
+  <LinkCard
+    title="Version Control"
+    description="Publishing versions — the workflow that takes changes from workspace to live through an environment."
+    href="/client-side/management/version-control/"
+  />
+  <LinkCard
+    title="Preview Mode"
+    description="The complementary debugging tool to environments — quick testing vs. persistent staging."
+    href="/client-side/debugging/preview-mode/"
+  />
+</CardGrid>

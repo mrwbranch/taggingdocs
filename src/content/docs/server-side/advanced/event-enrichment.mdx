@@ -1,6 +1,237 @@
 ---
 title: "Event Enrichment"
-description: "Adding data to events server-side before forwarding."
+description: "Adding server-side data to events before forwarding to vendors — Firestore lookups, API calls, computed fields, and caching patterns."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Event enrichment is one of the primary reasons to invest in server-side GTM. The browser only knows what is visible in the browser: URL, DOM, cookies, and whatever your application explicitly pushes to the dataLayer. Your server knows everything else: customer lifetime value, subscription tier, product margin, account age, order history, churn risk score, and any other data living in your databases.
+
+Enrichment adds that server-side context to events before they reach your marketing and analytics vendors. The result: GA4 receives events with profit margin attached. Meta CAPI receives conversions with hashed customer email. Google Ads receives purchase value enriched with a margin multiplier that helps bid toward profitable customers rather than high-revenue but low-margin ones.
+
+## What enrichment means in practice
+
+Enrichment is the act of reading data from a source that is not the incoming HTTP request, and adding that data to the Event Model so tags can use it.
+
+Sources:
+- **Firestore** — user profiles, product catalog, segment assignments
+- **HTTP API calls** — your internal microservices, CRM APIs
+- **Computed values** — mathematical transformations, hash functions, format conversions
+
+Timing: enrichment happens during request processing, before tags fire. A Firestore Lookup variable that reads a user's customer tier completes before the GA4 server tag fires — so the GA4 tag can include the tier as an event parameter.
+
+## Firestore Lookup variable
+
+The Firestore Lookup variable is the most common enrichment mechanism. It reads a single Firestore document and makes its fields available as variable values.
+
+**Configuration:**
+1. In your sGTM container → **Variables** → **New**
+2. Variable type: **Firestore Lookup**
+3. **Project ID**: your GCP project
+4. **Collection Path**: e.g., `users` or `user_profiles`
+5. **Document ID**: the field in the Event Model that identifies the user
+   - Typically: `{{Event Data - client_id}}` or `{{Event Data - user_id}}`
+6. **Key Path**: the specific field within the document to return
+   - e.g., `subscription_tier`, `customer_ltv`, `margin_multiplier`
+
+If the document exists, the variable returns the value at the key path. If the document does not exist, the variable returns `undefined` (or a default value you configure).
+
+**Using the enriched value in tags:**
+
+Once you have a Firestore Lookup variable, reference it in any tag configuration:
+
+```
+GA4 server tag parameter:
+  Name: subscription_tier
+  Value: {{Firestore - User Subscription Tier}}
+
+Meta CAPI tag:
+  Value: {{Event Data - value}} × {{Firestore - Margin Multiplier}}
+```
+
+## Enrichment timing and latency
+
+Firestore reads add latency to your request processing. A typical Firestore read from Cloud Run in the same GCP region takes 20–80ms. Multiple reads per request compound this.
+
+**What this latency means:**
+
+The sGTM server's response to the browser is sent before tags complete execution — the response is asynchronous relative to tag processing. The latency from Firestore reads does not affect what the browser experiences.
+
+What it does affect: Cloud Run request duration billing. Longer-running requests cost more. If you do 5 Firestore reads per event and each takes 50ms, you add 250ms to every request's duration on the billing clock.
+
+**Optimization strategies:**
+
+**Combine lookups**: Instead of 3 separate variables reading 3 separate Firestore documents, design your data model so a single document contains all enrichment fields for a user. One read, all the data.
+
+**Cache with `templateDataStorage`**: The `templateDataStorage` API caches values within a single container instance's lifetime. Useful for product catalog data that changes rarely:
+
+```javascript
+const templateDataStorage = require('templateDataStorage');
+
+// In a variable template:
+const cacheKey = 'product_' + productId;
+const cached = templateDataStorage.getItemCopy(cacheKey);
+
+if (cached) {
+  return cached; // Cache hit — no Firestore read
+}
+
+// Cache miss — read from Firestore
+// ... Firestore read logic ...
+templateDataStorage.setItemCopy(cacheKey, result);
+return result;
+```
+
+This cache is instance-local and volatile — it resets when the container instance restarts. But for user-level data, this effectively caches for the duration of a Cloud Run instance's active session.
+
+## HTTP API enrichment
+
+For data that lives in a service without Firestore access, call your internal API directly from a custom variable template:
+
+```javascript
+// Variable template: reads user tier from internal API
+const sendHttpRequest = require('sendHttpRequest');
+const getEventData = require('getEventData');
+const templateDataStorage = require('templateDataStorage');
+
+const userId = getEventData('user_id');
+if (!userId) return undefined;
+
+// Check cache first
+const cacheKey = 'tier_' + userId;
+const cached = templateDataStorage.getItemCopy(cacheKey);
+if (cached !== null) return cached;
+
+// Synchronous API call using sendHttpRequest
+// Note: sGTM variable templates must return synchronously
+// Use the promise-style approach for async resolution in tag templates instead
+// For variables, use this pattern with a callback-based resolution
+
+// For a variable template, async is not directly supported.
+// Use this in a TAG template instead:
+sendHttpRequest(
+  'https://internal-api.yoursite.com/users/' + userId + '/tier',
+  {
+    method: 'GET',
+    headers: {
+      'Authorization': 'Bearer ' + internalApiToken,
+    },
+    timeout: 2000,
+  },
+  function(statusCode, headers, body) {
+    if (statusCode === 200) {
+      const tier = JSON.parse(body).tier;
+      templateDataStorage.setItemCopy(cacheKey, tier);
+      // In a tag template: use this value to modify event data
+    }
+  }
+);
+```
+
+<Aside type="note">
+sGTM variable templates execute synchronously. For async operations like API calls, implement the enrichment logic in a tag template that fires before your data-forwarding tags, and use tag sequencing to ensure it completes first. Then read the enriched data from `templateDataStorage` or from Event Data variables in subsequent tags.
+</Aside>
+
+## Common enrichment patterns
+
+### POAS (Profit on Ad Spend)
+
+Enrich purchase events with product margin data before sending to Google Ads and Meta, enabling bidding toward profit rather than revenue:
+
+**Firestore document structure** (one doc per SKU):
+```json
+{
+  "sku": "ITEM-123",
+  "margin_pct": 0.42,
+  "cost": 29.99
+}
+```
+
+**Enrichment variable**: Firestore Lookup on `products` collection, document ID = `{{Event Data - items.0.item_id}}`, key = `margin_pct`
+
+**In Google Ads tag**: Override `value` with `{{Event Data - value}} * {{Firestore - Product Margin}}`
+
+This is a simplification for single-item purchases. Multi-item orders require a custom variable template that reads all items, looks up each margin, and computes the total profit.
+
+### User segment enrichment
+
+Add user lifecycle segment to all events for segmented reporting in GA4:
+
+```json
+// Firestore users collection document
+{
+  "client_id": "1234567890.1711900000",
+  "segment": "loyal_buyer",
+  "ltv": 450.00,
+  "cohort": "2023-Q1"
+}
+```
+
+Firestore Lookup variable returns `segment` → add as event parameter `user_segment` to GA4 server tag.
+
+### Product catalog enrichment
+
+Add product category or brand to events that only include SKU from the dataLayer:
+
+```json
+// Firestore products collection
+{
+  "sku": "ITEM-123",
+  "category": "Electronics",
+  "brand": "BrandName",
+  "catalog_name": "Main Catalog"
+}
+```
+
+Enriches `view_item` events with category data for more granular GA4 reporting without requiring the client to push categories to the dataLayer.
+
+## Enrichment vs. client-side data
+
+A common question: should I push data to the dataLayer client-side, or enrich server-side?
+
+**Push client-side** when:
+- The data is already available in the browser context (page title, user tier from a JWT payload, cart contents)
+- Latency matters and the data can be computed instantly
+- You want the data available for client-side tags too (e.g., GA4 custom dimensions from the client side)
+
+**Enrich server-side** when:
+- The data lives in a database your browser code cannot access
+- The data should not be visible in browser JavaScript (profit margins, internal scores)
+- The data needs to augment events from multiple sources (browser, webhooks, mobile app)
+
+The cleanest architectures use both: the browser pushes what it knows, the server enriches with what only the server can know.
+
+## Common mistakes
+
+**Multiple Firestore reads per request.** Each Firestore read adds 20–80ms latency and cost. Design your data model to minimize reads — store all enrichment data for a user in one document, readable in one lookup.
+
+**Reading from Firestore for events that do not need enrichment.** A Firestore read on every pageview to check if the user has a premium tier is expensive and slow if most users are not logged in. Gate enrichment reads on `user_id` being present.
+
+**Blocking the response on enrichment latency.** Remember: sGTM sends the response to the browser before tags complete. Enrichment latency affects billing but not browser performance. Do not avoid enrichment because you are worried about user experience — it does not work that way.
+
+**Not handling missing documents.** If a Firestore Lookup variable's document does not exist, it returns `undefined`. Tags that receive `undefined` for a required parameter may fail silently. Configure default values in your variable settings.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Firestore Writer"
+    description="Building the Firestore data store that enrichment reads from."
+    href="/server-side/tags/firestore-writer/"
+  />
+  <LinkCard
+    title="User Stitching"
+    description="Resolving anonymous users to known identifiers for richer enrichment."
+    href="/server-side/advanced/user-stitching/"
+  />
+  <LinkCard
+    title="Building a Custom CDP"
+    description="Using sGTM + Firestore as a lightweight customer data platform."
+    href="/server-side/advanced/building-custom-cdp/"
+  />
+  <LinkCard
+    title="Facebook Conversions API"
+    description="Practical enrichment example — improving Meta CAPI match quality with user data."
+    href="/server-side/tags/facebook-capi/"
+  />
+</CardGrid>

@@ -1,6 +1,194 @@
 ---
 title: "User Stitching"
-description: "Connecting anonymous and authenticated user sessions server-side."
+description: "Connecting anonymous sessions to authenticated users in sGTM — identity resolution, Firestore mapping, and privacy considerations."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+User stitching is the process of associating a user's anonymous browsing history with their authenticated identity. Before login, a user has a `client_id` but no `user_id`. After login, they have both. The stitching step creates a permanent mapping between the two so that historical anonymous behavior can be attributed to the now-known user — and future events consistently use the best available identifier.
+
+This is one of the more sophisticated sGTM patterns and one of the most valuable for cross-device attribution, CAPI match quality, and first-party audience building.
+
+## Why stitching matters
+
+**For analytics**: Without stitching, a user's funnel looks like this in GA4:
+- Session 1 (anonymous): viewed 15 products
+- Login event: creates a new `user_id` association
+- Session 2: purchase
+
+GA4 sees two users — the anonymous one who browsed, and the authenticated one who bought. Attribution models cannot connect the browse sessions to the conversion without stitching.
+
+**For ad platforms**: Meta CAPI and Google Ads enhanced conversions match conversions to users via email and phone. Without stitching, you can only send this data at the point of purchase. With stitching, you send it for all events once the user has authenticated — improving match quality for view-content and add-to-cart events that preceded the purchase.
+
+## The stitching architecture
+
+The recommended architecture using Firestore:
+
+```
+Anonymous session
+│  client_id = "1234567890.1711900000"
+│  user_id = undefined
+│
+▼
+Login event
+│  event_name = "login"
+│  client_id = "1234567890.1711900000"
+│  user_id = "user-uuid-abc123"
+│
+▼
+Firestore identity map (collection: identity_map)
+│  Document ID: "1234567890.1711900000"  (client_id)
+│  Fields:
+│    user_id: "user-uuid-abc123"
+│    email_hash: "sha256-of-email"
+│    phone_hash: "sha256-of-phone"
+│    stitched_at: timestamp
+│
+▼
+Subsequent events (same or different session):
+│  client_id = "1234567890.1711900000"
+│  user_id = lookup(client_id) → "user-uuid-abc123"
+│  email_hash = lookup(client_id) → "sha256-of-email"
+```
+
+## Step 1: Write the identity map on login
+
+Configure a Firestore Writer tag that fires on login events:
+
+**Trigger**: `Event Name equals login`
+
+**Document ID**: `{{Event Data - client_id}}`
+
+**Merge**: true (preserve existing data)
+
+**Fields to write**:
+| Field | Value |
+|---|---|
+| `user_id` | `{{Event Data - user_id}}` |
+| `email` | `{{Event Data - user_email_hash}}` (send hashed already) |
+| `phone` | `{{Event Data - user_phone_hash}}` |
+| `stitched_at` | server timestamp |
+| `last_login` | server timestamp |
+
+The `user_email_hash` and `user_phone_hash` should be hashed client-side before being pushed to the dataLayer — you do not want raw PII traversing your tracking pipeline.
+
+**Client-side dataLayer implementation** for the login event:
+
+```javascript
+// Hash function (in browser)
+async function sha256(str) {
+  const msgBuffer = new TextEncoder().encode(str.toLowerCase().trim());
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// On successful login
+const emailHash = await sha256(user.email);
+const phoneHash = user.phone ? await sha256(user.phone.replace(/\D/g, '')) : null;
+
+dataLayer.push({
+  event: 'login',
+  user_id: user.id,
+  user_email_hash: emailHash,
+  user_phone_hash: phoneHash,
+  login_method: 'email', // or 'google', 'facebook', etc.
+});
+```
+
+## Step 2: Look up the identity on all events
+
+Create a Firestore Lookup variable for each identity field:
+
+**Variable: Firestore - User ID**
+- Collection: `identity_map`
+- Document ID: `{{Event Data - client_id}}`
+- Key Path: `user_id`
+
+**Variable: Firestore - User Email Hash**
+- Collection: `identity_map`
+- Document ID: `{{Event Data - client_id}}`
+- Key Path: `email`
+
+**Variable: Firestore - User Phone Hash**
+- Collection: `identity_map`
+- Document ID: `{{Event Data - client_id}}`
+- Key Path: `phone`
+
+Now configure your tags to use these variables as fallbacks when the Event Model does not contain the value directly:
+
+```
+GA4 server tag:
+  user_id parameter: {{Event Data - user_id}} OR {{Firestore - User ID}}
+
+Meta CAPI tag:
+  email: {{Firestore - User Email Hash}}
+  external_id: {{Event Data - user_id}} OR {{Firestore - User ID}}
+```
+
+For most events, `{{Event Data - user_id}}` will be empty (anonymous browsing). The Firestore lookup resolves the identity from the previously stored mapping. For logged-in events, the Event Model value takes precedence.
+
+## Step 3: Handle cross-device stitching
+
+Cross-device stitching is harder. When a user browses on mobile (client_id A) and logs in on desktop (client_id B), the two clients have no inherent connection. After login, client_id B gets stitched to the user_id. But the mobile session's client_id A still appears anonymous.
+
+Solutions:
+
+**Server-side user_id as the canonical identifier**: Use `user_id` (not `client_id`) as the primary identifier in GA4. Set it on every logged-in event. GA4's User-ID reporting then shows a unified view regardless of which device's `client_id` was used.
+
+**Reverse lookup**: When a user logs in on a new device, write both the new `client_id → user_id` mapping AND store the `user_id → [list of client_ids]` mapping. Future lookups on any `client_id` can find the canonical `user_id`.
+
+**Pragmatic limit**: For most businesses, cross-device stitching is not necessary for the majority of conversions. Focus on same-device stitching (pre-login anonymous → post-login authenticated) before attempting cross-device attribution.
+
+## Privacy considerations
+
+<Aside type="caution">
+Identity stitching processes personal data. Before implementing, review your privacy policy and consent architecture. Associating anonymous browsing history with an authenticated identity is a privacy-sensitive operation in GDPR and similar frameworks.
+</Aside>
+
+Key privacy requirements for user stitching:
+
+**Legal basis**: You need a legal basis (typically consent or legitimate interest) for stitching anonymous data to user identity. For most analytics use cases, this requires explicit consent under GDPR.
+
+**Data minimization**: Only stitch what you need. Storing a `user_id` and a hashed email is different from storing full browsing history linked to name and address. Keep the identity map minimal.
+
+**Retention limits**: Set TTL (time-to-live) on your Firestore identity map documents. A user's stitched identity should not persist indefinitely — align with your data retention policy.
+
+**Right to be forgotten**: If a user exercises their GDPR right to erasure, you need to delete their records from the Firestore identity map. Include this in your data subject request workflow.
+
+**Hashing before storage**: Never store raw email addresses or phone numbers in Firestore. Always hash first with SHA-256, and normalize before hashing (lowercase email, digits-only phone with country code).
+
+## Common mistakes
+
+**Stitching on every event, not just login.** The identity map write should happen on the `login` event (or `sign_up` for new users). Writing on every event wastes Firestore write operations and does not add value.
+
+**Using email as a Firestore document ID.** Email addresses change. Use `client_id` or `user_id` as document identifiers, and store email as a field (hashed).
+
+**Not handling the case where the Firestore lookup returns undefined.** Many events come from users who have never logged in. Your tags must handle `undefined` gracefully for all identity fields. Set default values or conditional logic.
+
+**Storing raw PII in Firestore.** Firestore documents are readable by anyone with the correct GCP permissions. Never store raw email, phone, or other PII. Always hash before storage.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Event Enrichment"
+    description="Using the identity map as an enrichment source for outgoing ad platform events."
+    href="/server-side/advanced/event-enrichment/"
+  />
+  <LinkCard
+    title="Firestore Writer"
+    description="Writing the identity mapping to Firestore from login events."
+    href="/server-side/tags/firestore-writer/"
+  />
+  <LinkCard
+    title="Building a Custom CDP"
+    description="Extending user stitching into a full user profile accumulation system."
+    href="/server-side/advanced/building-custom-cdp/"
+  />
+  <LinkCard
+    title="Data Redaction & PII"
+    description="Safe handling of personal data in the sGTM processing pipeline."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+</CardGrid>

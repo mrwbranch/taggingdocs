@@ -1,6 +1,146 @@
 ---
 title: "Path Exploration"
-description: "Visualizing user journeys through your site."
+description: "Understand user journeys before and after any event in GA4 — tree visualization, forward and backward paths, and actionable analysis patterns."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Path exploration shows the sequence of events or pages that users take before or after a specific point in their journey. It answers questions like "where do users go after adding to cart?" and "what do users do before requesting a demo?" using a branching tree diagram.
+
+Unlike funnel exploration, path exploration is not about measuring drop-off through a predefined sequence — it is about discovering what sequences actually happen, without imposing a structure.
+
+## Creating a path exploration
+
+<Steps>
+1. Go to **Explore → Create new exploration → Path exploration**.
+
+2. Choose whether to start from the **beginning of a session** or from a specific **event or page**.
+
+3. For starting from an event:
+   - Click **Start point**
+   - Select "Event name" or "Page/screen name"
+   - Enter the event or page to start from
+
+4. For ending at a specific point (reverse path), click **End point** and define the ending event.
+
+5. The tree populates with the most common next steps.
+
+6. Click any node to expand it and see what users did after that step.
+</Steps>
+
+## Forward vs. backward paths
+
+**Forward path** — starts at a point and shows what users do NEXT. Start from `add_to_cart` and see: 60% go to `begin_checkout`, 25% go to another `view_item`, 15% end the session.
+
+**Backward path** — starts at an endpoint and shows what users did BEFORE. Start from `purchase` and trace backward: 80% had `begin_checkout` as their previous step, 20% came directly from `view_item` (skipped checkout steps).
+
+Set the path direction using the **Start point** or **End point** selector at the top of the Tab Settings.
+
+Backward paths are particularly useful for:
+- Understanding the paths that lead to conversion
+- Identifying which pages or events precede bounce
+- Discovering unexpected routes to conversion you did not design for
+
+## Segments in path exploration
+
+Apply a segment to see path differences between user groups. Add a segment in the Variables panel and drag it to the **Segment comparisons** area.
+
+Example: compare paths after `add_to_cart` for mobile users vs. desktop users. Mobile users may show a higher rate of going directly to checkout (lower comparison shopping), or a higher drop-off rate at payment information.
+
+## Interpreting the tree
+
+Each node in the tree shows:
+- The event name or page title
+- The count of users who took this path
+- The percentage of users at the previous node who took this step
+
+The tree branches at each step, showing the top 5 most common next events. Less common events are collapsed into an "others" group.
+
+**Width of branches** represents volume — wider branches have more users. This gives a quick visual of dominant paths vs. rare paths.
+
+**Clicking a node** expands that branch to show the next step from that point.
+
+## Node types
+
+By default, paths show **Event names**. You can change the node type in Tab Settings:
+- **Event name**: what event type occurred
+- **Page title and screen name**: what page was viewed
+- **Page path and screen class**: URL path of the page
+
+Choose the node type based on your question:
+- "What did users do after X?" → Event name
+- "Which pages do users visit after the landing page?" → Page path
+
+You can also mix — start with page views to see navigation patterns, then switch to event names to see interactions.
+
+## Common path analysis questions
+
+### Where do users go after viewing a key page?
+
+Forward path starting at: page view of `/pricing`
+
+Expected findings: a mix of going to `/signup`, back to the homepage, to `/features`, or ending the session. The ratio of pricing-to-signup vs. pricing-to-exit is the key metric for pricing page effectiveness.
+
+### What leads to conversion?
+
+Backward path ending at: `purchase` event
+
+This reveals the most common pre-purchase sequences. You may discover that users who view the FAQ before purchasing have a significantly higher conversion rate — suggesting FAQ content is influential.
+
+### What do bounce users do in their single session?
+
+Create a session segment for "sessions with exactly 1 page view" and apply it to a forward path starting at `page_view`. This shows the last event before these sessions ended (which is typically just the initial page_view, confirming they truly bounced with no interaction).
+
+### What events precede support ticket creation?
+
+Backward path ending at: `support_ticket_created`
+
+If users consistently trigger `error_message` or visit the `/help` page before submitting a ticket, that sequence is a signal for where to improve the product or self-service resources.
+
+## Limitations
+
+**Sampled data**: Path exploration samples for large datasets. Check the sampling indicator.
+
+**Node expansion limit**: You can expand up to 3 levels deep from the starting point before needing to start a new exploration.
+
+**Top 5 branches only**: At each node, only the 5 most common next steps are shown individually. Everything else is grouped into "others."
+
+**Session scope**: Paths are analyzed within sessions by default. Cross-session journeys require user-scoped analysis, which you can enable by changing the "scope" in Tab Settings from "Session" to "Across all sessions."
+
+<Aside type="tip">
+For deep path analysis — particularly reverse attribution analysis across full user journeys — BigQuery gives you more flexibility. You can query the full event sequence for users who converted and identify common multi-session patterns that the path exploration tree cannot show due to its 5-branch-per-node limit.
+</Aside>
+
+## Common mistakes
+
+### Starting a path from a very common event
+
+If you start a forward path from `page_view`, the tree immediately fragments across hundreds of next-step options and the visualization becomes unreadable. Start from specific, meaningful events — not the most frequent ones.
+
+### Ignoring the "others" category
+
+The "others" node at each branch represents all events not in the top 5. Sometimes the combined "others" volume is larger than any individual event shown. If you need to understand what is in "others," narrow your analysis using segment or filter conditions to focus on a specific user type where the top 5 branches represent the majority of paths.
+
+### Using forward path when backward path answers the question
+
+"What did users do before converting?" is a backward path question. Using a forward path from a step several back from conversion will give you path sequences that include converting users alongside non-converting users, making it harder to identify the conversion-specific pattern.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Funnel Exploration"
+    description="Measure conversion rates through a defined sequence — the complement to path exploration."
+    href="/ga4/reporting/funnel-exploration/"
+  />
+  <LinkCard
+    title="Explore Reports"
+    description="Overview of all exploration types and how to configure them."
+    href="/ga4/reporting/explore-reports/"
+  />
+  <LinkCard
+    title="Session Reconstruction"
+    description="Rebuild and analyze complete session event sequences in BigQuery."
+    href="/ga4/bigquery/session-reconstruction/"
+  />
+</CardGrid>

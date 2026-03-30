@@ -1,6 +1,291 @@
 ---
 title: "Shopify Headless"
-description: "Tracking on headless Shopify storefronts — Hydrogen, Next.js, and beyond."
+description: "DataLayer tracking for headless Shopify storefronts — Hydrogen (Remix), Next.js with Storefront API, SPA behavior, cart tracking, and checkout completion."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Headless Shopify means your storefront is a custom frontend (Hydrogen, Next.js, Gatsby) that communicates with Shopify via the Storefront API or Hydrogen's data layer, rather than using Shopify's theme system. The benefit is complete frontend control. The tracking challenge is that you lose all of Shopify's theme-based tracking infrastructure — no Liquid templates, no theme.liquid, no order-status.liquid.
+
+You're building tracking from scratch in a SPA environment. This guide covers the patterns that work.
+
+## The headless tracking challenge
+
+On a standard Shopify store, you can access product and order data via Liquid. On a headless store, that data lives in your React or Vue components, fetched from Shopify's APIs. The tracking events need to be built into your frontend components directly.
+
+Additional complications:
+- **SPA behavior**: route changes don't trigger page reloads — you need explicit page_view events
+- **Cart state**: the cart is managed client-side (localStorage, React state) rather than Shopify's server-side cart
+- **Checkout redirect**: checkout takes users to `shopify.com/checkout` — out of your headless domain
+- **Purchase confirmation**: order confirmation happens on Shopify's domain via Custom Pixels, not your headless frontend
+
+## Hydrogen (Remix-based) — GTM setup
+
+Hydrogen uses Remix's loader pattern. GTM goes in your root `app/root.tsx`:
+
+```tsx
+// app/root.tsx
+import {Links, Meta, Scripts, ScrollRestoration} from '@remix-run/react';
+import {useNonce} from '@shopify/hydrogen';
+
+export default function App() {
+  const nonce = useNonce();
+  const gtmId = 'GTM-XXXXXXX';
+
+  return (
+    <html lang="en">
+      <head>
+        <meta charSet="utf-8" />
+        <Meta />
+        <Links />
+        {/* GTM head snippet */}
+        <script
+          nonce={nonce}
+          dangerouslySetInnerHTML={{
+            __html: `
+              window.dataLayer = window.dataLayer || [];
+              (function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+              new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+              j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+              'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+              })(window,document,'script','dataLayer','${gtmId}');
+            `,
+          }}
+        />
+      </head>
+      <body>
+        <noscript>
+          <iframe
+            src={`https://www.googletagmanager.com/ns.html?id=${gtmId}`}
+            height="0"
+            width="0"
+            style={{display: 'none', visibility: 'hidden'}}
+          />
+        </noscript>
+        {/* ... */}
+        <Scripts nonce={nonce} />
+        <ScrollRestoration nonce={nonce} />
+      </body>
+    </html>
+  );
+}
+```
+
+<Aside type="caution">
+Hydrogen uses a Content Security Policy (CSP) with nonces. GTM's inline scripts must include the nonce to be allowed by CSP. Use Hydrogen's `useNonce()` hook to get the current nonce value and pass it to your GTM snippet's script tag.
+</Aside>
+
+## React hook for ecommerce tracking
+
+Create a reusable hook for all ecommerce events:
+
+```tsx
+// hooks/useEcommerceTracking.ts
+'use client'; // or remove for Remix client-side hooks
+
+interface EcommerceItem {
+  item_id: string;
+  item_name: string;
+  item_brand?: string;
+  item_category?: string;
+  item_variant?: string;
+  price: number;
+  quantity: number;
+  index?: number;
+  item_list_id?: string;
+  item_list_name?: string;
+}
+
+function pushEcommerceEvent(eventName: string, payload: Record<string, unknown>) {
+  if (typeof window === 'undefined') return;
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push({ event: eventName, ...payload });
+}
+
+export function useEcommerceTracking() {
+  const trackViewItem = (item: EcommerceItem, currency: string) => {
+    pushEcommerceEvent('view_item', {
+      ecommerce: {
+        currency,
+        value: item.price,
+        items: [item],
+      },
+    });
+  };
+
+  const trackAddToCart = (items: EcommerceItem[], currency: string) => {
+    const value = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    pushEcommerceEvent('add_to_cart', {
+      ecommerce: {
+        currency,
+        value: parseFloat(value.toFixed(2)),
+        items,
+      },
+    });
+  };
+
+  const trackViewItemList = (items: EcommerceItem[], listId: string, listName: string, currency: string) => {
+    pushEcommerceEvent('view_item_list', {
+      ecommerce: {
+        item_list_id: listId,
+        item_list_name: listName,
+        items,
+      },
+    });
+  };
+
+  return { trackViewItem, trackAddToCart, trackViewItemList };
+}
+```
+
+## Product page tracking
+
+```tsx
+// routes/products/$handle.tsx (Hydrogen) or pages/products/[handle].tsx (Next.js)
+import { useEffect, useRef } from 'react';
+import { useEcommerceTracking } from '@/hooks/useEcommerceTracking';
+
+function ProductPage({ product, selectedVariant, currency }) {
+  const { trackViewItem } = useEcommerceTracking();
+  const trackedVariantId = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedVariant) return;
+    if (trackedVariantId.current === selectedVariant.id) return; // no re-fire on same variant
+
+    trackedVariantId.current = selectedVariant.id;
+
+    trackViewItem({
+      item_id: selectedVariant.sku || selectedVariant.id,
+      item_name: product.title,
+      item_brand: product.vendor,
+      item_category: product.productType,
+      item_variant: selectedVariant.title !== 'Default Title' ? selectedVariant.title : '',
+      price: parseFloat(selectedVariant.price.amount),
+      quantity: 1,
+    }, currency);
+  }, [selectedVariant?.id]);
+}
+```
+
+## Cart tracking with Storefront API
+
+Headless carts are typically managed via Shopify's Cart API. Track add-to-cart after the API call succeeds:
+
+```tsx
+async function addToCart(variantId: string, quantity: number, product: ShopifyProduct) {
+  const response = await fetch('/api/cart/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ variantId, quantity }),
+  });
+
+  if (!response.ok) {
+    // Handle error
+    return;
+  }
+
+  const cart = await response.json();
+
+  // Track after successful API response
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push({
+    event: 'add_to_cart',
+    ecommerce: {
+      currency: cart.cost.totalAmount.currencyCode,
+      value: parseFloat(selectedVariant.price.amount) * quantity,
+      items: [{
+        item_id: selectedVariant.sku || selectedVariant.id,
+        item_name: product.title,
+        item_variant: selectedVariant.title !== 'Default Title' ? selectedVariant.title : '',
+        price: parseFloat(selectedVariant.price.amount),
+        quantity: quantity,
+      }],
+    },
+  });
+}
+```
+
+## Checkout event tracking
+
+Headless Shopify checkouts redirect to `checkout.shopify.com` (or your custom checkout domain). Your headless frontend cannot track events on Shopify's checkout domain — that's a different origin.
+
+**The only reliable options for checkout tracking on headless:**
+
+1. **Shopify Custom Pixels**: configure a Custom Pixel in Shopify Admin that runs on checkout pages, subscribing to Shopify's Customer Events API
+2. **Shopify server-side pixel**: Shopify's own tracking integration
+3. **Server-side tracking (sGTM)**: capture checkout events via Shopify webhooks and forward to GA4 via sGTM
+
+For purchase confirmation, the user returns to your headless domain via a redirect to a `/orders/confirmation?orderId=XXX` route. Fetch the order data from Shopify's API and push the purchase event from this route.
+
+```tsx
+// app/routes/orders.confirmation.tsx
+export async function loader({ request }) {
+  const url = new URL(request.url);
+  const orderId = url.searchParams.get('orderId');
+
+  // Fetch order from Shopify API
+  const order = await getOrder(orderId);
+  return { order };
+}
+
+export default function OrderConfirmation() {
+  const { order } = useLoaderData();
+  const tracked = useRef(false);
+
+  useEffect(() => {
+    if (tracked.current || !order) return;
+    tracked.current = true;
+
+    const key = `purchase_tracked_${order.id}`;
+    if (sessionStorage.getItem(key)) return;
+    sessionStorage.setItem(key, 'true');
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({ ecommerce: null });
+    window.dataLayer.push({
+      event: 'purchase',
+      ecommerce: {
+        transaction_id: order.orderNumber,
+        value: parseFloat(order.totalPriceV2.amount),
+        currency: order.totalPriceV2.currencyCode,
+        items: order.lineItems.edges.map(({ node }, i) => ({
+          item_id: node.variant?.sku || node.variant?.id,
+          item_name: node.title,
+          price: parseFloat(node.variant?.priceV2?.amount || 0),
+          quantity: node.quantity,
+          index: i,
+        })),
+      },
+    });
+  }, [order]);
+}
+```
+
+## Common mistakes
+
+**Assuming Shopify's theme-based Customer Events work on headless.** Custom Pixels are a Shopify checkout feature, not a storefront feature. They work when users go through Shopify's checkout regardless of your frontend. Your headless frontend needs its own tracking for storefront events.
+
+**Not guarding against duplicate fires on route changes.** In Remix and Next.js, components can re-render and effects can re-run. Always use a `useRef` guard for `view_item` and `purchase` events.
+
+**Using Shopify's GraphQL node IDs as item_id.** Shopify's API returns IDs like `gid://shopify/ProductVariant/12345678`. These are internal IDs — use the SKU when available, fall back to the numeric ID extracted from the GID.
+
+<CardGrid>
+  <LinkCard
+    title="Next.js"
+    description="General Next.js tracking patterns — App Router, route tracking, TypeScript typing."
+    href="/datalayer/platforms/nextjs/"
+  />
+  <LinkCard
+    title="Shopify Custom Pixels"
+    description="How to track checkout events from headless via Custom Pixels."
+    href="/datalayer/platforms/shopify-custom-pixels/"
+  />
+  <LinkCard
+    title="Shopify"
+    description="Base Shopify implementation for reference."
+    href="/datalayer/platforms/shopify/"
+  />
+</CardGrid>

@@ -1,6 +1,131 @@
 ---
 title: "Shopify Checkout Extensibility"
-description: "How Shopify's Checkout Extensibility migration affects tracking."
+description: "How Shopify's Checkout Extensibility migration removes checkout.liquid access for standard merchants — what this means for GTM, and the migration path to Custom Pixels and server-side tracking."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Shopify's Checkout Extensibility is the biggest change to checkout tracking in Shopify's history. The short version: the old `checkout.liquid` template — which let you inject custom JavaScript anywhere in the checkout — is being deprecated. For standard Shopify merchants, it's gone. This directly affects GTM and any client-side tracking that lived in checkout.liquid.
+
+## What changed
+
+**Before (checkout.liquid era):**
+- You could add custom JavaScript to any checkout step
+- GTM snippet went in checkout.liquid → full GTM functionality in checkout
+- Click triggers, form triggers, and custom dataLayer pushes worked throughout the checkout
+
+**After (Checkout Extensibility):**
+- Standard merchants: GTM cannot run directly in the checkout steps
+- Shopify Plus merchants: checkout.liquid still available but officially deprecated
+- All merchants: Custom Pixels are the supported mechanism for checkout tracking
+
+## Timeline
+
+| Milestone | Status |
+|-----------|--------|
+| Checkout Extensibility announced | 2023 |
+| Standard Shopify: checkout.liquid removed | August 2024 |
+| Shopify Plus: checkout.liquid officially deprecated | Ongoing — upgrade path to UI Extensions encouraged |
+| Long-term future | All checkouts migrated to Extensibility model |
+
+<Aside type="caution">
+If you have an existing Shopify standard (non-Plus) store with GTM tracking in checkout.liquid, that tracking stopped working in August 2024. Your purchase data in GA4 has a gap from that date if you haven't migrated to Custom Pixels.
+</Aside>
+
+## What's still possible after migration
+
+**Storefront (non-checkout pages):** Nothing changed. GTM via theme.liquid works fully on product pages, collection pages, cart page, and any other storefront page.
+
+**Thank you / order confirmation page:** The `order-status.liquid` template is still available and supports custom JavaScript for standard merchants. You can still track purchase events here for now.
+
+**Custom Pixels:** The supported replacement. Runs in the checkout via Shopify's sandboxed pixel environment. Supports the Customer Events API for ecommerce event tracking.
+
+**Shopify's server-side pixel:** Shopify's first-party tracking, which sends data server-side. Separate from Custom Pixels. Configurable in Settings > Customer Events > Shopify Pixel.
+
+## The migration path for standard merchants
+
+### Option 1: Custom Pixels (recommended for most merchants)
+
+Replace checkout.liquid tracking with a Custom Pixel that subscribes to Shopify's Customer Events:
+
+```javascript
+// Custom Pixel — checkout tracking replacement
+analytics.subscribe('checkout_completed', (event) => {
+  const checkout = event.data.checkout;
+
+  window.dataLayer = window.dataLayer || [];
+  dataLayer.push({ ecommerce: null });
+  dataLayer.push({
+    event: 'purchase',
+    ecommerce: {
+      transaction_id: checkout.order?.id || checkout.token,
+      value: parseFloat(checkout.totalPrice?.amount || 0),
+      tax: parseFloat(checkout.totalTax?.amount || 0),
+      shipping: parseFloat(checkout.shippingLine?.price?.amount || 0),
+      currency: checkout.currencyCode,
+      items: checkout.lineItems.map((item, i) => ({
+        item_id: item.variant?.sku || String(item.variant?.id),
+        item_name: item.title,
+        price: parseFloat(item.variant?.price?.amount || 0),
+        quantity: item.quantity,
+        index: i,
+      })),
+    },
+  });
+});
+```
+
+See [Shopify Custom Pixels](/datalayer/platforms/shopify-custom-pixels/) for the complete implementation.
+
+### Option 2: Server-side tracking via sGTM
+
+Server-side Google Tag Manager (sGTM) receives events from your Shopify store and forwards them to GA4 and other platforms. This is the most robust solution — it doesn't depend on browser JavaScript and isn't affected by ad blockers or Shopify's sandbox.
+
+The integration path: configure Shopify's server-side pixel or a Stape connector to send purchase events to your sGTM container, which then sends them to GA4 via the GA4 server-side tag.
+
+This approach requires:
+- A deployed sGTM container (GCP, Stape, or similar hosting)
+- Shopify server-side pixel or Stape's Shopify app
+- GA4 server-side tag configuration in sGTM
+
+### Option 3: Shopify's own Pixel (for GA4 without GTM)
+
+Shopify's built-in GA4 integration (configured in Online Store > Preferences or via the Google & YouTube app) sends purchase and ecommerce events directly to GA4 without requiring custom JavaScript. If your only goal is GA4 ecommerce data and you don't need custom event parameters or other platform integrations, this may be sufficient.
+
+## Shopify Plus: checkout.liquid is deprecated, not removed
+
+For Shopify Plus merchants, `checkout.liquid` is deprecated but not yet removed. You can still use it — but Shopify has made clear it will eventually be removed. Use this time to:
+
+1. Audit what tracking code lives in checkout.liquid
+2. Migrate checkout event tracking to Custom Pixels
+3. Keep checkout.liquid only for UI customizations that Custom Pixels can't replace (checkout branding, custom fields via UI Extensions)
+
+## The "optimized checkout" pixel data sharing
+
+Shopify's checkout includes a first-party "Shopify Pixel" that collects behavioral data for Shopify's own purposes. This is separate from your Custom Pixels. The customer-facing "Data sale opt-out" and privacy settings in your store affect what this pixel collects, not your Custom Pixels.
+
+## Common mistakes
+
+**Assuming checkout.liquid still works for standard merchants.** If you're on standard Shopify and your GA4 purchase event is missing since mid-2024, this is why. The silence is the problem — no error, just no tracking.
+
+**Migrating checkout.liquid code directly into a Custom Pixel.** Custom Pixels have different APIs and restrictions. Code that worked in checkout.liquid won't work verbatim in a Custom Pixel. Specifically: DOM queries fail silently, GTM triggers don't work (except Custom Event), and Shopify event data comes from `analytics.subscribe()` not from DOM scraping.
+
+**Double-tracking if you implement both Custom Pixels and server-side.** If you set up Custom Pixels for purchase tracking AND server-side tracking for the same events, you'll double-count. Implement one or the other, not both.
+
+<CardGrid>
+  <LinkCard
+    title="Shopify Custom Pixels"
+    description="The complete Custom Pixel implementation — GTM inside the sandbox, Customer Events API."
+    href="/datalayer/platforms/shopify-custom-pixels/"
+  />
+  <LinkCard
+    title="Shopify"
+    description="Base Shopify tracking — storefront GTM and what's still possible."
+    href="/datalayer/platforms/shopify/"
+  />
+  <LinkCard
+    title="Shopify Advanced"
+    description="Post-purchase tracking, server-side integration, multi-currency."
+    href="/datalayer/platforms/shopify-advanced/"
+  />
+</CardGrid>

@@ -1,6 +1,146 @@
 ---
 title: "Multi-Container Strategy"
-description: "When and how to use multiple GTM containers on one site."
+description: "When to use multiple GTM containers on one site, how they interact, and why one container is almost always the right answer."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The question of whether to run multiple GTM containers on a single site comes up often — usually when an agency wants to bring their own container, or when a large organization wants to separate marketing tracking from analytics tracking. The short answer: one container is almost always better than two.
+
+Here's when multiple containers are justified, how they interact technically, and the performance cost you're accepting.
+
+## The default position: one container
+
+One container per domain is the right default for the vast majority of sites. A single container:
+- Has one dataLayer (containers on the same page share the same array)
+- Has one publishing workflow to manage
+- Has one debug session in Preview mode
+- Has one version history to review
+- Costs one network request per page
+
+Two containers double the management overhead, double the potential failure points, and double the performance cost. The only reason to pay that price is a legitimate organizational need that cannot be met any other way.
+
+## When multiple containers are justified
+
+**Organizational separation with different publish gates:** Your internal analytics team runs Container A with strict change management. A marketing agency runs Container B with their own workflow. The agency's tags and your analytics tags never need to coordinate, and the organizational and permission boundaries justify the overhead.
+
+**Compliance boundary between teams:** Heavily regulated industries sometimes require that marketing pixels (Container B) are managed entirely separately from analytics (Container A) for auditing purposes.
+
+**A/B testing or experimentation platform:** Some teams run a dedicated container for their experimentation tool (Optimizely, VWO) to keep experiment setup isolated from production tracking.
+
+**Multi-product on one domain:** Different sections of a site run by different business units, where mixing the tag management is organizationally impossible.
+
+<Aside type="caution">
+None of these are automatic justifications — they're examples where the organizational need might outweigh the downsides. In each case, evaluate whether restructuring permissions, using workspaces, or using the GTM API to separate workflows might achieve the same goal without a second container.
+</Aside>
+
+## How multiple containers interact
+
+When you install two GTM containers on the same page, they share the same `window.dataLayer` array. This has important implications:
+
+**Shared dataLayer:** Container A's tags can read data pushed by Container B, and vice versa. A `dataLayer.push({ event: 'purchase', ecommerce: { ... } })` from Container A's Custom HTML tag will also trigger any Custom Event triggers in Container B that listen for `purchase`.
+
+**No isolation:** The containers are not sandboxed from each other. If Container A pushes a `user_id` to the dataLayer, Container B can read it via a Data Layer Variable. This is usually harmless but can cause unexpected behavior.
+
+**Separate execution contexts:** Each container processes the dataLayer independently and manages its own internal data model. Tags in Container A don't directly affect tags in Container B — they only interact via the shared dataLayer.
+
+**Separate debug sessions:** You cannot debug both containers in one Preview mode session. To debug Container B's tags, you need to enter Preview mode for Container B. The Tag Assistant interface shows each container as a separate tab.
+
+## Performance impact
+
+Each additional container adds:
+- One additional HTTP request for the container's `gtm.js` file (typically 30-50KB, cached after first load)
+- One additional JavaScript execution thread to initialize the container
+- Additional evaluations for every trigger on every dataLayer push
+
+For most sites, this is in the 20-100ms range on first load — noticeable but not catastrophic. For performance-sensitive applications or sites where GTM is already a measurable performance cost, adding a second container should be approached carefully.
+
+Measure before and after: use a performance tool (Lighthouse, WebPageTest) in a controlled environment with and without the second container to quantify the impact.
+
+## The shared GA4 Measurement ID pattern
+
+If both containers send data to the same GA4 property, you need to be careful about session counting and event attribution:
+
+- Both containers initialize GA4, potentially creating two GA4 sessions for the same page visit
+- Both containers sending page views result in double-counted page views
+
+The recommended approach: designate one container as the "primary" GA4 container. The secondary container either:
+1. Does not include a Google Tag at all (if it only manages marketing pixels that don't need GA4)
+2. Uses only GA4 Event tags with "Linked to" pointing to the primary container's Google Tag
+
+Alternatively, use the `gtag.js` instance directly (if the primary container loaded it) from the secondary container, though this is complex to maintain.
+
+## Installing multiple containers
+
+Install both snippets on every page where both should fire. The snippets are independent — they can be in any order, though convention places them in `<head>`:
+
+```html
+<head>
+  <!-- Primary analytics container -->
+  <!-- Google Tag Manager - Container A -->
+  <script>...</script>
+
+  <!-- Secondary agency/marketing container -->
+  <!-- Google Tag Manager - Container B -->
+  <script>...</script>
+</head>
+```
+
+Each container has its own GTM-XXXXXX ID. There is no technical requirement about their ordering relative to each other.
+
+## GTM 360 Zones as an alternative
+
+GTM 360 includes a feature called **Zones** — essentially segmented regions within a single container where different teams can manage their own tags with controlled permissions. Zones allow:
+- Different permission levels per zone
+- Isolated tag management within one container
+- A governance layer where the container owner approves what zones can do
+
+Zones are a better organizational solution than multiple containers when the goal is team separation — you get the separation without the performance overhead of a second container. However, Zones require GTM 360.
+
+## Decision framework
+
+Ask these questions before deploying a second container:
+
+1. **Can we achieve the organizational separation with workspaces and permissions instead?** Workspaces give different teams their own editing environment within a single container.
+
+2. **Is the second container genuinely needed permanently, or is it a temporary arrangement?** Temporary arrangements (an agency that's onboarding a new tool) should be planned to consolidate.
+
+3. **Who owns the second container?** If there's no clear owner with ongoing maintenance responsibility, it becomes a liability.
+
+4. **What is the performance cost?** Have you measured it on your specific site?
+
+5. **Is there a documented plan to merge containers in the future?** If "we'll merge them later" is the answer, write down when and who is responsible.
+
+## Common mistakes
+
+### Using a second container to bypass your organization's change management process
+
+Some teams add a second container to avoid having to go through the approval process for their main container. This creates a governance gap: unchecked code running on your production site. Don't do this.
+
+### Assuming the containers are isolated
+
+The shared dataLayer means events in one container can accidentally trigger tags in another. Test both containers together in Preview mode (separate sessions) after any significant change.
+
+### Forgetting to add the second snippet to all pages
+
+If Container B is added to some pages but not others, coverage gaps are difficult to diagnose — and the dataLayer behavior will differ between pages.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Workspaces"
+    description="An often-better alternative to multiple containers for organizational separation."
+    href="/client-side/management/workspaces/"
+  />
+  <LinkCard
+    title="Permissions"
+    description="How to structure access for agencies and contractors within a single container."
+    href="/client-side/management/permissions/"
+  />
+  <LinkCard
+    title="Container Cleanup"
+    description="Consolidating a container that has accumulated unnecessary complexity."
+    href="/client-side/management/container-cleanup/"
+  />
+</CardGrid>

@@ -1,6 +1,178 @@
 ---
 title: "Track Web Vitals"
-description: "Send Core Web Vitals to GA4 via GTM."
+description: "Send Core Web Vitals (LCP, INP, CLS) to GA4 via GTM — web-vitals library integration, Custom HTML tag, GA4 event parameters, and BigQuery analysis query."
+sidebar:
+  badge:
+    text: Intermediate
+    variant: note
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Core Web Vitals measure real user experience: how fast pages appear to load (LCP), how responsive they are to interaction (INP), and how much layout shifts happen during load (CLS). Google Search uses these scores in its ranking algorithm. Tracking them in GA4 means you can correlate page performance with conversion rates and identify which pages need performance work.
+
+## The three metrics
+
+| Metric | What it measures | Good | Needs Improvement | Poor |
+|--------|-----------------|------|-------------------|------|
+| **LCP** | Largest Contentful Paint — when the main content is visible | < 2.5s | 2.5–4s | > 4s |
+| **INP** | Interaction to Next Paint — responsiveness to all interactions | < 200ms | 200–500ms | > 500ms |
+| **CLS** | Cumulative Layout Shift — visual stability | < 0.1 | 0.1–0.25 | > 0.25 |
+
+## Implementation using the web-vitals library
+
+Google's [web-vitals](https://github.com/GoogleChrome/web-vitals) library is the standard way to measure these metrics. It handles all the complexity of the Intersection Observer, PerformanceObserver, and event timing APIs.
+
+<DataLayerExample event="web_vital" description="Pushes each Core Web Vital as it is measured. LCP fires after the page loads, CLS and INP fire when the user navigates away.">
+```javascript
+(function() {
+  // Load the web-vitals library from a CDN
+  // In production, self-host or bundle this
+  var script = document.createElement('script');
+  script.src = 'https://unpkg.com/web-vitals@4/dist/web-vitals.iife.js';
+  script.onload = function() {
+    function sendVital(metric) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'web_vital',
+        metric_name: metric.name,           // 'LCP', 'INP', 'CLS', 'FCP', 'TTFB'
+        metric_value: Math.round(metric.name === 'CLS' ? metric.value * 1000 : metric.value),
+        metric_rating: metric.rating,        // 'good', 'needs-improvement', 'poor'
+        metric_delta: Math.round(metric.delta),
+        metric_id: metric.id,
+        navigation_type: metric.navigationType,
+        page_path: window.location.pathname
+      });
+    }
+
+    webVitals.onLCP(sendVital);
+    webVitals.onINP(sendVital);
+    webVitals.onCLS(sendVital);
+    webVitals.onFCP(sendVital);   // First Contentful Paint
+    webVitals.onTTFB(sendVital);  // Time to First Byte
+  };
+  document.head.appendChild(script);
+})();
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add the code as a Custom HTML tag** in GTM
+   - Trigger: **Window Loaded** (All Pages)
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `web_vital`
+
+3. **Create Data Layer Variables**
+
+   - `DLV - metric_name` → `metric_name`
+   - `DLV - metric_value` → `metric_value`
+   - `DLV - metric_rating` → `metric_rating`
+   - `DLV - navigation_type` → `navigation_type`
+
+4. **Create a GA4 Event Tag**
+
+   - Event name: `web_vital`
+   - Parameters:
+     - `metric_name` → `{{DLV - metric_name}}`
+     - `metric_value` → `{{DLV - metric_value}}`
+     - `metric_rating` → `{{DLV - metric_rating}}`
+     - `navigation_type` → `{{DLV - navigation_type}}`
+     - `page_path` → `{{Page Path}}`
+   - Trigger: the Custom Event trigger
+
+5. **Register custom dimensions in GA4**
+
+   Go to **GA4 → Admin → Custom Definitions → Custom Dimensions**:
+   - `metric_name`: Event scope
+   - `metric_value`: Event scope (type: Number)
+   - `metric_rating`: Event scope
+
+6. **Test in Preview Mode**
+
+   Visit a page. Within a few seconds, `web_vital` events should start appearing — FCP and TTFB first, then LCP. CLS and INP will only fire when the user navigates away or the tab becomes hidden.
+</Steps>
+
+<TagConfig
+  name="GA4 - web_vital"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - web_vital"
+  variables={["DLV - metric_name", "DLV - metric_value", "DLV - metric_rating"]}
+/>
+
+<Aside type="tip">
+CLS values are multiplied by 1000 in the code above (from a decimal like `0.045` to an integer `45`). GA4 event parameter values have a maximum precision, and very small decimals can be lost. When analysing CLS in GA4 or BigQuery, divide by 1000 to get the original score.
+</Aside>
+
+## Analysing Web Vitals data in GA4
+
+Create an Exploration report:
+
+1. **Dimensions**: `metric_name`, `page_path`, `metric_rating`
+2. **Metric**: `Event count`
+3. **Filter**: `Event name = web_vital`
+
+This shows the distribution of ratings (good/needs-improvement/poor) per metric per page.
+
+To find your worst-performing pages:
+- Filter: `metric_name = LCP` AND `metric_rating = poor`
+- Dimension: `page_path`
+- Sort by: `Event count` descending
+
+## BigQuery analysis query
+
+If you have the GA4 BigQuery export enabled:
+
+```sql
+SELECT
+  params.value.string_value AS page_path,
+  metric_params.value.string_value AS metric_name,
+  AVG(value_params.value.int_value) /
+    CASE metric_params.value.string_value
+      WHEN 'CLS' THEN 1000.0
+      ELSE 1.0
+    END AS avg_metric_value,
+  COUNTIF(rating_params.value.string_value = 'good') / COUNT(*) AS pct_good,
+  COUNT(*) AS total_measurements
+FROM
+  `your_project.your_dataset.events_*`,
+  UNNEST(event_params) AS params,
+  UNNEST(event_params) AS metric_params,
+  UNNEST(event_params) AS value_params,
+  UNNEST(event_params) AS rating_params
+WHERE
+  _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name = 'web_vital'
+  AND params.key = 'page_path'
+  AND metric_params.key = 'metric_name'
+  AND value_params.key = 'metric_value'
+  AND rating_params.key = 'metric_rating'
+GROUP BY 1, 2
+ORDER BY pct_good ASC
+LIMIT 50
+```
+
+## Test it
+
+1. Open GTM Preview and visit a content page
+2. Wait 3-5 seconds — FCP, TTFB, and LCP events should appear in the Summary pane
+3. Navigate to another page (or close the tab) — CLS and INP events should fire on the original page
+4. Check `metric_value` and `metric_rating` are sensible (LCP should be in the hundreds of milliseconds for a fast page)
+5. In GA4 DebugView, verify `web_vital` events appear with parameters
+
+## Common gotchas
+
+**INP replaces FID.** The web-vitals library v3+ measures INP (Interaction to Next Paint) instead of FID (First Input Delay). If you have existing FID data in GA4, they are not directly comparable.
+
+**CLS fires multiple times.** The web-vitals library reports CLS as the user interacts with the page. Each time a new layout shift exceeds the previous maximum CLS value, a new event is fired. The final CLS value (when the user leaves the page) is the authoritative one.
+
+**CDN loading adds latency.** Loading `web-vitals` from `unpkg.com` adds a network request. For production, bundle the library into your site code or self-host it.
+
+<CardGrid>
+  <LinkCard title="Fetch External Data in GTM" href="/recipes/fetch-external-data-gtm/" description="Another async pattern for enriching events with external data." />
+  <LinkCard title="Track Scroll Milestones" href="/recipes/track-scroll-milestones/" description="Engagement metrics to correlate with performance scores." />
+</CardGrid>

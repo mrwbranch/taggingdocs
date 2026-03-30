@@ -1,6 +1,182 @@
 ---
 title: "Funnel Exploration"
-description: "Creating and analyzing conversion funnels."
+description: "Build conversion funnels in GA4 — open vs. closed funnels, step conditions, elapsed time, segment breakdowns, and abandoned users analysis."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Funnel exploration in GA4 visualizes user drop-off across a defined sequence of steps. Unlike standard reports, funnels in GA4 Explore can use any event or page view as a step, apply segment breakdowns, and switch between open and closed completion modes.
+
+GA4 funnels are event-based. Each step is an event occurrence, optionally filtered by event parameters. This makes them more flexible than Universal Analytics goal funnels, which were page-view-based.
+
+## Creating a funnel
+
+<Steps>
+1. Go to **Explore → Create new exploration → Funnel exploration**.
+
+2. In the Variables panel, add any segments or dimensions you plan to use.
+
+3. In the Tab Settings panel, click **Edit funnel** (pencil icon next to Steps).
+
+4. Click **Add step** for each step in your funnel.
+
+5. For each step:
+   - Choose the **condition**: event name, page/screen view, or a custom event parameter
+   - Optionally add **AND conditions** to filter the step (e.g., event name = `purchase` AND `value` > 50)
+   - Give the step a descriptive **name**
+
+6. Set the **funnel type**: open or closed.
+
+7. Optionally set **elapsed time** between steps.
+
+8. Click **Apply** to generate the funnel.
+</Steps>
+
+## Open vs. closed funnels
+
+This is the most important choice in funnel configuration.
+
+**Closed funnel**: Users must enter the funnel at step 1. If a user visited the cart (step 2) before visiting the product page (step 1), they are not counted. The funnel tracks only the intended linear path.
+
+**Open funnel**: Users can enter at any step. A user who goes directly to checkout without a product page view is counted at the checkout step. Open funnels show absolute drop-off from each step but do not enforce a linear order.
+
+**When to use closed**: You want to understand the linear conversion path and enforce order. E-commerce purchase funnel: `view_item` → `add_to_cart` → `begin_checkout` → `purchase`. You only want to count users who followed this exact sequence.
+
+**When to use open**: You want to see where users are in the funnel regardless of how they got there. Multi-channel signup flow where some users skip steps because they already completed them.
+
+<Aside type="tip">
+If you are not sure which to use, start with closed. Open funnels can inflate earlier steps with users who joined mid-funnel, making drop-off percentages misleading. Closed funnels give a truer picture of the linear conversion path.
+</Aside>
+
+## Step conditions
+
+Each step can be defined by:
+
+**Event name**: the simplest condition — any occurrence of a named event qualifies.
+
+**Page/screen view**: users who viewed a specific page (by path or title). Useful for page-based funnels on single-page application sites where route changes fire `page_view`.
+
+**AND conditions**: add filters to a step. For example:
+- Event = `purchase` AND parameter `value` > 100 (only count high-value purchases)
+- Page view AND page path contains `/checkout/` (all checkout-related pages)
+- Event = `form_submission` AND parameter `form_id` = `signup` (specific form)
+
+**OR conditions within a step**: If multiple page paths count as the same step (e.g., any product detail page), use OR conditions: page path contains `/product/` OR page path contains `/item/`.
+
+## Elapsed time between steps
+
+Set a time constraint on how long users have to move between steps. Options range from 5 minutes to 90 days.
+
+Use elapsed time when:
+- Your funnel has a natural time window (checkout should complete within 1 hour)
+- You want to exclude users who abandoned for a long period and returned
+- You are measuring fast-path completion vs. slow-path completion
+
+Leave it at the default (no constraint) when:
+- Users commonly return across sessions to complete steps (B2B evaluation funnels)
+- Your funnel is multi-session by design
+
+## Segment breakdowns
+
+After building the funnel, apply a segment breakdown to compare the funnel across user groups:
+
+In the Tab Settings panel, find **Segment comparisons** and add up to 3 segments. The funnel will show parallel bars for each segment, making it easy to compare:
+- Mobile vs. Desktop conversion rates
+- Paid traffic vs. Organic conversion rates
+- New users vs. Returning users conversion rates
+
+This is one of the most powerful uses of funnel exploration — identifying which segments have significantly different drop-off at specific steps.
+
+## Analyzing abandoned users
+
+At each funnel step, GA4 shows the number of users who dropped off. Click the drop-off number for a step to create a segment of users who completed that step but did not complete the next one.
+
+Use this abandoned segment to:
+- Apply it to a path exploration to see what they did instead
+- Cross-reference with other dimensions (device, country, traffic source) to find patterns
+- Build a remarketing audience for these users
+
+## Funnel exploration examples
+
+### E-commerce purchase funnel
+
+```
+Step 1: Event = view_item
+Step 2: Event = add_to_cart
+Step 3: Event = begin_checkout
+Step 4: Event = purchase
+Type: Closed
+Elapsed time: Within 1 day
+```
+
+This measures the linear purchase path. Closed mode ensures only users who followed the intended sequence are counted.
+
+### SaaS trial signup funnel
+
+```
+Step 1: Page view — page path contains /pricing
+Step 2: Page view — page path contains /signup
+Step 3: Event = form_submission AND form_id = trial_signup
+Step 4: Event = onboarding_complete
+Type: Open
+Elapsed time: Within 30 days
+```
+
+Open because users may view pricing multiple times before signing up, and onboarding may span multiple sessions over days.
+
+### Content engagement funnel
+
+```
+Step 1: Event = page_view AND content_type = blog_post
+Step 2: Scroll event with percent_scrolled = 90
+Step 3: Event = click AND link_text = Subscribe
+Step 4: Event = form_submission AND form_id = newsletter
+Type: Closed
+Elapsed time: Within same session
+```
+
+## Exporting funnel data
+
+You cannot export the funnel visualization directly, but you can:
+1. Switch the visualization to a table view for the underlying data
+2. Export the table as CSV
+
+For automated funnel reporting, replicate the funnel logic in BigQuery (see [Funnel Analysis in SQL](/ga4/bigquery/funnel-analysis-sql/)).
+
+## Common mistakes
+
+### Using open funnel when closed is needed
+
+An open funnel on an e-commerce checkout path will show users entering at the "purchase" step without going through "add_to_cart". These are likely direct link purchases, API orders, or data quality issues — not users who completed the intended funnel path. Use closed for strict purchase funnels.
+
+### Not filtering steps to the relevant event parameters
+
+A step defined as "Event = page_view" in a funnel will match ANY page view. If your funnel step should be the product detail page, add a condition: Event = page_view AND page path contains `/product/`. Without the filter, every page view qualifies and the funnel loses meaning.
+
+### Ignoring elapsed time on long funnels
+
+A B2B demo request funnel where someone viewed pricing 90 days before requesting a demo is a valid conversion. Without setting elapsed time (or setting it to 90 days), this user is counted. With a 1-hour elapsed time, they are not. Match the elapsed time to your actual buying cycle.
+
+### Building funnels with too many steps
+
+A 10-step funnel where most steps have 90%+ completion rates hides the meaningful drop-off. Focus on 3-6 steps where meaningful decisions occur. You can always drill down by removing high-completion steps or viewing step-level data separately.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Path Exploration"
+    description="Explore what abandoned funnel users do next."
+    href="/ga4/reporting/path-exploration/"
+  />
+  <LinkCard
+    title="Funnel Analysis in SQL"
+    description="Replicate and extend GA4 funnels in BigQuery without sampling."
+    href="/ga4/bigquery/funnel-analysis-sql/"
+  />
+  <LinkCard
+    title="Explore Reports"
+    description="Overview of the full Explore workspace and all exploration types."
+    href="/ga4/reporting/explore-reports/"
+  />
+</CardGrid>

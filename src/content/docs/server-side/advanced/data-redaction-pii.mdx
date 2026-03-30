@@ -1,6 +1,227 @@
 ---
 title: "Data Redaction & PII"
-description: "Stripping personally identifiable information server-side."
+description: "Stripping PII from events before forwarding to vendors — regex redaction, hashing, transformation patterns, and compliance auditing."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+One of the clearest compliance arguments for server-side GTM is the ability to inspect and modify data before it reaches third-party vendors. With client-side tracking, data goes directly from the user's browser to Google, Meta, and TikTok — you have no interception point. With sGTM, your server is that interception point. Data redaction is the application of that capability.
+
+## Why PII ends up in tracking data
+
+PII frequently appears in tracking data unintentionally:
+
+**URL parameters**: Users fill out a form with their email address, and the thank-you page URL includes `?email=user%40example.com`. Your GA4 pageview tag captures `page_location` — including the email address.
+
+**Page titles**: Some applications include user names in page titles. "John Smith's Dashboard — YourApp" becomes a page_title in your analytics.
+
+**Ecommerce data**: Order confirmation dataLayer pushes sometimes include email or address fields that developers added without considering tracking implications.
+
+**Referrer URLs**: Inbound links from email marketing platforms sometimes include hashed or encoded email identifiers in the URL.
+
+**Form data scraping**: Badly configured tracking that reads form field values via DOM scraping can capture form input contents.
+
+None of these are malicious. All of them create compliance problems when they reach vendor platforms without redaction.
+
+## Where to implement redaction
+
+Redaction can happen at multiple layers:
+
+1. **Client-side**: Never push PII to the dataLayer in the first place. Developers should not include email addresses in dataLayer pushes. This is the first line of defense.
+
+2. **Server-side (sGTM)**: Intercept PII in the Event Model before it reaches tags. This catches accidental PII that slips through client-side.
+
+3. **Per-vendor**: Apply different redaction rules for different destinations. Send full data to GA4 (which you control), but strip PII before it reaches Meta or TikTok.
+
+sGTM's role is layers 2 and 3 — not a replacement for client-side hygiene, but an additional safety net and a per-vendor control point.
+
+## Redacting PII from URL parameters
+
+The most common PII vector is URLs containing email addresses. Implement URL sanitization as a variable template:
+
+```javascript
+// Variable template: sanitize_page_location
+// Returns page_location with email and phone removed from query string
+
+const getEventData = require('getEventData');
+
+const pageLocation = getEventData('page_location');
+if (!pageLocation) return undefined;
+
+// Remove email-like patterns from query string
+// Pattern matches: word@word.word
+let sanitized = pageLocation.replace(
+  /([?&][^=]+=)[^&]*@[^.]+\.[^&]*/gi,
+  '$1[REDACTED]'
+);
+
+// Remove phone-like patterns (simple version)
+sanitized = sanitized.replace(
+  /([?&][^=]+=)\+?[\d\s\-\(\)]{10,}/g,
+  '$1[REDACTED]'
+);
+
+return sanitized;
+```
+
+Use `{{Sanitized Page Location}}` instead of `{{Event Data - page_location}}` in your GA4 server tag configuration. All tags using this variable get sanitized URLs automatically.
+
+## Hashing PII for ad platforms
+
+Ad platforms like Meta and Google Ads require hashed PII (SHA-256) rather than raw values. Hashing serves a dual purpose: it allows the platform to match users while being a one-way transformation that prevents raw PII from reaching the platform.
+
+```javascript
+// Variable template: hash_value
+// Returns SHA-256 hash of a string, lowercase, trimmed
+
+const sha256 = require('sha256'); // available in sGTM templates
+const getEventData = require('getEventData');
+
+const rawValue = getEventData(data.fieldName); // field configured in template
+if (!rawValue) return undefined;
+
+// Normalize before hashing (required by Meta, Google)
+const normalized = rawValue.toLowerCase().trim();
+return sha256(normalized);
+```
+
+Create separate variable instances for email and phone:
+- `{{Hashed Email}}`: reads `user_email`, hashes
+- `{{Hashed Phone}}`: reads `user_phone`, normalizes (digits only + country code), hashes
+
+<Aside type="note">
+The `sha256` module is available in the sGTM sandboxed environment. You do not need to implement SHA-256 yourself. Import it with `const sha256 = require('sha256');`
+</Aside>
+
+## Selective forwarding: different data to different vendors
+
+One of the architectural advantages of sGTM: you can send full data to trusted internal systems and redacted data to external vendors.
+
+Example configuration:
+
+| Destination | User email | Raw IP | User ID |
+|---|---|---|---|
+| GA4 (your property) | Hashed | Remove | Send |
+| Meta CAPI | Hashed | Remove | Hashed external_id |
+| TikTok Events API | Hashed | Remove | Hashed |
+| Internal Firestore | Hashed (stored) | Remove | Send |
+
+Implement this by having separate variable instances for each destination:
+
+```
+Meta CAPI tag:
+  email → {{Hashed Email for Meta}}   (hashed with specific normalization for Meta)
+
+Google Ads tag:
+  email → {{Hashed Email for Google}} (hashed with specific normalization for Google)
+```
+
+The normalization requirements differ slightly between platforms — Meta requires lowercase, Google requires lowercase and stripped dots from Gmail addresses. Use platform-specific hash variables.
+
+## IP address handling
+
+The client's IP address is included in the Event Model as `ip_override`. By default, GA4 sends IP addresses to Google for geolocation. For GDPR compliance, many organizations redact IP addresses.
+
+In the GA4 server tag, set `ip_override` to an empty string or anonymized value:
+
+```
+Override event parameter:
+  Name: ip_override
+  Value: (empty)
+```
+
+With an empty `ip_override`, GA4 uses the sGTM server's IP address instead of the user's. Since your sGTM server is in a known region, geolocation is still approximate.
+
+Alternative: pass only the network/CIDR range, not the full IP:
+```javascript
+// Variable template: anonymize_ip
+const ip = getEventData('ip_override') || '';
+// Remove last octet
+return ip.replace(/\.\d+$/, '.0');
+// "203.0.113.42" → "203.0.113.0"
+```
+
+## Redaction audit logging
+
+For GDPR compliance, document what gets redacted and when. Log redaction events to Cloud Logging:
+
+```javascript
+// In a tag template or client template that applies redaction:
+logToConsole(JSON.stringify({
+  type: 'pii_redaction',
+  event_name: getEventData('event_name'),
+  redacted_fields: ['email', 'phone'],
+  destination: 'meta_capi',
+  timestamp: getTimestampMillis(),
+}));
+```
+
+These logs appear in Cloud Logging and can be exported to BigQuery for compliance reporting. Your DPO can query: "what data was stripped before reaching Meta in Q1 2025?"
+
+## Automatic PII scanning
+
+For proactive PII detection, implement a scan that runs on every event:
+
+```javascript
+// Variable template: detect_pii_in_parameters
+// Returns true if any event parameter looks like PII
+
+const getEventData = require('getEventData');
+const getAllEventData = require('getAllEventData');
+const JSON = require('JSON');
+
+const allData = getAllEventData();
+const dataString = JSON.stringify(allData);
+
+const patterns = [
+  /\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z]{2,}\b/i, // email
+  /\b\+?[\d\s\-\(\)]{10,15}\b/,                           // phone
+  /\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b/,                      // SSN (US)
+];
+
+for (let i = 0; i < patterns.length; i++) {
+  if (patterns[i].test(dataString)) {
+    return true; // PII detected
+  }
+}
+return false;
+```
+
+Use this as a conditional in a tag that fires when PII is detected, sending an alert to Cloud Logging or a Slack webhook. This gives you visibility into PII leakage before it becomes a problem.
+
+## Common mistakes
+
+**Relying on redaction as the only PII control.** Server-side redaction is a safety net. It should not be the first line of defense. Developers should not push PII to the dataLayer, and client-side tracking should not collect it. sGTM redaction catches what slips through.
+
+**Redacting identically across all destinations.** You control the data. GA4 (which you own) can receive more data than Meta CAPI (a third party). Implement per-destination redaction rules rather than one-size-fits-all.
+
+**Hashing inconsistently.** If you hash the same email differently for Meta and Google Ads, you cannot reconcile conversions across platforms using email as the key. Define normalization rules (lowercase, trim, no dots in Gmail local part) and apply them consistently.
+
+**Not logging what was redacted.** Without an audit trail, you cannot demonstrate to a regulator or auditor that PII was removed before reaching a third party. Log redaction events.
+
+**Treating redaction as a performance-free operation.** String replacement and regex matching on every event adds milliseconds. Not significant for most deployments, but worth knowing at very high event volumes.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Event Enrichment"
+    description="The complement to redaction — adding data after removing what should not be shared."
+    href="/server-side/advanced/event-enrichment/"
+  />
+  <LinkCard
+    title="User Stitching"
+    description="Handling identity data safely — hashing and normalization before storage."
+    href="/server-side/advanced/user-stitching/"
+  />
+  <LinkCard
+    title="Facebook Conversions API"
+    description="Meta-specific hashing requirements and match quality optimization."
+    href="/server-side/tags/facebook-capi/"
+  />
+  <LinkCard
+    title="Monitoring & Logging"
+    description="Setting up audit logs for compliance and redaction tracking."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+</CardGrid>

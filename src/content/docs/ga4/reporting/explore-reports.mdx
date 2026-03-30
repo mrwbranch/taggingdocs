@@ -1,6 +1,205 @@
 ---
 title: "Explore Reports"
-description: "Building custom explorations for deeper analysis."
+description: "Build custom explorations in GA4 — free-form, funnel, path, segment overlap, and cohort analysis with custom segments and dimensions."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Explorations are GA4's custom analysis workspace. Unlike standard reports with fixed formats, explorations let you define your own dimensions, metrics, segments, and visualizations to answer specific questions. They support analysis that standard reports cannot provide: custom funnels, path analysis, segment overlap, cohort retention, and flexible pivot tables.
+
+Every serious GA4 analysis eventually lives in Explorations.
+
+## Exploration types
+
+**Free form** — a drag-and-drop table with flexible dimensions, metrics, and optional visualizations (scatter plot, bar chart, line chart, geo map, pie chart).
+
+**Funnel exploration** — visualize conversion rates across a defined multi-step user journey. Supports both open and closed funnel modes.
+
+**Path exploration** — explore the sequence of events before or after a specified starting point, in a tree diagram.
+
+**Segment overlap** — Venn diagram showing users who belong to multiple segments simultaneously.
+
+**User explorer** — individual user-level session timelines. Browse specific users' event sequences.
+
+**Cohort exploration** — retention analysis by cohort, similar to the standard Retention report but with more customization options.
+
+**User lifetime** — cumulative metrics (revenue, sessions, conversions) over a user's lifetime from first visit.
+
+## The exploration interface
+
+The exploration workspace has three panels:
+
+**Variables panel** (left) — the pool of dimensions, metrics, and segments available for the exploration. Adding a dimension here makes it available to use; it does not automatically appear in the visualization.
+
+**Tab settings panel** (middle) — configuration for the current tab: which dimensions appear as rows/columns, which metrics are calculated, what visualization is shown, and filters applied.
+
+**Canvas** (right) — the visualization output.
+
+This structure confuses new users. Adding something to Variables does not display it — you also need to drag it from Variables into the Tab Settings rows/columns/values areas.
+
+## Creating a free form exploration
+
+<Steps>
+1. Go to **Explore → Create new exploration**.
+
+2. Select **Free form**.
+
+3. Click the **+** next to Dimensions in the Variables panel. Search for and add the dimensions you need.
+
+4. Click the **+** next to Metrics to add the metrics you need.
+
+5. Drag a dimension from Variables to **Rows** in the Tab Settings panel.
+
+6. Drag a metric to **Values**.
+
+7. The canvas updates with your table.
+</Steps>
+
+### Common free-form configurations
+
+**Top pages by engagement time**:
+- Row dimension: Page path
+- Values: Views, Engagement time (median), Unique users
+- Sort: Engagement time descending
+
+**Conversion rate by device category**:
+- Row dimension: Device category
+- Values: Sessions, Conversions, Conversion rate
+- Visualization: Bar chart
+
+**Revenue by source/medium over time**:
+- Row dimension: Date
+- Column dimension: Session source/medium
+- Values: Purchase revenue
+- Visualization: Line chart
+
+## Segments in explorations
+
+Segments are the most powerful feature of explorations. They let you compare two or more groups of users or sessions across all your metrics.
+
+### Segment types
+
+**User segments** — users who match conditions based on their entire event history (across sessions, across time).
+
+**Session segments** — sessions that match conditions within a single session.
+
+**Event segments** — event occurrences that match conditions.
+
+### Creating a segment
+
+<Steps>
+1. Click the **+** next to Segments in the Variables panel.
+
+2. Select the segment type.
+
+3. Build conditions: choose a dimension or event, operator, and value.
+
+4. For multi-condition segments: add AND conditions within a group, or add OR groups.
+
+5. Name the segment and save.
+
+6. Drag the segment to the **Segments** area in Tab Settings.
+</Steps>
+
+### Segment examples
+
+**Purchasers**: Users where event = `purchase` at any point
+
+**High-value purchasers**: Users where event = `purchase` AND `value` > 100
+
+**Mobile users from organic search**: Sessions where device category = "mobile" AND session source = "google" AND session medium = "organic"
+
+**Users who viewed 3+ pages**: Sessions where event count for `page_view` ≥ 3
+
+## Filters in explorations
+
+Filters narrow the data in the exploration without creating named segments. Apply them in the Tab Settings panel under "Filters."
+
+Filters operate on the full exploration dataset. They are less flexible than segments (you cannot compare filtered vs. unfiltered) but simpler to apply for one-off drill-downs.
+
+**Common filter uses**:
+- Exclude "(not set)" dimension values
+- Focus on a specific date range within a longer exploration
+- Narrow to a specific country or device type
+
+## Applying date ranges
+
+Explorations have their own date range, independent of the property-level date range in standard reports. Set it in the top right of the exploration.
+
+You can also add a comparison date range. When comparing periods, GA4 shows the percentage change alongside each metric.
+
+## Sampling in explorations
+
+Explorations are subject to sampling for large datasets. The sampling indicator appears in the top right of the canvas — a shield icon with a percentage.
+
+When you see sampling:
+1. **Narrow the date range** — the single most effective way to reduce sampling
+2. **Apply segment or filter conditions** — reduces the dataset before sampling occurs
+3. **Export to BigQuery** — BigQuery does not sample
+
+<Aside type="caution">
+Sampled explorations can produce misleading numbers, especially for specific segments or low-frequency events. A 10% sample of a segment that comprises 5% of total users means you are analyzing 0.5% of actual data. Always check the sampling indicator when making important decisions from exploration data.
+</Aside>
+
+## Sharing and exporting explorations
+
+**Sharing**: Explorations can be shared with specific GA4 users in the same property. The shared exploration shows the same data but each user can edit their own copy without affecting the original.
+
+**Exporting**: Export exploration data as CSV or Google Sheets. The export includes only the visible rows (up to the row limit), not the full unsampled dataset.
+
+**Scheduled reports**: GA4 does not support scheduled exploration exports natively. For automated reporting, use the GA4 Data API or connect Looker Studio to the property.
+
+## Row limits
+
+Explorations show up to 500 rows by default. You can increase this to 10,000 rows in Tab Settings under "Show rows."
+
+For dimensions with more than 10,000 unique values, use BigQuery. Explorations cannot return more than 10,000 rows.
+
+## Exploration limits
+
+| Limit | Value |
+|-------|-------|
+| Explorations per property | 200 per user |
+| Segments per exploration | 10 |
+| Dimensions per exploration | 20 |
+| Metrics per exploration | 20 |
+| Rows returned | Up to 10,000 |
+
+## Common mistakes
+
+### Adding dimensions to Variables but not to Tab Settings
+
+This is the most common confusion for new Explore users. Adding a dimension to the Variables panel makes it available — it does not display it. You must also drag it from Variables to the Rows or Columns area in Tab Settings for it to appear in the visualization.
+
+### Using user segments when you need session segments
+
+User segments include all sessions for users who match the condition, even sessions before or after the matching event. "Users who purchased" includes all their browsing sessions, not just the session with the purchase. If you want to analyze "sessions that resulted in a purchase," use a session segment.
+
+### Not checking sampling before reporting numbers
+
+Presenting sampled exploration results as exact figures to stakeholders is a common and damaging mistake. If the sampling indicator shows 15%, your numbers have ±15% uncertainty (optimistically). Always report sampled data as estimates with the sampling caveat, or narrow the date range to eliminate sampling.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Funnel Exploration"
+    description="Build multi-step conversion funnels in the exploration workspace."
+    href="/ga4/reporting/funnel-exploration/"
+  />
+  <LinkCard
+    title="Path Exploration"
+    description="Visualize event sequences and user journeys."
+    href="/ga4/reporting/path-exploration/"
+  />
+  <LinkCard
+    title="Segment Overlap"
+    description="Identify users who belong to multiple segments."
+    href="/ga4/reporting/segment-overlap/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="BigQuery alternatives for unsampled analysis."
+    href="/ga4/bigquery/common-queries/"
+  />
+</CardGrid>

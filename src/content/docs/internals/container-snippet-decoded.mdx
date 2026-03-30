@@ -1,6 +1,259 @@
 ---
 title: "Container Snippet Decoded"
-description: "Line-by-line breakdown of what the GTM container snippet actually does."
+description: "Line-by-line breakdown of every part of the GTM container snippet — what each character does, why the IIFE pattern is used, how async loading works, what the noscript iframe accomplishes, and what happens when you modify the snippet."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+The GTM container snippet is 13 lines of obfuscated JavaScript that most people paste into their site without reading. They know it loads GTM. They do not know what each part does, why the IIFE pattern exists, or what happens if they modify it. This article changes that.
+
+Here is the standard GTM snippet from Google:
+
+```html
+<!-- Google Tag Manager -->
+<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+})(window,document,'script','dataLayer','GTM-XXXX');</script>
+<!-- End Google Tag Manager -->
+```
+
+Let us expand and annotate every single part.
+
+## The expanded and annotated snippet
+
+```javascript
+(function(w, d, s, l, i) {
+  // PARAMETER MEANINGS:
+  // w = window (the global object)
+  // d = document
+  // s = 'script' (the string, used for tag name lookups)
+  // l = 'dataLayer' (the dataLayer variable name — configurable)
+  // i = 'GTM-XXXX' (your container ID)
+  //
+  // These are passed as arguments at the bottom:
+  // })(window, document, 'script', 'dataLayer', 'GTM-XXXX');
+  //
+  // The IIFE (Immediately Invoked Function Expression) wrapping
+  // serves two purposes:
+  // 1. Creates a new scope — local variables (f, j, dl) don't pollute window
+  // 2. Minifies to 1 and 2 character variable names with no collision risk
+
+  // ── Step 1: Initialize the dataLayer array ──────────────────────────────
+  w[l] = w[l] || [];
+  // Equivalent to: window.dataLayer = window.dataLayer || [];
+  //
+  // The OR pattern is critical: if code BEFORE the GTM snippet already
+  // created window.dataLayer and pushed events to it, those events are
+  // preserved. If dataLayer doesn't exist yet, create an empty array.
+  //
+  // This is why you can safely push to dataLayer before GTM loads:
+  //   window.dataLayer = window.dataLayer || [];
+  //   dataLayer.push({ user_id: '12345' });
+  //   // ... GTM snippet here ...
+
+  // ── Step 2: Push the gtm.js event ──────────────────────────────────────
+  w[l].push({
+    'gtm.start': new Date().getTime(),
+    event: 'gtm.js'
+  });
+  // This push records the exact timestamp (milliseconds since epoch) when
+  // the GTM snippet began executing. GTM uses this internally for timing
+  // measurements and the gtm.start variable.
+  //
+  // The 'event' key is special — GTM's Custom Event trigger listens for
+  // this exact key. However, 'gtm.js' is an internal event name that
+  // GTM reserves for its own bootstrap process. You cannot trigger
+  // user-defined tags on this event.
+  //
+  // At this point, GTM has not loaded yet. This push just goes into the
+  // raw array — it will be replayed when the container JS arrives.
+
+  // ── Step 3: Find the first script tag in the DOM ────────────────────────
+  var f = d.getElementsByTagName(s)[0];
+  // Equivalent to: var f = document.getElementsByTagName('script')[0];
+  //
+  // This finds the FIRST <script> element on the page.
+  // The GTM script tag will be inserted immediately before it.
+  // This insertion point ensures GTM loads as early as possible —
+  // before any other scripts on the page.
+
+  // ── Step 4: Create a new script element ────────────────────────────────
+  var j = d.createElement(s);
+  // Equivalent to: var j = document.createElement('script');
+
+  // ── Step 5: Handle custom dataLayer name ───────────────────────────────
+  var dl = l != 'dataLayer' ? '&l=' + l : '';
+  // GTM supports a custom dataLayer name other than 'dataLayer'.
+  // If you configured a custom name (e.g., 'myDataLayer'), the dl variable
+  // becomes '&l=myDataLayer' and is appended to the container URL.
+  // If you're using the default 'dataLayer', dl is empty.
+  //
+  // Custom dataLayer names are rarely used in practice — mostly for
+  // sites with name conflicts or multi-container setups where you need
+  // to isolate each container's data.
+
+  // ── Step 6: Set async flag ──────────────────────────────────────────────
+  j.async = true;
+  // This makes the container script download asynchronously.
+  // The browser does NOT wait for the container JS to download before
+  // continuing to parse and render the HTML.
+  //
+  // This is essential for performance. Without async, GTM would block
+  // all page rendering until the container script downloads from Google's
+  // servers — potentially 100-500ms on a slow connection.
+  //
+  // The consequence: there is a gap between when the snippet runs
+  // and when GTM's container JS actually loads. Events pushed to
+  // the dataLayer during this gap are queued and replayed.
+
+  // ── Step 7: Set the script source URL ──────────────────────────────────
+  j.src = 'https://www.googletagmanager.com/gtm.js?id=' + i + dl;
+  // This is the URL that downloads your specific GTM container.
+  // The container file is cached by Google's CDN and served with
+  // cache headers — typically cached for 15 minutes.
+  //
+  // The container file contains all your tags, triggers, and variables
+  // as compiled JavaScript. It changes whenever you publish a new version.
+
+  // ── Step 8: Insert the script before the first script tag ──────────────
+  f.parentNode.insertBefore(j, f);
+  // This actually adds the new <script> element to the DOM.
+  // Inserting before the first existing script tag ensures:
+  // 1. The container loads early in the page lifecycle
+  // 2. The script tag insertion is safe — there's always at least
+  //    one script tag present (the GTM snippet itself)
+
+})(window, document, 'script', 'dataLayer', 'GTM-XXXX');
+// These are the arguments passed into the IIFE:
+// window → w, document → d, 'script' → s, 'dataLayer' → l, 'GTM-XXXX' → i
+```
+
+## The noscript fallback
+
+```html
+<!-- Google Tag Manager (noscript) -->
+<noscript>
+  <iframe src="https://www.googletagmanager.com/ns.html?id=GTM-XXXX"
+          height="0" width="0"
+          style="display:none;visibility:hidden">
+  </iframe>
+</noscript>
+<!-- End Google Tag Manager (noscript) -->
+```
+
+This block renders a hidden 1x1 iframe for browsers with JavaScript disabled. In this context, the iframe makes a network request to Google's servers, which serves the GTM noscript environment.
+
+**What can GTM do in noscript mode?**
+
+Almost nothing useful. Without JavaScript:
+- No data from the page (no dataLayer, no variables, no dynamic values)
+- No event-based tags (Custom Event, Click, Form, etc.)
+- Only Page View triggers can fire
+- Only Custom Image tags can fire (they are just `<img>` elements)
+
+In 2026, essentially no real web user has JavaScript disabled. The browsers that receive `<noscript>` content are primarily SEO crawlers and certain accessibility tools. Google still recommends including the noscript block, presumably for edge case completeness and audit tool compliance.
+
+**Keep it? Yes.** It is five lines of HTML with zero performance impact. Not including it causes some audit tools to flag the installation. Include it immediately after the opening `<body>` tag.
+
+## What happens when GTM modifies the snippet
+
+### Adding `defer` to the script tag
+
+Some developers add `defer` to the GTM snippet, hoping to improve performance scores:
+
+```javascript
+// WRONG: adding defer manually
+j.defer = true;
+j.async = true;
+```
+
+`async` and `defer` together: scripts with both `async` and `defer` behave as async scripts (the `async` attribute wins). Adding `defer` has no effect because `j.async = true` is already set.
+
+### Removing `async`
+
+```javascript
+// WRONG: removing async makes GTM blocking
+// j.async = true;  ← removed
+```
+
+Without `async`, the browser stops parsing HTML until the container script downloads. This is the "render-blocking" behavior that degrades performance metrics. Never remove the async flag.
+
+### Deferring the entire snippet
+
+Some lazy-loading approaches wrap the entire GTM snippet in a delayed execution (after user interaction, after a timeout, etc.):
+
+```javascript
+// Delayed GTM loading pattern
+window.addEventListener('click', function loadGTM() {
+  window.removeEventListener('click', loadGTM);
+  // GTM snippet here
+}, {once: true});
+```
+
+**Consequences**:
+- All events before the trigger condition (first click) are not tracked
+- Consent mode defaults are not established until GTM loads — potential compliance issue
+- The dataLayer queue may contain many events by the time GTM loads; replay is generally fine but test carefully
+
+For most sites, delayed GTM loading is unnecessary complexity. The performance impact of GTM's async load is minimal compared to the tracking data you lose.
+
+## The container file: what GTM.js actually contains
+
+When the `gtm.js` request completes, the browser receives a JavaScript file that contains:
+- Your container's compiled tag, trigger, and variable definitions
+- GTM's runtime engine (the code that evaluates triggers, manages the data model, fires tags)
+- Any template code from Community Gallery templates in your container
+- References to third-party libraries your tags depend on (loaded as needed)
+
+This file is specific to your container. It changes every time you publish a new version. The URL (`gtm.js?id=GTM-XXXX`) always serves the latest published version.
+
+You can inspect your container file directly:
+```
+https://www.googletagmanager.com/gtm.js?id=GTM-XXXX
+```
+
+It is minified but readable enough to understand the structure. Each trigger, tag, and variable has a numeric ID that maps to your GTM configuration.
+
+## Container loading and the replay mechanism
+
+After the container JS downloads and executes, GTM:
+
+1. Hijacks `Array.prototype.push` on `window.dataLayer` (replaces the native push with a custom implementation that processes events)
+2. Processes every item already in the `dataLayer` array (the replay)
+3. Now listens for new pushes and processes them in real time
+
+The replay is what makes the pre-GTM push pattern work. Code that runs before the container loads pushes to the raw array. When the container loads, it reads and processes all of those pushes as if they happened during GTM's execution.
+
+**One subtlety about the push override**: After GTM loads, calling `dataLayer.push()` no longer calls `Array.prototype.push`. It calls GTM's custom implementation that processes the push through the data model and event system. The behavior looks identical from the outside — but `dataLayer.push()` post-GTM is a different function than pre-GTM.
+
+You can verify this:
+
+```javascript
+// Before GTM loads
+typeof dataLayer.push  // "function" — the native Array.prototype.push
+
+// After GTM loads
+typeof dataLayer.push  // "function" — but now it's GTM's custom implementation
+dataLayer.push.toString() // Shows GTM's custom function body, not native code
+```
+
+## Common mistakes
+
+**Modifying the snippet src URL.** Some implementations point the script source to a custom domain or CDN. This is legitimate for performance optimization, but be aware: custom loader URLs must serve GTM's container JS with the correct content type and CORS headers.
+
+**Placing the noscript block in `<head>` instead of after `<body>`.** `<noscript>` inside `<head>` has different rendering behavior across browsers. Google's documentation specifies it goes after the `<body>` tag, and this placement is what makes the iframe technique work correctly.
+
+**Duplicating the snippet.** Two GTM snippets with the same container ID loads the container twice. All events fire twice, all cookies get duplicate values, all tags execute twice. The GTM Preview mode will show doubled events. Check for duplicate snippet installations via `console.log(Object.keys(window.google_tag_manager))` — you should see exactly one key.
+
+**Changing 'dataLayer' to a custom name without updating all references.** If you customize `l = 'myDataLayer'`, every `dataLayer.push()` in your codebase needs to become `myDataLayer.push()`. This includes code in your CMS themes, e-commerce platform, and any hardcoded tracking calls. Missed references push to `window.dataLayer` which GTM is no longer monitoring.
+
+---
+
+<CardGrid>
+  <LinkCard title="Data Model Deep Dive" href="/internals/data-model-deep-dive/" description="What GTM does with the dataLayer after the container snippet executes." />
+  <LinkCard title="Race Conditions and Tag Timing" href="/internals/race-conditions-tag-timing/" description="How the async loading gap creates timing issues." />
+  <LinkCard title="Dual Deployment Conflicts" href="/internals/dual-deployment-conflicts/" description="What happens when the GTM snippet coexists with hardcoded gtag.js." />
+</CardGrid>

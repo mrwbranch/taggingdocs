@@ -1,6 +1,203 @@
 ---
 title: "Shopify Advanced"
-description: "Advanced Shopify tracking patterns — subscriptions, multi-currency, and B2B."
+description: "Advanced Shopify tracking patterns — post-purchase upsells, subscription products, multi-currency, Shopify Markets, B2B tracking, and server-side integration."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Once basic ecommerce tracking is in place, Shopify stores encounter a set of advanced tracking challenges: post-purchase upsell flows that add items after the initial order, subscription products with recurring billing, multi-currency stores where the same order could be in any of a dozen currencies, and B2B stores with negotiated pricing that differs from the public catalog.
+
+This guide covers the patterns for each.
+
+## Post-purchase upsell tracking
+
+Post-purchase upsell apps (Zipify OCU, Rebuy, Carthook) present offers after the initial checkout is complete. When a customer accepts an upsell, it creates a second order or modifies the original order — depending on the app's implementation.
+
+### Tracking approach
+
+Fire a second `purchase` event for the upsell transaction. Use the upsell order's transaction ID, not the original order's ID.
+
+```javascript
+// Fired when customer accepts a post-purchase upsell
+// This is a separate transaction from the original order
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: upsellOrderId,    // NOT the original order ID
+    value: parseFloat(upsellTotal),
+    currency: shopCurrency,
+    affiliation: 'Post-Purchase Upsell',   // identify the upsell in GA4
+    items: upsellItems.map((item, i) => ({
+      item_id: item.variant_sku || String(item.variant_id),
+      item_name: item.product_title,
+      price: parseFloat(item.price),
+      quantity: item.quantity,
+      index: i,
+      affiliation: 'Post-Purchase Upsell'
+    }))
+  }
+});
+```
+
+Most post-purchase upsell apps fire their own JavaScript when the upsell is accepted. Check the app's documentation for the available JavaScript events or callbacks. If the app doesn't provide a callback, you may need to use a Custom Pixel in the post-purchase extension context.
+
+## Subscription product tracking
+
+WooCommerce Subscriptions has a direct equivalent in Shopify — subscription apps like Recharge, Bold Subscriptions, or Shopify's native subscriptions handle recurring billing.
+
+### First order vs. renewal distinction
+
+Track first subscription orders and renewals differently. The GA4 `purchase` event doesn't have a built-in subscription parameter, but you can add custom context:
+
+```javascript
+// First subscription order (happens on your storefront)
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: 'ORD-2024-98765',
+    value: 49.99,
+    currency: 'USD',
+    subscription_type: 'new',          // custom parameter
+    subscription_interval: 'monthly',  // custom parameter
+    items: [{
+      item_id: 'SUB-COFFEE-MONTHLY',
+      item_name: 'Monthly Coffee Subscription',
+      price: 49.99,
+      quantity: 1,
+      item_category: 'Subscriptions'
+    }]
+  }
+});
+
+// Renewal order (happens server-side via billing system)
+// Use Measurement Protocol — the customer isn't in a browser
+// See the refund article for the MP pattern
+```
+
+Renewals happen via Shopify's billing system without user browser activity. They must be tracked server-side via GA4 Measurement Protocol or sGTM with a Shopify webhook.
+
+## Multi-currency tracking
+
+Shopify Markets allows merchants to sell in multiple currencies. The challenge: the `value` and `price` parameters in GA4 events must use a consistent currency for meaningful aggregation.
+
+### Strategy: always use presentment currency
+
+Send the currency the customer sees, not the shop's base currency. GA4 handles currency conversion for reporting.
+
+```javascript
+// Shopify makes the presentment currency available via JavaScript
+// In theme.liquid: {{ shop.currency }} is the base currency
+// For presentment currency, use Shopify.currency.active
+
+var presentmentCurrency = Shopify.currency?.active || '{{ shop.currency }}';
+var presentmentPrice = Shopify.currency
+  ? convertPrice(basePrice, '{{ shop.currency }}', Shopify.currency.active)
+  : basePrice;
+
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: presentmentCurrency,
+    value: presentmentPrice,
+    items: [{
+      item_id: '{{ product.selected_or_first_available_variant.sku }}',
+      item_name: '{{ product.title | escape }}',
+      price: presentmentPrice,
+      quantity: 1
+    }]
+  }
+});
+```
+
+On the thank you page, Shopify's `order.currency` is the presentment currency — the currency the customer used to pay:
+
+```liquid
+{% if first_time_accessed %}
+<script>
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: '{{ order.order_number }}',
+    value: {{ order.total_price | money_without_currency }},
+    currency: '{{ order.currency }}',   // presentment currency
+    items: [...]
+  }
+});
+</script>
+{% endif %}
+```
+
+## Shopify Markets: different GTM containers per market
+
+If your markets have different GA4 properties or tracking requirements, you can conditionally load different GTM containers based on the active market.
+
+```liquid
+{%- assign market = localization.market -%}
+{%- if market.handle == 'us' -%}
+  {%- assign gtm_id = 'GTM-US-XXXXX' -%}
+{%- elsif market.handle == 'eu' -%}
+  {%- assign gtm_id = 'GTM-EU-XXXXX' -%}
+{%- else -%}
+  {%- assign gtm_id = 'GTM-DEFAULT-XXXXX' -%}
+{%- endif -%}
+
+<script>/* GTM with {{ gtm_id }} */</script>
+```
+
+## User identification: customerId for returning customers
+
+Shopify exposes the customer ID in JavaScript for logged-in customers. Use it as the `user_id` for cross-device tracking.
+
+```javascript
+// In theme.liquid — only output if customer is logged in
+{% if customer %}
+window.dataLayer = window.dataLayer || [];
+dataLayer.push({
+  user_id: '{{ customer.id }}',
+  user_type: 'logged_in',
+  user_order_count: {{ customer.orders_count }},
+  user_email_hash: '{{ customer.email | md5 }}'   // hashed — never raw email
+});
+{% endif %}
+```
+
+`ShopifyAnalytics.meta.page.customerId` is an alternative source for the customer ID if you're working inside a Custom Pixel context.
+
+## Server-side tracking with Stape
+
+Stape is the most common server-side tracking solution for Shopify stores without in-house sGTM infrastructure. The Stape Shopify app adds a server-side layer that:
+1. Captures Shopify webhook events (orders, refunds)
+2. Forwards them to your sGTM container
+3. Sends GA4 events server-side via the GA4 tag in sGTM
+
+This removes client-side checkout tracking from the equation entirely — your purchase data doesn't depend on Custom Pixels, browser JavaScript, or ad blockers.
+
+## Common mistakes
+
+**Using the same transaction_id for post-purchase upsells.** If you push a second `purchase` event with the original order ID, GA4 deduplicates it as the same transaction. The upsell revenue is lost. Always use the upsell order's own ID.
+
+**Not accounting for currency conversion in multi-currency stores.** If your base currency is USD but a customer pays in EUR, using the EUR price with `currency: 'USD'` means GA4 reports the wrong revenue. Send the currency that matches the value.
+
+**Tracking subscription renewals client-side.** Renewals happen without user browser activity. There is no browser to push to the dataLayer. Server-side tracking (Measurement Protocol or sGTM) is the only way to track renewals in GA4.
+
+<CardGrid>
+  <LinkCard
+    title="Shopify Custom Pixels"
+    description="Checkout tracking for standard Shopify merchants."
+    href="/datalayer/platforms/shopify-custom-pixels/"
+  />
+  <LinkCard
+    title="Shopify Checkout Extensibility"
+    description="The checkout tracking migration from checkout.liquid."
+    href="/datalayer/platforms/shopify-checkout-extensibility/"
+  />
+  <LinkCard
+    title="refund"
+    description="Server-side refund tracking via Measurement Protocol."
+    href="/datalayer/ecommerce/refund/"
+  />
+</CardGrid>

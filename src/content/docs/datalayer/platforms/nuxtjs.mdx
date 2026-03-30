@@ -1,6 +1,254 @@
 ---
 title: "Nuxt.js"
-description: "DataLayer implementation guide for Nuxt.js applications."
+description: "Complete dataLayer implementation for Nuxt 3 — GTM plugin, route middleware for page tracking, composable-based tracking, and TypeScript support."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Nuxt 3 is a Vue meta-framework with server-side rendering, file-based routing, and a composables system that maps well to analytics tracking patterns. The main implementation challenge is the same as any SPA: route changes don't trigger full page loads, so you need explicit tracking for each navigation.
+
+## GTM installation as a Nuxt plugin
+
+Create a plugin that loads GTM and initializes the dataLayer.
+
+```typescript
+// plugins/gtm.client.ts
+// The .client suffix ensures this only runs in the browser
+export default defineNuxtPlugin(() => {
+  const config = useRuntimeConfig();
+  const gtmId = config.public.gtmId;
+
+  if (!gtmId) {
+    console.warn('GTM ID not configured');
+    return;
+  }
+
+  // Initialize dataLayer
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ 'gtm.start': new Date().getTime(), event: 'gtm.js' });
+
+  // Load GTM script
+  const script = document.createElement('script');
+  script.async = true;
+  script.src = `https://www.googletagmanager.com/gtm.js?id=${gtmId}`;
+  document.head.appendChild(script);
+
+  // Add noscript fallback
+  const noscript = document.createElement('noscript');
+  noscript.innerHTML = `<iframe src="https://www.googletagmanager.com/ns.html?id=${gtmId}" height="0" width="0" style="display:none;visibility:hidden"></iframe>`;
+  document.body.insertBefore(noscript, document.body.firstChild);
+});
+```
+
+Configure the GTM ID in your `nuxt.config.ts`:
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  runtimeConfig: {
+    public: {
+      gtmId: process.env.GTM_ID || '',
+    },
+  },
+});
+```
+
+## Route middleware for page tracking
+
+Use Nuxt's router middleware to fire page view events after each navigation.
+
+```typescript
+// middleware/analytics.global.ts
+export default defineNuxtRouteMiddleware((to, from) => {
+  // Skip on server-side
+  if (process.server) return;
+
+  // Skip the initial navigation (GTM handles the first page view)
+  if (!from.name) return;
+
+  // Use nextTick to ensure the new page has rendered
+  nextTick(() => {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'page_view',
+      page_path: to.fullPath,
+      page_title: document.title,
+    });
+  });
+});
+```
+
+The `global` suffix on the middleware filename means it runs on every route change automatically.
+
+## Composable for dataLayer pushes
+
+Create a composable that provides a type-safe `pushDataLayer` function throughout your application.
+
+```typescript
+// composables/useDataLayer.ts
+interface EcommerceItem {
+  item_id: string;
+  item_name: string;
+  item_brand?: string;
+  item_category?: string;
+  item_variant?: string;
+  price: number;
+  quantity: number;
+  index?: number;
+}
+
+interface DataLayerEvent {
+  event: string;
+  [key: string]: unknown;
+}
+
+export function useDataLayer() {
+  function push(data: DataLayerEvent) {
+    if (process.server) return; // Never push server-side
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(data);
+  }
+
+  function pushEcommerceEvent(data: DataLayerEvent) {
+    push({ ecommerce: null } as unknown as DataLayerEvent);
+    push(data);
+  }
+
+  function trackViewItem(product: {
+    id: string;
+    name: string;
+    brand?: string;
+    category?: string;
+    variant?: string;
+    price: number;
+    currency: string;
+  }) {
+    pushEcommerceEvent({
+      event: 'view_item',
+      ecommerce: {
+        currency: product.currency,
+        value: product.price,
+        items: [{
+          item_id: product.id,
+          item_name: product.name,
+          item_brand: product.brand,
+          item_category: product.category,
+          item_variant: product.variant,
+          price: product.price,
+          quantity: 1,
+        }],
+      },
+    });
+  }
+
+  function trackAddToCart(item: EcommerceItem, currency: string) {
+    pushEcommerceEvent({
+      event: 'add_to_cart',
+      ecommerce: {
+        currency,
+        value: item.price * item.quantity,
+        items: [item],
+      },
+    });
+  }
+
+  return {
+    push,
+    pushEcommerceEvent,
+    trackViewItem,
+    trackAddToCart,
+  };
+}
+```
+
+Usage in a component:
+
+```vue
+<!-- pages/products/[slug].vue -->
+<script setup lang="ts">
+const { data: product } = await useFetch(`/api/products/${route.params.slug}`);
+const { trackViewItem } = useDataLayer();
+
+onMounted(() => {
+  if (product.value) {
+    trackViewItem({
+      id: product.value.sku,
+      name: product.value.name,
+      brand: product.value.brand,
+      category: product.value.category,
+      price: product.value.price,
+      currency: 'USD',
+    });
+  }
+});
+</script>
+
+<template>
+  <div>
+    <h1>{{ product?.name }}</h1>
+    <AddToCartButton :product="product" />
+  </div>
+</template>
+```
+
+## The noscript tag in app.vue
+
+For proper GTM installation, add the noscript fallback tag immediately after the opening `<body>` tag in `app.vue`:
+
+```vue
+<!-- app.vue -->
+<template>
+  <div>
+    <noscript>
+      <iframe
+        :src="`https://www.googletagmanager.com/ns.html?id=${$config.public.gtmId}`"
+        height="0"
+        width="0"
+        style="display:none;visibility:hidden"
+      />
+    </noscript>
+    <NuxtPage />
+  </div>
+</template>
+```
+
+## TypeScript configuration
+
+Extend the Window type in a global declaration file:
+
+```typescript
+// types/datalayer.d.ts
+interface Window {
+  dataLayer: Array<Record<string, unknown>>;
+}
+```
+
+Add this to your `tsconfig.json` includes:
+
+```json
+{
+  "include": ["types/**/*.d.ts"]
+}
+```
+
+## Common mistakes
+
+**Not guarding against server-side execution.** In Nuxt with SSR, code runs both on the server (Node.js) and in the browser. `window` doesn't exist on the server. Always check `process.server` or use `.client.ts` plugin suffix before accessing `window.dataLayer`.
+
+**Firing page_view on the initial load.** The GTM snippet handles the first page view via `gtm.js`. If your middleware also fires `page_view` on the first navigation from `undefined` to the entry route, you'll double-count. The `if (!from.name) return` guard in the middleware above prevents this.
+
+**Using synchronous router middleware for async data.** If your page tracking needs data that's fetched asynchronously (like product data for a product page view), push the tracking event from within the component's `onMounted` lifecycle hook rather than in middleware.
+
+<CardGrid>
+  <LinkCard
+    title="Next.js"
+    description="React's equivalent — GTM with next/script, App Router route tracking."
+    href="/datalayer/platforms/nextjs/"
+  />
+  <LinkCard
+    title="TypeScript Schemas"
+    description="Complete TypeScript types for a typed dataLayer."
+    href="/datalayer/validation/typescript-schemas/"
+  />
+</CardGrid>

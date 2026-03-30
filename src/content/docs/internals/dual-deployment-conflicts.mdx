@@ -1,6 +1,188 @@
 ---
 title: "Dual Deployment Conflicts"
-description: "What happens when both GTM and hardcoded gtag.js exist on the same page."
+description: "What happens when GTM and a hardcoded gtag.js instance coexist on the same page — double-counting, conflicting consent states, tracker collisions, and the correct architecture for each scenario."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+A surprising number of production websites have both Google Tag Manager and a hardcoded `gtag.js` snippet. Usually this happened gradually: a developer added GA4 directly in the 2021 migration, a marketer added GTM later without removing the direct GA4 install. Now there are two tracking systems sharing the same page, same cookies, and sometimes the same GA4 property.
+
+The symptoms range from doubled event counts to consent mode conflicts to attribution inconsistencies. Understanding why they happen is the first step to resolving them.
+
+## What "dual deployment" means
+
+A dual deployment occurs when both of these exist on the same page:
+
+**1. A GTM container snippet:**
+```html
+<script>(function(w,d,s,l,i){...})(window,document,'script','dataLayer','GTM-XXXX');</script>
+```
+
+**2. A direct gtag.js snippet:**
+```html
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-XXXXXXXXXX');
+</script>
+```
+
+When both are present, two separate tracking instances operate on the same page. They may or may not write to the same `dataLayer` array (they typically do, since both use `window.dataLayer` by default), but they have separate internal state and send data independently.
+
+## The double-counting problem
+
+If both GTM and a direct gtag.js instance have a GA4 tracker configured for the same property (same `G-XXXXXXXXXX` Measurement ID), **every pageview and event is counted twice**.
+
+Here is what happens at a technical level:
+
+1. The hardcoded `gtag('config', 'G-XXXXXXXXXX')` sends a `page_view` to GA4
+2. The GTM container loads, evaluates the GA4 Configuration tag, and sends another `page_view` to GA4
+3. GA4 receives both hits — from the same client, same session, milliseconds apart
+4. GA4 counts them as two separate pageviews
+
+You can verify this in the Network tab: filter for `google-analytics.com/g/collect`. If you see two hits with `en=page_view` (event name: page_view) within milliseconds of each other with the same `tid` (tracking ID), you have double-counting.
+
+The impact on metrics:
+- Sessions doubled
+- Pageviews doubled
+- If both instances also track events: every custom event doubled
+- Attribution: one of the two hits may not have the `_gl` cross-domain parameter, causing split sessions
+
+## Consent mode conflicts
+
+Dual deployments create two separate consent contexts with two separate initialization points.
+
+**Conflict scenario 1**: The hardcoded `gtag('consent', 'default', {...})` sets consent defaults, then GTM loads and sets different defaults via a tag on Consent Initialization. Two `gtag('consent', 'default')` calls — the second one may override the first for some consent types.
+
+**Conflict scenario 2**: The direct gtag.js instance initializes GA4 without consent defaults (most legacy direct implementations don't have Consent Mode configured). GTM has correct Consent Mode v2 setup. GA4 sees conflicting consent signals — one tracker with no consent setup, one with proper denied defaults.
+
+**Conflict scenario 3**: The CMP fires a consent update that reaches both trackers. But because the direct tracker was configured without Consent Mode defaults, it may have already sent hits before the update arrived — hits that the GTM-managed tracker would have correctly blocked.
+
+## Cookie conflicts
+
+Both GTM-managed GA4 and direct gtag.js set the `_ga` cookie. Under the hood, GA4 generates a Client ID when it first loads. If both trackers load simultaneously, there is a brief race condition where two Client IDs could be generated and written to `_ga`.
+
+In practice, the `_ga` cookie uses a specific format and both trackers read the existing cookie value if present. However, edge cases exist:
+- One tracker may read a stale cookie while the other is writing a fresh one
+- The cookie domain configuration may differ between the two implementations
+- Server-side GA4 clients may interpret the `_ga` cookie differently when two instances are competing
+
+## The valid exception: separate property IDs
+
+Dual deployment is legitimate when the two instances track **different GA4 properties**:
+
+```html
+<!-- Direct implementation: internal analytics property (not in GTM) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-INTERNAL1"></script>
+<script>
+  gtag('js', new Date());
+  gtag('config', 'G-INTERNAL1', {send_page_view: false});
+</script>
+
+<!-- GTM: marketing property, handled through GTM for marketer access -->
+<script>(function(w,d,s,l,i){...})(window,document,'script','dataLayer','GTM-XXXX');</script>
+```
+
+This is not a conflict — it is intentional multi-property tracking. The two instances send data to different GA4 properties and do not interfere with each other (assuming Measurement IDs are different).
+
+## The specific valid pattern: consent defaults via gtag.js, tracking via GTM
+
+A commonly recommended pattern for consent compliance: use a minimal hardcoded `gtag.js` call **only** to set consent defaults, then use GTM for all actual tracking.
+
+```html
+<head>
+  <!-- Minimal gtag for consent defaults only -->
+  <!-- Note: do NOT load gtag.js full library here — just use the dataLayer pattern -->
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('consent', 'default', {
+      'analytics_storage': 'denied',
+      'ad_storage': 'denied',
+      'ad_user_data': 'denied',
+      'ad_personalization': 'denied',
+      'security_storage': 'granted',
+      'wait_for_update': 500
+    });
+  </script>
+
+  <!-- GTM snippet — handles all actual tracking -->
+  <script>(function(w,d,s,l,i){...})(window,document,'script','dataLayer','GTM-XXXX');</script>
+</head>
+```
+
+This pattern is NOT a dual deployment. The consent default code does not load `gtag.js` — it only pushes to `window.dataLayer`. GTM's own `gtag()` implementation (loaded with the container) processes these pushes. No separate tracker instance is created.
+
+The key distinction: **loading `gtag.js` via a separate `<script src="...">` tag creates a second tracker**. Calling `gtag()` via the dataLayer (without loading `gtag.js`) does not.
+
+## Diagnosing a dual deployment
+
+**Browser console check:**
+
+```javascript
+// Check how many GA4 tracker instances exist
+var gtmData = window.google_tag_data;
+if (gtmData && gtmData.gl) {
+  console.log('Google Tag instances:', Object.keys(gtmData.gl));
+}
+// If you see multiple G-XXXXXXXXXX IDs, you have multiple trackers
+
+// Check dataLayer for multiple initialization events
+window.dataLayer.filter(d => d.event === 'gtm.js' || d['gtm.start'])
+// More than one entry suggests GTM was loaded twice OR
+// a second snippet exists alongside GTM
+```
+
+**Network tab check:**
+
+Filter for `google-analytics.com/g/collect`. Look at the `tid` parameter in requests. If you see two hits within 100ms with the same `tid` and `en=page_view`, you have double-counting.
+
+**Tag Assistant check:**
+
+Google's Tag Assistant Chrome extension shows all Google Tag instances on a page. If it shows two GA4 configurations with the same property ID, you have a dual deployment.
+
+## Resolving a dual deployment
+
+**Step 1: Identify what each implementation does.**
+
+List all tracking tags in:
+- The hardcoded direct snippet
+- GTM container (tags list)
+
+Determine which is more complete, more recent, and better configured.
+
+**Step 2: Migrate if needed.**
+
+If GTM has more tags and better configuration, migrate anything from the direct snippet into GTM (if it isn't already there), then remove the direct snippet.
+
+If the direct snippet has critical configuration not in GTM (e.g., enhanced ecommerce via direct API calls), migrate those configurations into GTM.
+
+**Step 3: Remove the redundant implementation.**
+
+Usually this means removing the hardcoded `gtag.js` snippet from the site's `<head>` template. This requires a developer deploy.
+
+**Step 4: Verify in staging first.**
+
+After removing the direct snippet, load the page in GTM Preview mode and verify:
+- Pageview fires once, not twice
+- All custom events fire correctly
+- Consent mode is working (check the Consent tab in Preview)
+
+## Common mistakes
+
+**Removing the direct snippet breaks a feature.** Some direct implementations use `gtag()` APIs that GTM does not expose — like `gtag('event', ..., { 'event_callback': function() {...} })`. If removing the direct snippet breaks something, audit all `gtag()` calls in your codebase first.
+
+**Keeping both "just to be safe" during migration.** Double-counting during transition creates data you cannot use. Remove the legacy implementation immediately when the GTM-managed implementation is verified working.
+
+**Not updating the consent setup after removing the direct snippet.** If your consent default was `gtag('consent', 'default', {...})` in the direct snippet (loading the full `gtag.js`), and you remove that snippet, you must move the consent default call into an inline script before the GTM snippet. Do not lose the consent configuration.
+
+---
+
+<CardGrid>
+  <LinkCard title="Google Tag Auto-Loading" href="/internals/google-tag-auto-loading/" description="How GTM auto-loads a Google Tag and what this means for your consent configuration." />
+  <LinkCard title="Container Snippet Decoded" href="/internals/container-snippet-decoded/" description="Understanding what the GTM snippet does vs. what the direct gtag.js snippet does." />
+  <LinkCard title="Consent Mode GTM Setup" href="/consent/consent-mode-gtm-setup/" description="The correct inline consent default pattern that avoids dual deployment." />
+</CardGrid>

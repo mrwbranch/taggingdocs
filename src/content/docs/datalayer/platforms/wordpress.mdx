@@ -1,6 +1,246 @@
 ---
 title: "WordPress"
-description: "DataLayer implementation guide for WordPress sites."
+description: "DataLayer implementation for WordPress — plugin options, manual implementation via functions.php, WordPress hooks, and Contact Form 7 / Gravity Forms integration."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+WordPress is the most common CMS platform you'll implement GTM on. The implementation is simpler than ecommerce platforms — you're primarily tracking content interactions, not transactions — but there are enough WordPress-specific patterns (how data is structured, how scripts should be enqueued, how form plugins work) that a dedicated guide is warranted.
+
+## Plugin options
+
+Before writing custom code, evaluate these plugin options:
+
+**Google Tag Manager for WordPress (GTM4WP)** by Thomas Geiger — the gold standard. Handles GTM installation correctly, outputs a comprehensive dataLayer with page type, post categories, author data, and WooCommerce ecommerce events if WooCommerce is active. Recommended for most WordPress sites.
+
+**Google Site Kit** — Google's official plugin. Installs GA4 directly (without GTM). If your analytics setup needs GTM for multi-tool tracking or custom event logic, Site Kit's GA4 direct integration bypasses GTM entirely.
+
+**Manual implementation** — what this guide covers. More control, no plugin dependency, appropriate when you need custom dataLayer structure that plugins don't support.
+
+## Manual GTM installation
+
+Add GTM via `functions.php` in your child theme, or better, a custom plugin:
+
+```php
+<?php
+/**
+ * Plugin Name: Site Analytics
+ * Description: GTM and dataLayer implementation
+ * Version: 1.0.0
+ */
+
+define('GTM_ID', 'GTM-XXXXXXX');
+
+// Head snippet — priority 1 to load early
+function analytics_gtm_head() {
+    ?>
+    <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+    new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+    j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+    'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+    })(window,document,'script','dataLayer','<?php echo esc_js(GTM_ID); ?>');</script>
+    <?php
+}
+add_action('wp_head', 'analytics_gtm_head', 1);
+
+// Body noscript — requires wp_body_open support in theme
+function analytics_gtm_body() {
+    ?>
+    <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=<?php echo esc_attr(GTM_ID); ?>"
+    height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+    <?php
+}
+add_action('wp_body_open', 'analytics_gtm_body', 1);
+```
+
+<Aside type="note">
+`wp_body_open` is a WordPress action hook that fires immediately after the `<body>` tag opens. It requires the theme to call `wp_body_open()` in its template. Most modern themes (including Twenty Twenty-Four) support this. If your theme doesn't, you can add the noscript to the head instead — it's a minor tradeoff.
+</Aside>
+
+## DataLayer initialization with page context
+
+Push page-level data before GTM loads so it's available when the `gtm.js` event fires.
+
+```php
+function analytics_datalayer_init() {
+    global $wp_query;
+
+    $post_type = get_post_type();
+    $page_type = 'other';
+
+    if (is_front_page())          $page_type = 'homepage';
+    elseif (is_single())          $page_type = 'article';
+    elseif (is_page())            $page_type = 'page';
+    elseif (is_category())        $page_type = 'category';
+    elseif (is_tag())             $page_type = 'tag';
+    elseif (is_archive())         $page_type = 'archive';
+    elseif (is_search())          $page_type = 'search';
+    elseif (is_404())             $page_type = '404';
+
+    $data = [
+        'page_type'   => $page_type,
+        'post_type'   => $post_type ?: 'unknown',
+        'site_name'   => get_bloginfo('name'),
+    ];
+
+    // Add post-specific data on single posts/pages
+    if (is_singular()) {
+        $post = get_queried_object();
+        $categories = get_the_category($post->ID);
+        $primary_category = !empty($categories) ? $categories[0]->name : '';
+
+        $data['content_id']       = (string) $post->ID;
+        $data['content_title']    = $post->post_title;
+        $data['content_author']   = get_the_author_meta('display_name', $post->post_author);
+        $data['content_category'] = $primary_category;
+        $data['content_date']     = get_the_date('Y-m-d', $post);
+    }
+
+    // Add user data if logged in
+    if (is_user_logged_in()) {
+        $current_user = wp_get_current_user();
+        $data['user_type']  = 'logged_in';
+        $data['user_role']  = implode(',', $current_user->roles);
+    } else {
+        $data['user_type'] = 'guest';
+    }
+
+    ?>
+    <script>
+    window.dataLayer = window.dataLayer || [];
+    dataLayer.push(<?php echo wp_json_encode($data); ?>);
+    </script>
+    <?php
+}
+add_action('wp_head', 'analytics_datalayer_init', 0); // Priority 0 — before GTM snippet
+```
+
+## Contact Form 7 integration
+
+Contact Form 7 fires a JavaScript event `wpcf7mailsent` on successful submission. Listen to it and push to the dataLayer.
+
+```php
+// Add to plugin or functions.php
+function analytics_cf7_tracking() {
+    // Only enqueue on pages with CF7 forms
+    if (!function_exists('wpcf7')) return;
+    ?>
+    <script>
+    document.addEventListener('wpcf7mailsent', function(event) {
+        var formId = event.detail.contactFormId;
+        var formTitle = event.detail.inputs.find(function(i) {
+            return i.name === '_wpcf7_unit_tag';
+        });
+
+        window.dataLayer = window.dataLayer || [];
+        dataLayer.push({
+            event: 'form_submit',
+            form_id: String(formId),
+            form_name: 'cf7_' + formId,
+            form_type: 'contact_form_7'
+        });
+    }, false);
+    </script>
+    <?php
+}
+add_action('wp_footer', 'analytics_cf7_tracking');
+```
+
+## Gravity Forms integration
+
+Gravity Forms provides a PHP hook that fires after successful submission:
+
+```php
+// Gravity Forms — fires server-side after submission
+function analytics_gf_tracking($entry, $form) {
+    // Output a dataLayer push script in the footer
+    add_action('wp_footer', function() use ($entry, $form) {
+        ?>
+        <script>
+        window.dataLayer = window.dataLayer || [];
+        dataLayer.push({
+            event: 'form_submit',
+            form_id: '<?php echo esc_js($form['id']); ?>',
+            form_name: '<?php echo esc_js($form['title']); ?>',
+            form_type: 'gravity_forms'
+        });
+        </script>
+        <?php
+    });
+}
+add_action('gform_after_submission', 'analytics_gf_tracking', 10, 2);
+```
+
+## User login tracking
+
+```php
+function analytics_login_tracking($user_login, $user) {
+    // Store login event for next page load via a transient
+    set_transient('analytics_login_' . $user->ID, 1, 60);
+}
+add_action('wp_login', 'analytics_login_tracking', 10, 2);
+
+function analytics_output_login_event() {
+    if (!is_user_logged_in()) return;
+
+    $user_id = get_current_user_id();
+    $login_event = get_transient('analytics_login_' . $user_id);
+
+    if (!$login_event) return;
+
+    delete_transient('analytics_login_' . $user_id);
+
+    ?>
+    <script>
+    window.dataLayer = window.dataLayer || [];
+    dataLayer.push({
+        event: 'login',
+        method: 'wordpress'
+    });
+    </script>
+    <?php
+}
+add_action('wp_footer', 'analytics_output_login_event');
+```
+
+## Enqueueing scripts properly
+
+Always use `wp_enqueue_script` for external JavaScript files. For inline dataLayer pushes that contain PHP data, use the `wp_head` / `wp_footer` action hooks.
+
+```php
+// Enqueue external tracking helpers
+wp_enqueue_script(
+    'site-analytics',
+    plugin_dir_url(__FILE__) . 'js/analytics.js',
+    [], // no dependencies
+    '1.0.0',
+    true // load in footer
+);
+
+// Pass PHP data to JavaScript
+wp_localize_script('site-analytics', 'siteAnalyticsData', [
+    'pageType' => $page_type,
+    'ajaxUrl'  => admin_url('admin-ajax.php'),
+]);
+```
+
+## Common mistakes
+
+**Using `echo` to output JavaScript without sanitization.** Any PHP value output into a `<script>` tag must be sanitized. Use `esc_js()` for individual string values, `wp_json_encode()` for arrays and objects.
+
+**Adding GTM from a section that not every page uses.** If your GTM code is in a template file that's only included on certain page types, you'll miss tracking on other pages. The GTM snippet must be in your root layout — typically `header.php` or via `wp_head` hook.
+
+**CF7 events firing on page load.** Some WordPress setups output inline scripts from shortcodes. Make sure CF7 tracking only fires on the `wpcf7mailsent` event — not on page render.
+
+<CardGrid>
+  <LinkCard
+    title="WooCommerce"
+    description="When WordPress runs WooCommerce — ecommerce tracking for the full funnel."
+    href="/datalayer/platforms/woocommerce/"
+  />
+  <LinkCard
+    title="Form Submission"
+    description="Form event specifications — what to track and what not to push."
+    href="/datalayer/custom-events/form-submission/"
+  />
+</CardGrid>

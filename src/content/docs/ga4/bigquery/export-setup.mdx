@@ -1,6 +1,183 @@
 ---
-title: "Export Setup"
-description: "Connecting GA4 to BigQuery for raw data access."
+title: "BigQuery Export Setup"
+description: "Link GA4 to BigQuery, configure daily vs. streaming export, understand costs, and what lands in your dataset from day one."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The BigQuery export is GA4's most powerful feature. It gives you raw, unsampled, event-level data in a queryable format. Do this on the same day you create your GA4 property — you cannot retroactively export data for dates before you enabled it.
+
+## Prerequisites
+
+Before linking GA4 to BigQuery:
+
+1. **A Google Cloud project** — create one at [console.cloud.google.com](https://console.cloud.google.com). The project needs billing enabled (you will not be charged significant amounts, but billing must be active).
+
+2. **BigQuery enabled** — in your GCP project, enable the BigQuery API.
+
+3. **Correct permissions** — you need at least Editor role on the GCP project, and Admin access to the GA4 property.
+
+## Linking GA4 to BigQuery
+
+<Steps>
+1. Go to **Admin → Product Links → BigQuery Links**.
+
+2. Click **Link**.
+
+3. Click **Choose a BigQuery project** and select your GCP project.
+
+4. Configure the export:
+   - **Dataset region**: choose the same region as other GCP resources you will use (US or EU are most common). **This cannot be changed after setup** — a wrong region requires deleting the link and creating a new one, losing any data gap.
+   - **Export frequency**: Daily only, or Daily + Streaming
+   - **Data streams**: select which streams to export (all streams by default)
+   - **Include advertising identifiers**: exports `advertising_id` (GAID on Android, IDFA on iOS) if available
+
+5. Click **Submit**.
+</Steps>
+
+BigQuery will create a dataset named `analytics_PROPERTY_ID` (e.g., `analytics_123456789`) in your selected GCP project.
+
+## Daily vs. streaming export
+
+**Daily export** — data arrives once per day, typically between midnight and 8 AM in your property's time zone. Each day's data lands in a table named `events_YYYYMMDD`.
+
+Cost: The export itself is free. You pay standard BigQuery storage rates for the data you store.
+
+**Streaming export** — events arrive in near real-time (1-5 minute delay). Each day's data lands in an intraday table named `events_intraday_YYYYMMDD`. When the daily export runs, the intraday table is deleted and replaced with `events_YYYYMMDD`.
+
+Cost: Streaming inserts have a cost. As of 2024, Google charges approximately $0.01 per 200 MB of streamed data. For most properties, this adds up quickly. **Enable streaming export only if you have a specific operational need for near-real-time data — most analytics use cases are fine with daily export.**
+
+<Aside type="caution">
+Streaming export is expensive relative to what most teams need. A property with 10 million events per day streaming continuously can cost hundreds of dollars per month in streaming insert charges, on top of storage and query costs. Enable daily export for the baseline and add streaming only for specific dashboards or pipelines that genuinely require fresh data.
+</Aside>
+
+## What lands in BigQuery
+
+After the link is established and the first daily export runs (typically the next day), you will see:
+
+- **Dataset**: `analytics_PROPERTY_ID`
+- **Tables**: `events_YYYYMMDD` — one table per day
+- **Intraday tables** (streaming only): `events_intraday_YYYYMMDD`
+
+Each row in the events table is one event occurrence. The columns include:
+- `event_date`, `event_timestamp`, `event_name`
+- `event_params` — ARRAY of key-value parameters
+- `user_pseudo_id` — the anonymized client ID
+- `user_id` — if set in your implementation
+- `user_properties` — ARRAY of user property key-value pairs
+- `user_first_touch_timestamp`
+- `device`, `geo`, `app_info`, `traffic_source`, `stream_id`, `platform`
+- `ecommerce`, `items` — ecommerce data
+- `event_bundle_sequence_id`, `event_server_timestamp_offset`
+
+See [Schema Reference](/ga4/bigquery/schema-reference/) for the complete field list.
+
+## Querying your data
+
+The recommended pattern uses date-based partitioning via `_TABLE_SUFFIX`:
+
+```sql
+-- Query last 7 days
+SELECT
+  event_name,
+  COUNT(*) AS event_count
+FROM `project-id.analytics_123456789.events_*`
+WHERE _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY))
+  AND FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
+GROUP BY event_name
+ORDER BY event_count DESC
+```
+
+Always filter by `_TABLE_SUFFIX` to avoid full table scans. Without this filter, BigQuery scans all historical tables, which costs money and time.
+
+## Cost management
+
+BigQuery charges for:
+- **Storage**: approximately $0.02/GB/month for active storage
+- **Query processing**: $5/TB of data scanned (on-demand pricing)
+- **Streaming inserts**: ~$0.01/200 MB (streaming export only)
+
+For a typical website with 1M daily events:
+- Daily storage growth: ~100-500 MB/day depending on event complexity
+- Annual storage: ~100-200 GB, cost ~$2-4/month
+- Query costs: vary widely based on query design
+
+The key to controlling costs is always filtering by `_TABLE_SUFFIX` (or using partitioned tables with column-level date filtering). A single query without date filtering on a 2-year history can scan and charge for hundreds of gigabytes.
+
+See [Cost Optimization](/ga4/bigquery/cost-optimization/) for detailed guidance.
+
+## Dataset settings
+
+After the export is running, configure your BigQuery dataset:
+
+**Table expiration** — optionally set tables to expire after N days. For most analytics use cases, you want to retain data indefinitely (or until your data retention policy requires deletion).
+
+**Default encryption** — by default uses Google-managed encryption. You can configure customer-managed encryption keys (CMEK) if your compliance requirements demand it.
+
+**Access controls** — grant team members access to the dataset in GCP IAM. Use predefined roles:
+- `roles/bigquery.dataViewer` — read-only access (most analysts)
+- `roles/bigquery.dataEditor` — can query and modify data
+- `roles/bigquery.dataOwner` — full control
+
+## Verifying the export
+
+The day after linking, check that data arrived:
+
+```sql
+-- Check latest available date and event count
+SELECT
+  _TABLE_SUFFIX AS date,
+  COUNT(*) AS events
+FROM `project-id.analytics_PROPERTY_ID.events_*`
+GROUP BY _TABLE_SUFFIX
+ORDER BY date DESC
+LIMIT 7
+```
+
+If the table exists and event counts match your GA4 Realtime report from the previous day (approximately), the export is working.
+
+## Connecting to existing BigQuery data
+
+Many teams link their GA4 data alongside other data sources in BigQuery — CRM data, product data, transaction data. To join GA4 data with other datasets, you typically join on:
+
+- `user_pseudo_id` — matches GA4's anonymous identifier if you store it
+- `user_id` — matches authenticated user IDs
+- `transaction_id` — for ecommerce, joins to order management systems
+
+## Common mistakes
+
+### Not setting up the export immediately
+
+Every day without the BigQuery export is a day of raw event data you cannot recover. GA4 reports keep standard report aggregates, but individual event-level analysis requires BigQuery data from when the export was active.
+
+### Choosing the wrong dataset region
+
+The region cannot be changed without deleting and recreating the export link. If your team's analytics infrastructure is in `EU`, choosing `US` for the GA4 export means cross-region data transfers for every query, which incurs transfer costs and latency. Choose the region that matches your other BigQuery datasets.
+
+### Enabling streaming export without a specific need
+
+Streaming export costs money. Most analysis requirements are satisfied by daily export. Enable streaming only when you have a specific operational dashboard or alerting system that genuinely requires data within minutes of collection.
+
+### Running queries without _TABLE_SUFFIX filters
+
+Without `WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'`, every query scans your entire event history. On a property with 2 years of data, this can process hundreds of gigabytes and cost significant money for a single query.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Schema Reference"
+    description="Complete field reference for the GA4 BigQuery export."
+    href="/ga4/bigquery/schema-reference/"
+  />
+  <LinkCard
+    title="Cost Optimization"
+    description="Keep BigQuery costs under control with partitioning and query best practices."
+    href="/ga4/bigquery/cost-optimization/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="Ready-to-use SQL for the most common GA4 analysis tasks."
+    href="/ga4/bigquery/common-queries/"
+  />
+</CardGrid>

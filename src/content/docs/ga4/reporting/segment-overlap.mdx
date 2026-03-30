@@ -1,6 +1,150 @@
 ---
 title: "Segment Overlap"
-description: "Comparing audience segments with overlap analysis."
+description: "Identify users who belong to multiple segments in GA4 — Venn diagram analysis, intersection metrics, and practical applications for audience research."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Segment overlap exploration shows how many users belong to two or three segments simultaneously. It renders as a Venn diagram with intersection counts and a table of metrics for each segment combination. The primary use is understanding relationships between different user behaviors and characteristics.
+
+## When to use segment overlap
+
+**Audience research**: What percentage of your mobile users are also purchasers? What percentage of organic search users also came from email at some point?
+
+**Campaign analysis**: How many users were exposed to both email and paid search before converting? Are these users more likely to purchase than users who saw only one channel?
+
+**Product analysis**: What proportion of your trial users are also active blog readers? Do trial users who engage with the product tour have higher conversion to paid?
+
+**Attribution investigation**: How much do your acquisition channels overlap? If a large percentage of paid search users also have an organic search visit, last-click attribution may be significantly understating organic's contribution.
+
+## Creating a segment overlap exploration
+
+<Steps>
+1. Go to **Explore → Create new exploration → Segment overlap**.
+
+2. In the Variables panel, add the segments you want to compare. You can compare 2 or 3 segments.
+
+3. Drag the segments from Variables to **Segments** in the Tab Settings panel.
+
+4. Select the **metrics** to display for each intersection (users, conversions, revenue, etc.).
+
+5. The Venn diagram and intersection table populate automatically.
+</Steps>
+
+## Reading the output
+
+The Venn diagram shows:
+- Each circle = one segment
+- The number inside each circle (outside overlaps) = users in that segment only
+- Overlap areas = users in multiple segments simultaneously
+
+Below the diagram, a table shows each segment combination and the selected metrics.
+
+For two segments A and B:
+- A only: users in A but not B
+- B only: users in B but not A
+- A ∩ B: users in both A and B
+
+For three segments, you get seven combinations: each segment alone, each pair, and all three together.
+
+## Practical examples
+
+### Mobile + Purchaser overlap
+
+**Segments**:
+- Segment A: Device category = Mobile
+- Segment B: Event = purchase
+
+**Question**: What percentage of purchasers are mobile? What percentage of mobile users purchase?
+
+If Segment A has 60,000 mobile users and Segment B has 8,000 purchasers, and the intersection is 3,200 users — 40% of purchasers are mobile, but only 5.3% of mobile users purchase. If desktop purchasers represent 4,800 users out of 40,000 desktop users, the purchase rate is 12% for desktop. This tells you mobile has significant room to improve or may need a different checkout experience.
+
+### Multi-channel exposure
+
+**Segments**:
+- Segment A: Sessions from Paid Search
+- Segment B: Sessions from Email
+- Segment C: Sessions from Organic Social
+
+**Question**: How many users have been touched by multiple channels?
+
+A large intersection of A ∩ B ∩ C suggests your retargeting and email sequences are reaching users who initially arrived via paid search — this is the multi-touch journey you want to understand for attribution purposes.
+
+### Content engagement + conversion
+
+**Segments**:
+- Segment A: Users who viewed 3+ blog posts
+- Segment B: Users who completed a trial signup
+
+**Question**: Is there a correlation between content engagement and trial signup?
+
+If the A ∩ B intersection is proportionally large relative to Segment B total (blog readers make up 40% of trial signups but only 15% of total users), content engagement is a positive signal for conversion. This supports investment in content marketing.
+
+## Metric selection
+
+Choose metrics in the Tab Settings that are most relevant to your analysis question:
+
+- **Users**: the baseline — how many users in each segment
+- **Conversions**: did overlap affect conversion behavior?
+- **Purchase revenue**: are multi-segment users higher-value?
+- **Engagement time**: do overlapping users engage more deeply?
+- **Sessions per user**: do overlapping users visit more frequently?
+
+You cannot use calculated metrics in segment overlap by default, but you can compute ratios manually from the table output.
+
+## Limitations
+
+**Maximum 3 segments**: Segment overlap supports at most 3 simultaneous segments. For more complex analyses, consider comparing multiple 2-way overlap explorations.
+
+**User scope only**: Segment overlap operates at the user level. You cannot do session-level overlap analysis.
+
+**Sampling**: Large properties with many users will experience sampling. The Venn diagram counts are estimates. Check the sampling indicator.
+
+**No dimensional breakdowns**: Unlike free-form explorations, you cannot add secondary dimensions to segment overlap. The output is the segment intersections and your selected metrics only.
+
+<Aside type="tip">
+For more complex overlap analysis — particularly if you need to break down overlap by channel, country, or date — use BigQuery. You can replicate segment overlap logic with a series of `COUNTIF` or `CASE WHEN` expressions on the user event history.
+</Aside>
+
+## Segment overlap vs. comparisons in standard reports
+
+Standard reports let you add comparisons (up to 4) that filter the same report by different conditions. This is similar to segment overlap but:
+- Comparisons in standard reports show the same metrics side-by-side for each filter
+- Comparisons do not show intersections (how many users are in multiple groups)
+- Segment overlap specifically calculates and shows the intersection populations
+
+Use standard report comparisons when you want to compare segment performance on standard metrics. Use segment overlap when the intersection size itself is the question.
+
+## Common mistakes
+
+### Comparing segments with very different scales
+
+If Segment A has 500,000 users and Segment B has 200 users, the Venn diagram is nearly useless visually — the circles are disproportionate and the intersection numbers are all tiny. Segment overlap works best when segments are on a comparable scale.
+
+### Drawing causal conclusions from overlap
+
+Segment overlap shows correlation, not causation. The fact that blog readers are more likely to convert does not prove that reading blogs causes conversion — it may be that users who are more interested in your product both read your blog and convert at higher rates for independent reasons. Use experimentation to establish causation.
+
+### Forgetting to consider the time dimension
+
+Segment overlap is calculated over the exploration's date range. Users who were purchasers last year but not in the current date range will not appear in the "purchaser" segment for a current-period exploration. Define your date range carefully to ensure the segments reflect the population you intend to compare.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Explore Reports"
+    description="Full guide to the Explore workspace including all exploration types."
+    href="/ga4/reporting/explore-reports/"
+  />
+  <LinkCard
+    title="Audiences"
+    description="Build persistent segments that can be used for remarketing and comparisons."
+    href="/ga4/configuration/audiences/"
+  />
+  <LinkCard
+    title="Attribution Queries"
+    description="Analyze multi-channel user journeys in BigQuery for deeper overlap insights."
+    href="/ga4/bigquery/attribution-queries/"
+  />
+</CardGrid>

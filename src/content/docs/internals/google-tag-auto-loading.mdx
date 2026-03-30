@@ -1,6 +1,135 @@
 ---
-title: "Google Tag Auto-Loading"
-description: "How the Google Tag update changed GTM's behavior."
+title: "Google Tag Auto-Loading Behavior"
+description: "How GTM automatically loads a Google Tag when Ads or Floodlight tags are present, the shared gtag() instance this creates, implications for consent mode inheritance, and how GA4 event tags inherit the configuration tag's settings."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Google Tag Manager contains a piece of behavior that surprises many experienced practitioners: when you add certain Google Ads or Floodlight tags to your container, GTM automatically creates a Google Tag instance — even if you have not explicitly configured one. This auto-loading behavior affects how consent mode, GA4, and Ads tags share configuration, and misunderstanding it can cause consent issues that appear to work in testing but fail in production.
+
+## What auto-loading means
+
+In older GTM implementations, each Google product (GA4, Google Ads, Floodlight) loaded its own independent JavaScript library. When you added a Google Ads Conversion Tracking tag, it loaded the Ads JavaScript. When you added GA4, it loaded the GA4 JavaScript. These were separate instances.
+
+The modern implementation uses a shared **Google Tag** (`gtag.js`) library that all Google products share. This library is loaded once and all subsequent tag executions reference the shared instance.
+
+The consequence: when you add a Google Ads Conversion Tracking tag or a Floodlight tag to your GTM container, GTM automatically loads `gtag.js` to service that tag — even if you have not added a GA4 Configuration tag or explicitly configured a Google Tag in GTM.
+
+You can observe this in the network tab: when a Google Ads tag fires, look for a request to `googletagmanager.com/gtag/js?id=AW-XXXXXXX`. This is the auto-loaded Google Tag for that Ads account.
+
+## The `gtag()` global and its implications
+
+When the Google Tag loads (either via an explicit Google Tag configuration in GTM, or auto-loaded by an Ads/Floodlight tag), it creates the `gtag()` global function on `window` if it doesn't already exist.
+
+This matters because:
+1. **Consent mode defaults affect the Google Tag** — if you call `gtag('consent', 'default', {...})` before GTM loads, and then GTM auto-loads the Google Tag, the Google Tag inherits those consent defaults. This is the correct behavior and is why inline consent defaults work for Google Ads tags even without an explicit GA4 configuration.
+
+2. **Two Google Tags can coexist** — if your page has a hardcoded `gtag.js` snippet AND GTM auto-loads another one, you have two `gtag()` instances. See [Dual Deployment Conflicts](/internals/dual-deployment-conflicts/).
+
+3. **Consent mode state is shared** — when GTM fires `gtag('consent', 'update', {...})` (via a consent update tag), that update applies to all Google Tags loaded by GTM, including auto-loaded ones.
+
+## How GA4 event tags wait for the Google Tag
+
+One specific timing behavior to understand: GA4 Event tags in GTM do not fire independently. They are **associated with a Google Tag** (the GA4 Configuration or Google Tag configuration). The GA4 Event tag waits for its associated Google Tag to initialize before executing.
+
+This creates implicit tag sequencing:
+- The Google Tag fires on "All Pages" (first page load)
+- GA4 Event tags fire on Custom Events
+- When a GA4 Event fires, GTM checks if the linked Google Tag is initialized
+- If not initialized (e.g., consent denied so Google Tag hasn't fully executed), the event tag may be queued
+
+In practice:
+```
+Page load
+  ↓
+[Google Tag fires — initializes GA4 with Measurement ID G-XXXX]
+  ↓
+User interaction: clicks "Add to Cart"
+  ↓
+[Add to Cart Custom Event fires]
+  ↓
+[GA4 Event tag checks: is Google Tag G-XXXX initialized?]
+  ↓ YES
+[GA4 Event tag sends add_to_cart event]
+```
+
+If the Google Tag has not fired (denied consent, tag paused, configuration error), GA4 Event tags associated with that Google Tag may fail silently.
+
+You can verify the Google Tag initialization state in the browser console:
+
+```javascript
+// Check if the Google Tag for your GA4 property is initialized
+var gtagData = window.google_tag_data;
+console.log(gtagData);
+// Look for your Measurement ID in the gtagData.gl object
+// or in window.dataLayer events with event:'gtm.load'
+```
+
+## Consent mode inheritance
+
+When consent mode defaults are set before GTM loads (via inline `gtag('consent', 'default', {...})`), those defaults apply to all Google Tags — including auto-loaded ones.
+
+This means:
+- Your consent default affects Google Ads tags even without an explicit GA4 setup
+- A `gtag('consent', 'update', {...})` call from your CMP applies to all Google product tags simultaneously
+- There is no need to configure separate consent states for GA4 vs. Ads vs. Floodlight — one `gtag('consent', 'update')` call covers all of them
+
+```javascript
+// One consent update covers all Google Tags
+gtag('consent', 'update', {
+  'ad_storage': 'granted',       // Affects Google Ads
+  'analytics_storage': 'granted', // Affects GA4
+  'ad_user_data': 'granted',      // Affects Enhanced Conversions
+  'ad_personalization': 'granted' // Affects Remarketing audiences
+});
+// All Google products loaded by GTM (including auto-loaded ones) see this update
+```
+
+## The combined Google Tag ID configuration
+
+GTM allows you to configure a single Google Tag that serves multiple Google products. Under **Tags → Google Tag**, you can set a Measurement ID that covers both GA4 and Google Ads:
+
+- Primary ID: `G-XXXXXXXXXX` (GA4 Measurement ID)
+- Additional IDs: `AW-XXXXXXXXX` (Google Ads account)
+
+This explicitly combines the two Google Tags into one, ensuring they share the same configuration, consent state, and initialization timing.
+
+The alternative — adding separate GA4 and Ads tags without this combined configuration — still works because auto-loading provides the shared Google Tag. But the explicit combined configuration is cleaner and easier to audit.
+
+## Detecting auto-loading in your container
+
+To check whether auto-loading is happening in your container:
+
+1. Open GTM → Tags → New Tag
+2. Look for your Google Ads Conversion Tracking or Floodlight tags
+3. Check the Google Tag ID in each tag's configuration
+4. If these IDs are not present in your explicitly configured Google Tags, the Google Tag is being auto-loaded
+
+In the network tab after a page load, look for requests to:
+- `googletagmanager.com/gtag/js?id=AW-XXXXXXX` — Ads auto-loaded tag
+- `googletagmanager.com/gtag/js?id=G-XXXXXXXXXX` — GA4 tag (may be explicit or auto-loaded)
+
+Multiple requests to `gtag/js` with different IDs indicates multiple Google Tags loading, which may be intentional (separate products) or may indicate a configuration issue.
+
+## Impact on container performance
+
+Each auto-loaded Google Tag adds a network request. For containers with both GA4 and multiple Ads properties, this can mean 3-4 requests to load Google Tag scripts. These requests are asynchronous and cached, so the performance impact is modest — but it is worth auditing whether all auto-loaded tags are intentional.
+
+In GTM container settings, you can configure the Google Tag explicitly to serve multiple product IDs from a single script load, reducing the number of `gtag/js` requests.
+
+## Common mistakes
+
+**Assuming a consent update in GTM only affects GA4.** A `gtag('consent', 'update')` call affects all Google products. If you update analytics_storage but not ad_storage, the ads tags still see the denied ad_storage state. Be explicit about all consent types in every update call.
+
+**Adding Google Ads tags without setting consent defaults.** If you add Google Ads tags to a container that previously only had GA4, and your GA4 consent defaults only set `analytics_storage` and `ad_storage`, the new `ad_user_data` and `ad_personalization` types (added in Consent Mode v2) may default to `granted` if not explicitly set. Always set all seven types in the default.
+
+**Not accounting for auto-loaded tags in CSP.** If you use a Content Security Policy, you need to allowlist `googletagmanager.com` for both the GTM script and the auto-loaded Google Tag scripts. A policy that allows `GTM-XXXX` but doesn't allow `AW-XXXXXXXXX` or `G-XXXXXXXXXX` will block auto-loaded tags.
+
+---
+
+<CardGrid>
+  <LinkCard title="Dual Deployment Conflicts" href="/internals/dual-deployment-conflicts/" description="What happens when auto-loaded Google Tags coexist with hardcoded gtag.js instances." />
+  <LinkCard title="Consent Mode GTM Setup" href="/consent/consent-mode-gtm-setup/" description="How the shared Google Tag instance simplifies consent configuration." />
+  <LinkCard title="Container Snippet Decoded" href="/internals/container-snippet-decoded/" description="How the container snippet initiates the Google Tag loading process." />
+</CardGrid>

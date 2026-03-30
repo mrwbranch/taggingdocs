@@ -1,6 +1,293 @@
 ---
 title: "Client-Side GTM"
-description: "Everything that happens in the browser — setup, triggers, variables, tags, tracking, debugging, and management."
+description: "Everything that happens in the browser — setup, triggers, variables, tags, tracking implementations, debugging, and container management."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Client-side GTM is the browser half of the equation: the container snippet on your page, the dataLayer your developers maintain, the triggers and tags that fire when users interact with your site. It's where most tracking work happens, and where most tracking problems originate.
+
+This section covers everything from initial setup to production management — organized so you can find what you need whether you're setting up a new implementation or debugging an existing one.
+
+<Aside type="tip">
+New to GTM? Start with [Foundations](/foundations/) for the conceptual model before diving into implementation guides. Understanding how tags, triggers, and variables connect will make every guide in this section easier to follow.
+</Aside>
+
+## Setup
+
+Getting GTM installed correctly and configured for your environment.
+
+<CardGrid>
+  <LinkCard
+    title="Container Installation"
+    description="Installing the GTM snippet correctly — static HTML, WordPress, Shopify, Next.js."
+    href="/client-side/setup/container-installation/"
+  />
+  <LinkCard
+    title="SPA Setup"
+    description="History Change triggers, custom page_view events, and dataLayer cleanup for single-page apps."
+    href="/client-side/setup/spa-setup/"
+  />
+  <LinkCard
+    title="Google Consent Mode"
+    description="Implementing Consent Mode v2 with default denied state and CMP integration."
+    href="/client-side/setup/google-consent-mode/"
+  />
+  <LinkCard
+    title="Container Loading Strategies"
+    description="Optimizing when and how GTM loads — lazy loading, consent-gated loading, performance impact."
+    href="/client-side/setup/container-loading-strategies/"
+  />
+</CardGrid>
+
+## Triggers
+
+When tags fire — the full trigger type reference.
+
+<CardGrid>
+  <LinkCard
+    title="Trigger Types Overview"
+    description="Quick reference for every trigger type and the right one for each scenario."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The most powerful trigger type — fire tags based on dataLayer.push() events."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Click Triggers"
+    description="All Clicks vs. Link Click — event delegation, CSS selectors, child element issues."
+    href="/client-side/triggers/click-triggers/"
+  />
+  <LinkCard
+    title="Element Visibility Trigger"
+    description="Fire tags when elements enter the viewport — product impressions, ad viewability, lazy content."
+    href="/client-side/triggers/element-visibility-trigger/"
+  />
+</CardGrid>
+
+## Variables
+
+Reading data — from the dataLayer, the DOM, the URL, and custom logic.
+
+<CardGrid>
+  <LinkCard
+    title="DataLayer Variables"
+    description="Extracting values from dataLayer pushes with dot notation — the primary data source."
+    href="/client-side/variables/datalayer-variables/"
+  />
+  <LinkCard
+    title="JavaScript Variables"
+    description="Custom JavaScript variables for data transformation, conditional logic, and calculations."
+    href="/client-side/variables/javascript-variables/"
+  />
+  <LinkCard
+    title="Built-in Variables"
+    description="The complete reference — Click, Form, Scroll, Video, History, and Page variables."
+    href="/client-side/variables/built-in-variables/"
+  />
+  <LinkCard
+    title="Lookup Tables & Regex Tables"
+    description="Mapping values without code — page categorization, event classification, value transformation."
+    href="/client-side/variables/lookup-tables/"
+  />
+</CardGrid>
+
+## Tags
+
+What fires — GA4, Google Ads, custom HTML, and tag execution control.
+
+<CardGrid>
+  <LinkCard
+    title="GA4 Configuration Tag"
+    description="Setting up the Google Tag correctly — Measurement ID, user properties, consent settings."
+    href="/client-side/tags/ga4-configuration-tag/"
+  />
+  <LinkCard
+    title="GA4 Event Tag"
+    description="Sending custom events to GA4 — event parameters, user properties, ecommerce data."
+    href="/client-side/tags/ga4-event-tag/"
+  />
+  <LinkCard
+    title="Custom HTML Tags"
+    description="Power user tag type — arbitrary JavaScript execution, third-party pixels, data enrichment."
+    href="/client-side/tags/custom-html-tags/"
+  />
+  <LinkCard
+    title="Tag Sequencing"
+    description="Controlling execution order — setup tags, cleanup tags, dependency management."
+    href="/client-side/tags/tag-sequencing/"
+  />
+</CardGrid>
+
+## Tracking implementations
+
+Complete patterns for common tracking requirements.
+
+<CardGrid>
+  <LinkCard
+    title="Ecommerce Tracking"
+    description="The full GA4 ecommerce lifecycle — view_item_list through purchase, with complete item arrays."
+    href="/client-side/tracking/ecommerce-tracking/"
+  />
+  <LinkCard
+    title="Form Tracking"
+    description="Built-in trigger, AJAX detection, multi-step forms, and form abandonment patterns."
+    href="/client-side/tracking/form-tracking/"
+  />
+  <LinkCard
+    title="Video Tracking"
+    description="YouTube (built-in), Vimeo (postMessage), HTML5 video, and Wistia tracking patterns."
+    href="/client-side/tracking/video-tracking/"
+  />
+  <LinkCard
+    title="File Download Tracking"
+    description="Click triggers for file extensions, authenticated downloads, and blob URL patterns."
+    href="/client-side/tracking/file-download-tracking/"
+  />
+  <LinkCard
+    title="Outbound Link Tracking"
+    description="Tracking external link clicks — enhanced measurement, custom triggers, domain exclusions."
+    href="/client-side/tracking/outbound-link-tracking/"
+  />
+  <LinkCard
+    title="Scroll Depth Tracking"
+    description="25/50/75/90% milestones, page filtering, and combining with time on page."
+    href="/client-side/tracking/scroll-depth-tracking/"
+  />
+  <LinkCard
+    title="Error Tracking"
+    description="JavaScript Error trigger, unhandled promise rejections, application errors, and 404 pages."
+    href="/client-side/tracking/error-tracking/"
+  />
+  <LinkCard
+    title="User ID Tracking"
+    description="Cross-device identification — what to use as user_id, where to set it, how to clear it."
+    href="/client-side/tracking/user-id-tracking/"
+  />
+  <LinkCard
+    title="Cross-Domain Tracking"
+    description="Maintaining sessions across domains — the _gl linker, configuration, and referral exclusions."
+    href="/client-side/tracking/cross-domain-tracking/"
+  />
+</CardGrid>
+
+### Advanced tracking
+
+<CardGrid>
+  <LinkCard
+    title="Shadow DOM Tracking"
+    description="Tracking clicks inside web components — why GTM breaks, which events compose, and the workarounds."
+    href="/client-side/tracking/shadow-dom-tracking/"
+  />
+  <LinkCard
+    title="Core Web Vitals"
+    description="Measuring LCP, INP, CLS via the web-vitals library and sending field data to GA4."
+    href="/client-side/tracking/core-web-vitals/"
+  />
+  <LinkCard
+    title="Comprehensive Link Tracking"
+    description="One trigger and one tag that classifies all link types — outbound, download, email, phone, social."
+    href="/client-side/tracking/comprehensive-link-tracking/"
+  />
+  <LinkCard
+    title="Form Builder Tracking"
+    description="Tested patterns for Gravity Forms, Contact Form 7, HubSpot, Typeform, Webflow, and Calendly."
+    href="/client-side/tracking/form-builder-tracking/"
+  />
+  <LinkCard
+    title="Offline Tracking"
+    description="Service Worker queuing, IndexedDB persistence, and Measurement Protocol replay for PWAs."
+    href="/client-side/tracking/offline-tracking/"
+  />
+</CardGrid>
+
+## Debugging
+
+Diagnosing and fixing tracking problems.
+
+<CardGrid>
+  <LinkCard
+    title="Preview Mode"
+    description="GTM's primary debugging tool — event timeline, variables tab, trigger conditions, data layer inspection."
+    href="/client-side/debugging/preview-mode/"
+  />
+  <LinkCard
+    title="Tag Assistant"
+    description="Chrome extension and embedded debugger — tag health indicators, GA4 validation."
+    href="/client-side/debugging/tag-assistant/"
+  />
+  <LinkCard
+    title="Console Debugging"
+    description="Browser console commands — inspect the dataLayer, monitor pushes, decode GA4 payloads."
+    href="/client-side/debugging/console-debugging/"
+  />
+  <LinkCard
+    title="DataLayer Debugging"
+    description="Stale data, merge behavior, type mismatches, variable name mismatches — the dataLayer-specific problems."
+    href="/client-side/debugging/datalayer-debugging/"
+  />
+  <LinkCard
+    title="Common Errors"
+    description="Quick reference for the most frequent GTM problems with specific solutions."
+    href="/client-side/debugging/common-errors/"
+  />
+  <LinkCard
+    title="Why Isn't My Tag Firing?"
+    description="Interactive diagnostic flowchart — work through 12 possible causes systematically."
+    href="/client-side/debugging/why-tag-not-firing/"
+  />
+  <LinkCard
+    title="iFrame Debugging"
+    description="Debug GTM inside iframes — Preview mode limitations, console context switching, postMessage."
+    href="/client-side/debugging/iframe-debugging/"
+  />
+</CardGrid>
+
+## Container management
+
+Keeping your GTM container organized, versioned, and maintainable.
+
+<CardGrid>
+  <LinkCard
+    title="Naming Conventions"
+    description="Tag, trigger, and variable naming standards — pick a convention on day one and enforce it."
+    href="/client-side/management/naming-conventions/"
+  />
+  <LinkCard
+    title="Folder Organization"
+    description="Structuring folders by platform, function, or hybrid — with warning signs of poor organization."
+    href="/client-side/management/folder-organization/"
+  />
+  <LinkCard
+    title="Version Control"
+    description="Naming versions, writing descriptions, comparing diffs, and rolling back correctly."
+    href="/client-side/management/version-control/"
+  />
+  <LinkCard
+    title="Workspaces"
+    description="Parallel development environments — when to create them, how to resolve conflicts."
+    href="/client-side/management/workspaces/"
+  />
+  <LinkCard
+    title="Environments"
+    description="Staging, dev, and QA environments — testing container changes before they go live."
+    href="/client-side/management/environments/"
+  />
+  <LinkCard
+    title="Permissions"
+    description="Who gets Publish, who gets Edit, how agency access should work, and quarterly access reviews."
+    href="/client-side/management/permissions/"
+  />
+  <LinkCard
+    title="Multi-Container Strategy"
+    description="When multiple containers are justified and the performance cost you're accepting."
+    href="/client-side/management/multi-container-strategy/"
+  />
+  <LinkCard
+    title="Container Cleanup"
+    description="Systematic process for removing dead tags, orphaned triggers, and unused variables."
+    href="/client-side/management/container-cleanup/"
+  />
+</CardGrid>

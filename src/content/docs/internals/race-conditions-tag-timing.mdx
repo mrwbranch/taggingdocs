@@ -1,6 +1,267 @@
 ---
-title: "Race Conditions & Tag Timing"
-description: "Systematic guide to race conditions in GTM and how to prevent them."
+title: "Race Conditions and Tag Timing"
+description: "A systematic guide to every race condition in GTM — consent manager timing, SPA render gaps, page exit races, cross-domain link decoration timing, and the architectural patterns that prevent all of them."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Race conditions in GTM are events that depend on timing assumptions that are not always true. The container loads asynchronously. The CMP loads asynchronously. React renders asynchronously. When you build tracking that assumes something is ready before it actually is, you have a race condition — and it will fail intermittently, making it difficult to reproduce and diagnose.
+
+This article catalogs every common race condition in GTM implementations, explains the exact mechanism, and provides the architectural pattern that prevents it.
+
+<Aside type="tip">
+The most effective prevention strategy for all race conditions is the same: use **Custom Event triggers with explicit dataLayer pushes** rather than DOM-based triggers, page view triggers with variable conditions, or trigger groups. If your code pushes the event, you control when it fires and what data is available when it does.
+</Aside>
+
+## Race condition 1: Container loading gap
+
+**The problem**: Between when the GTM snippet runs and when the container JavaScript finishes downloading (typically 100-500ms), any events pushed to `dataLayer` are queued. Tags do not fire during this gap. If a critical event happens in this window, it may fire with incomplete data or in a context GTM is not ready for.
+
+**When it matters**: Events that fire very early in the page lifecycle — before DOM ready, from inline scripts, from server-rendered data.
+
+**Example**:
+```javascript
+// Inline script early in <head>
+window.dataLayer = window.dataLayer || [];
+dataLayer.push({
+  event: 'user_identified',
+  user_id: '{{ server_rendered_user_id }}'
+});
+// GTM hasn't loaded yet — this goes into the queue
+// It WILL be replayed when GTM loads — so this is usually fine
+// UNLESS the user navigates away before the container downloads
+```
+
+**Prevention**: The queue replay mechanism handles most cases correctly. For events that must fire in a specific context, push them explicitly and rely on the replay. The only case where this causes real data loss is users who navigate away faster than GTM loads (~200-300ms) — which is rare but nonzero on slow connections.
+
+## Race condition 2: Consent manager timing
+
+**The problem**: Most CMPs load asynchronously. The `wait_for_update` parameter buys time, but if the CMP takes longer than `wait_for_update` milliseconds to respond, tags fire with the default denied state — even for users who previously granted consent.
+
+**Sequence**:
+```
+0ms:   GTM snippet runs, default consent: denied
+0ms:   wait_for_update: 500ms countdown starts
+50ms:  GTM container JS downloads, starts evaluating tags
+50ms:  GA4 config tag sees wait_for_update active — queues
+400ms: CMP script loads (from third-party server)
+500ms: wait_for_update expires — still waiting for CMP
+550ms: CMP fires consent callback — AFTER wait_for_update expired
+550ms: Google tags fire with denied consent (too late for CMP update to apply)
+```
+
+**Impact**: On slow connections (or slow CMP servers), returning users who already accepted consent miss their first pageview event.
+
+**Prevention**:
+```javascript
+// Option 1: Increase wait_for_update
+gtag('consent', 'default', {
+  'analytics_storage': 'denied',
+  'wait_for_update': 2000  // 2 seconds — generous but safe
+});
+
+// Option 2: Pre-populate consent from localStorage/cookie before GTM loads
+(function() {
+  try {
+    var stored = localStorage.getItem('user_consent_state');
+    if (stored) {
+      var consent = JSON.parse(stored);
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      // Immediately set granted consent before GTM loads
+      // The CMP will still fire and confirm this on load
+      gtag('consent', 'default', {
+        'analytics_storage': consent.analytics ? 'granted' : 'denied',
+        'ad_storage': consent.advertising ? 'granted' : 'denied',
+        'ad_user_data': consent.advertising ? 'granted' : 'denied',
+        'ad_personalization': consent.advertising ? 'granted' : 'denied',
+        'security_storage': 'granted',
+        'wait_for_update': 500
+      });
+    }
+  } catch(e) {}
+})();
+```
+
+## Race condition 3: SPA route change before framework renders
+
+**The problem**: GTM's History Change trigger fires immediately when the browser's history changes (via `pushState`). In React, Vue, or Angular, the component renders asynchronously after the route change. If you push a virtual pageview in response to the History Change trigger, the new page's data hasn't been set yet — document.title is stale, and any page-specific dataLayer data hasn't been pushed.
+
+**Sequence in React Router**:
+```
+Route A: /products/widget-a
+User clicks link → history.pushState('/products/widget-b') fires
+[History Change trigger fires immediately]
+  → GTM fires page_view tag
+  → document.title still says "Widget A | Store" (React hasn't rendered)
+  → dataLayer still has Widget A's product data (no flush happened yet)
+  → GA4 receives a page_view for /products/widget-b but with Widget A data
+[50ms later: React renders Widget B component]
+  → useEffect runs, pushes Widget B's data to dataLayer
+```
+
+**Prevention**: Do not use the History Change trigger for pageview tracking. Use custom dataLayer events pushed from the framework's routing hooks, after the new page component has mounted:
+
+```javascript
+// React Router v6 — correct pattern
+import { useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
+
+function TrackPageView({ pageType, pageData }) {
+  const location = useLocation();
+
+  useEffect(() => {
+    // This runs AFTER the component renders (after mount)
+    // pageType and pageData are from the rendered component's props
+    window.dataLayer = window.dataLayer || [];
+
+    // 1. Flush stale data
+    window.dataLayer.push({ ecommerce: null, page_type: undefined });
+
+    // 2. Push new page context
+    window.dataLayer.push({
+      page_type: pageType,
+      ...pageData
+    });
+
+    // 3. Fire the pageview event
+    window.dataLayer.push({
+      event: 'page_view',
+      page_path: location.pathname + location.search,
+      page_title: document.title  // Title is correct now — component has rendered
+    });
+  }, [location.pathname]);
+
+  return null;
+}
+```
+
+## Race condition 4: Page exit timing
+
+**The problem**: When a user clicks a link or closes a tab, the browser starts navigation immediately. Any tag that fires in response to `beforeunload` or page exit events has a very small window to complete. Long-running tags (those waiting for API responses) will be cut off mid-execution.
+
+**Symptoms**: Intermittent missing events on links that navigate away, inconsistent last-interaction event capture.
+
+**Prevention**: Use `navigator.sendBeacon()` for exit-critical events. `sendBeacon` is fire-and-forget — it queues a network request that the browser sends even after the page is unloaded:
+
+```javascript
+// Page exit tracking via sendBeacon (reliable on page unload)
+window.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'hidden') {
+    // Page is being hidden (tab switch or close)
+    var eventData = {
+      event_type: 'page_exit',
+      time_on_page: Math.round((Date.now() - window.pageStartTime) / 1000),
+      scroll_depth: calculateScrollDepth()
+    };
+
+    // sendBeacon is reliable even during page unload
+    navigator.sendBeacon(
+      'https://your-sgtm-domain.com/collect',
+      JSON.stringify(eventData)
+    );
+  }
+});
+```
+
+For GTM-managed exit tracking, use a Custom HTML tag triggered on the GA4 configuration tag's cleanup sequence, not on `beforeunload`.
+
+## Race condition 5: Cross-domain `_gl` parameter timing
+
+**The problem**: The `_gl` linker parameter (for cross-domain tracking) must be present in the URL before the user lands on the destination domain. GTM's cross-domain feature modifies links as the user hovers over them or clicks. If the tag that adds `_gl` hasn't finished executing before the browser starts navigation, the `_gl` parameter may be missing.
+
+**Prevention**: This is handled by GTM's "Link Click" trigger with "Check Validation" enabled — the trigger holds the click until tags have fired, then allows navigation. Ensure your cross-domain setup uses Link Click triggers, not All Click triggers.
+
+Also ensure the Google Tag's automatic linker is configured. In the Google Tag settings, under "Additional Configuration" → "Cross-domain linking", add your destination domains. This uses a native link decoration mechanism that is more reliable than custom implementation.
+
+## Race condition 6: Tag execution order non-determinism
+
+**The problem**: Multiple tags on the same trigger with the same priority fire in non-deterministic order. GTM does not guarantee execution order for tags at the same priority level.
+
+**Example**: A "Consent Check" tag and a "GA4 Event" tag both fire on the same All Pages trigger at priority 0. On some page loads, Consent Check fires first (correct). On others, GA4 Event fires first, before consent is verified.
+
+**Prevention**: Use tag priority settings or tag sequencing explicitly:
+
+```javascript
+// In GTM: Advanced Settings → Tag Priority
+// Higher number = fires first
+// GA4 Config: priority 10 (fires last — depends on consent check)
+// Consent check: priority 100 (fires first)
+
+// OR: Use Setup Tag
+// GA4 Config → Advanced Settings → Setup Tag: "Consent Check Tag"
+// Check "Don't fire if setup tag fails"
+```
+
+## Race condition 7: Dynamic content and element visibility
+
+**The problem**: The Element Visibility trigger observes when an element becomes visible. But if you target an element that is injected into the DOM after GTM loads, the trigger may not observe it correctly — the observer set up when GTM loaded won't see elements that didn't exist yet.
+
+**Prevention**: Configure the Element Visibility trigger with "Observe DOM Changes" enabled. This makes GTM re-evaluate visibility for newly added elements. Without this option, the trigger only fires for elements present at GTM load time.
+
+## Race condition 8: dataLayer push before GTM snippet
+
+**This is actually NOT a problem**, but it is often treated as one. Developers sometimes worry that pushing to `dataLayer` before GTM loads will cause issues.
+
+The truth: pre-GTM pushes are replayed correctly. But there is a nuance: the order matters.
+
+```javascript
+// This is fine — both pushes happen before GTM
+window.dataLayer = window.dataLayer || [];
+dataLayer.push({ userId: '12345' });
+dataLayer.push({ event: 'user_identified' });
+// GTM loads, replays both pushes in order
+// user_identified tag fires with userId: '12345' in the model
+
+// This is also fine, but the order is reversed
+window.dataLayer = window.dataLayer || [];
+dataLayer.push({ event: 'user_identified' });
+dataLayer.push({ userId: '12345' });
+// GTM replays both pushes in order
+// user_identified fires, but at that moment userId is not yet in the model
+// After userId push, the model has it — but the event already fired
+// If a tag reading userId was triggered by user_identified, it got undefined
+```
+
+The fix: always push data before the event that triggers tags that need that data.
+
+## The universal fix: explicit event-driven architecture
+
+The pattern that eliminates almost all race conditions:
+
+1. **Never rely on page view or History Change triggers for events that need data**. Always use Custom Event triggers.
+2. **Push all required data before pushing the event**. Data is in the model when the event fires.
+3. **Use your application code (React hooks, Vue Router guards) as the source of truth for when to push events**, not GTM trigger conditions on page load.
+
+```javascript
+// The gold standard pattern
+// In your SPA's route-change handler:
+
+// 1. Flush old data
+window.dataLayer.push({ ecommerce: null, item_id: undefined });
+
+// 2. Fetch and push new page data
+window.dataLayer.push({
+  page_type: 'product',
+  item_id: product.id,
+  item_name: product.name,
+  item_category: product.category
+});
+
+// 3. THEN push the event — data is guaranteed in the model
+window.dataLayer.push({
+  event: 'page_view',
+  page_path: '/products/' + product.slug
+});
+```
+
+When you follow this pattern, you are never waiting for GTM to read data that might not be there — you have written the data before triggering the event that reads it.
+
+---
+
+<CardGrid>
+  <LinkCard title="Data Model Deep Dive" href="/internals/data-model-deep-dive/" description="How the merge model determines what data is available when tags fire." />
+  <LinkCard title="Flushing Stale Variables" href="/internals/flushing-stale-variables/" description="The flush pattern that prevents stale data from appearing in events." />
+  <LinkCard title="Consent Initialization Timing" href="/consent/consent-initialization-timing/" description="The consent-specific race condition and its correct resolution." />
+</CardGrid>

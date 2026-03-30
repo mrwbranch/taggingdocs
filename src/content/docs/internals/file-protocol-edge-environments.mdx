@@ -1,6 +1,201 @@
 ---
-title: "Edge Environments"
-description: "Running GTM in non-HTTP environments — file://, Electron, WebViews."
+title: "GTM in Edge Environments"
+description: "Running GTM in non-HTTP environments — the file:// protocol, local development on localhost, Electron desktop applications, mobile app WebViews, and what each limitation means for your implementation."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+GTM is designed for web pages served over HTTP or HTTPS. Step outside that context — load a page from `file://`, embed a webview in a mobile app, build an Electron desktop application, or develop locally on `localhost` — and you encounter behaviors that are confusing if you don't know why they happen.
+
+These are not common scenarios for most GTM implementations, but when they arise they tend to block entire projects. This article explains what GTM can and cannot do in each non-standard environment.
+
+## The `file://` protocol
+
+When you open an HTML file directly from your filesystem (by double-clicking or dragging into a browser), the page loads with a `file://` URL like `file:///Users/john/project/index.html`.
+
+**What happens with GTM on `file://`:**
+
+GTM's container snippet calls `https://www.googletagmanager.com/gtm.js?id=GTM-XXXX`. This is an HTTPS request from a `file://` page. Different browsers handle this differently:
+
+- **Chrome and Edge**: Mixed content blocking is less aggressive for `file://` pages — the request to `https://` may succeed
+- **Firefox**: More restrictive; may block the request or require explicit permission
+- **Safari**: Generally blocks cross-origin requests from `file://` pages
+
+Even when the container loads, several GTM features fail:
+- **Cookies**: `document.cookie` is unreachable from `file://` pages in most browsers. The `_ga` cookie cannot be written. Returning visitor detection fails.
+- **localStorage/sessionStorage**: Available on `file://` in most browsers but scoped per directory path rather than domain
+- **External script injection**: Tags that inject third-party scripts may be blocked by CORS policies on those external servers
+- **Network requests from tags**: Requests to analytics collection endpoints may fail due to CORS restrictions
+
+**Practical implication**: GTM does not work reliably on `file://` pages. Do not test your GTM implementation by opening HTML files directly. Use a local server.
+
+## Local development on `localhost`
+
+Developing on `http://localhost:3000` (or similar) works substantially better than `file://` because `localhost` is treated as a proper origin with a domain. Cookies work, CORS is handled, and most GTM features function.
+
+**What works on localhost:**
+- GTM container loading
+- dataLayer pushes and event processing
+- Custom HTML tags
+- Most tag types
+
+**What requires special handling:**
+
+**GTM Preview mode**: GTM's Preview mode uses a connection to `www.googletagmanager.com` that requires the container URL to match the site URL. GTM Preview works on `localhost` — just paste `http://localhost:3000` into the Preview URL field.
+
+**GA4 cookies**: The `_ga` cookie is set for `localhost` domain. It doesn't persist cross-subdomain or cross-port, but it works for local testing.
+
+**HTTPS-only features**: Some browser APIs are only available on secure contexts (HTTPS). These include the Clipboard API, some camera/microphone permissions, and certain storage APIs. Testing tracking on `http://localhost` may not reveal issues that appear on your production HTTPS site.
+
+**Self-signed SSL certificates**: If you run a local HTTPS server with a self-signed certificate, browsers show security warnings and may block certain requests. Use tools like `mkcert` to create locally trusted certificates for HTTPS development.
+
+## Electron applications
+
+Electron embeds a Chromium browser in a desktop application. Pages rendered in Electron have a `file://` URL by default — the application loads HTML from the packaged application bundle.
+
+GTM in Electron is technically possible with modifications:
+
+**Making GTM work in Electron:**
+
+```javascript
+// In your Electron main process (main.js)
+// Set a custom partition to enable cookies for your webview
+const win = new BrowserWindow({
+  webPreferences: {
+    partition: 'persist:myapp',  // Enables persistent storage
+    contextIsolation: true,
+    nodeIntegration: false
+  }
+});
+
+// Override protocol handling to allow HTTP requests from file:// context
+// This is needed for GTM's network requests to succeed
+const {session} = require('electron');
+session.defaultSession.protocol.interceptHttpProtocol('https',
+  (request, callback) => {
+    callback({url: request.url});
+  }
+);
+```
+
+**Using a virtual URL instead of file://**:
+
+A more reliable approach for Electron: load your application via a custom protocol that maps to `https://your-app.local/`:
+
+```javascript
+// Electron: register custom protocol
+const {protocol} = require('electron');
+
+protocol.registerFileProtocol('app', (request, callback) => {
+  const filePath = request.url.slice('app://'.length);
+  callback(path.join(__dirname, filePath));
+});
+
+// Load app via custom protocol
+win.loadURL('app://index.html');
+```
+
+This gives your Electron app a proper "domain" (`app://`), enabling cookie-based tracking and more reliable GTM operation.
+
+**GA4 in Electron**: If your Electron application needs to report analytics to GA4, consider using the GA4 Measurement Protocol API directly from the Electron main process rather than loading GTM in a renderer window. This avoids browser security restrictions entirely and is more reliable.
+
+## Mobile WebViews
+
+Mobile apps (iOS and Android) can embed web content in a WebView component. GTM running inside a WebView behaves similarly to GTM in a mobile browser, with some important differences.
+
+**Android WebView:**
+
+By default, Android WebViews disable JavaScript. You must explicitly enable it:
+
+```java
+// Android: enable JavaScript in WebView
+WebView webView = (WebView) findViewById(R.id.webview);
+WebSettings settings = webView.getSettings();
+settings.setJavaScriptEnabled(true);
+
+// Also allow third-party cookies (blocked by default in Android WebView)
+CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false);
+// Note: typically you do NOT want to accept third-party cookies
+// but GTM uses first-party cookies (for _ga), so the cookie domain must
+// match your WebView's URL
+```
+
+**iOS WKWebView:**
+
+WKWebView (modern iOS) supports JavaScript and cookies, but has stricter ITP rules than Safari. The `_ga` cookie will be subject to the same 7-day cap from JavaScript as in mobile Safari.
+
+**Tracking challenges in WebViews:**
+
+- **Attribution break**: WebViews cannot access the referring app's context. If a user comes from a native mobile app link into a WebView, the GA4 session starts fresh — no campaign attribution from the app's context.
+- **Cookie scope**: Each WebView instance has its own cookie storage, separate from the device's main browser. Users who click your link from Chrome on Android and see your content in a WebView are tracked as entirely separate users.
+- **App-to-web attribution**: Google provides Firebase Analytics → GA4 integration for native app tracking. If you have both a native app and a webview that show your content, coordinate attribution via the `app_instance_id` parameter.
+
+**Passing app context to the WebView:**
+
+```javascript
+// Native Android: inject app context into WebView JavaScript
+webView.addJavascriptInterface(new Object() {
+  @JavascriptInterface
+  public String getAppContext() {
+    return new JSONObject()
+      .put("app_instance_id", FirebaseAnalytics.getInstance(context).getAppInstanceId())
+      .put("app_version", BuildConfig.VERSION_NAME)
+      .toString();
+  }
+}, "AndroidInterface");
+
+// In the WebView's HTML/JavaScript:
+var appContext = JSON.parse(AndroidInterface.getAppContext());
+window.dataLayer = window.dataLayer || [];
+dataLayer.push({
+  app_instance_id: appContext.app_instance_id,
+  app_version: appContext.app_version
+});
+```
+
+## AMP (Accelerated Mobile Pages)
+
+AMP pages use a separate GTM container type and a different JavaScript runtime that sandboxes most browser APIs. GTM for AMP is configured through the AMP HTML framework with `<amp-analytics>` tags.
+
+The standard GTM Web container does not work in AMP — you need to configure an AMP container separately in GTM. AMP containers have a subset of GTM's tag and trigger types available.
+
+AMP containers are increasingly rare as Google's AMP policy has evolved. If you have AMP pages, they are likely isolated on `/amp/` URLs and can be tracked with a dedicated AMP container without affecting your main container.
+
+## Content Security Policy considerations in edge environments
+
+In controlled environments (Electron, WebViews), you have full control over CSP headers. GTM requires:
+
+```
+script-src https://www.googletagmanager.com;
+img-src https://www.googletagmanager.com https://www.google-analytics.com;
+connect-src https://www.google-analytics.com https://analytics.google.com;
+frame-src https://www.googletagmanager.com;  /* For noscript iframe */
+```
+
+In Electron, CSP is configured via:
+```html
+<meta http-equiv="Content-Security-Policy" content="...">
+```
+
+Or via Electron's session permissions API. Electron's default security policy may block GTM's requests — configure explicitly.
+
+## Testing GTM in edge environments
+
+**Local testing checklist:**
+1. Serve your HTML via a local server (`npx serve .` or `python3 -m http.server 8000`), not `file://`
+2. Verify GTM container loads: check Network tab for `gtm.js` request
+3. Verify cookies work: check Application → Cookies for `_ga`
+4. Use GTM Preview mode by entering `http://localhost:PORT` as the debug URL
+
+**Electron testing:**
+1. Use Chrome DevTools remote debugging: launch Electron with `--remote-debugging-port=9222`
+2. Navigate to `chrome://inspect` in Chrome
+3. Attach DevTools to your Electron renderer window
+4. Check GTM loading and cookie state as you would in a browser
+
+---
+
+<CardGrid>
+  <LinkCard title="Container Snippet Decoded" href="/internals/container-snippet-decoded/" description="Understanding how the snippet loads the container JS and why protocol matters." />
+  <LinkCard title="Race Conditions and Tag Timing" href="/internals/race-conditions-tag-timing/" description="Timing issues that become more pronounced in non-standard environments." />
+</CardGrid>
