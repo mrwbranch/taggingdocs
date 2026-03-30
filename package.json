@@ -1,0 +1,32 @@
+{
+  "name": "taggingdocs",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.19.0",
+  "dependencies": {
+    "@astrojs/react": "^5.0.2",
+    "@astrojs/starlight": "^0.38.2",
+    "@astrojs/starlight-tailwind": "^5.0.0",
+    "@tailwindcss/vite": "^4.2.2",
+    "astro": "^6.1.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwindcss": "^4.2.2"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/plus-jakarta-sans": "^5.2.8",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,35 @@
+@import 'tailwindcss';
+@import '@astrojs/starlight-tailwind';
+
+@import '@fontsource/plus-jakarta-sans/400.css';
+@import '@fontsource/plus-jakarta-sans/500.css';
+@import '@fontsource/plus-jakarta-sans/600.css';
+@import '@fontsource/plus-jakarta-sans/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+
+@theme {
+  --color-accent-low: #083344;
+  --color-accent: #06b6d4;
+  --color-accent-high: #67e8f9;
+  --font-sans: 'Plus Jakarta Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+:root {
+  --sl-color-accent-low: #083344;
+  --sl-color-accent: #06b6d4;
+  --sl-color-accent-high: #67e8f9;
+  --sl-font: 'Plus Jakarta Sans', sans-serif;
+  --sl-font-mono: 'JetBrains Mono', monospace;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-bg: #0f172a;
+  --sl-color-bg-nav: #0c1524;
+  --sl-color-bg-sidebar: #0c1524;
+}
+
+.sl-markdown-content {
+  line-height: 1.75;
+}
