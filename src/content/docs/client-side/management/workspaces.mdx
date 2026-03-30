@@ -1,6 +1,126 @@
 ---
 title: "Workspaces"
-description: "Parallel development with GTM workspaces."
+description: "GTM workspaces for parallel development — when to create one, how to resolve conflicts, and how to avoid the common pitfalls of collaborative GTM work."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Workspaces let multiple people (or multiple projects) make changes to a GTM container simultaneously without overwriting each other. They're the GTM equivalent of Git branches — each workspace is an isolated editing environment that you merge back into the live container when ready.
+
+Most teams underuse workspaces. They edit directly in the Default Workspace, create conflicts when two people publish simultaneously, and then wonder why changes disappeared. Workspaces are the fix.
+
+## How workspaces work
+
+Every GTM container starts with one workspace: the **Default Workspace**. This is a mutable editing environment that diverges from the last published version as you make changes.
+
+When you publish, the workspace's changes are merged into the live container, a new version is created, and the workspace is reset to match the live container.
+
+Additional workspaces let you create parallel editing environments:
+- **Workspace A** — implementing GA4 ecommerce tracking
+- **Workspace B** — adding a new Meta pixel event
+- **Default Workspace** — for quick fixes
+
+Each workspace is independent until you publish it. Changes in one workspace don't affect other workspaces or the live container.
+
+## When to create a workspace
+
+**Always create a new workspace when:**
+- A change will take more than one editing session to complete
+- Multiple people are working on different changes simultaneously
+- You're experimenting with something that might not ship
+- An agency or contractor is making changes
+
+**It's okay to use Default for:**
+- Quick single-session changes (fix a typo in a tag name, update a constant variable value)
+- Changes you're testing and publishing in the same sitting
+
+## Creating a workspace
+
+<Steps>
+1. In GTM, click the workspace selector (shows current workspace name, usually "Default Workspace") near the top of the interface.
+
+2. Click **+ New Workspace**.
+
+3. Give it a descriptive name: `GA4 Ecommerce Tracking`, `Meta CAPI Integration`, `Q4 Campaign Tracking`, `Agency Workspace - [Agency Name]`.
+
+4. Click **Create**. You're now in the new workspace. All edits you make are isolated here.
+</Steps>
+
+The new workspace starts as a copy of the current live container state. If the live container updates (someone publishes from another workspace), your workspace doesn't automatically update — your changes remain based on the container state when you created your workspace.
+
+## Workspace limits
+
+The number of workspaces you can have active simultaneously depends on your GTM tier:
+- **Standard GTM (free)**: 3 workspaces total (including Default)
+- **GTM 360**: Unlimited workspaces
+
+For most teams using standard GTM, this means you need to publish or delete workspaces before creating new ones. This is a practical reason to keep workspaces short-lived — create, use, publish, done.
+
+## Resolving workspace conflicts
+
+Conflicts happen when two workspaces have both modified the same tag, trigger, or variable. GTM will surface these conflicts when you attempt to publish:
+
+**GTM's conflict resolution flow:**
+
+1. You attempt to submit (publish) your workspace
+2. GTM detects that the live container has changed since you created your workspace
+3. GTM shows a list of conflicts
+4. For each conflict, you choose: keep your change OR keep the live version
+
+GTM doesn't offer a three-way merge — you pick one version or the other for each conflicting item. This is a deliberate simplification that avoids complex merge conflicts.
+
+**Practical strategies for avoiding conflicts:**
+- **Coordinate work** — if both you and a colleague need to edit the GA4 Configuration Tag, decide who goes first and sequences the work
+- **Keep workspace scope narrow** — a workspace for "Add Pinterest tracking" should only touch Pinterest tags and nothing else
+- **Publish frequently** — long-lived workspaces accumulate more potential conflicts. Aim to create, use, and publish a workspace within 1-2 days
+
+## Workspace best practices
+
+**Name workspaces by project, not by person.** "Jonas's Workspace" tells you who made it, not what's in it. "Q1 Campaign Tags" or "Checkout Funnel Fix" tells you the scope.
+
+**Delete workspaces after publishing.** A workspace that has been published no longer contains anything new — its changes are now in the live container. Delete it. Leaving old workspaces around creates confusion about what's "in progress" vs. "done."
+
+**Use the Default Workspace for emergencies only.** Quick production fixes that need to go out immediately can go in Default. Everything else should have a named workspace.
+
+**Disable (not delete) work-in-progress.** If you need to pause work in a workspace and don't want the half-finished tags to accidentally fire, you can pause individual tags in the workspace. This keeps them in the workspace but prevents them from firing if someone else publishes the workspace.
+
+## Syncing with the live container
+
+There's no "pull latest" button in GTM — unlike Git, you can't sync your workspace to the latest live container state without publishing your workspace first.
+
+This has an implication: if someone publishes from another workspace while you're working in yours, your workspace is now based on an older container state. When you eventually publish, GTM will merge your changes with the current live state.
+
+In practice this is usually fine — GTM handles the merge for non-conflicting changes. But it's why coordination matters for changes to shared tags.
+
+## Agency and contractor workspaces
+
+When giving an external team access to your GTM container, create a dedicated workspace for them:
+- `Agency - [Agency Name] - [Month/Year]`
+
+This isolates their changes from your internal work. You can review their workspace before publishing — the workspace acts as a review mechanism. Only someone with Publish permission needs to actually push it live.
+
+When the engagement ends, review the workspace, publish or discard their changes, and delete the workspace.
+
+<Aside type="caution">
+Agency workspaces don't prevent the agency from accessing other workspaces. Workspaces are an organizational tool, not a security boundary. For security, manage permissions — limit the agency to specific containers if needed, and give them Edit-only access rather than Publish.
+</Aside>
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Version Control"
+    description="How workspaces relate to versions — the publish workflow that goes workspace → version → live."
+    href="/client-side/management/version-control/"
+  />
+  <LinkCard
+    title="Permissions"
+    description="Managing who can create workspaces, who can publish, and how agency access works."
+    href="/client-side/management/permissions/"
+  />
+  <LinkCard
+    title="Environments"
+    description="GTM environments for staging and development — a complementary tool to workspaces."
+    href="/client-side/management/environments/"
+  />
+</CardGrid>

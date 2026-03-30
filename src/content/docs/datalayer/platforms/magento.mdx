@@ -1,6 +1,268 @@
 ---
-title: "Magento"
-description: "DataLayer implementation guide for Magento/Adobe Commerce."
+title: "Magento / Adobe Commerce"
+description: "DataLayer implementation for Magento 2 and Adobe Commerce — layout XML, JavaScript mixins, Knockout.js integration, and full page cache considerations."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Magento 2's frontend architecture is significantly more complex than most platforms. It uses Knockout.js for dynamic UI rendering, RequireJS for module loading, and a layout XML system that controls what JavaScript loads on which page. Understanding this architecture is a prerequisite for any dataLayer implementation.
+
+## Magento 2 frontend stack essentials
+
+- **Layout XML**: Controls which JS modules and templates load per page type (CMS, catalog, checkout)
+- **RequireJS**: Magento's module loader — all JavaScript is loaded as AMD modules
+- **Knockout.js**: Powers the mini-cart, checkout, and dynamic product components
+- **UI Components**: Magento's declarative framework for form fields and checkout steps
+- **Full Page Cache (FPC)**: ESI and Varnish caching that means page HTML may not contain current user/session data
+
+## Installing GTM via layout XML
+
+The recommended approach is a custom module. Never modify core or theme files directly.
+
+**Module structure:**
+
+```
+app/code/YourVendor/Gtm/
+├── etc/
+│   ├── module.xml
+│   └── frontend/
+│       └── di.xml
+├── view/
+│   └── frontend/
+│       └── layout/
+│           └── default.xml
+├── templates/
+│   ├── gtm_head.phtml
+│   └── gtm_body.phtml
+└── registration.php
+```
+
+**`view/frontend/layout/default.xml`:**
+
+```xml
+<?xml version="1.0"?>
+<page xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:noNamespaceSchemaLocation="urn:magento:framework:View/Layout/etc/page_configuration.xsd">
+    <head>
+        <block class="Magento\Framework\View\Element\Template"
+               name="gtm.head"
+               template="YourVendor_Gtm::gtm_head.phtml"
+               before="-"/>
+    </head>
+    <body>
+        <block class="Magento\Framework\View\Element\Template"
+               name="gtm.body"
+               template="YourVendor_Gtm::gtm_body.phtml"
+               after="-"
+               before="-"/>
+    </body>
+</page>
+```
+
+**`templates/gtm_head.phtml`:**
+
+```php
+<?php
+$gtmId = 'GTM-XXXXXXX'; // or read from config
+?>
+<script>
+window.dataLayer = window.dataLayer || [];
+</script>
+<!-- Google Tag Manager -->
+<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+})(window,document,'script','dataLayer','<?= $block->escapeJs($gtmId) ?>');</script>
+```
+
+## Product view tracking via JavaScript mixin
+
+Magento's catalog pages don't have straightforward template hooks for JavaScript injection. Use a RequireJS mixin to extend an existing module with dataLayer tracking.
+
+**`view/frontend/requirejs-config.js`:**
+
+```javascript
+var config = {
+    config: {
+        mixins: {
+            'Magento_Catalog/js/product/view/product-details-base': {
+                'YourVendor_Gtm/js/product-view-mixin': true
+            }
+        }
+    }
+};
+```
+
+**`view/frontend/web/js/product-view-mixin.js`:**
+
+```javascript
+define(['jquery'], function($) {
+    'use strict';
+
+    return function(ProductView) {
+        return ProductView.extend({
+            initialize: function() {
+                this._super();
+                this._trackViewItem();
+                return this;
+            },
+
+            _trackViewItem: function() {
+                var productData = this.options.productData || {};
+
+                window.dataLayer = window.dataLayer || [];
+                dataLayer.push({ ecommerce: null });
+                dataLayer.push({
+                    event: 'view_item',
+                    ecommerce: {
+                        currency: window.checkoutConfig?.quoteData?.quote_currency_code || 'USD',
+                        value: parseFloat(productData.finalPrice || 0),
+                        items: [{
+                            item_id: productData.sku || String(productData.id),
+                            item_name: productData.name,
+                            price: parseFloat(productData.finalPrice || 0),
+                            quantity: 1
+                        }]
+                    }
+                });
+            }
+        });
+    };
+});
+```
+
+## Add-to-cart tracking
+
+Intercept Magento's add-to-cart action via a mixin on the `Magento_Catalog/js/catalog-add-to-cart` module.
+
+```javascript
+// add-to-cart-mixin.js
+define(['jquery'], function($) {
+    'use strict';
+
+    return function(AddToCart) {
+        return AddToCart.extend({
+            ajaxSubmit: function(form) {
+                // Get product data from the form
+                var productId = form.find('input[name="product"]').val();
+                var qty = parseInt(form.find('input[name="qty"]').val() || '1');
+                var price = parseFloat(form.data('product-price') || 0);
+                var productName = form.data('product-name') || '';
+                var sku = form.data('product-sku') || productId;
+
+                // Call original method
+                var result = this._super(form);
+
+                // Track after successful add
+                result.done(function() {
+                    window.dataLayer = window.dataLayer || [];
+                    dataLayer.push({ ecommerce: null });
+                    dataLayer.push({
+                        event: 'add_to_cart',
+                        ecommerce: {
+                            currency: window.checkoutConfig?.quoteData?.quote_currency_code || 'USD',
+                            value: price * qty,
+                            items: [{
+                                item_id: sku,
+                                item_name: productName,
+                                price: price,
+                                quantity: qty
+                            }]
+                        }
+                    });
+                });
+
+                return result;
+            }
+        });
+    };
+});
+```
+
+## Checkout step tracking
+
+Magento's checkout is a multi-step Knockout.js application. Track step progression by subscribing to Magento's checkout step observable.
+
+```javascript
+// checkout-tracking.js
+define([
+    'Magento_Checkout/js/model/step-navigator',
+    'Magento_Checkout/js/model/quote'
+], function(stepNavigator, quote) {
+    'use strict';
+
+    return function() {
+        stepNavigator.steps.subscribe(function(steps) {
+            var activeStep = steps.find(function(step) {
+                return step.isVisible();
+            });
+
+            if (!activeStep) return;
+
+            var cartItems = quote.getItems()().map(function(item, index) {
+                return {
+                    item_id: item.sku,
+                    item_name: item.name,
+                    price: parseFloat(item.base_price),
+                    quantity: parseInt(item.qty),
+                    index: index
+                };
+            });
+
+            if (activeStep.code === 'shipping') {
+                window.dataLayer = window.dataLayer || [];
+                dataLayer.push({ ecommerce: null });
+                dataLayer.push({
+                    event: 'begin_checkout',
+                    ecommerce: {
+                        currency: quote.totals().quote_currency_code,
+                        value: parseFloat(quote.totals().subtotal),
+                        items: cartItems
+                    }
+                });
+            }
+        });
+    };
+});
+```
+
+## Full page cache considerations
+
+Magento's Full Page Cache (FPC) with Varnish caches page HTML. This means:
+
+1. **Customer-specific data cannot be in cached page HTML.** Product prices, cart contents, and user information must be fetched via AJAX from a non-cached endpoint.
+2. **The dataLayer push in Phtml templates will be cached.** For session-specific data, use Magento's customer-data sections API.
+
+```javascript
+// Fetch customer-specific data from Magento's sections API (not cached)
+require(['Magento_Customer/js/customer-data'], function(customerData) {
+    var cart = customerData.get('cart');
+    cart.subscribe(function(cartData) {
+        // Cart data is always fresh, not cached
+        var items = cartData.items || [];
+        // Push view_cart or other cart events here
+    });
+});
+```
+
+## Common mistakes
+
+**Modifying core or vendor JavaScript.** Magento upgrades will overwrite your changes. Always use mixins, plugins, or observer patterns to extend behavior.
+
+**Not flushing caches after layout XML changes.** Layout XML is compiled and cached. After any layout change, flush Magento's layout and full page caches: `bin/magento cache:clean layout full_page`.
+
+**Using DOM scraping instead of Magento's data structures.** Magento exposes rich JavaScript objects (`quote`, `checkoutData`, `customerData`) via its module system. Scraping the DOM for price and product information is fragile and unnecessary.
+
+<CardGrid>
+  <LinkCard
+    title="Validation Approaches"
+    description="Testing and validating your Magento dataLayer implementation."
+    href="/datalayer/validation/validation-approaches/"
+  />
+  <LinkCard
+    title="Ecommerce Overview"
+    description="The GA4 ecommerce event specification your implementation must match."
+    href="/datalayer/ecommerce/ecommerce-overview/"
+  />
+</CardGrid>

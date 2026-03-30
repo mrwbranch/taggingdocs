@@ -1,6 +1,197 @@
 ---
 title: "Naming Conventions"
-description: "A consistent naming system for tags, triggers, and variables."
+description: "A definitive naming system for GTM tags, triggers, variables, and folders — pick a convention on day one and enforce it."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Naming conventions are the first thing new team members see and the last thing most teams plan. Six months into a GTM implementation, a container with 80 tags named "GA4 Event," "GA4 Event (2)," "test - purchase," and "Copy of Purchase Event (DO NOT DELETE)" is not unusual. It is also completely avoidable.
+
+Pick a convention on day one. Enforce it. Document it in your team wiki. Future you will be grateful.
+
+## Tags
+
+The recommended format: `[Platform] - [Type] - [Description]`
+
+- Platform: who receives the data (GA4, Meta, LinkedIn, HubSpot, Google Ads, etc.)
+- Type: what kind of tag (Event, Config, Pixel, Conversion, PageView, etc.)
+- Description: what specifically it tracks, in plain language
+
+**Examples:**
+
+| Good | Bad |
+|---|---|
+| `GA4 - Event - Purchase` | `GA4 Purchase` |
+| `GA4 - Event - Form Submission` | `Form tag` |
+| `GA4 - Config - Google Tag` | `Tag 1` |
+| `Meta - Pixel - PageView` | `Facebook` |
+| `Meta - Pixel - Purchase` | `meta purchase event` |
+| `Google Ads - Conversion - Purchase` | `Ads Conversion` |
+| `LinkedIn - Insight Tag - PageView` | `linkedin` |
+| `HubSpot - Tracking Code` | `HubSpot test` |
+
+**Why this structure:**
+- Sorting alphabetically groups all GA4 tags together, all Meta tags together, etc.
+- The type prefix helps you scan quickly when looking for "all event tags" or "all conversion tags"
+- The description should be specific enough to know what fires it without opening the tag
+
+<Aside type="caution">
+Never use "Copy of" in a production tag name. When you duplicate a tag, immediately rename it. "Copy of Purchase Event" sitting in a production container with an active trigger is a support nightmare three months later.
+</Aside>
+
+## Triggers
+
+The recommended format: `[Trigger Type Abbreviation] - [Description]`
+
+Common abbreviations:
+- `PV` — Page View
+- `DR` — DOM Ready
+- `WL` — Window Loaded
+- `CE` — Custom Event
+- `CL` — Click (All Elements)
+- `LC` — Link Click
+- `FS` — Form Submission
+- `SD` — Scroll Depth
+- `TM` — Timer
+- `EV` — Element Visibility
+- `JS` — JavaScript Error
+- `HC` — History Change
+
+**Examples:**
+
+| Good | Bad |
+|---|---|
+| `CE - purchase` | `Purchase Event` |
+| `CE - form_submission` | `form_sub trigger` |
+| `PV - All Pages` | `page view` |
+| `PV - Product Pages` | `PDP page view` |
+| `LC - Outbound Links` | `Link` |
+| `LC - File Downloads` | `downloads` |
+| `SD - 25/50/75/90 - Content Pages` | `scroll trigger` |
+| `CE - add_to_cart - Exception: Checkout Pages` | `add to cart` |
+
+For Custom Event triggers specifically, use the exact event name as the trigger description:
+- `CE - add_to_cart` (not `CE - Add to Cart`)
+- `CE - video_play` (not `CE - Video Play`)
+
+This makes it instantly clear what dataLayer event name the trigger is listening for.
+
+## Variables
+
+The recommended format: `[Variable Type Abbreviation] - [Description]`
+
+Common abbreviations:
+- `DLV` — Data Layer Variable
+- `CJS` — Custom JavaScript
+- `Const` — Constant
+- `RT` — Regex Table
+- `LT` — Lookup Table
+- `URL` — URL Variable
+- `DOM` — DOM Element
+- `Cookie` — First Party Cookie
+- `JS` — JavaScript Variable (window global reference)
+
+**Examples:**
+
+| Good | Bad |
+|---|---|
+| `DLV - ecommerce.transaction_id` | `Transaction ID` |
+| `DLV - user_id` | `user id` |
+| `Const - GA4 Measurement ID` | `GA4 ID` |
+| `Const - Site Hostname` | `domain` |
+| `CJS - File Extension from Click URL` | `file ext` |
+| `CJS - Is Excluded Domain` | `domain check` |
+| `RT - Link Type` | `link type` |
+| `LT - Page Type to Content Category` | `categories` |
+| `URL - Query Param: utm_source` | `utm source` |
+
+For Data Layer Variables, including the dataLayer key path in the name (e.g., `DLV - ecommerce.transaction_id` rather than just `DLV - Transaction ID`) makes it immediately clear where the variable reads from.
+
+## Folders
+
+Organize folders by platform, with optional sub-folders for large implementations:
+
+```
+📁 GA4
+   GA4 - Config - Google Tag
+   GA4 - Event - Purchase
+   GA4 - Event - Form Submission
+   ...
+
+📁 Meta
+   Meta - Pixel - PageView
+   Meta - Pixel - Purchase
+   ...
+
+📁 Google Ads
+   Google Ads - Conversion Linker
+   Google Ads - Conversion - Purchase
+   ...
+
+📁 Consent
+   Consent Mode - Default
+   Consent Mode - Update Handler
+   ...
+
+📁 Utility
+   CJS - File Extension
+   CJS - Is Excluded Domain
+   Const - GA4 Measurement ID
+   ...
+```
+
+Alternative: organize by function (`Tracking`, `Marketing`, `Consent`, `Utility`). Pick one and apply it consistently. The biggest mistake is having some items in folders and some not.
+
+## DataLayer event names
+
+DataLayer event names should use `snake_case` to align with GA4's built-in event naming conventions:
+
+| Good | Bad |
+|---|---|
+| `form_submission` | `formSubmission`, `form-submission`, `Form Submission` |
+| `add_to_cart` | `addToCart`, `ADD_TO_CART` |
+| `video_play` | `videoPlay`, `video-play` |
+| `page_view` | `pageView`, `PageView` |
+
+This consistency means your custom event names and GA4 standard event names look the same in reports. It also prevents the most common typo errors (camelCase mixed with underscore).
+
+## What to avoid
+
+**"test" in production tag names.** Every container has a `GA4 - test` or `test tag - DO NOT DELETE` sitting there. Clean them up before every publish.
+
+**Numbers as descriptions.** `GA4 Event 1`, `GA4 Event 2` tells you nothing. Even temporary tags deserve a real name.
+
+**Abbreviations nobody remembers.** `GA4 - EV - PDPAT` — what does that mean? Six months later, nobody knows. Use words.
+
+**Inconsistent capitalization.** `GA4 - event - purchase` and `GA4 - Event - Form Submission` and `GA4 - EVENT - VIDEO` in the same container. Pick a capitalization style and enforce it across the team.
+
+**Overly long names.** A tag named `GA4 - Event - User Clicked The Purchase Button on the Product Detail Page After Viewing the Item` is unwieldy. `GA4 - Event - Purchase` is enough — the trigger and the dataLayer event context fill in the rest.
+
+## Enforcing conventions
+
+Naming conventions only work if they're enforced. Practical approaches:
+
+1. **Document them in your team wiki.** Include examples. Link to this guide or your own version of it.
+2. **Review new tags in code review style.** Before publishing, have someone check naming on new items.
+3. **Rename before publish.** Make it a rule: any "Copy of" or "test" name must be renamed before the version is published.
+4. **Export your container regularly and check names in JSON.** It's easier to spot naming inconsistencies when you can search the text.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Folder Organization"
+    description="How to structure GTM folders for maximum visibility and maintainability."
+    href="/client-side/management/folder-organization/"
+  />
+  <LinkCard
+    title="Container Cleanup"
+    description="Auditing and cleaning a container that's already accumulated naming debt."
+    href="/client-side/management/container-cleanup/"
+  />
+  <LinkCard
+    title="Version Control"
+    description="Publishing workflow that includes naming versions correctly."
+    href="/client-side/management/version-control/"
+  />
+</CardGrid>

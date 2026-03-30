@@ -1,6 +1,211 @@
 ---
-title: "Facebook CAPI"
-description: "Server-side Facebook Conversions API implementation."
+title: "Facebook Conversions API"
+description: "Implementing Meta CAPI via sGTM — tag setup, event mapping, deduplication, and match quality optimization."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Meta's Conversions API (CAPI) is the server-to-server equivalent of the Meta Pixel. Instead of the browser sending conversion data directly to Facebook's servers, your sGTM server sends it via Meta's Graph API. The result: conversions that ad blockers, iOS 14+ privacy changes, and browser privacy features would have stripped from the browser Pixel now reach Meta's attribution system from a reliable server-side path.
+
+sGTM is the most practical way to implement CAPI without custom back-end development. The Meta Pixel tag in sGTM's Community Template Gallery handles the API call — you provide the access token and event configuration.
+
+## Why CAPI matters
+
+Without CAPI:
+- Meta's browser Pixel is blocked by ~25% of users
+- iOS 14+ App Tracking Transparency reduces event matching for iOS users
+- Short-lived cookies limit attribution windows
+- GDPR consent refusals block the Pixel for European users who decline
+
+CAPI from your server:
+- Not blocked by ad blockers (server-to-server, no browser involvement)
+- Not affected by iOS ATT (no app pixel involved)
+- Can match events using hashed email/phone in addition to cookies
+- Still requires consent for EU users (server-side does not change consent obligations)
+
+## Step 1: Get a Meta Access Token
+
+You need a permanent access token for the CAPI endpoint:
+
+<Steps>
+1. Go to [Meta Events Manager](https://business.facebook.com/events_manager)
+
+2. Select your pixel → **Settings** → **Conversions API**
+
+3. Under **Generate Access Token**, click **Generate**. Copy and save this token immediately — it is not shown again.
+
+4. Store the token as a GTM constant variable (not hardcoded in the tag). Name it something like `Meta CAPI Access Token`.
+</Steps>
+
+<Aside type="caution">
+The CAPI access token is a permanent credential with write access to your ad account's event data. Treat it as a secret — do not put it in client-side JavaScript, version control, or any place accessible to unauthorized parties.
+</Aside>
+
+## Step 2: Install the Meta Pixel CAPI tag template
+
+The official Meta CAPI tag for sGTM is available from the Community Template Gallery:
+
+1. In your sGTM container, go to **Templates**
+2. Search the Community Gallery for **Facebook Conversions API**
+3. Install the template published by Facebook
+
+Alternatively, install directly from [Meta's GitHub](https://github.com/facebookincubator/Facebook-Pixel-for-GTM-Server-Side-Tagging).
+
+## Step 3: Configure the tag
+
+Create a new tag using the Meta CAPI template:
+
+**Required fields:**
+- **Pixel ID**: Your Meta Pixel ID (found in Events Manager → Settings)
+- **Access Token**: `{{Meta CAPI Access Token}}` (reference your constant variable)
+- **Action Source**: Set to `website` for web conversion events
+
+**Event name mapping**: The tag needs to know which GA4 event maps to which Meta standard event.
+
+| GA4 event | Meta standard event |
+|---|---|
+| `page_view` | PageView |
+| `view_item` | ViewContent |
+| `add_to_cart` | AddToCart |
+| `begin_checkout` | InitiateCheckout |
+| `add_payment_info` | AddPaymentInfo |
+| `purchase` | Purchase |
+| `sign_up` | CompleteRegistration |
+| `generate_lead` | Lead |
+| `search` | Search |
+
+Configure the tag to read `event_name` from the Event Model and map it to the appropriate Meta event name using a GTM lookup table variable, or configure separate tag instances per event type.
+
+## Step 4: User data for match quality
+
+Meta's Event Match Quality (EMQ) score measures how well your CAPI events can be matched to Meta users. Higher match quality = better attribution, better optimization. The score is visible in Events Manager.
+
+User data parameters that improve match quality (all must be lowercase-hashed with SHA-256 before sending):
+
+| Parameter | Meta field | Hash required |
+|---|---|---|
+| Email address | `em` | SHA-256, lowercase first |
+| Phone number | `ph` | SHA-256, digits only, country code |
+| First name | `fn` | SHA-256, lowercase |
+| Last name | `ln` | SHA-256, lowercase |
+| Date of birth | `db` | SHA-256, YYYYMMDD |
+| City | `ct` | SHA-256, lowercase |
+| State | `st` | SHA-256, 2-letter code, lowercase |
+| Zip code | `zp` | SHA-256 |
+| Country | `country` | SHA-256, 2-letter code, lowercase |
+| External ID | `external_id` | SHA-256 (or plain, if stable) |
+
+The Meta CAPI tag template handles SHA-256 hashing for you when you configure these parameters. Configure in the **Customer Information Parameters** section.
+
+**Where to get these values in sGTM:**
+- Email: from the Event Model if sent by client-side (e.g., `{{Event Data - user_email}}`)
+- From Firestore if you have a user profile lookup
+- From a server-side session that resolved the user at login
+
+Do not send unhashed PII. The Meta CAPI template handles hashing automatically — provide the raw value and let the template hash it.
+
+## Step 5: Configure the trigger
+
+Set the trigger for the CAPI tag:
+- For conversion-only CAPI: create a trigger matching specific event names (`purchase`, `generate_lead`, etc.)
+- For full funnel CAPI: All Events trigger (sends all GA4 events to Meta)
+
+Most implementations start with purchase events only, then expand to full-funnel once the deduplication setup is verified.
+
+## Step 6: Implement deduplication
+
+**This is not optional.** If you run both the browser Meta Pixel and the server-side CAPI tag, Meta receives each event twice — once from the browser, once from your server. Without deduplication, every conversion is counted twice, inflating your reported results and degrading your ad optimization.
+
+The deduplication mechanism is the `event_id` parameter:
+
+1. **Generate a unique event ID** on the client side, for each event
+2. **Send the same `event_id`** from both the browser Pixel and the CAPI tag
+3. Meta's deduplication window: 48 hours — if two events arrive with the same `event_id` and `event_name` within 48 hours, Meta counts them as one
+
+**Client-side implementation** (in your dataLayer push or GA4 tag):
+
+```javascript
+// Generate a UUID for each event
+function generateEventId() {
+  return 'ev_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+// Push to dataLayer with event_id
+dataLayer.push({
+  event: 'purchase',
+  event_id: generateEventId(), // consistent UUID for this event instance
+  ecommerce: {
+    transaction_id: 'ORDER-123',
+    value: 99.99,
+    currency: 'USD',
+    // ...
+  }
+});
+```
+
+**In client-side GTM**: add `event_id` as a custom parameter on your Meta Pixel tag's purchase event.
+
+**In sGTM**: read `event_id` from the Event Model using an Event Data variable: `{{Event Data - event_id}}`. Set this as the **Event ID** in the CAPI tag configuration.
+
+Verify deduplication is working in Meta Events Manager → Test Events. Events with the same `event_id` should show as deduplicated (not counted twice).
+
+## Step 7: Test event code for verification
+
+During setup, use Meta's test event capability:
+
+1. Events Manager → your pixel → **Test Events**
+2. Copy the Test Event Code (format: `TEST12345`)
+3. Add this code to the CAPI tag during testing: **Test Event Code** field
+4. Trigger events on your site
+5. They appear in real-time in the Test Events panel
+
+Remove the test event code before publishing to production.
+
+## Event Match Quality optimization
+
+After setup, check your EMQ score in Events Manager. Target score: 7/10 or higher.
+
+To improve score:
+- Add hashed email for logged-in users (biggest single improvement)
+- Add hashed phone number
+- Ensure `client_user_agent` and `client_ip_address` are being forwarded
+- Pass `fbp` (Meta Pixel cookie) and `fbc` (Facebook click ID from URL parameter) if available
+
+The `fbp` and `fbc` parameters come from the browser and must be passed through the GA4 Measurement Protocol request to be available in the Event Model. Ensure your client-side GA4 tag includes these parameters.
+
+## Common mistakes
+
+**No deduplication setup.** Running browser Pixel + CAPI without `event_id` matching doubles all your reported conversions. This makes your ROAS look better than it is — until Meta's algorithm optimizes on inflated data and your actual performance plateaus.
+
+**Hardcoding the access token.** Store it in a GTM constant variable, not directly in the tag. This prevents the token from being visible in container exports.
+
+**Sending unhashed PII.** The CAPI template hashes values for you when you provide raw PII — but if you accidentally pre-hash and the template hashes again, Meta receives double-hashed values it cannot match. Provide raw values and let the template handle hashing.
+
+**Not including `action_source: website`.** Meta uses this to understand where the event originated. Without it, the event may be attributed incorrectly.
+
+**Triggering CAPI for PageView events at high volume without checking the impact.** Sending all PageView events to Meta CAPI means millions of API calls/month on high-traffic sites. Meta charges by API call volume — configure your trigger to only send events that have attribution value.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Event Deduplication"
+    description="Complete guide to preventing double-counting when running both browser Pixel and CAPI."
+    href="/server-side/advanced/event-deduplication/"
+  />
+  <LinkCard
+    title="Data Redaction & PII"
+    description="Handling user data safely before it reaches Meta's servers."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+  <LinkCard
+    title="TikTok Events API"
+    description="Similar setup pattern for TikTok server-side conversion tracking."
+    href="/server-side/tags/tiktok-events-api/"
+  />
+  <LinkCard
+    title="Event Enrichment"
+    description="Adding user data from Firestore to improve Meta CAPI match quality."
+    href="/server-side/advanced/event-enrichment/"
+  />
+</CardGrid>

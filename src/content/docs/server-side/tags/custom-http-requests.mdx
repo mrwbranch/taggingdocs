@@ -1,6 +1,277 @@
 ---
 title: "Custom HTTP Requests"
-description: "Sending data to any endpoint with custom HTTP request tags."
+description: "Making arbitrary HTTP requests from sGTM — sending data to any endpoint, API authentication, and error handling."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+sGTM is not limited to the built-in vendor tags (GA4, Meta CAPI, Google Ads). You can send data to any HTTP endpoint from your server container — your data warehouse, a custom analytics API, a CRM, Slack for alerting, or any other service that accepts HTTP requests. The Custom HTTP Request tag (or a custom tag template using `sendHttpRequest`) is the mechanism.
+
+## Two approaches
+
+**Community Template Gallery**: Search for "HTTP Request" in the sGTM template gallery. Multiple templates exist for sending custom HTTP requests with various authentication methods. These are the fastest path for common use cases.
+
+**Custom tag template**: Build your own using the `sendHttpRequest` API in the sandboxed JavaScript environment. More control, more code, but handles any authentication scheme or request format.
+
+This article focuses on building custom HTTP requests in tag templates — the approach that handles cases the Gallery templates do not cover.
+
+## The `sendHttpRequest` API
+
+The primary API for making outbound HTTP requests in sGTM templates:
+
+```javascript
+sendHttpRequest(url, options, callback);
+```
+
+**Parameters:**
+- `url`: the full URL to send the request to
+- `options`: object with `method`, `headers`, `body`, `timeout`
+- `callback`: function called with `(statusCode, headers, body)` when the response arrives
+
+**Basic example — POST to a webhook:**
+
+```javascript
+const sendHttpRequest = require('sendHttpRequest');
+const JSON = require('JSON');
+
+const eventData = {
+  event: data.event_name,
+  user_id: data.user_id,
+  timestamp: getTimestampMillis(),
+};
+
+sendHttpRequest(
+  'https://your-api.com/events',
+  {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': data.apiKey, // field from template configuration
+    },
+    body: JSON.stringify(eventData),
+    timeout: 5000, // 5 second timeout
+  },
+  function(statusCode, headers, body) {
+    if (statusCode >= 200 && statusCode < 300) {
+      // Success
+      data.gtmOnSuccess();
+    } else {
+      // Failed
+      data.gtmOnFailure();
+    }
+  }
+);
+```
+
+## Authentication patterns
+
+### API Key in header
+
+Most common pattern — pass the key in a custom request header:
+
+```javascript
+headers: {
+  'Authorization': 'ApiKey ' + data.apiKey,
+  // or
+  'X-API-Key': data.apiKey,
+  // or
+  'api-key': data.apiKey,
+}
+```
+
+Store the API key as a template field (with `canBeSensitive: true` in the field definition) so it is entered via the GTM UI, not hardcoded.
+
+### Bearer token
+
+```javascript
+headers: {
+  'Authorization': 'Bearer ' + data.bearerToken,
+}
+```
+
+### Google Cloud Service Account (for internal GCP APIs)
+
+For calling Google APIs from sGTM (Firestore REST API, BigQuery Streaming API, etc.), use the `getGoogleAuth` API:
+
+```javascript
+const getGoogleAuth = require('getGoogleAuth');
+const sendHttpRequest = require('sendHttpRequest');
+
+const auth = getGoogleAuth({
+  scopes: ['https://www.googleapis.com/auth/datastore']
+});
+
+auth.getAuthToken(function(authToken) {
+  sendHttpRequest(
+    'https://firestore.googleapis.com/v1/projects/YOUR_PROJECT/databases/(default)/documents/events',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + authToken,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({fields: {
+        event_name: {stringValue: data.event_name},
+        timestamp: {timestampValue: new Date().toISOString()},
+      }}),
+    },
+    function(statusCode) {
+      if (statusCode >= 200 && statusCode < 300) {
+        data.gtmOnSuccess();
+      } else {
+        data.gtmOnFailure();
+      }
+    }
+  );
+});
+```
+
+The `getGoogleAuth` API uses the sGTM server's service account credentials automatically — no credential management required.
+
+## Sending ecommerce data to a custom analytics endpoint
+
+A practical example: forwarding purchase events to your internal data warehouse endpoint:
+
+```javascript
+const sendHttpRequest = require('sendHttpRequest');
+const JSON = require('JSON');
+const getEventData = require('getEventData');
+
+// Only proceed for purchase events
+if (getEventData('event_name') !== 'purchase') {
+  data.gtmOnSuccess();
+  return;
+}
+
+const items = getEventData('items') || [];
+const payload = {
+  event: 'purchase',
+  transaction_id: getEventData('transaction_id'),
+  revenue: getEventData('value'),
+  currency: getEventData('currency'),
+  client_id: getEventData('client_id'),
+  user_id: getEventData('user_id'),
+  items: items.map(function(item) {
+    return {
+      sku: item.item_id,
+      name: item.item_name,
+      quantity: item.quantity,
+      price: item.price,
+    };
+  }),
+  received_at: new Date().toISOString(),
+};
+
+sendHttpRequest(
+  data.endpointUrl, // field from template config
+  {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + data.authToken,
+    },
+    body: JSON.stringify(payload),
+    timeout: 8000,
+  },
+  function(statusCode, headers, responseBody) {
+    if (statusCode >= 200 && statusCode < 300) {
+      data.gtmOnSuccess();
+    } else {
+      // Log the error for debugging
+      logToConsole('Endpoint error: ' + statusCode + ' ' + responseBody);
+      data.gtmOnFailure();
+    }
+  }
+);
+```
+
+## Error handling and retries
+
+The sGTM sandbox does not provide automatic retries. If your outbound request fails, you must handle it explicitly.
+
+**Simple failure logging:**
+```javascript
+function(statusCode, headers, body) {
+  if (statusCode >= 400) {
+    logToConsole(JSON.stringify({
+      level: 'error',
+      message: 'HTTP request failed',
+      status: statusCode,
+      endpoint: url,
+      event: getEventData('event_name'),
+    }));
+    data.gtmOnFailure();
+    return;
+  }
+  data.gtmOnSuccess();
+}
+```
+
+**Manual retry with exponential backoff:**
+
+The sGTM sandbox does not have `setTimeout` for async delays, so true exponential backoff is not possible within a single request. For important events (purchase, lead), consider a different architecture: write the event to Firestore immediately (fast, reliable), then have a separate process retry the outbound request asynchronously.
+
+## Timeout considerations
+
+The sGTM request to the browser waits for your tag code to complete (up to the configured request timeout). If your outbound HTTP request is slow:
+
+- The browser's tracking request stays open while it waits
+- If `sendHttpRequest` timeout (e.g., 5000ms) is shorter than the Cloud Run request timeout (60s), the tag times out gracefully and calls `gtmOnFailure()`
+- If the outbound request is slow but within the timeout, all processing is delayed
+
+**Best practice**: set `timeout` in `sendHttpRequest` to 5–8 seconds maximum. For non-critical data destinations, use `timeout: 3000` and accept that slow responses mean data loss. For critical conversions, consider an async architecture (write to queue, process separately).
+
+## Rate limiting
+
+Your outbound HTTP requests count against the rate limits of the destination API. If you are sending high event volumes to a rate-limited endpoint:
+
+- Check the API's rate limit documentation before deploying at scale
+- Test with 1% traffic sample first
+- Build rate-limit-aware retry logic if the API returns 429
+
+## Use cases
+
+**Data warehouse ingestion**: Send purchase events to your BigQuery streaming insert endpoint or Snowflake ingest endpoint for first-party data consolidation.
+
+**CRM event tracking**: Forward form submissions, purchases, or trial signups to HubSpot, Salesforce, or Pipedrive via their respective APIs.
+
+**Custom analytics**: Send events to your internal analytics platform that does not have an sGTM template.
+
+**Slack/PagerDuty alerts**: When a high-value purchase exceeds a threshold, send a Slack notification to the relevant team channel.
+
+**Inventory reservation**: On `add_to_cart` events, call your inventory API to soft-reserve the item.
+
+## Common mistakes
+
+**No timeout set.** Without a timeout, a hung outbound API call keeps the request open until Cloud Run's 60-second timeout. Set explicit timeouts on every `sendHttpRequest` call.
+
+**Hardcoding credentials in template code.** Use template fields for API keys and tokens. This makes credentials visible in the GTM UI (with appropriate permissions) rather than buried in template code.
+
+**Not calling `data.gtmOnSuccess()` or `data.gtmOnFailure()`.** Every tag template must call one of these to signal completion to the container. If neither is called, the container waits indefinitely and tag sequencing breaks.
+
+**Not handling non-2xx status codes as failures.** A 400 or 500 from your endpoint should call `data.gtmOnFailure()`, not `data.gtmOnSuccess()`. Ignoring failure status codes means you never learn about broken integrations.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Templates"
+    description="The full sandboxed JavaScript API for building custom tag templates."
+    href="/server-side/advanced/custom-templates/"
+  />
+  <LinkCard
+    title="Firestore Writer"
+    description="Writing event data to Firestore — an alternative to HTTP requests for GCP-native storage."
+    href="/server-side/tags/firestore-writer/"
+  />
+  <LinkCard
+    title="Webhook Integrations"
+    description="Receiving inbound webhooks and forwarding to ad platforms."
+    href="/server-side/advanced/webhook-integrations/"
+  />
+  <LinkCard
+    title="Monitoring & Logging"
+    description="Logging HTTP request failures and monitoring outbound call success rates."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+</CardGrid>

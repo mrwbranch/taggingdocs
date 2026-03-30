@@ -1,6 +1,221 @@
 ---
 title: "Duplicate Transaction Prevention"
-description: "Prevent duplicate purchase events on thank-you page refreshes."
+description: "Prevent duplicate purchase events when users refresh the thank-you page or navigate back — cookie-based dedup, localStorage approach, and server-side validation."
+sidebar:
+  badge:
+    text: Intermediate
+    variant: note
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+The most damaging data quality issue in ecommerce analytics is duplicate purchase events. A single purchase appears as two or three conversions in GA4 and Google Ads, inflating revenue numbers, corrupting conversion rate calculations, and potentially triggering bid strategy adjustments on false data.
+
+Duplicates happen most commonly when:
+- A user refreshes the order confirmation page
+- The browser back-button navigates to the confirmation page
+- The confirmation page is loaded from cache in an SPA
+- A payment gateway redirect returns to the confirmation page multiple times
+
+## The correct solution: transaction ID deduplication
+
+GA4 automatically deduplicates `purchase` events based on `transaction_id`. If you send the same `transaction_id` twice, the second event is ignored in GA4 (after some delay). But Google Ads Conversion Tracking and Meta Pixel do not automatically deduplicate — you need client-side prevention for those platforms.
+
+## Cookie-based deduplication (recommended)
+
+Store the transaction ID in a cookie after the first `purchase` event fires. On subsequent loads of the confirmation page, check the cookie before pushing to the dataLayer.
+
+<DataLayerExample event="purchase" description="Only fires once per transaction ID. Stores a cookie to prevent re-firing on page refresh.">
+```javascript
+(function() {
+  // Get current transaction ID from your server-rendered page
+  var transactionId = document.querySelector('meta[name="transaction-id"]')?.content
+    || window.orderConfirmation?.transactionId;
+
+  if (!transactionId) return; // Not on confirmation page
+
+  // Check if we've already tracked this transaction
+  var cookieName = 'tracked_order_' + transactionId;
+  var alreadyTracked = document.cookie.split(';').some(function(cookie) {
+    return cookie.trim().startsWith(cookieName + '=');
+  });
+
+  if (alreadyTracked) {
+    console.log('[Analytics] Duplicate purchase prevented for:', transactionId);
+    return;
+  }
+
+  // Set the cookie before pushing (prevents race conditions)
+  // Cookie expires in 24 hours
+  var expires = new Date(Date.now() + 86400000).toUTCString();
+  document.cookie = cookieName + '=1; expires=' + expires + '; path=/; SameSite=Lax';
+
+  // Now push the purchase event
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push({
+    event: 'purchase',
+    ecommerce: {
+      transaction_id: transactionId,
+      value: window.orderConfirmation?.total,
+      tax: window.orderConfirmation?.tax,
+      shipping: window.orderConfirmation?.shipping,
+      currency: window.orderConfirmation?.currency || 'USD',
+      items: window.orderConfirmation?.items || []
+    }
+  });
+})();
+```
+</DataLayerExample>
+
+**Inject the transaction ID into the page** from your server:
+
+```html
+<!-- In your order confirmation template -->
+<meta name="transaction-id" content="{{ order.transaction_id }}">
+<script>
+  window.orderConfirmation = {
+    transactionId: '{{ order.transaction_id }}',
+    total: {{ order.total }},
+    tax: {{ order.tax }},
+    shipping: {{ order.shipping }},
+    currency: '{{ order.currency }}',
+    items: {{ order.items | json }}
+  };
+</script>
+```
+
+## localStorage approach (alternative)
+
+If cookies are blocked by consent or browser policy, use localStorage:
+
+```javascript
+(function() {
+  var transactionId = document.querySelector('meta[name="transaction-id"]')?.content;
+  if (!transactionId) return;
+
+  var key = 'tracked_tx_' + transactionId;
+
+  if (localStorage.getItem(key)) {
+    return; // Already tracked
+  }
+
+  // Store before pushing
+  localStorage.setItem(key, Date.now().toString());
+
+  // Push purchase event
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push({
+    event: 'purchase',
+    ecommerce: {
+      transaction_id: transactionId
+      // ... rest of ecommerce data
+    }
+  });
+
+  // Clean up old entries (keep last 20 transactions)
+  cleanupOldTransactions();
+})();
+
+function cleanupOldTransactions() {
+  var keys = Object.keys(localStorage).filter(function(k) {
+    return k.startsWith('tracked_tx_');
+  });
+  if (keys.length > 20) {
+    keys.sort(function(a, b) {
+      return parseInt(localStorage.getItem(a)) - parseInt(localStorage.getItem(b));
+    });
+    keys.slice(0, keys.length - 20).forEach(function(k) {
+      localStorage.removeItem(k);
+    });
+  }
+}
+```
+
+## GTM implementation
+
+<Steps>
+1. **Add the deduplication code** to your order confirmation page template, before the GTM snippet
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `purchase`
+
+3. **Create a GA4 Ecommerce Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `purchase`
+   - Enable **Send Ecommerce Data** → read from **Data Layer**
+   - Trigger: the Custom Event trigger
+
+4. **Test in Preview Mode**
+
+   Visit the order confirmation page. The `purchase` event should fire once. Refresh the page — no second `purchase` event should appear in the Summary pane.
+
+5. **Test deduplication**
+
+   Refresh the confirmation page multiple times. Only the first load should fire the `purchase` event.
+</Steps>
+
+## Server-side deduplication (most reliable)
+
+For the highest-integrity solution, track the conversion server-side and avoid client-side events for the `purchase` event entirely. Use the [GA4 Measurement Protocol](https://developers.google.com/analytics/devguides/collection/protocol/ga4) to send the `purchase` event from your backend after the payment is confirmed:
+
+```python
+import requests
+import hashlib
+
+def track_purchase_server_side(order):
+    payload = {
+        "client_id": order.ga_client_id,  # From _ga cookie
+        "events": [{
+            "name": "purchase",
+            "params": {
+                "transaction_id": order.id,
+                "value": float(order.total),
+                "currency": order.currency,
+                "items": [
+                    {
+                        "item_id": item.sku,
+                        "item_name": item.name,
+                        "price": float(item.price),
+                        "quantity": item.quantity
+                    }
+                    for item in order.items
+                ]
+            }
+        }]
+    }
+
+    requests.post(
+        f"https://www.google-analytics.com/mp/collect?measurement_id={GA4_ID}&api_secret={API_SECRET}",
+        json=payload
+    )
+```
+
+Server-side tracking is immune to page refreshes, ad blockers, and browser restrictions. Combine it with client-side deduplication for maximum coverage.
+
+## Test it
+
+1. Visit your order confirmation page
+2. In GTM Preview, verify `purchase` fires exactly once
+3. Refresh the page — verify NO second `purchase` fires
+4. Open DevTools → Application → Cookies — verify the dedup cookie is set
+5. Open the page in a private window — verify `purchase` fires (no cookie)
+
+## Common gotchas
+
+**Cookie is set but purchase does not fire on first visit.** If the cookie is set before the `push()` call and there is a JavaScript error inside the ecommerce data, the event never fires — but the dedup cookie blocks any retry. Add error handling around the ecommerce data construction.
+
+**SPA back-button returns to confirmation page.** In SPAs, navigating back may reload the confirmation page component without a full page load. The cookie dedup works because cookies persist across SPA navigations. Ensure your component mounts call the dedup check on every mount, not just initial page load.
+
+**GA4 automatic dedup vs. client-side prevention.** GA4 deduplicates `purchase` events with matching `transaction_id` in its own pipeline, but this takes up to 24 hours to process. Client-side prevention stops the events at the source — better for real-time reporting and third-party pixels.
+
+<CardGrid>
+  <LinkCard title="Track Form Submissions" href="/recipes/track-form-submissions/" description="The same AJAX success callback pattern for lead gen forms." />
+  <LinkCard title="Offline Conversion Import" href="/recipes/offline-conversion-import/" description="Server-side conversion tracking for long sales cycles." />
+</CardGrid>

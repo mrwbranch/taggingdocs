@@ -1,6 +1,194 @@
 ---
 title: "LinkedIn Insight Tag"
-description: "LinkedIn Insight Tag and conversion tracking via GTM."
+description: "LinkedIn Insight Tag installation via GTM, conversion tracking for lead generation, event-specific conversions, and LinkedIn CAPI overview."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The LinkedIn Insight Tag tracks visitors to your website and enables conversion tracking, website retargeting, and demographic insights for LinkedIn advertising campaigns. Unlike Meta or TikTok pixels, LinkedIn's value proposition is professional audience data — company name, job title, seniority, industry — which makes it uniquely valuable for B2B advertising.
+
+## Prerequisites
+
+- LinkedIn Campaign Manager account with an ad account
+- LinkedIn Partner ID (your account ID, found in Campaign Manager URL: `campaignmanager.linkedin.com/accounts/[YOUR_ID]/`)
+- Access to Campaign Manager to verify conversions
+
+## Installing the Insight Tag via GTM
+
+LinkedIn provides two installation methods: a Community Template and a direct JavaScript snippet. Use the Community Template when available.
+
+<Steps>
+1. In GTM, Tags → New → Community Template Gallery
+2. Search "LinkedIn Insight Tag" — select LinkedIn's official template
+3. Add to workspace
+
+4. Configure the tag:
+   - **Partner ID:** Your numeric LinkedIn Partner ID
+   - The template handles the `linkedin_data_partner_id` global variable and script loading automatically
+
+5. Firing trigger: All Pages
+
+6. Save and publish
+
+7. Verify in LinkedIn Campaign Manager → Insight Tag (under Account Assets):
+   - Status should change from "Unverified" to "Active" within a few hours of the first page load
+   - The tag must fire on at least one page before Campaign Manager reports it as verified
+</Steps>
+
+<Aside type="tip">
+If the Community Template is unavailable, install via Custom HTML. LinkedIn's Insight Tag snippet is straightforward:
+
+```html
+<script type="text/javascript">
+_linkedin_partner_id = "1234567";
+window._linkedin_data_partner_ids = window._linkedin_data_partner_ids || [];
+window._linkedin_data_partner_ids.push(_linkedin_partner_id);
+</script><script type="text/javascript">
+(function(l) {
+if (!l){window.lintrk = function(a,b){window.lintrk.q.push([a,b])};
+window.lintrk.q=[]}
+var s = document.getElementsByTagName("script")[0];
+var b = document.createElement("script");
+b.type = "text/javascript";b.async = true;
+b.src = "https://snap.licdn.com/li.lms-analytics/insight.min.js";
+s.parentNode.insertBefore(b, s);})(window.lintrk);
+</script>
+```
+
+Replace `1234567` with your actual Partner ID.
+</Aside>
+
+## Conversion tracking setup
+
+Conversions in LinkedIn are configured in Campaign Manager, then verified via GTM. There are two types: **URL-based conversions** (simpler, no additional tagging needed) and **event-specific conversions** (require additional tag configuration).
+
+### URL-based conversions
+
+For simple "user reached this page" conversions (like a thank-you page):
+
+1. In Campaign Manager → Conversions → Create Conversion
+2. Select "Use a URL" as the conversion tracking method
+3. Set the URL rule (exact match or contains for your confirmation page URL)
+4. Set conversion type, attribution window, and value
+5. No additional GTM configuration needed — the Insight Tag on All Pages handles this automatically
+
+### Event-specific conversions
+
+For conversions triggered by user actions (form submissions, button clicks, downloads) that do not result in a URL change:
+
+<Steps>
+1. In Campaign Manager → Conversions → Create Conversion
+2. Select "Track specific events" as the method
+3. Configure conversion settings
+4. Note the **Conversion ID** provided by LinkedIn
+
+5. In GTM, create a new tag: **LinkedIn Insight Tag — Conversion**
+   - Tag Type: LinkedIn Insight Tag (the same template)
+   - Partner ID: same as your base tag
+   - **Conversion ID:** the ID from Campaign Manager
+   - Firing trigger: the specific user action (form submit, button click, etc.)
+
+6. Publish
+
+7. In Campaign Manager, verify the conversion shows as "Active" after a test event
+</Steps>
+
+**Example: Lead form submission tracking**
+
+```
+Tag: LinkedIn Insight Tag — Lead Form Conversion
+  Partner ID: 1234567
+  Conversion ID: 99887766  (from Campaign Manager)
+Trigger: Custom Event — "generate_lead"
+```
+
+This fires `lintrk('track', { conversion_id: 99887766 })` when a lead form is submitted, reporting the conversion to LinkedIn Campaign Manager.
+
+## Passing revenue value with conversions
+
+LinkedIn supports passing a revenue value with conversion events, which enables ROAS reporting.
+
+For Custom HTML implementations or when the template supports it, add a value parameter:
+
+```javascript
+// Custom HTML tag for LinkedIn conversion with value
+lintrk('track', {
+  conversion_id: {{LinkedIn Conversion ID}},
+  value: {{DL - Revenue}},
+  currency: {{DL - Currency}}
+});
+```
+
+Not all conversion types support revenue tracking. Purchase conversions and custom value events do.
+
+## Demographic insights
+
+Beyond conversion tracking, the Insight Tag enables LinkedIn's Website Demographics report in Campaign Manager. This shows the professional profile of your website visitors: company name, job title, industry, seniority, country, and job function — aggregated and anonymized.
+
+This data is available without any additional configuration beyond the base Insight Tag firing on all pages. Access it in Campaign Manager → Analyze → Website Demographics.
+
+<Aside type="note">
+LinkedIn's Website Demographics data is delayed by 7-14 days and requires at least 300 members in the audience segment for data to display (to protect individual privacy). It is most useful for understanding your audience composition, not for real-time reporting.
+</Aside>
+
+## LinkedIn Conversions API (CAPI) overview
+
+LinkedIn offers a server-side Conversions API for sending conversion events from your server. As of 2024, the LinkedIn CAPI is available but has more limited platform support in GTM's community templates compared to Meta or TikTok.
+
+**When to use LinkedIn CAPI:**
+- You have significant LinkedIn ad spend and want to recover conversions blocked by ad blockers
+- You want to send offline conversions (CRM-to-LinkedIn attribution)
+- Your primary conversion events happen in environments without browser access
+
+**LinkedIn CAPI setup overview:**
+
+1. Generate an access token in Campaign Manager → Account Assets → Conversions → API Access
+2. Use the LinkedIn Conversions API endpoint: `POST https://api.linkedin.com/rest/conversionEvents`
+3. Events include: `conversion` ID, timestamp, user identifiers (hashed email, LinkedIn first-party ad ID from `li_fat_id` cookie), and optionally revenue
+
+For sGTM implementation, the LinkedIn CAPI community template (if available in your region) handles the authentication and request formatting. Alternatively, a Custom Template in sGTM can call the LinkedIn API endpoint directly.
+
+**Deduplication:** LinkedIn uses `conversionHappenedAt` (timestamp) + user identifier for deduplication. If sending the same conversion both client-side and server-side, use matching user identifiers to allow LinkedIn to deduplicate.
+
+## Consent integration
+
+LinkedIn Insight Tag requires advertising consent. Gate the Insight Tag on `ad_storage` consent:
+
+```
+GTM Trigger condition: {{Consent State - Ad Storage}} equals "granted"
+```
+
+Or use GTM Consent Mode — LinkedIn's template respects the standard consent signals and will not fire if `ad_storage` is denied.
+
+## Common mistakes
+
+### Firing multiple Insight Tags on the same page
+
+If you install both the GTM-based Insight Tag and a hardcoded Insight Tag in your HTML, LinkedIn will log two page views per visit, inflating your audience sizes and conversion counts. Verify there is only one Insight Tag initialization per page.
+
+### Not verifying the tag status in Campaign Manager
+
+The Insight Tag must show "Active" status in Campaign Manager before you can create audiences or verify conversions. Always check this after installation — if it shows "Unverified" after 24 hours, the tag is not firing correctly.
+
+### Creating conversion rules that match too broadly
+
+URL-based conversions using "Contains" rules can accidentally match pages you do not intend. A rule that contains `/confirm` might match your order confirmation page and your subscription confirmation page and your email confirmation page — creating duplicate conversion tracking. Use more specific URL rules or switch to event-specific conversions.
+
+### Not setting the correct attribution window
+
+LinkedIn's default attribution window is 30 days for click-based and 7 days for view-based conversions. For B2B sales cycles that are longer, consider extending to 90 days. Review your actual sales cycle data before setting this.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Meta Pixel (Client-Side)"
+    description="Similar client-side pixel pattern for social platform conversion tracking."
+    href="/integrations/meta-pixel-client-side/"
+  />
+  <LinkCard
+    title="Microsoft Ads UET"
+    description="B2B-adjacent platform with similar conversion tracking concepts."
+    href="/integrations/microsoft-ads-uet/"
+  />
+</CardGrid>

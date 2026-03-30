@@ -1,6 +1,249 @@
 ---
 title: "Shopify"
-description: "DataLayer implementation guide for Shopify stores."
+description: "Complete dataLayer implementation guide for Shopify — theme.liquid GTM installation, Customer Events API, product data access, and checkout tracking limitations."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Shopify is the most common ecommerce platform you'll implement dataLayer tracking on, and also the most constrained. Shopify's architecture deliberately limits where third-party JavaScript can run — particularly in the checkout. Understanding what's possible at each layer of Shopify's infrastructure is the prerequisite to any tracking implementation.
+
+## Shopify's tracking architecture
+
+| Layer | What it is | GTM access |
+|-------|-----------|------------|
+| Theme (storefront) | Liquid templates, theme.liquid | Full access — GTM snippet goes here |
+| Custom Pixels | Sandboxed JS environment | Limited — no DOM access, restricted APIs |
+| Checkout | Cart, checkout, and thank you pages | Non-Plus: Custom Pixels only. Plus: checkout.liquid (deprecated) |
+| Post-purchase | Order confirmation extensions | Custom Pixels only |
+
+For standard Shopify merchants (non-Plus), you have full GTM access on every page except checkout. The checkout is the most important conversion event — and it's the most restricted.
+
+## Installing GTM in theme.liquid
+
+The GTM snippet goes in your theme's `theme.liquid` file — the master layout template that wraps every storefront page.
+
+```html
+<!-- theme.liquid — inside the <head> tag -->
+<head>
+  {% comment %} GTM - head snippet {% endcomment %}
+  <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+  new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+  j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+  'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+  })(window,document,'script','dataLayer','GTM-XXXXXXX');</script>
+  {% comment %} End GTM - head snippet {% endcomment %}
+</head>
+
+<!-- theme.liquid — immediately after the opening <body> tag -->
+<body>
+  {% comment %} GTM - noscript {% endcomment %}
+  <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-XXXXXXX"
+  height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+  {% comment %} End GTM - noscript {% endcomment %}
+```
+
+Replace `GTM-XXXXXXX` with your actual GTM container ID.
+
+## Initializing the dataLayer before GTM
+
+Declare the dataLayer array and push initial page data before the GTM snippet. This ensures data is available when GTM processes the `gtm.js` event.
+
+```html
+<head>
+  <!-- Initialize dataLayer first -->
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    dataLayer.push({
+      'page_type': '{{ template.name }}',
+      'page_name': '{{ page_title }}',
+      'shop_currency': '{{ shop.currency }}',
+      {% if customer %}
+      'user_id': '{{ customer.id }}',
+      'user_type': 'logged_in',
+      'user_order_count': {{ customer.orders_count }},
+      {% else %}
+      'user_type': 'guest',
+      {% endif %}
+    });
+  </script>
+
+  <!-- GTM snippet goes here -->
+</head>
+```
+
+## Product page tracking
+
+On product pages, access Shopify's product Liquid objects to populate the `view_item` push.
+
+```html
+<!-- In your product template (product.liquid or sections/main-product.liquid) -->
+<script>
+  var productData = {
+    item_id: '{{ product.selected_or_first_available_variant.sku | default: product.id }}',
+    item_name: {{ product.title | json }},
+    item_brand: {{ product.vendor | json }},
+    item_category: {{ product.type | json }},
+    price: {{ product.selected_or_first_available_variant.price | money_without_currency }},
+  };
+
+  // Push view_item on page load
+  window.dataLayer = window.dataLayer || [];
+  dataLayer.push({ ecommerce: null });
+  dataLayer.push({
+    event: 'view_item',
+    ecommerce: {
+      currency: '{{ shop.currency }}',
+      value: productData.price,
+      items: [Object.assign({ quantity: 1 }, productData)]
+    }
+  });
+</script>
+```
+
+<Aside type="caution">
+Shopify's `money_without_currency` filter returns the price in the store's currency, already divided by 100 (Shopify stores prices as integers in cents internally). Check your theme's money format to ensure you're getting the decimal value, not the integer cents value.
+</Aside>
+
+## AJAX add-to-cart tracking
+
+Shopify themes use AJAX to add products to the cart without page reload. Track add-to-cart by intercepting the AJAX cart API call.
+
+```javascript
+// Intercept Shopify AJAX cart adds
+document.addEventListener('click', function(e) {
+  const addToCartBtn = e.target.closest('[data-add-to-cart], [name="add"]');
+  if (!addToCartBtn) return;
+
+  const form = addToCartBtn.closest('form[action="/cart/add"]');
+  if (!form) return;
+
+  const variantId = form.querySelector('[name="id"]')?.value;
+  const quantity = parseInt(form.querySelector('[name="quantity"]')?.value || '1');
+
+  // Get variant price from page data
+  const price = parseFloat(form.dataset.price || '0');
+
+  window.dataLayer = window.dataLayer || [];
+  dataLayer.push({ ecommerce: null });
+  dataLayer.push({
+    event: 'add_to_cart',
+    ecommerce: {
+      currency: Shopify.currency?.active || '{{ shop.currency }}',
+      value: price * quantity,
+      items: [{
+        item_id: variantId,
+        item_name: form.dataset.productTitle || '',
+        price: price,
+        quantity: quantity
+      }]
+    }
+  });
+});
+```
+
+A more reliable approach is to use Shopify's native cart events if your theme supports them:
+
+```javascript
+// Some themes emit custom events after cart updates
+document.addEventListener('cart:updated', function(e) {
+  const { item, quantity } = e.detail;
+  // push add_to_cart event here
+});
+```
+
+## Purchase tracking via Thank You page
+
+The order status / thank you page (`order-status.liquid` in older themes, or accessed via `checkout.order-status.js`) is one of the few checkout pages where custom JavaScript can run for standard merchants.
+
+```html
+<!-- order-status.liquid — Shopify's thank you page template -->
+{% if first_time_accessed %}
+<script>
+  window.dataLayer = window.dataLayer || [];
+
+  var purchaseData = {
+    event: 'purchase',
+    ecommerce: {
+      transaction_id: '{{ order.order_number }}',
+      value: {{ order.total_price | money_without_currency }},
+      tax: {{ order.tax_price | money_without_currency }},
+      shipping: {{ order.shipping_price | money_without_currency }},
+      currency: '{{ order.currency }}',
+      coupon: '{% for discount in order.discount_applications %}{{ discount.title }}{% endfor %}',
+      items: [
+        {% for line_item in order.line_items %}
+        {
+          item_id: '{{ line_item.variant.sku | default: line_item.variant_id }}',
+          item_name: {{ line_item.title | json }},
+          item_variant: '{{ line_item.variant.title }}',
+          price: {{ line_item.price | money_without_currency }},
+          quantity: {{ line_item.quantity }}
+        }{% unless forloop.last %},{% endunless %}
+        {% endfor %}
+      ]
+    }
+  };
+
+  dataLayer.push({ ecommerce: null });
+  dataLayer.push(purchaseData);
+</script>
+{% endif %}
+```
+
+The `{% if first_time_accessed %}` Liquid tag prevents the purchase event from firing again if the customer refreshes the thank you page.
+
+## Shopify Customer Events vs. theme-based tracking
+
+Shopify has introduced the Customer Events API as the modern replacement for theme-based checkout tracking. Customer Events run in Custom Pixels — a sandboxed JavaScript environment accessible from Marketing > Customer Events in Shopify Admin.
+
+**When to use Customer Events:**
+- Checkout event tracking for non-Plus merchants (where `checkout.liquid` is unavailable)
+- Any tracking that Shopify's sandbox provides natively (purchase, checkout_completed, etc.)
+
+**When to use theme-based GTM:**
+- Product page events (`view_item`, `add_to_cart`)
+- Non-checkout events throughout the storefront
+- Cases where you need full GTM functionality including Click and Form triggers
+
+See [Shopify Custom Pixels](/datalayer/platforms/shopify-custom-pixels/) for the complete Custom Pixels implementation guide.
+
+## Shopify Plus vs. standard Shopify
+
+| Feature | Standard Shopify | Shopify Plus |
+|---------|-----------------|--------------|
+| theme.liquid GTM | ✅ Full access | ✅ Full access |
+| Custom Pixels | ✅ Available | ✅ Available |
+| checkout.liquid | ❌ Not available | ✅ Available (deprecated) |
+| Checkout Extensibility | ✅ Available | ✅ Available |
+| Order status page JS | ✅ order-status.liquid | ✅ order-status.liquid |
+
+## Common mistakes
+
+**Putting the GTM snippet in a section file instead of theme.liquid.** If the section is not included on every page, GTM won't load on every page. Always put the GTM snippet in `theme.liquid`.
+
+**Not using `{% if first_time_accessed %}` on the thank you page.** Without this Liquid conditional, every page refresh fires a duplicate purchase event. Shopify provides this flag specifically for this use case.
+
+**Using JavaScript to access the Shopify object before it's initialized.** `Shopify.currency` may not be available immediately on page load in some theme configurations. Fall back to the Liquid variable `{{ shop.currency }}` rendered server-side.
+
+<CardGrid>
+  <LinkCard
+    title="Shopify Custom Pixels"
+    description="The sandboxed Custom Pixel environment — GTM inside Shopify's checkout."
+    href="/datalayer/platforms/shopify-custom-pixels/"
+  />
+  <LinkCard
+    title="Shopify Checkout Extensibility"
+    description="How the checkout.liquid deprecation changes your tracking strategy."
+    href="/datalayer/platforms/shopify-checkout-extensibility/"
+  />
+  <LinkCard
+    title="Shopify Advanced"
+    description="Post-purchase upsells, subscriptions, multi-currency, and server-side tracking."
+    href="/datalayer/platforms/shopify-advanced/"
+  />
+  <LinkCard
+    title="Shopify Headless"
+    description="Tracking on Hydrogen, Next.js, and other headless Shopify storefronts."
+    href="/datalayer/platforms/shopify-headless/"
+  />
+</CardGrid>

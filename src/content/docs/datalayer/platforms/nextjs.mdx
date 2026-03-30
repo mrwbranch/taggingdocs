@@ -1,6 +1,335 @@
 ---
 title: "Next.js"
-description: "DataLayer implementation guide for Next.js applications."
+description: "Complete dataLayer implementation for Next.js — App Router vs Pages Router, GTM with next/script, route change tracking, Server vs Client Components, and TypeScript typing."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Next.js presents two distinct implementation contexts: App Router (introduced in Next.js 13) and Pages Router (the original). They have different component models, different lifecycle hooks, and different places where GTM belongs. This guide covers both, with an emphasis on App Router since it's the current default.
+
+## App Router: GTM installation
+
+In App Router, the GTM snippet goes in the root layout file using the `next/script` component.
+
+```tsx
+// app/layout.tsx
+import Script from 'next/script';
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <head>
+        <Script
+          id="gtm-script"
+          strategy="afterInteractive"
+          dangerouslySetInnerHTML={{
+            __html: `
+              window.dataLayer = window.dataLayer || [];
+              (function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+              new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+              j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+              'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+              })(window,document,'script','dataLayer','${process.env.NEXT_PUBLIC_GTM_ID}');
+            `,
+          }}
+        />
+      </head>
+      <body>
+        <noscript>
+          <iframe
+            src={`https://www.googletagmanager.com/ns.html?id=${process.env.NEXT_PUBLIC_GTM_ID}`}
+            height="0"
+            width="0"
+            style={{ display: 'none', visibility: 'hidden' }}
+          />
+        </noscript>
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+Use `strategy="afterInteractive"` — this loads GTM after the page is interactive, which is appropriate for most tracking. Do not use `strategy="beforeInteractive"` (blocks hydration) or `strategy="lazyOnload"` (too late for important events).
+
+## App Router: route change tracking
+
+In App Router, page navigation doesn't trigger a full browser navigation — React swaps the component tree. GTM's built-in History Change trigger fires, but it fires before the new page's components have mounted and their data is available.
+
+The reliable approach is a custom route tracking component:
+
+```tsx
+// components/RouteTracker.tsx
+'use client';
+
+import { useEffect, useRef } from 'react';
+import { usePathname, useSearchParams } from 'next/navigation';
+
+export function RouteTracker() {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const isFirstRender = useRef(true);
+
+  useEffect(() => {
+    // Skip the first render — GTM handles the initial page load
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+
+    // This fires after the new route's components have mounted
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'page_view',
+      page_path: pathname,
+      page_search: searchParams.toString(),
+      page_title: document.title,
+    });
+  }, [pathname, searchParams]);
+
+  return null;
+}
+```
+
+```tsx
+// app/layout.tsx — add RouteTracker inside a Suspense boundary
+import { Suspense } from 'react';
+import { RouteTracker } from '@/components/RouteTracker';
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        <Suspense fallback={null}>
+          <RouteTracker />
+        </Suspense>
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+<Aside type="note">
+`useSearchParams()` requires a Suspense boundary in App Router. Wrap `RouteTracker` in `<Suspense>` as shown above, or Next.js will error during static rendering.
+</Aside>
+
+## Server Components vs. Client Components
+
+In App Router, components are Server Components by default. Server Components cannot interact with the browser — no `window`, no `document`, no event listeners.
+
+**DataLayer pushes always happen in Client Components.** The rule is simple:
+- Fetch data in Server Components
+- Pass data as props to Client Components
+- Client Components push to `window.dataLayer`
+
+```tsx
+// ProductPage.tsx — Server Component
+// Fetches product data server-side, passes to client tracker
+import { ProductTracker } from './ProductTracker';
+import { getProduct } from '@/lib/products';
+
+export default async function ProductPage({ params }: { params: { slug: string } }) {
+  const product = await getProduct(params.slug);
+
+  return (
+    <main>
+      <h1>{product.name}</h1>
+      <p>{product.description}</p>
+      {/* Client component handles the dataLayer push */}
+      <ProductTracker product={product} />
+    </main>
+  );
+}
+
+// ProductTracker.tsx — Client Component
+'use client';
+
+import { useEffect, useRef } from 'react';
+import type { Product } from '@/types';
+
+interface Props {
+  product: Product;
+}
+
+export function ProductTracker({ product }: Props) {
+  const tracked = useRef(false);
+
+  useEffect(() => {
+    if (tracked.current) return;
+    tracked.current = true;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({ ecommerce: null });
+    window.dataLayer.push({
+      event: 'view_item',
+      ecommerce: {
+        currency: 'USD',
+        value: product.price,
+        items: [{
+          item_id: product.sku,
+          item_name: product.name,
+          item_brand: product.brand,
+          item_category: product.category,
+          price: product.price,
+          quantity: 1,
+        }],
+      },
+    });
+  }, [product]);
+
+  return null;
+}
+```
+
+## TypeScript dataLayer typing
+
+Define types for your dataLayer events to catch errors at compile time:
+
+```typescript
+// lib/datalayer.ts
+
+interface EcommerceItem {
+  item_id: string;
+  item_name: string;
+  item_brand?: string;
+  item_category?: string;
+  item_variant?: string;
+  price: number;
+  quantity: number;
+  index?: number;
+  item_list_id?: string;
+  item_list_name?: string;
+}
+
+interface ViewItemEvent {
+  event: 'view_item';
+  ecommerce: {
+    currency: string;
+    value: number;
+    items: EcommerceItem[];
+  };
+}
+
+interface AddToCartEvent {
+  event: 'add_to_cart';
+  ecommerce: {
+    currency: string;
+    value: number;
+    items: EcommerceItem[];
+  };
+}
+
+interface PurchaseEvent {
+  event: 'purchase';
+  ecommerce: {
+    transaction_id: string;
+    value: number;
+    currency: string;
+    tax?: number;
+    shipping?: number;
+    coupon?: string;
+    items: EcommerceItem[];
+  };
+}
+
+interface EcommerceNull {
+  ecommerce: null;
+}
+
+type DataLayerEvent = EcommerceNull | ViewItemEvent | AddToCartEvent | PurchaseEvent;
+
+// Extend Window type
+declare global {
+  interface Window {
+    dataLayer: DataLayerEvent[];
+  }
+}
+
+// Type-safe push function
+export function pushDataLayer(event: DataLayerEvent) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push(event);
+}
+
+// Ecommerce push with automatic null clear
+export function pushEcommerceEvent(event: Exclude<DataLayerEvent, EcommerceNull>) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push(event);
+}
+```
+
+## Pages Router
+
+For Next.js projects still using Pages Router, the pattern is similar but uses `_app.tsx` and `Router` events:
+
+```tsx
+// pages/_app.tsx
+import Script from 'next/script';
+import Router from 'next/router';
+import { useEffect } from 'react';
+
+function MyApp({ Component, pageProps }) {
+  useEffect(() => {
+    const handleRouteChange = (url: string) => {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'page_view',
+        page_path: url,
+        page_title: document.title,
+      });
+    };
+
+    Router.events.on('routeChangeComplete', handleRouteChange);
+    return () => Router.events.off('routeChangeComplete', handleRouteChange);
+  }, []);
+
+  return (
+    <>
+      <Script
+        id="gtm"
+        strategy="afterInteractive"
+        src={`https://www.googletagmanager.com/gtm.js?id=${process.env.NEXT_PUBLIC_GTM_ID}`}
+        onLoad={() => {
+          window.dataLayer = window.dataLayer || [];
+          window.dataLayer.push({ 'gtm.start': new Date().getTime(), event: 'gtm.js' });
+        }}
+      />
+      <Component {...pageProps} />
+    </>
+  );
+}
+```
+
+## Common mistakes
+
+**DataLayer pushes in Server Components.** This causes a `window is not defined` error. All `window.dataLayer` access must be in Client Components or in `useEffect` hooks.
+
+**Not wrapping `useSearchParams` in Suspense.** Next.js App Router requires Suspense boundaries around `useSearchParams` when used outside of a Client Component's own render tree.
+
+**Using `strategy="lazyOnload"` for GTM.** This loads GTM only after the page is fully idle — which can mean important early events (including the initial page view) fire before GTM is loaded.
+
+**Double page_view events.** GTM's History Change trigger fires on route changes, and so does your `RouteTracker` component. Disable GTM's History Change trigger and rely entirely on your custom `page_view` push — this gives you more control over when and what data is available.
+
+<CardGrid>
+  <LinkCard
+    title="Nuxt.js"
+    description="Vue's equivalent — GTM plugin, route middleware, composable-based tracking."
+    href="/datalayer/platforms/nuxtjs/"
+  />
+  <LinkCard
+    title="TypeScript Schemas"
+    description="Complete TypeScript type definitions for the full ecommerce dataLayer."
+    href="/datalayer/validation/typescript-schemas/"
+  />
+  <LinkCard
+    title="Shopify Headless"
+    description="Headless Shopify on Next.js with Storefront API tracking."
+    href="/datalayer/platforms/shopify-headless/"
+  />
+</CardGrid>

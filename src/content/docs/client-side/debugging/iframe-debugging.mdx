@@ -1,6 +1,147 @@
 ---
 title: "iFrame Debugging"
-description: "Debugging GTM inside iframes — Preview mode, cross-origin, and console tricks."
+description: "Debug GTM inside iframes — why Preview mode doesn't work by default, same-origin vs cross-origin constraints, and practical workarounds."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+iframes are isolated browser contexts. The GTM container running in the parent page cannot see what happens inside an iframe, and the GTM container inside the iframe (if any) can't connect to the parent page's Preview mode session. This isolation is by design — it's the same origin policy at work.
+
+Understanding which scenario you're in is the first step to debugging.
+
+## Three scenarios
+
+**Scenario 1: Your GTM container is in the parent page, and you're trying to track interactions inside an iframe you don't control.** You can't. The same-origin policy prevents the parent page's GTM from accessing the iframe's DOM or events.
+
+**Scenario 2: Your GTM container is in the parent page, and the iframe is on the same origin (same domain).** You can access the iframe's JavaScript context and attach listeners manually.
+
+**Scenario 3: The iframe has its own GTM container (e.g., a form embedded from a third-party service like HubSpot or Typeform).** The iframe communicates with the parent page via postMessage. Your parent page GTM can listen for those messages.
+
+Scenario 3 is the most common. If you're tracking HubSpot Forms, Calendly, or Typeform — see the [Form Builder Tracking](/client-side/tracking/form-builder-tracking/) guide for the specific postMessage patterns.
+
+## Why Preview mode doesn't connect to iframes
+
+GTM Preview mode establishes a WebSocket connection between Tag Assistant and the page. This connection is page-level, not iframe-level.
+
+When Tag Assistant connects to `https://yoursite.com`, it communicates with the GTM container on that page. If there's also a GTM container inside an iframe on that page, Tag Assistant has no connection to it. You can't debug the iframe container from Tag Assistant on the parent page.
+
+## Forcing debug mode in an iframe
+
+If you control both the parent page and the iframe, you can force debug mode by appending `?gtm_debug=x` to the iframe URL. This tells GTM inside the iframe to activate debug mode — but the output goes to the iframe's own console context, not the parent page's.
+
+```javascript
+// Temporarily force debug mode in a same-origin iframe via JavaScript
+var iframe = document.querySelector('iframe.tracked-embed');
+if (iframe) {
+  var src = iframe.src;
+  iframe.src = src + (src.indexOf('?') !== -1 ? '&' : '?') + 'gtm_debug=1';
+}
+```
+
+For a cross-origin iframe (a third-party service), you'd need to add the `?gtm_debug=x` parameter to the embed URL in your HTML — if the third-party service allows it.
+
+## Debugging same-origin iframes
+
+For iframes on your own domain, you can access the iframe's JavaScript context directly from the parent page console:
+
+```javascript
+// Access the iframe's window object (same-origin only)
+var iframeWindow = document.querySelector('iframe').contentWindow;
+
+// Inspect the iframe's dataLayer
+console.log(iframeWindow.dataLayer);
+
+// Monitor pushes in the iframe
+var originalPush = iframeWindow.dataLayer.push.bind(iframeWindow.dataLayer);
+iframeWindow.dataLayer.push = function() {
+  console.log('[iframe dataLayer push]', arguments[0]);
+  return originalPush.apply(this, arguments);
+};
+```
+
+```javascript
+// Inspect the iframe's GTM container
+Object.keys(iframeWindow.google_tag_manager || {})
+```
+
+You can also switch the DevTools console context to the iframe's execution context:
+1. Open DevTools → Console tab
+2. Click the context selector (shows "top" by default) in the top of the Console panel
+3. Select the iframe from the dropdown
+4. Now your console commands run inside the iframe's context
+
+## Network tab filtering by frame
+
+The Network tab in Chrome DevTools shows requests from all frames by default. To filter by specific frame:
+
+1. Open DevTools → Network tab
+2. Click the "No throttling" dropdown → select "Filter requests by frame"
+3. Select the iframe from the list
+
+Or filter by search text: type `collect` to see only GA4 collection requests, then look at the Initiator column to identify which frame generated the request.
+
+## Debugging cross-origin iframes
+
+For cross-origin iframes you don't control, your debugging options are limited:
+
+**Monitor postMessage traffic:** The parent page can see messages sent by the iframe via `window.postMessage`:
+
+```javascript
+// In the parent page console
+window.addEventListener('message', function(event) {
+  // Log all incoming messages to see what the iframe is sending
+  console.log('postMessage from:', event.origin, '| data:', event.data);
+});
+```
+
+This lets you see what the iframe is communicating — form submission events, video progress, booking confirmations. This is the basis of the HubSpot and Typeform tracking patterns.
+
+**Network tab inspection:** Even for cross-origin iframes, the Network tab shows the HTTP requests made by the iframe. Switch to the iframe's frame context in the Network tab filter. You can see whether GA4 collection requests are being made from inside the iframe.
+
+**DevTools console context switching:** Even for cross-origin iframes opened on your own page, Chrome allows limited console context switching. Switch to the iframe context in the console dropdown. You'll be able to read public JavaScript (but not access or modify cross-origin objects due to the same-origin policy).
+
+## The GTM noscript iframe and its debugging implications
+
+The GTM snippet includes a `<noscript>` fallback iframe:
+
+```html
+<noscript>
+  <iframe src="https://www.googletagmanager.com/ns.html?id=GTM-XXXX" height="0" width="0"></iframe>
+</noscript>
+```
+
+This iframe is only loaded when JavaScript is disabled. If you see GTM requests coming from an iframe source in your Network tab in a normal browser session, this is not the noscript iframe — it's a cross-origin embed making its own GTM requests.
+
+## Common problems and fixes
+
+### Preview mode shows "waiting" indefinitely for an iframed page
+
+You're trying to debug a page that's served inside an iframe on another page. Navigate to the page directly (not within the iframe) to use Preview mode. The debug URL is for the page itself, not for how it's embedded.
+
+### Event listeners not firing inside cross-origin iframes
+
+The parent page's GTM cannot reach inside a cross-origin iframe. Use the postMessage pattern: the content inside the iframe must send a postMessage to the parent, and the parent's GTM listens for that message.
+
+### Form submissions not tracked inside iframes
+
+The `submit` event from within an iframe (even same-origin) doesn't bubble to the parent page's document. You need either a postMessage from the iframe's GTM, or same-origin DOM access from the parent page's GTM.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Form Builder Tracking"
+    description="HubSpot, Typeform, and Calendly — all iframe-based, all using postMessage tracking."
+    href="/client-side/tracking/form-builder-tracking/"
+  />
+  <LinkCard
+    title="Preview Mode"
+    description="How Preview mode works in normal (non-iframe) contexts — the baseline before dealing with iframe complexity."
+    href="/client-side/debugging/preview-mode/"
+  />
+  <LinkCard
+    title="Console Debugging"
+    description="Console-based debugging techniques including context switching for iframes."
+    href="/client-side/debugging/console-debugging/"
+  />
+</CardGrid>

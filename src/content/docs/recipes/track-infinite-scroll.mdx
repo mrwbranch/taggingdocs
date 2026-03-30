@@ -1,6 +1,217 @@
 ---
 title: "Track Infinite Scroll"
-description: "Track content consumption in infinite scroll layouts."
+description: "Track content consumption in infinite scroll and feed layouts — IntersectionObserver for content blocks, impression deduplication, and batch event sending."
+sidebar:
+  badge:
+    text: Intermediate
+    variant: note
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Infinite scroll layouts — news feeds, product grids, article lists — present a tracking challenge: there are no page loads between items, and items can appear and disappear as the user scrolls. Standard scroll depth tracking does not apply because the page length changes dynamically. This recipe tracks individual content items as they become visible.
+
+## The approach
+
+Use IntersectionObserver to watch each content item. When an item enters the viewport:
+1. Mark it as "seen" to prevent duplicate events
+2. Queue it in an impression batch
+3. Flush the batch after a short debounce delay
+
+This gives you:
+- Which specific items users actually saw (not just loaded)
+- How many items users consumed per session
+- Which items appear but are immediately scrolled past
+
+## Implementation
+
+<DataLayerExample event="content_impression" description="Tracks individual content items as they become visible in an infinite scroll feed.">
+```javascript
+(function() {
+  var impressionQueue = [];
+  var seenItems = new Set();
+  var flushTimer = null;
+  var itemsConsumed = 0;
+
+  function flushImpressions() {
+    if (impressionQueue.length === 0) return;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'content_impression',
+      impressions: impressionQueue.slice(),
+      impression_count: impressionQueue.length,
+      total_consumed: itemsConsumed,
+      page_path: window.location.pathname
+    });
+
+    impressionQueue = [];
+    flushTimer = null;
+  }
+
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (!entry.isIntersecting) return;
+
+      var el = entry.target;
+      var itemId = el.dataset.itemId || el.id;
+
+      // Deduplicate: only count each item once
+      if (seenItems.has(itemId)) return;
+      seenItems.add(itemId);
+      itemsConsumed++;
+
+      impressionQueue.push({
+        item_id: itemId,
+        item_title: el.dataset.itemTitle || el.querySelector('h2, h3')?.textContent?.trim() || null,
+        item_type: el.dataset.itemType || 'content',
+        item_position: itemsConsumed,
+        item_category: el.dataset.category || null
+      });
+
+      // Debounce flush
+      clearTimeout(flushTimer);
+      flushTimer = setTimeout(flushImpressions, 300);
+    });
+  }, {
+    rootMargin: '0px',
+    threshold: 0.3  // 30% visible = "seen"
+  });
+
+  // Initial observation of existing items
+  function observeItems() {
+    document.querySelectorAll('[data-item-id], .feed-item, .article-card').forEach(function(el) {
+      var itemId = el.dataset.itemId || el.id;
+      if (itemId && !seenItems.has(itemId)) {
+        observer.observe(el);
+      }
+    });
+  }
+
+  observeItems();
+
+  // Watch for new items added to the DOM (infinite scroll loads more)
+  var mutationObserver = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+      mutation.addedNodes.forEach(function(node) {
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+        // Check if the added node itself is a feed item
+        if (node.dataset?.itemId || node.classList?.contains('feed-item')) {
+          observer.observe(node);
+        }
+
+        // Check children of the added node
+        node.querySelectorAll?.('[data-item-id], .feed-item, .article-card').forEach(function(el) {
+          var itemId = el.dataset.itemId || el.id;
+          if (itemId && !seenItems.has(itemId)) {
+            observer.observe(el);
+          }
+        });
+      });
+    });
+  });
+
+  mutationObserver.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+
+  // Flush on page exit
+  window.addEventListener('beforeunload', flushImpressions);
+})();
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add `data-item-id` attributes** to each content item in your feed:
+   ```html
+   <article
+     class="feed-item"
+     data-item-id="post-1234"
+     data-item-title="How to Track PDF Downloads"
+     data-item-type="blog_post"
+     data-category="tracking"
+   >
+     <!-- Article content -->
+   </article>
+   ```
+
+2. **Add the IntersectionObserver code** as a Custom HTML tag in GTM
+   - Trigger: **DOM Ready** (on feed/listing pages)
+
+3. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `content_impression`
+
+4. **Create Data Layer Variables**
+
+   - `DLV - impressions` → `impressions`
+   - `DLV - impression_count` → `impression_count`
+   - `DLV - total_consumed` → `total_consumed`
+
+5. **Create a GA4 Event Tag**
+
+   - Event name: `content_impression`
+   - Parameters:
+     - `impression_count` → `{{DLV - impression_count}}`
+     - `total_consumed` → `{{DLV - total_consumed}}`
+   - Trigger: the Custom Event trigger
+
+   Note: The `impressions` array is best analysed in BigQuery via the GA4 export rather than in standard GA4 reports.
+
+6. **Test in Preview Mode**
+
+   Visit your feed page and scroll down. After 2-3 items enter the viewport, a `content_impression` event should fire with an array of items in the `impressions` field.
+</Steps>
+
+<TagConfig
+  name="GA4 - content_impression"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - content_impression"
+  variables={["DLV - impression_count", "DLV - total_consumed"]}
+/>
+
+## Tracking a "content consumed" milestone
+
+In addition to raw impressions, track when users reach meaningful consumption milestones:
+
+```javascript
+// Add inside the impression handler after itemsConsumed is incremented
+var MILESTONES = [5, 10, 20, 50];
+if (MILESTONES.indexOf(itemsConsumed) !== -1) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'content_milestone',
+    items_consumed: itemsConsumed,
+    page_path: window.location.pathname
+  });
+}
+```
+
+Users who consume 20+ items in one session are your highest-engagement users — build GA4 audiences around them.
+
+## Test it
+
+1. Open GTM Preview on a feed page
+2. Scroll down so 3+ items enter the viewport
+3. Wait for the debounce (300ms) — the `content_impression` event should fire
+4. Verify `impression_count` matches the number of visible items
+5. Scroll down further — verify each new item is counted only once
+6. Reload the page and scroll to a previously-seen item — it should NOT be re-counted
+
+## Common gotchas
+
+**Items at the top of the page are immediately visible.** Several items will be visible on page load before the user scrolls. These should still be counted — they are legitimate impressions. If you only want to count items the user actively scrolled to, add a time threshold (only count items visible for > 1 second).
+
+**`data-item-id` must be unique across the page.** If multiple items share the same ID, the deduplication Set will prevent the second item from being tracked. Make sure IDs are unique.
+
+**MutationObserver performance.** Watching `document.body` with `subtree: true` can be expensive on very large feeds. If you notice performance issues, narrow the observed element to the feed container instead.
+
+<CardGrid>
+  <LinkCard title="Track Element Visibility" href="/recipes/track-element-visibility/" description="Element visibility tracking for static pages." />
+  <LinkCard title="Track Scroll Milestones" href="/recipes/track-scroll-milestones/" description="Page-level depth tracking for traditional layouts." />
+</CardGrid>

@@ -1,6 +1,200 @@
 ---
 title: "Microsoft Ads UET"
-description: "Microsoft Ads UET tag setup via GTM."
+description: "Microsoft Ads Universal Event Tracking tag setup via GTM — UET installation, conversion goals, variable revenue tracking, remarketing audiences, and common troubleshooting."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Microsoft Ads' Universal Event Tracking (UET) tag is the tracking infrastructure for Bing Ads, Microsoft Audience Network, and other Microsoft advertising properties. UET works similarly to Google Ads' conversion tracking: a base tag fires on all pages, and conversion goals are defined in Microsoft Ads based on URL matching or specific event firing.
+
+UET is often neglected in favor of Google Ads tracking, but for sites with meaningful Bing traffic (particularly older demographics, enterprise users, and regions where Bing has significant market share), accurate UET tracking is worth the 30-minute implementation investment.
+
+## Prerequisites
+
+- Microsoft Ads account
+- UET tag ID from Microsoft Ads (a numeric ID like `12345678`)
+- Access to Microsoft Ads UI to configure conversion goals
+
+## Installing the UET tag via GTM
+
+<Steps>
+1. In Microsoft Ads → Tools → UET tags → Create UET tag
+2. Note the UET Tag ID
+3. In GTM, Tags → New → Community Template Gallery
+4. Search "Microsoft Advertising" or "UET" — select Microsoft's official UET template
+5. Add to workspace
+
+6. Configure the base tag: **Microsoft Ads UET — Base**
+   - UET Tag ID: your numeric tag ID
+   - Leave all other settings at default
+   - Firing trigger: All Pages
+
+7. Save and publish
+
+8. Verify in Microsoft Ads → UET tags:
+   - Your tag should show "Recording activity" within a few hours of the first page load
+</Steps>
+
+If the community template is unavailable, the Custom HTML fallback:
+
+```html
+<script>
+(function(w,d,t,r,u){var f,n,i;w[u]=w[u]||[],f=function(){var o={ti:"TAG_ID",enableAutoSpaTracking:true};o.q=w[u],w[u]=new UET(o),w[u].push("pageLoad")},n=d.createElement(t),n.src=r,n.async=1,n.onload=n.onreadystatechange=function(){var s=this.readyState;s&&s!=="loaded"&&s!=="complete"||(f(),n.onload=n.onreadystatechange=null)},i=d.getElementsByTagName(t)[0],i.parentNode.insertBefore(n,i)})(window,document,"script","//bat.bing.com/bat.js","uetq");
+</script>
+```
+
+Replace `TAG_ID` with your UET Tag ID.
+
+## Conversion goal setup
+
+Conversion goals in Microsoft Ads tell the platform what to optimize toward. You define them in Microsoft Ads, and UET reports when those goals are achieved.
+
+### URL-based destination goals
+
+The simplest goal type — "user reached this URL."
+
+1. In Microsoft Ads → Tools → Conversion Goals → Create conversion goal
+2. Goal type: **Destination URL**
+3. URL condition: contains your confirmation page URL (e.g., `/order/confirmation`)
+4. Set: goal name, revenue type (fixed value or variable), count setting (one vs. every), attribution model, conversion window
+5. No additional GTM configuration needed — UET on All Pages handles detection
+
+### Custom event goals
+
+For conversions triggered by user actions (form submissions, button clicks, video plays) that may not change the URL:
+
+1. In Microsoft Ads → Conversion Goals → Create → type: **Custom event**
+2. Set trigger category and action values
+3. Note: custom event goals in Microsoft Ads fire based on `window.uetq.push()` calls
+
+In GTM, create a tag that fires the custom event:
+
+```html
+<!-- GTM Custom HTML tag for UET custom event -->
+<script>
+window.uetq = window.uetq || [];
+window.uetq.push('event', 'submit_lead_form', {
+  'event_category': 'lead',
+  'event_label': '{{Form ID or Name}}',
+  'event_value': {{Lead Value or 0}}
+});
+</script>
+```
+
+Fire this tag on your Custom Event trigger (e.g., when a form is submitted).
+
+### Revenue tracking with variable values
+
+For e-commerce purchases with dynamic order values, use variable revenue:
+
+<Steps>
+1. In Microsoft Ads, configure your conversion goal with "Revenue type: Variable value" and a default fallback value
+
+2. In GTM, create a tag that fires on your purchase event and passes the order value:
+
+```html
+<!-- GTM Custom HTML tag: UET Purchase with Revenue -->
+<script>
+window.uetq = window.uetq || [];
+window.uetq.push('event', 'purchase', {
+  'revenue_value': {{DL - Revenue}},
+  'currency': {{DL - Currency}}
+});
+</script>
+```
+
+3. Trigger: Custom Event — `purchase`
+
+4. The `revenue_value` and `currency` parameters override the default goal value
+</Steps>
+
+Alternatively, use the Community Template which has built-in fields for revenue and currency:
+
+```
+Tag Type: Microsoft Advertising UET
+  UET Tag ID: 12345678
+  Event action: purchase
+  Revenue value: {{DL - Revenue}}
+  Revenue currency: {{DL - Currency}}
+Trigger: Custom Event — purchase
+```
+
+**Revenue value must be a number.** If your dataLayer variable returns a string, wrap it: `parseFloat({{DL - Revenue}})`.
+
+## Remarketing audiences
+
+The UET tag automatically collects audience data for remarketing. You do not need additional tag configuration — every page view tracked by UET builds audience data. In Microsoft Ads → Shared Library → Audiences, you can create:
+
+**Remarketing lists:**
+- All website visitors
+- Visitors to specific pages (e.g., product category, checkout without purchase)
+- Visitors who completed specific conversions
+
+**Custom combinations:**
+- All visitors minus recent converters
+- High-intent visitors (viewed checkout) minus converters
+
+**Dynamic remarketing for e-commerce:**
+For product-specific remarketing (showing users ads for products they viewed), you need to pass product IDs to UET:
+
+```html
+<!-- On product pages: push product ID for dynamic remarketing -->
+<script>
+window.uetq = window.uetq || [];
+window.uetq.push('set', {
+  'page_type': 'product',
+  'ecomm_prodid': {{DL - Product ID}},
+  'ecomm_pagetype': 'product'
+});
+</script>
+```
+
+## Microsoft Clarity integration
+
+Microsoft Clarity (the session recording and heatmap tool) can be integrated alongside UET. Microsoft Ads and Microsoft Clarity share user data when both are installed on the same site, allowing you to see session recordings for users who clicked your Microsoft Ads.
+
+Enable the integration in Microsoft Clarity → Settings → Microsoft Advertising. There is no additional GTM configuration required — the integration happens at the Microsoft account level.
+
+## Verifying your implementation
+
+**Microsoft Ads UET tag verification:**
+1. Install the "Microsoft Clarity" or "UET Tag Helper" browser extension (Microsoft provides this)
+2. Visit your site — the extension shows which UET tags fired and their event data
+3. Check conversion tracking: trigger a test conversion and look for it in Microsoft Ads → Reporting → Conversion Goals within a few hours
+
+**Microsoft Ads UI verification:**
+- Tools → UET tags → status column should show "Recording activity"
+- Conversion goals → status should show "Recording conversions" after test events fire
+
+## Common mistakes
+
+### Not enabling revenue tracking for purchase goals
+
+The default UET conversion goal records only that a conversion happened, with a fixed value. For e-commerce, you need variable revenue tracking — otherwise you cannot calculate ROAS or optimize for revenue rather than conversion count.
+
+### Firing the base UET tag and a conversion tag on the same purchase page
+
+This fires the base `pageLoad` event AND the custom purchase event. Microsoft Ads handles this correctly — it counts the conversion event, not the page load, for the conversion goal. But verify in the UET Tag Helper that the conversion event appears as a separate call from the page load, with the correct event name and value.
+
+### Forgetting to set the conversion count to "One" for lead goals
+
+For lead generation, a conversion goal should typically be set to "One per unique user" to avoid counting multiple form submissions from the same user as multiple conversions. For e-commerce purchases, "Every" is correct — each purchase is a separate conversion.
+
+### Mismatched goal type and firing mechanism
+
+URL destination goals only fire when the user reaches the configured URL. Custom event goals only fire when `window.uetq.push('event', ...)` is called. If you configure a custom event goal in Microsoft Ads but only have the base UET tag (which fires `pageLoad`, not a custom event), the goal never records a conversion.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="LinkedIn Insight Tag"
+    description="B2B-adjacent platform with similar installation and conversion tracking patterns."
+    href="/integrations/linkedin-insight-tag/"
+  />
+  <LinkCard
+    title="Meta Pixel (Client-Side)"
+    description="Similar client-side pixel architecture with more extensive standard event documentation."
+    href="/integrations/meta-pixel-client-side/"
+  />
+</CardGrid>

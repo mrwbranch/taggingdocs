@@ -1,6 +1,181 @@
 ---
-title: "Data Limits & Cardinality"
-description: "Every GA4 limit that silently breaks your reporting."
+title: "Data Limits and Cardinality"
+description: "Every GA4 quota and limit that silently breaks your reporting — (other) rows, custom dimension quotas, thresholds, and how to work within them."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+GA4 has a set of limits that are not prominently documented but produce silent data quality issues when exceeded. Unlike collection errors (which show up in debugging), limit violations show up as "(other)" rows in reports, missing dimensions, or mysteriously capped metrics — often without any warning message.
+
+This is the complete reference.
+
+## Collection limits
+
+These limits apply when you are sending data to GA4:
+
+| Limit | Value | Notes |
+|-------|-------|-------|
+| Unique event names per property | 500 | Shared across all streams |
+| Event parameters per event | 25 | Excluding `items` array |
+| Event name length | 40 characters | |
+| Event parameter name length | 40 characters | |
+| Event parameter string value length | 100 characters | Values truncated silently |
+| User properties per user | 25 | |
+| User property name length | 24 characters | |
+| User property value length | 36 characters | |
+| Items per event (ecommerce) | 200 | Per `items` array |
+| Item parameters per item | 100 | Documented but rarely hit |
+
+### The 500 event name limit
+
+500 event names per property seems large, but a few implementation patterns eat through this quickly:
+- Using dynamic event names: `button_click_hero_cta_1`, `button_click_hero_cta_2`, etc.
+- Including page titles or IDs in event names: `view_product_12345`
+- Per-page-type events: `click_home_header`, `click_about_header`, `click_blog_header`
+
+Once 500 unique event names exist, additional unique names are dropped — the event data is lost. Use a single event name like `button_click` with a parameter `button_id` to differentiate interactions.
+
+### String truncation at 100 characters
+
+Parameter string values are truncated to 100 characters without any error or warning. Long URLs, full product descriptions, or JSON strings sent as parameter values will be cut off silently. You will see the truncated value in reports and BigQuery without any indication that data was lost.
+
+Design your parameters to keep values under 100 characters. For longer values, store them server-side and send a shorter identifier.
+
+## Configuration limits
+
+These limits apply to the GA4 property configuration:
+
+| Limit | Value | Notes |
+|-------|-------|-------|
+| Event-scoped custom dimensions | 50 per property | GA4 360: 125 |
+| User-scoped custom dimensions | 25 per property | GA4 360: 100 |
+| Custom metrics | 50 per property | GA4 360: 125 |
+| Calculated metrics | 5 per property | GA4 360: 50 |
+| Audiences | 100 per property | |
+| Conversions | 30 per property | |
+| Channel groups | 10 per property | |
+| Data filters | 10 per property | |
+
+### What happens when you hit custom dimension limits
+
+When you reach 50 event-scoped custom dimensions, you cannot create new ones without archiving existing ones. Archiving a dimension frees the slot but does not delete historical data — archived dimensions are still visible in reports for historical periods.
+
+Parameters collected without a corresponding custom dimension are not visible in the GA4 UI but are available in BigQuery. BigQuery is the escape valve when you run out of custom dimensions.
+
+## Reporting limits and cardinality
+
+These limits affect what you see in GA4 reports:
+
+### (other) row — cardinality threshold
+
+The most impactful reporting limit. When a dimension has more than approximately 500 unique values in a report, GA4 collapses the tail values into a single "(other)" row.
+
+The threshold is approximately 500 unique values but varies by report, time range, and property traffic volume. The "(other)" row groups everything that does not fit within the threshold.
+
+**High-cardinality dimensions that commonly trigger (other)**:
+- Page path (sites with thousands of unique URLs)
+- `page_title` with dynamic content
+- User-generated content parameters (usernames, search terms in URLs)
+- UTM content values with per-user personalization
+- Product SKUs on large catalogs
+
+**How to handle it**:
+1. Reduce cardinality by normalizing values (e.g., strip URL query parameters before sending to GA4)
+2. Use BigQuery for analysis of high-cardinality dimensions — no cardinality limits there
+3. Add filtering to narrow the report to a specific subset before hitting the threshold
+
+<Aside type="caution">
+The (other) row is cumulative — the metrics for all collapsed rows are summed into it. This means your "top pages" report might show the top 500 pages and then an (other) row with 80% of total pageviews. The (other) row is not noise; it contains real data from your long tail.
+</Aside>
+
+### Thresholds for low-traffic dimensions
+
+For privacy protection, GA4 applies thresholds to reports that contain sensitive dimensions (age, gender, interests). When the count is below a threshold, GA4 removes those rows from the report entirely to prevent identification of individuals.
+
+You will see "(not set)" for some combinations and lower totals than you expect. This is intentional and cannot be disabled in the standard GA4 interface. GA4 360 properties have lower thresholds.
+
+### Sampling in explorations
+
+Standard reports in GA4 are unsampled. Explorations use sampled data when the dataset is large:
+
+| Data size | Sampling level |
+|-----------|---------------|
+| < 10 million events | Not sampled |
+| 10M - 100M events | Approximately 10M events sampled |
+| > 100M events | Higher sampling rates |
+
+The sampling indicator appears in the top right of the exploration — a shield icon with a percentage. Sampling affects result accuracy; the more events are sampled, the less reliable the numbers.
+
+**Workaround**: Narrow your date range, apply filters to reduce the dataset, or use BigQuery for unsampled analysis of large date ranges.
+
+## Measurement Protocol limits
+
+| Limit | Value |
+|-------|-------|
+| Events per request | 25 |
+| Backdating window | 72 hours |
+| Requests per second (recommended) | No hard limit, but rate limiting applies |
+
+## Data retention limits
+
+| Tier | Event data retention | Default |
+|------|---------------------|---------|
+| Free GA4 | Up to 14 months | 2 months |
+| GA4 360 | Up to 50 months | 14 months |
+
+The default 2-month retention for free properties is critically short. Change to 14 months immediately after creating a property.
+
+Note: aggregate data in standard reports is retained indefinitely. Only event-level data (used in Explorations) is subject to retention limits.
+
+## BigQuery export considerations
+
+When BigQuery export is enabled, data is stored according to your BigQuery table settings, not GA4's retention settings. You can retain BigQuery data indefinitely (subject to BigQuery storage costs).
+
+BigQuery has no cardinality limits — it processes all values regardless of uniqueness. Use BigQuery for any analysis that hits the (other) row in GA4 reports.
+
+## Conversion and event deduplication
+
+| Limit | Value |
+|-------|-------|
+| Purchase event deduplication | By `transaction_id`, per property, last 7 days |
+| Other event deduplication | None built-in |
+
+Only `purchase` events are automatically deduplicated. For other conversion events, implement deduplication in your tracking code.
+
+## Common mistakes
+
+### Sending URLs as event parameters without stripping query strings
+
+URLs with UTM parameters, session IDs, or other query strings produce extremely high cardinality. `page_location` with `?utm_source=google&utm_medium=cpc&utm_campaign=q4&gclid=Cj0...` creates thousands of unique values for the same effective URL. Strip or normalize URLs before sending them as event parameters if you plan to analyze them in GA4 reports.
+
+### Not checking the (other) row percentage
+
+Many analysts look at the top rows in GA4 reports and make decisions without noticing that the (other) row contains 40-60% of the data. Always check the (other) row size. If it is large, either narrow your filters to avoid it or move the analysis to BigQuery.
+
+### Waiting until custom dimensions are full to think about it
+
+The 50 event-scoped dimension limit requires planning. Audit your dimension usage quarterly and archive dimensions for parameters that are no longer actively used. Build the habit before you hit the wall.
+
+### Treating exploration sampling as unsampled data
+
+Explorations with large date ranges or many dimensions will be sampled. The sampling indicator is subtle. For critical business decisions on large date ranges, always validate against BigQuery.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Dimensions"
+    description="Managing the 50 event-scoped custom dimension limit."
+    href="/ga4/configuration/custom-dimensions/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="BigQuery queries as the escape valve for cardinality limits."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Data Model"
+    description="How GA4's data model relates to collection limits."
+    href="/ga4/fundamentals/data-model/"
+  />
+</CardGrid>

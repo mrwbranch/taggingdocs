@@ -1,6 +1,147 @@
 ---
 title: "Folder Organization"
-description: "Organizing GTM elements with folders."
+description: "Structuring GTM containers with folders — strategies, recommended structures, and signs your container needs reorganization."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Folders in GTM are a visual organization tool — they don't affect how tags, triggers, or variables execute. But a well-organized folder structure turns a 100-item container from an overwhelming list into a navigable system where you can find anything in under 10 seconds.
+
+## Why folders matter at scale
+
+Without folders, GTM's interface shows every tag, trigger, and variable in a flat alphabetical list. At 10 items, this is fine. At 80 items, you need folders. At 200 items, you need folders with consistent naming conventions and a clear strategy.
+
+Folders help in three scenarios:
+1. **Finding things fast** — navigate to the right folder rather than scanning a long list
+2. **Understanding the scope of a platform** — "all Meta tags" in one folder makes it easy to see exactly what's deployed
+3. **Bulk actions** — when removing a vendor, you can see all their tags in one place and disable/delete them together
+
+## Strategy 1: Organize by platform (recommended)
+
+Group everything by the system that receives the data. This is the most universally useful structure because the primary question in most debugging scenarios is "what's happening with [Platform X]?"
+
+```
+📁 GA4
+📁 Meta / Facebook
+📁 Google Ads
+📁 LinkedIn
+📁 HubSpot
+📁 TikTok
+📁 Consent
+📁 Utility
+```
+
+Within each platform folder, place all tags, the triggers that exist specifically for those tags, and the variables those tags uniquely use.
+
+Shared infrastructure — triggers like "All Pages - Page View" or variables like `DLV - page_type` that multiple platforms use — goes in **Utility**.
+
+Consent-related tags, triggers, and variables go in **Consent**.
+
+## Strategy 2: Organize by function
+
+If you have one primary analytics platform and many smaller integrations, organize by what the tags do:
+
+```
+📁 Analytics (GA4, custom events)
+📁 Marketing Pixels (Meta, LinkedIn, TikTok)
+📁 Conversions (Google Ads, Meta conversions)
+📁 Consent Management
+📁 Utility & Infrastructure
+```
+
+This works well for teams where the analytics team and the paid media team have separate responsibilities — each team has their folder(s).
+
+## Strategy 3: Hybrid (for complex containers)
+
+Large containers often benefit from a hybrid: top-level folders by platform, with meaningful tags further organized within the platform folder using naming conventions (not sub-folders — GTM doesn't support nested folders).
+
+```
+📁 GA4           → Contains all GA4 tags/triggers/variables
+📁 Paid Media    → Contains all ad platform tags grouped by naming convention
+📁 Consent       → Consent mode setup
+📁 Infrastructure → Shared variables, utility tags
+```
+
+Since GTM has no sub-folders, naming conventions handle the second level of organization:
+- `Meta - Pixel - PageView`
+- `Meta - Pixel - Purchase`
+- `Google Ads - Conversion - Purchase`
+- `Google Ads - Conversion Linker`
+
+## What goes in Utility
+
+The Utility folder holds anything that's shared infrastructure rather than specific to one platform:
+
+- Constant variables (GA4 Measurement ID, site hostname, environment name)
+- Custom JavaScript variables used by multiple platforms
+- Lookup Tables and Regex Tables for classification
+- The Google Tag / Configuration Tag
+- The Consent Mode initialization tag
+- Shared triggers like "All Pages - DOM Ready" or "CE - purchase (used by 3+ platforms)"
+
+<Aside type="tip">
+If a trigger or variable is referenced by tags in more than two different platform folders, move it to Utility. The goal is to avoid confusion about which platform "owns" a shared resource.
+</Aside>
+
+## Creating and managing folders
+
+In GTM, go to the Items section (top nav) or work directly in Tags/Triggers/Variables. Create a folder by clicking "New Folder" in the folder panel on the left side of any entity list.
+
+To move items to a folder:
+1. Select multiple items using the checkboxes
+2. Click "Move to folder" in the action bar that appears at the top
+
+You can't drag and drop between folders in the GTM UI. Use checkboxes and batch-move.
+
+## When your container needs reorganization
+
+Warning signs:
+
+- **More than 20% of tags are uncategorized** (in "No Folder") — you've let organization debt accumulate
+- **Finding a tag requires scrolling** — the alphabetical list is too long to scan
+- **Duplicate or conflicting tags** are only discovered when a platform complains about double-counting — folder organization would have surfaced these during review
+- **Folder names are generic** — "Tags," "Tracking," "Other" — are your actual folders named anything useful?
+- **A departed team member's naming scheme dominates** — "JD's stuff" or "Agency" from a previous agency
+
+A reorganization doesn't require republishing. Folder changes in GTM are workspace-level and take effect only in the UI — moving tags between folders doesn't change tag behavior. You can reorganize without affecting your live container.
+
+## Folder naming conventions
+
+Keep folder names short and recognizable:
+- `GA4` not `Google Analytics 4`
+- `Meta` not `Facebook / Instagram`
+- `Google Ads` not `Google AdWords Conversion Tracking`
+- `Utility` not `Shared Infrastructure and Global Variables`
+
+If you have multiple containers (web + app, or different products), the folder structure should be consistent across all containers so team members moving between containers don't need to relearn the layout.
+
+## Moving triggers and variables
+
+A common mistake: when you move a tag to a folder, its triggers and variables stay in the default unfoldered state. Tags, triggers, and variables each have their own folder association — you need to move them separately.
+
+Consistent approach: after creating a platform folder, move all three entity types:
+1. Select all tags for that platform → move to platform folder
+2. Select all platform-specific triggers → move to platform folder
+3. Select all platform-specific variables → move to platform folder
+
+Shared variables and shared triggers stay in Utility.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Naming Conventions"
+    description="Tag, trigger, and variable naming standards that complement folder organization."
+    href="/client-side/management/naming-conventions/"
+  />
+  <LinkCard
+    title="Container Cleanup"
+    description="Reorganizing a container that's already accumulated organizational debt."
+    href="/client-side/management/container-cleanup/"
+  />
+  <LinkCard
+    title="Workspaces"
+    description="Parallel development environments — organization within workspaces follows the same folder conventions."
+    href="/client-side/management/workspaces/"
+  />
+</CardGrid>

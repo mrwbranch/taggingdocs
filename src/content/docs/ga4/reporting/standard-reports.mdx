@@ -1,6 +1,201 @@
 ---
 title: "Standard Reports"
-description: "Navigating GA4's built-in standard reports."
+description: "Navigate GA4's built-in standard reports — what each report actually measures, how to customize them, and when to use explorations instead."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+GA4's standard reports are the pre-built reports under the **Reports** section. They cover the most common analytics questions: where traffic comes from, what users do on the site, and which pages and events matter. Understanding what each report actually measures (and its limitations) saves hours of confusion.
+
+## Report navigation structure
+
+Standard reports are organized into collections:
+
+- **Reports Snapshot** — overview cards with key metrics
+- **Realtime** — events and users in the last 30 minutes
+- **Acquisition** — where users and sessions come from
+- **Engagement** — what users do on the site
+- **Monetization** — revenue and ecommerce data
+- **Retention** — returning user behavior
+- **Demographics** — who users are (age, gender, interests)
+- **Tech** — devices, browsers, platforms
+
+## Acquisition reports
+
+### Overview
+
+The Acquisition overview gives a summary view of traffic across all channels. It shows new users, sessions, engagement rate, and conversions for each default channel group.
+
+Key distinction: the chart at top shows New users over time. This is not total users — it is users who visited for the first time in the selected date range.
+
+### User acquisition
+
+Shows how **new users** were acquired — the first traffic source/medium/campaign that brought each user to your site for the first time. This uses the first-touch session's source, not the most recent session.
+
+**Primary dimension options**:
+- First user default channel group
+- First user source/medium
+- First user campaign
+
+**When to use**: Understanding which channels are best at acquiring new customers. Comparing cohort starting points.
+
+**Attribution note**: Last non-direct click for the first session.
+
+### Traffic acquisition
+
+Shows **sessions** by traffic source — the source of each session, regardless of when the user first visited. This report answers "where is today's traffic coming from?"
+
+**Primary dimension options**:
+- Session default channel group
+- Session source/medium
+- Session campaign
+
+**When to use**: Understanding current traffic mix. Evaluating campaign performance by session volume.
+
+**Attribution note**: Last non-direct click, session-scoped.
+
+<Aside type="caution">
+User acquisition and Traffic acquisition answer different questions. User acquisition is acquisition-focused (when did each user first arrive). Traffic acquisition is engagement-focused (where are sessions coming from). Do not conflate them. A user acquired via organic search who returns via direct is counted in organic in User acquisition but as direct in Traffic acquisition.
+</Aside>
+
+## Engagement reports
+
+### Overview
+
+An overview of engagement metrics including active users, events, conversions, and top events by count. The "Average engagement time" metric is unique to GA4 — it measures the time the page was in the foreground (in focus), not just time on page.
+
+### Events
+
+A table of all events, their counts, and event counts per user. Use this to see which events fire most often and monitor for unexpected event names (typos, duplicates).
+
+**Key uses**:
+- Monitor event volume for anomalies
+- Verify new events are firing
+- Check conversion events are counting correctly
+
+### Conversions
+
+The same table filtered to events marked as conversions. Shows conversion count and conversion rate (conversions / sessions).
+
+### Pages and screens
+
+Shows page view counts by page path and title. Includes:
+- Views: total page_view events
+- Users: unique users who viewed the page
+- Views per user: average views per user
+- Average engagement time: average time on page
+
+**The (other) row**: For sites with many unique URLs, the (other) row aggregates pages beyond the cardinality threshold. On large sites, the (other) row may contain most of your pages and traffic.
+
+### Landing pages
+
+Shows which pages users first see in a session, combined with engagement metrics and conversion data. This is one of the most useful standard reports for SEO and campaign landing page analysis.
+
+## Monetization reports
+
+### Overview
+
+Summary of revenue metrics. Requires ecommerce events (`purchase`, `add_to_cart`, `view_item`, etc.) to populate.
+
+### Ecommerce purchases
+
+Product-level analysis: which items are viewed, added to cart, and purchased. Requires properly implemented GA4 ecommerce with `items` array in events.
+
+**The funnel columns** (Item views, Add to carts, Ecommerce purchases) give a built-in product-level funnel without needing to build a custom exploration.
+
+### In-app purchases
+
+For mobile apps: in-app purchase revenue from the app stores. Populated automatically from Firebase SDK.
+
+### Publisher ads
+
+For sites using Google AdSense or Ad Manager: ad revenue data linked from those products.
+
+## Retention report
+
+Shows how many users return to your site after their first visit, broken down by days since first visit. This is a cohort retention chart.
+
+**How to read it**: Each row is a cohort of users who first visited on a given week. The columns show what percentage of those users returned in week 1, week 2, etc.
+
+**Limitation**: Retention in GA4 standard reports is based on new users only and is limited in customization. For custom cohort analysis, use Cohort exploration in the Explore section.
+
+## Demographics reports
+
+Shows age groups, genders, and interest categories for users who have Google signals enabled and have opted in to personalized advertising.
+
+**Limitation**: Thresholds apply. For small user counts within a demographic segment, GA4 withholds the data to protect privacy. You may see significant "(not set)" values, especially for small properties or specific segments.
+
+**Enabling demographics**: Demographics data requires Google signals to be enabled in **Admin → Reporting Identity**.
+
+## Tech reports
+
+### Tech overview
+
+Shows operating system, browser, screen resolution, and device category breakdowns.
+
+### Platform/device model
+
+Breaks down by specific device models. Useful for identifying device-specific issues (e.g., a specific phone model with a broken checkout flow).
+
+## Customizing standard reports
+
+Standard reports can be customized per property. Click the edit icon (pencil) when viewing a report to:
+- Add or remove metrics
+- Change default dimensions
+- Reorder columns
+- Apply saved filters
+
+Customizations are saved at the property level and visible to all users of the property. Modifying standard reports affects everyone — communicate changes to your team.
+
+## Standard reports vs. explorations
+
+Use standard reports when:
+- You need a quick overview of standard metrics
+- You are sharing with non-technical stakeholders
+- You need a report that refreshes with current data automatically
+- You want to set up a persistent view of key metrics
+
+Use explorations when:
+- You need custom segments
+- You need pivot tables, funnels, or path analysis
+- You need to analyze data beyond the standard report dimensions
+- You need to combine multiple analysis views
+- You want to investigate a specific question that requires custom dimensions or metrics
+
+<Aside type="tip">
+Standard reports are subject to the same cardinality limits as explorations — the (other) row appears in both. However, standard reports are generally unsampled for the default date ranges, while explorations on large date ranges may be sampled. For high-accuracy analysis, narrow your date ranges or use BigQuery.
+</Aside>
+
+## Common mistakes
+
+### Using Traffic acquisition to find top acquisition channels for new users
+
+Traffic acquisition shows where all sessions come from, not where new users came from. A user who first came via paid search and returned 10 times directly will show 10 direct sessions in Traffic acquisition. For acquisition analysis, use User acquisition.
+
+### Ignoring the Comparisons feature
+
+At the top of standard reports, you can add up to 4 comparisons (dimension + value combinations). This is extremely useful for quick comparisons: "All users vs. Mobile users", "Organic Search vs. Paid Search", "Purchasers vs. Non-purchasers". Most analysts overlook this feature.
+
+### Not customizing date comparison
+
+By default GA4 shows the selected date range with no comparison. Click the date picker and enable "Compare" to see week-over-week or year-over-year trends. The sparklines in report cards are more meaningful with comparison enabled.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Explore Reports"
+    description="Free-form analysis beyond what standard reports provide."
+    href="/ga4/reporting/explore-reports/"
+  />
+  <LinkCard
+    title="Data Limits and Cardinality"
+    description="The (other) row and cardinality limits that affect standard reports."
+    href="/ga4/configuration/data-limits-cardinality/"
+  />
+  <LinkCard
+    title="Attribution Settings"
+    description="How attribution models affect acquisition report numbers."
+    href="/ga4/configuration/attribution-settings/"
+  />
+</CardGrid>

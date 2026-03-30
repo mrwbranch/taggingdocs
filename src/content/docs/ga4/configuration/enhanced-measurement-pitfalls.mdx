@@ -1,6 +1,202 @@
 ---
 title: "Enhanced Measurement Pitfalls"
-description: "What Enhanced Measurement gets wrong and when to replace it with GTM."
+description: "Every Enhanced Measurement feature and why it might be producing bad data — the specific bugs, limitations, and when to replace each with custom GTM tracking."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Enhanced Measurement is convenient but not trustworthy without scrutiny. Each feature has specific limitations that produce misleading data in common scenarios. Before relying on any Enhanced Measurement event for decision-making, verify it is actually measuring what you think it is.
+
+This guide goes feature by feature.
+
+## Scroll tracking
+
+**What it does**: Fires `scroll` when a user scrolls to 90% of the page length.
+
+**The problem — only 90%**: You cannot get 25%, 50%, or 75% scroll depth from Enhanced Measurement. You get one data point per page view. For most content analysis purposes, knowing whether a user reached 90% scroll depth is only marginally useful. You cannot identify where users stop reading.
+
+**The problem — multiple fires per session**: If a user scrolls to 90%, scrolls back up, and scrolls down again, `scroll` may fire twice. The parameter `percent_scrolled` is always 90, so you cannot distinguish first reach from re-scrolls.
+
+**The problem — page length changes**: On pages where content loads dynamically (infinite scroll, expandable sections), "90% of page" changes as the page grows. The trigger fires based on the DOM height at the time of evaluation, which may not represent meaningful reading progress.
+
+**Replace with**: A custom scroll depth tracker that fires at 25%, 50%, 75%, and 100% using the Intersection Observer API or a GTM scroll depth trigger configured to fire at multiple thresholds.
+
+```javascript
+// GTM Scroll Depth trigger setup
+// Create trigger: Scroll Depth
+// Vertical scroll depths: 25, 50, 75, 90, 100
+// Fire on: Percentages
+
+// This fires at each threshold, giving you granular scroll data:
+// gtag('event', 'scroll', { percent_scrolled: 25 })
+// gtag('event', 'scroll', { percent_scrolled: 50 })
+// etc.
+```
+
+## Outbound link click tracking
+
+**What it does**: Fires `click` when a user clicks a link to a domain different from the current page.
+
+**The problem — misclassifying your own domains**: If you have multiple domains (e.g., `shop.example.com`, `blog.example.com`, `app.example.com`) and cross-domain tracking is not configured, Enhanced Measurement fires `click` when users navigate between these domains. Your internal navigation appears as outbound clicks.
+
+**The problem — no context**: The event includes `link_url` and `link_domain` but no context about where on the page the click occurred (section, placement, CTA text). This makes outbound click analysis less actionable.
+
+**Fix**: Configure your domains in **Admin → Data Streams → Configure tag settings → Configure your domains**. All listed domains are treated as same-domain for this trigger.
+
+**Replace with** (for more context): A custom click trigger in GTM filtered to external links, with additional parameters capturing the link text, page section, and placement.
+
+## Site search tracking
+
+**What it does**: Fires `view_search_results` when the URL contains a query parameter matching common search parameter names (q, s, search, query, etc.).
+
+**The problem — wrong parameter detection**: If your site uses a URL parameter for something other than search (e.g., filtering, sorting) and that parameter happens to be named `q` or `s`, Enhanced Measurement fires `view_search_results` for every filtered page load.
+
+**The problem — missing search terms**: If your site uses a POST request for search rather than a URL query string, Enhanced Measurement cannot see the search term and will miss these searches entirely.
+
+**The problem — search terms not captured**: Enhanced Measurement fires the event but `search_term` may be empty if the URL parameter is URL-encoded in a non-standard way.
+
+**Fix**: Check your current `view_search_results` events and verify `search_term` values are sensible. If you see obviously wrong values, identify which URL parameter is being detected incorrectly.
+
+**Configure correctly**: In Enhanced Measurement settings, you can configure the specific query parameter name for your site's search. Click the gear icon next to Enhanced Measurement and set "Query parameter" to your actual search parameter (e.g., `q` for most sites, or `search_query` for custom implementations).
+
+**Replace with**: A custom dataLayer push on your search results page that captures the search term, number of results, and applied filters.
+
+## Video engagement tracking
+
+**What it does**: Fires `video_start`, `video_progress` (at 10%, 25%, 50%, 75%), and `video_complete` for embedded YouTube videos with the YouTube IFrame API.
+
+**The problem — only YouTube**: Enhanced Measurement only tracks YouTube embeds. Vimeo, self-hosted HTML5 video, Wistia, Brightcove, and other players require custom implementation.
+
+**The problem — YouTube privacy settings**: YouTube videos embedded in "privacy-enhanced mode" (`youtube-nocookie.com`) may not trigger the IFrame API events that Enhanced Measurement relies on.
+
+**The problem — autoplay videos**: Videos that play automatically on page load will fire `video_start` for every page view where the video element exists, regardless of user intent.
+
+**Replace with** (for non-YouTube): A custom JavaScript listener for your video player's event API. Every major video platform has a JavaScript API that exposes play, pause, progress, and complete events.
+
+```javascript
+// Example: self-hosted video tracking
+const video = document.getElementById('product-demo');
+
+video.addEventListener('play', () => {
+  gtag('event', 'video_start', {
+    video_title: video.dataset.title,
+    video_duration: Math.round(video.duration),
+    video_provider: 'self_hosted'
+  });
+});
+
+[0.25, 0.5, 0.75].forEach(threshold => {
+  let fired = false;
+  video.addEventListener('timeupdate', () => {
+    if (!fired && video.currentTime / video.duration >= threshold) {
+      fired = true;
+      gtag('event', 'video_progress', {
+        video_title: video.dataset.title,
+        video_percent: Math.round(threshold * 100)
+      });
+    }
+  });
+});
+```
+
+## File download tracking
+
+**What it does**: Fires `file_download` when a user clicks a link where the URL ends in common file extensions: pdf, xlsx, docx, txt, rtf, csv, exe, key, pps, ppt, pptx, ods, odt, pages, numbers, zip, gz, rar, mp3, mp4, avi, mov, wav, wmv.
+
+**The problem — extension matching only**: Enhanced Measurement matches on file extension. If your PDF viewer is at `/api/documents/view?id=123` (no file extension), it will not be tracked. If your CSV export is at `/export.csv?date=2024-01-01`, it will be tracked (even if it is not a download in the user intent sense).
+
+**The problem — no context**: The event captures the URL but not the document name or category, making bulk analysis difficult.
+
+**The problem — cached downloads**: If a browser serves a PDF from cache rather than making a new network request, Enhanced Measurement still fires (it tracks the click, not the network request). However, some download tracking implementations that hook into network events may behave differently.
+
+**Replace with**: A custom click listener filtered to `[href$=".pdf"]` (or your file extensions) that also captures document title, category, and page location.
+
+## Form interaction tracking (beta)
+
+**What it does**: Fires `form_start` when a user interacts with a form for the first time, and `form_submit` when a form is submitted.
+
+**The problem — unreliable**: This feature is in beta and uses JavaScript to intercept form events. It works for standard HTML forms but fails for:
+- React-controlled form components (which do not use native form submission)
+- Multi-step forms (fires on each step, not just final submission)
+- Forms validated client-side where submission is prevented
+- Forms rendered in iframes
+
+**The problem — no form identification**: The event captures the form element but distinguishing which form on a page without explicit form IDs is unreliable.
+
+**Replace with**: A custom dataLayer push in your application code or a GTM form submission trigger configured for specific forms. This gives you explicit control and reliable identification.
+
+## Page view tracking for SPAs
+
+**What it does**: Enhanced Measurement fires `page_view` on initial page load. For Single Page Applications, it does not automatically detect route changes.
+
+**The problem**: A React/Vue/Angular app with client-side routing will only fire `page_view` once (on initial load), not on each route change. Your entire navigation appears as a single page view.
+
+**Fix**: This is not a configuration issue — it requires implementation. Use GTM's History Change trigger or push custom `page_view` events from your router's navigation lifecycle:
+
+```javascript
+// React Router example
+import { useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
+
+function Analytics() {
+  const location = useLocation();
+
+  useEffect(() => {
+    gtag('event', 'page_view', {
+      page_title: document.title,
+      page_location: window.location.href
+    });
+  }, [location]);
+
+  return null;
+}
+```
+
+## When to use Enhanced Measurement vs. custom tracking
+
+| Feature | Use Enhanced Measurement when | Replace with custom when |
+|---------|-------------------------------|--------------------------|
+| Scroll | Quick gut-check on page completion | Need 25/50/75% or content-aware tracking |
+| Outbound clicks | Simple external link tracking, single domain | Multi-domain, need context data |
+| Site search | Standard URL query parameter search | POST search, complex parameters |
+| Video (YouTube) | Basic YouTube engagement | Any non-YouTube player |
+| File downloads | Standard file extension downloads | API-served files, need context |
+| Form tracking | Never rely on this in production | Always implement custom |
+
+<Aside type="tip">
+A reasonable default: enable Enhanced Measurement but also implement custom tracking for events you actually make decisions with. If `scroll` data informs content strategy, implement proper scroll tracking. If file downloads are a key conversion metric, implement custom download tracking. Use Enhanced Measurement as a backup or for low-priority signals only.
+</Aside>
+
+## Common mistakes
+
+### Treating Enhanced Measurement events as accurate without validation
+
+Enhanced Measurement events appear in GA4 without any warning that they might be misconfigured. Validate each event type against your actual site behavior before using the data.
+
+### Disabling all Enhanced Measurement unnecessarily
+
+Even imperfect data is useful for directional analysis. Unless Enhanced Measurement is actively producing wrong data that you cannot distinguish from correct data, it is generally better to leave it on while implementing custom tracking for high-priority events.
+
+### Not auditing after site changes
+
+Site structure changes, SPA migrations, video player changes, and form system updates can all silently break Enhanced Measurement events that were previously working. Revalidate Enhanced Measurement tracking after significant site changes.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DebugView"
+    description="Validate Enhanced Measurement events in real time."
+    href="/ga4/troubleshooting/debugview/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="Replace Enhanced Measurement with reliable custom event tracking in GTM."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Data Streams"
+    description="Where to configure Enhanced Measurement settings for your web stream."
+    href="/ga4/fundamentals/data-streams/"
+  />
+</CardGrid>

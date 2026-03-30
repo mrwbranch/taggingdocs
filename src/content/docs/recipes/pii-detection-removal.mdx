@@ -1,6 +1,208 @@
 ---
 title: "PII Detection & Removal"
-description: "Detect and remove PII from tracking data before it leaves the browser."
+description: "Detect and remove personally identifiable information from tracking data before it leaves the browser — regex scrubbing, URL sanitisation, and Custom HTML guards."
+sidebar:
+  badge:
+    text: Intermediate
+    variant: note
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+
+PII in analytics data is a legal and compliance risk. Email addresses, phone numbers, and names in URL parameters, form fields pre-filled in URLs, or search queries can all end up in GA4 if you are not careful. This recipe provides scrubbing functions you can use in GTM to clean data before it reaches any analytics platform.
+
+<Aside type="caution">
+PII scrubbing is a safety net, not a privacy strategy. The correct approach is to never push PII to the dataLayer in the first place. Use server-side hashing before any PII reaches the client, and ensure your development team understands what should and should not go into tracking events.
+</Aside>
+
+## PII patterns to watch for
+
+These are the most common PII types that appear in analytics data accidentally:
+
+| Type | Example | Risk vector |
+|------|---------|-------------|
+| Email | `user@example.com` | URL params, search queries, form field scraping |
+| Phone | `+1-212-555-1234` | URL params, search queries |
+| Name | `John Doe` | URL params, search results |
+| SSN | `123-45-6789` | Form fields, error messages in URLs |
+| Credit card | `4111111111111111` | Error URLs, debug parameters |
+| IP address | `192.168.1.1` | Server-side logs flowing into events |
+
+## The scrubbing function
+
+This function strips PII from arbitrary strings. Use it in Custom HTML tags before pushing to the dataLayer, or in Custom JavaScript Variables to sanitise values before they are read by GA4 tags.
+
+```javascript
+function scrubPII(str) {
+  if (!str || typeof str !== 'string') return str;
+
+  return str
+    // Email addresses
+    .replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, '[email]')
+    // US phone numbers (various formats)
+    .replace(/\b(\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}\b/g, '[phone]')
+    // Social Security Numbers
+    .replace(/\b\d{3}\-\d{2}\-\d{4}\b/g, '[ssn]')
+    // Credit card numbers (13-16 digits, possibly with spaces/dashes)
+    .replace(/\b(?:\d[\s\-]?){13,16}\b/g, '[card]')
+    // IPv4 addresses
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[ip]');
+}
+```
+
+## URL sanitisation
+
+URLs are the most common PII leakage vector. Query parameters like `?email=user@example.com`, `?token=abc123`, and `?phone=5551234567` end up in GA4's `page_location` parameter unless you scrub them.
+
+```javascript
+function sanitizeUrl(url) {
+  if (!url) return url;
+
+  try {
+    var parsed = new URL(url);
+    var sensitiveParams = [
+      'email', 'phone', 'mobile', 'tel',
+      'name', 'first_name', 'last_name', 'fullname',
+      'ssn', 'dob', 'date_of_birth',
+      'token', 'api_key', 'secret', 'password',
+      'credit_card', 'cc', 'card_number'
+    ];
+
+    var modified = false;
+    sensitiveParams.forEach(function(param) {
+      if (parsed.searchParams.has(param)) {
+        parsed.searchParams.set(param, '[redacted]');
+        modified = true;
+      }
+    });
+
+    // Also run PII detection on remaining parameter values
+    parsed.searchParams.forEach(function(value, key) {
+      var scrubbed = scrubPII(value);
+      if (scrubbed !== value) {
+        parsed.searchParams.set(key, scrubbed);
+        modified = true;
+      }
+    });
+
+    return modified ? parsed.toString() : url;
+  } catch (e) {
+    // If URL parsing fails, apply regex scrubbing to the raw string
+    return scrubPII(url);
+  }
+}
+```
+
+## GTM Implementation — URL Sanitisation Variable
+
+Create a Custom JavaScript Variable in GTM that returns a sanitised version of the current page URL. Use this variable instead of `{{Page URL}}` or `{{Page Location}}` in your GA4 tags.
+
+<Steps>
+1. **Create a Custom JavaScript Variable** named `Sanitized Page URL`:
+
+   ```javascript
+   function() {
+     function scrubPII(str) {
+       if (!str || typeof str !== 'string') return str;
+       return str
+         .replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, '[email]')
+         .replace(/\b(\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}\b/g, '[phone]')
+         .replace(/\b\d{3}\-\d{2}\-\d{4}\b/g, '[ssn]');
+     }
+
+     try {
+       var url = new URL(window.location.href);
+       var sensitiveParams = ['email', 'phone', 'token', 'api_key', 'password', 'name'];
+       sensitiveParams.forEach(function(p) {
+         if (url.searchParams.has(p)) url.searchParams.set(p, '[redacted]');
+       });
+       url.searchParams.forEach(function(val, key) {
+         var s = scrubPII(val);
+         if (s !== val) url.searchParams.set(key, s);
+       });
+       return url.toString();
+     } catch(e) {
+       return scrubPII(window.location.href);
+     }
+   }
+   ```
+
+2. **Use `{{Sanitized Page URL}}`** instead of `{{Page URL}}` in all GA4 event tags and your Google Tag configuration's `page_location` field.
+
+3. **Create a GTM Exception trigger** for any tags that should never fire when PII is detected in the URL:
+
+   Create a Custom JavaScript Variable `Has PII in URL` that returns `true` if the URL contains PII patterns. Use it as a blocking condition on all tags:
+   - Condition: `{{Has PII in URL}}` **does not equal** `true`
+</Steps>
+
+## Scrubbing search queries
+
+Internal search queries are high-risk for PII. Users sometimes type their own email address or phone number into search boxes.
+
+```javascript
+// Custom JavaScript Variable: Sanitized Search Query
+function() {
+  var query = {{DLV - search_term}};
+  if (!query) return query;
+
+  return query
+    .replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, '[email]')
+    .replace(/\b(\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}\b/g, '[phone]');
+}
+```
+
+Use `{{Sanitized Search Query}}` as the `search_term` parameter in your GA4 tag.
+
+## Scrubbing dataLayer pushes at the GTM level
+
+For the most comprehensive coverage, intercept all dataLayer pushes and scrub them before GTM processes them. This is advanced and should be tested carefully:
+
+```javascript
+// Add this BEFORE the GTM snippet — in a Custom HTML tag with highest priority,
+// or ideally directly in the page HTML before the GTM snippet
+(function() {
+  var originalPush = Array.prototype.push;
+  var sensitiveKeys = ['email', 'phone', 'name', 'first_name', 'last_name'];
+
+  window.dataLayer = window.dataLayer || [];
+
+  // Override push to scrub PII from known sensitive keys
+  var dl = window.dataLayer;
+  var originalDlPush = dl.push.bind(dl);
+
+  dl.push = function(obj) {
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      sensitiveKeys.forEach(function(key) {
+        if (obj[key] && typeof obj[key] === 'string') {
+          console.warn('[Analytics] PII key "' + key + '" detected in dataLayer push — remove it from the source.');
+          delete obj[key];
+        }
+      });
+    }
+    return originalDlPush(obj);
+  };
+})();
+```
+
+<Aside type="note">
+Overriding `dataLayer.push` is an advanced pattern. It runs before GTM and can affect all tags. Test thoroughly in a staging environment before deploying to production.
+</Aside>
+
+## Test it
+
+1. Manually navigate to a URL with a known PII parameter: `/search?q=john@example.com`
+2. In GTM Preview, check what `{{Sanitized Page URL}}` returns — it should show `[email]` instead of the email
+3. Check your GA4 event parameters for the current URL — verify no raw email appears
+4. Perform an internal search with your email address — verify `search_term` is scrubbed
+
+## Common gotchas
+
+**False positives.** The SSN pattern `\d{3}\-\d{2}\-\d{4}` can match product codes or order IDs like `SKU-12-3456`. Adjust specificity based on your data. Use conservative patterns and validate matches manually in staging before deploying.
+
+**Scrubbing too aggressively breaks tracking.** If your URL sanitisation removes parameters that GA4 or Google Ads needs (like `gclid`, `fbclid`, `utm_*`), your attribution will break. Allowlist those parameters explicitly and only scrub the parameters that are not needed for tracking.
+
+<CardGrid>
+  <LinkCard title="GTM Regex Cheatsheet" href="/recipes/regex-cheatsheet/" description="PII detection patterns and URL matching reference." />
+  <LinkCard title="Track Internal Search" href="/recipes/track-internal-search/" description="Search tracking implementation where PII scrubbing is particularly important." />
+</CardGrid>

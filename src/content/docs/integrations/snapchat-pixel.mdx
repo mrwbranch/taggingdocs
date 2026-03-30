@@ -1,6 +1,278 @@
 ---
 title: "Snapchat Pixel"
-description: "Snapchat Pixel and Conversions API setup via GTM."
+description: "Snapchat Pixel client-side setup via GTM, standard events with correct parameters, server-side Conversions API configuration, and deduplication."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The Snapchat Pixel tracks website activity from users who engage with Snapchat ads, enabling conversion optimization, audience building, and attribution for Snapchat advertising campaigns. It follows the same client-side pixel plus server-side Conversions API pattern as Meta and TikTok.
+
+## Prerequisites
+
+- Snapchat Business account
+- Pixel ID from Snapchat Ads Manager → Assets → Pixels (a UUID format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+- For CAPI: Conversions API access token from Snapchat Ads Manager
+
+## Installing the Snapchat Pixel via GTM
+
+<Steps>
+1. In GTM, Tags → New → Community Template Gallery
+2. Search "Snapchat Pixel" — select Snapchat's official template if available
+3. If not available, use the Custom HTML approach below
+
+4. Configure the base tag: **Snapchat Pixel — PAGE_VIEW**
+   - Pixel ID: your UUID-format Pixel ID
+   - Event Type: PAGE_VIEW
+   - Firing trigger: All Pages
+
+5. Save and publish
+</Steps>
+
+**Custom HTML installation (if template unavailable):**
+
+```html
+<script>
+(function(e,t,n){if(e.snaptr)return;var a=e.snaptr=function()
+{a.handleRequest?a.handleRequest.apply(a,arguments):a.queue.push(arguments)};
+a.queue=[];var s='script';r=t.createElement(s);r.async=!0;
+r.src=n;var u=t.getElementsByTagName(s)[0];
+u.parentNode.insertBefore(r,u);})(window,document,
+'https://sc-static.net/scevent.min.js');
+
+snaptr('init', '{{Snapchat Pixel ID}}', {
+  'user_email': '__INSERT_USER_EMAIL__'  // Leave as placeholder — replace with your hashed email variable
+});
+
+snaptr('track', 'PAGE_VIEW');
+</script>
+```
+
+Replace `{{Snapchat Pixel ID}}` with your GTM variable for the Pixel ID. For email matching, pass a SHA-256 hashed email via your hashed email dataLayer variable.
+
+## Standard events
+
+Snapchat's standard events use uppercase names. The most important events for conversion optimization:
+
+### PAGE_VIEW
+
+Fires on every page. Handled by your base tag. No additional configuration needed for basic page tracking.
+
+### VIEW_CONTENT
+
+Fire on product pages.
+
+```
+Event: VIEW_CONTENT
+Parameters:
+  item_ids: [{{DL - Product ID}}]
+  item_category: {{DL - Category}}
+  price: {{DL - Price}}
+  currency: {{DL - Currency}}
+  number_items: 1
+```
+
+Trigger: Custom Event — `view_item`
+
+### ADD_CART
+
+```
+Event: ADD_CART
+Parameters:
+  item_ids: [{{DL - Product ID}}]
+  item_category: {{DL - Category}}
+  price: {{DL - Price}}
+  currency: {{DL - Currency}}
+  number_items: {{DL - Quantity}}
+```
+
+Trigger: Custom Event — `add_to_cart`
+
+### START_CHECKOUT
+
+```
+Event: START_CHECKOUT
+Parameters:
+  price: {{DL - Cart Value}}
+  currency: {{DL - Currency}}
+  number_items: {{DL - Cart Item Count}}
+  item_ids: {{DL - Cart Item IDs}}
+```
+
+Trigger: Custom Event — `begin_checkout`
+
+### PURCHASE
+
+The most critical event. Pass accurate value and all item details.
+
+```javascript
+// In GTM Custom HTML tag for Snapchat Purchase
+snaptr('track', 'PURCHASE', {
+  'transaction_id': {{DL - Transaction ID}},
+  'price': {{DL - Revenue}},              // number
+  'currency': {{DL - Currency}},
+  'item_ids': {{DL - Purchase Item IDs}}, // array of strings
+  'number_items': {{DL - Item Count}},
+  'client_dedup_id': {{DL - Event ID}}    // for CAPI deduplication
+});
+```
+
+Trigger: Custom Event — `purchase`
+
+<Aside type="tip">
+Use `client_dedup_id` (not `event_id` as with Meta/TikTok) for Snapchat deduplication. This is Snapchat's parameter name for the deduplication key.
+</Aside>
+
+### SIGN_UP
+
+```
+Event: SIGN_UP
+Parameters:
+  sign_up_method: "email"  or {{Method}}
+```
+
+### SUBSCRIBE
+
+For newsletter or subscription sign-ups.
+
+```
+Event: SUBSCRIBE
+```
+
+### SAVE
+
+For wishlist or save-to-favorites actions (relevant for product-focused apps).
+
+```
+Event: SAVE
+Parameters:
+  item_ids: [{{DL - Product ID}}]
+  price: {{DL - Price}}
+  currency: {{DL - Currency}}
+```
+
+## Advanced Matching (Customer Match)
+
+Snapchat Advanced Matching sends hashed user data to improve attribution match rates.
+
+**Supported fields:**
+- `user_email` — SHA-256 hashed email
+- `user_phone_number` — SHA-256 hashed phone (E.164 format)
+
+Configure in the `snaptr('init', ...)` call or in the Community Template's Advanced Matching fields:
+
+```javascript
+// Initialize with hashed email for Advanced Matching
+snaptr('init', '{{Snapchat Pixel ID}}', {
+  'user_email': {{DL - User Hashed Email}}  // pre-hashed SHA-256
+});
+```
+
+The initialization can be updated with user data when it becomes available (e.g., after login):
+
+```javascript
+snaptr('init', '{{Snapchat Pixel ID}}', {
+  'user_email': {{DL - User Hashed Email}}
+});
+```
+
+## Snapchat Conversions API
+
+The Snapchat Conversions API allows server-to-server event sending.
+
+<Steps>
+1. Generate an access token:
+   - Snapchat Ads Manager → Business → Apps → Conversions API
+   - Create a new token for your pixel
+
+2. In your sGTM container, add the Snapchat Conversions API template (community gallery or custom)
+
+3. Configure:
+   - **Pixel ID:** your Snapchat Pixel UUID
+   - **Access Token:** your Variable referencing the stored token
+   - **Event Type:** mapped from GA4 event (e.g., `purchase` → `PURCHASE`)
+   - **Price/Revenue:** mapped from ecommerce.value
+   - **Currency:** mapped from ecommerce.currency
+   - **client_dedup_id:** mapped from event_id parameter
+   - **Transaction ID:** mapped from ecommerce.transaction_id
+
+4. For user matching, add:
+   - **Email Hash:** read from user data in event or cookie
+   - **Phone Hash:** read from user data
+   - **IP Address:** from X-Forwarded-For request header
+   - **User Agent:** from User-Agent request header
+</Steps>
+
+**Snapchat-specific cookies:**
+- `_scid` — Snapchat's click identifier, set when users arrive from Snapchat ads with `ScCid` URL parameter
+- Pass this as the `sc_click_id` parameter in CAPI events
+
+```
+Create sGTM Cookie Variable: _scid
+Use as sc_click_id in the CAPI tag
+```
+
+## Deduplication
+
+Snapchat uses `client_dedup_id` as the deduplication key. The same `client_dedup_id` on both the client-side pixel event and the CAPI event causes Snapchat to count only one conversion.
+
+**Generate and push per-event IDs:**
+
+```javascript
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'purchase',
+  event_id: 'sc-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9),
+  ecommerce: { ... }
+});
+```
+
+**In the client-side Snapchat tag:** Pass `event_id` as `client_dedup_id`.
+**In the sGTM CAPI tag:** Map the same event_id parameter to `client_dedup_id`.
+
+## Verifying events
+
+**Snapchat Events Manager:**
+1. Go to Snapchat Ads Manager → Events Manager → your pixel
+2. Click "Test Events" — enter your website URL
+3. Navigate your site and trigger conversions
+4. Events appear in the test panel with parameter details
+
+**Snapchat Pixel Helper:** Snapchat does not have an official browser extension equivalent to Meta Pixel Helper. Use browser DevTools Network tab to verify requests to `tr.snapchat.com` are firing with the correct event names and parameters.
+
+## Common mistakes
+
+### Using lowercase event names
+
+Snapchat's standard events use uppercase: `PURCHASE`, `ADD_CART`, `PAGE_VIEW`. Lowercase `purchase` is not a recognized standard event — it may fire but will not optimize campaigns correctly.
+
+### Not passing `transaction_id` on PURCHASE events
+
+Without `transaction_id`, Snapchat cannot deduplicate page refreshes on the confirmation page. A user refreshing the thank-you page generates duplicate purchase conversions. Always include `transaction_id`.
+
+### Initializing the pixel multiple times on SPAs
+
+In single-page applications, if the Snapchat pixel initialization (`snaptr('init', ...)`) fires on every virtual page view, the pixel state resets and advanced matching data is lost between events. Initialize once per page load, not per virtual page view.
+
+### Forgetting to consent-gate the pixel
+
+Snapchat Pixel tracks user behavior for advertising purposes and requires consent under GDPR and similar regulations. Gate the pixel initialization and event firing on `ad_storage` consent, the same as you would for Meta Pixel.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Meta Pixel (Client-Side)"
+    description="The most fully documented version of the client-side pixel + CAPI pattern."
+    href="/integrations/meta-pixel-client-side/"
+  />
+  <LinkCard
+    title="TikTok Pixel & Events API"
+    description="TikTok's similar dual-implementation pattern with deduplication."
+    href="/integrations/tiktok-pixel-and-api/"
+  />
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="Detailed CAPI architecture and deduplication that applies to Snapchat CAPI as well."
+    href="/integrations/meta-capi-server-side/"
+  />
+</CardGrid>

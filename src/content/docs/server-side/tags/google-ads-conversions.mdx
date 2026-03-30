@@ -1,6 +1,171 @@
 ---
 title: "Google Ads Conversions"
-description: "Server-side Google Ads conversion tracking."
+description: "Server-side Google Ads conversion tracking and enhanced conversions in sGTM — configuration, gclid handling, and consent mode interaction."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Google Ads conversion tracking from sGTM sends conversion signals directly from your server to Google Ads, bypassing browser-based blocking and providing more reliable attribution data. Combined with Enhanced Conversions — which sends hashed first-party data alongside conversions — this is one of the highest-ROI server-side integrations available.
+
+## Two paths to server-side Google Ads conversions
+
+**Option 1: Google Ads Conversion Tracking tag in sGTM**
+Sends conversion events directly from your server to Google Ads. Uses the same Conversion ID and Label as the client-side tag. Best for: teams that want server-side conversion firing without changing their GA4-to-Google-Ads setup.
+
+**Option 2: Import GA4 goals into Google Ads (recommended)**
+Configure GA4 to record conversions server-side, then import those conversions into Google Ads. This path is simpler and keeps your conversion logic in one place. Best for: teams already using GA4 for Google Ads conversion measurement.
+
+This guide covers the direct Google Ads Conversion Tracking tag approach, which provides more control and lower latency.
+
+## Prerequisites
+
+- Your Google Ads account with active conversion actions
+- Your Conversion ID (`AW-XXXXXXXXX`) and Conversion Label (from the Google Ads conversion action)
+- sGTM deployed with a custom domain
+- Client-side GTM with a Conversion Linker tag firing on All Pages
+
+## The Conversion Linker tag
+
+The Conversion Linker is the prerequisite that most implementations forget. It runs client-side and stores the `gclid` (Google Click ID) from ad click URLs into first-party cookies so it can be read later on the conversion page.
+
+Without the Conversion Linker:
+- Your client-side ads tag reads `gclid` from the URL at click time
+- User navigates to the conversion page — the URL no longer contains `gclid`
+- No attribution data available
+
+The Conversion Linker resolves this by writing the `gclid` to a cookie on first landing:
+
+In your **client-side** GTM container:
+1. Tags → New → Conversion Linker
+2. Trigger: All Pages
+3. Publish this before enabling the Google Ads server-side conversion tag
+
+The `gclid` stored in the first-party cookie flows through to your sGTM server as part of the request, where it can be read from the Event Model.
+
+## Step 1: Get your Conversion ID and Label
+
+In Google Ads:
+1. **Goals** → **Conversions** → **Summary** → select your conversion action
+2. **Tag Setup** → **Use Google Tag Manager** → copy the **Conversion ID** and **Conversion Label**
+
+## Step 2: Configure the Google Ads Conversion Tracking tag in sGTM
+
+Create a new tag in your sGTM container:
+
+1. **New Tag** → **Google Ads Conversion Tracking**
+
+2. Required fields:
+   - **Conversion ID**: `AW-XXXXXXXXX` (your account-level ID)
+   - **Conversion Label**: the action-specific label
+   - **Conversion Value**: map from the Event Model (`{{Event Data - value}}`)
+   - **Currency**: map from the Event Model (`{{Event Data - currency}}`)
+   - **Order ID / Transaction ID**: map from `{{Event Data - transaction_id}}`
+
+3. **gclid handling**: The tag automatically reads the `gclid` cookie (written by the Conversion Linker) if it is present in the request. You do not need to explicitly configure this — the tag handles it.
+
+4. Set trigger: `Event Name equals purchase` (or your conversion event name)
+
+## Step 3: Enhanced Conversions
+
+Enhanced Conversions improve matching by sending hashed first-party user data alongside your conversion. Google matches this data to signed-in Google accounts, recovering conversions that cannot be attributed via cookies alone.
+
+Enhanced Conversions data to send:
+- **Email address**: hashed with SHA-256 (most impactful)
+- **First name** + **Last name**: hashed
+- **Home address** (street, city, region, postal code, country): hashed
+- **Phone number**: hashed
+
+In the Google Ads tag configuration, find **Enhanced Conversions**:
+
+| Field | Variable |
+|---|---|
+| Email | `{{Event Data - user_email}}` |
+| First name | `{{Event Data - user_first_name}}` |
+| Last name | `{{Event Data - user_last_name}}` |
+| Phone | `{{Event Data - user_phone}}` |
+
+The Google Ads tag in sGTM handles SHA-256 hashing automatically when you provide raw values. Do not pre-hash them.
+
+**Where to source user data in sGTM:**
+- From the dataLayer pushed on the checkout confirmation page: `user_email`, `user_phone`, etc.
+- From a Firestore lookup that resolves the user's profile from their `client_id`
+- From authenticated session data passed via GA4 custom parameters
+
+<Aside type="caution">
+Enhanced Conversions data must come from logged-in user interactions where the user has provided the data and consented to it being used for advertising. Do not send email addresses for users who have not consented to marketing.
+</Aside>
+
+## Consent mode interaction
+
+The Google Ads server tag respects Google Consent Mode signals. When Consent Mode is active:
+
+- If `ad_storage` and `ad_user_data` are both `granted`: full conversion tracking with user-level data
+- If `ad_storage` is `denied`: conversion is sent without cookies, reduced attribution
+- If `ad_user_data` is `denied`: Enhanced Conversions user data is not forwarded to Google
+
+Consent signals flow from the client-side through the GA4 Measurement Protocol request and are available in the Event Model. The Google Ads tag reads them automatically.
+
+To verify consent mode is working in sGTM:
+1. Open sGTM Preview
+2. Trigger a test conversion with consent denied
+3. Inspect the Google Ads tag's outbound request — user data parameters should be absent
+
+## Click ID and attribution
+
+The `gclid` parameter is the primary attribution key linking a conversion back to a specific Google Ads click. The data flow:
+
+1. User clicks a Google Ad → lands on your site with `?gclid=XXXXX` in the URL
+2. Client-side Conversion Linker writes `gclid` to cookie `_gcl_aw`
+3. GA4 tag on conversion page reads `gclid` from cookie, includes it in the Measurement Protocol request
+4. sGTM Event Model contains `gclid` (available as `{{Event Data - gclid}}`)
+5. Google Ads server tag forwards the `gclid` with the conversion
+
+If the `gclid` is missing from the Event Model:
+- Check that the Conversion Linker tag is firing on all pages client-side
+- Check that the GA4 tag is forwarding the `gclid` parameter (it should be automatic)
+- Verify in sGTM Preview that `gclid` appears in the Event Model for a conversion event
+
+## Testing Google Ads conversions
+
+Google Ads does not have a real-time test event panel like Meta's Events Manager. Testing approaches:
+
+**Google Tag Assistant**: Load Tag Assistant alongside your sGTM Preview to verify the Google Ads tag fires correctly.
+
+**Google Ads Conversion Insights**: After 24–48 hours, check **Goals** → **Conversions** → your conversion action → recent conversions. Verify the conversion count matches expected orders.
+
+**Diagnostics tab**: In Google Ads, **Goals** → **Conversions** → **Diagnostics** shows errors in conversion tag firing. Common errors appear here with actionable descriptions.
+
+## Common mistakes
+
+**Missing Conversion Linker client-side.** The server-side Google Ads tag cannot attribute conversions without `gclid`. The Conversion Linker must fire on all pages client-side before the server-side tag has anything to attribute.
+
+**Wrong trigger condition.** The conversion tag should fire on your actual order confirmation event — not on all checkout steps. Firing on `begin_checkout` or `add_payment_info` inflates conversion counts.
+
+**Not sending Enhanced Conversions for logged-in purchase flows.** For e-commerce, the checkout confirmation page always has an email address. Not including it in Enhanced Conversions leaves attribution recovery on the table.
+
+**Conversion value as a string instead of a number.** The Google Ads API expects `value` as a numeric float (e.g., `99.99`), not a string (`"99.99"`). Verify the Event Data variable returns a number, not a string.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Event Enrichment"
+    description="Adding user data to events for Enhanced Conversions without storing PII client-side."
+    href="/server-side/advanced/event-enrichment/"
+  />
+  <LinkCard
+    title="Data Redaction & PII"
+    description="Handling user data safely before it reaches Google's servers."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+  <LinkCard
+    title="Conversion Adjustments"
+    description="Sending retractions and restated values when orders are refunded or cancelled."
+    href="/server-side/advanced/conversion-adjustments/"
+  />
+  <LinkCard
+    title="Facebook Conversions API"
+    description="Parallel implementation for Meta — same patterns, Meta-specific configuration."
+    href="/server-side/tags/facebook-capi/"
+  />
+</CardGrid>

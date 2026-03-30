@@ -1,6 +1,257 @@
 ---
 title: "DataLayer Push Functions"
-description: "The undocumented ability to push functions to the dataLayer."
+description: "The undocumented ability to push functions to the dataLayer — how this.get() and this.set() work inside pushed functions, use cases for computed data injection, and why this is GTM's most powerful undocumented feature."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The dataLayer accepts more than objects and arrays. You can push a **function** to `window.dataLayer`, and when GTM processes that push, it executes the function with the Abstract Data Model as `this`. The function then has direct read/write access to GTM's internal state.
+
+This behavior is not documented in Google's official GTM documentation. It was discovered by Simo Ahava through reverse engineering GTM's source code. Despite being undocumented, it has been stable across GTM versions and is used in production by many sophisticated implementations.
+
+<Aside type="tip">
+This is a power-user technique. You do not need it for standard GTM implementations. But when you need to compute data based on what is already in the data model — without knowing in advance what is there — it is the cleanest solution available.
+</Aside>
+
+## How it works
+
+When GTM processes the dataLayer queue, it checks each item. If an item is a function, it executes the function with the data model interface (`this`) bound to GTM's internal model object.
+
+Inside the function, `this` exposes two methods:
+- `this.get(key)` — reads a value from the current data model
+- `this.set(key, value)` — writes a value to the data model
+
+These are direct reads and writes to the same data model that Data Layer Variables read from. Changes made via `this.set()` are immediately visible to all subsequent GTM evaluations.
+
+```javascript
+// Push a function to the dataLayer
+dataLayer.push(function() {
+  // 'this' is GTM's internal data model interface
+  var currentUser = this.get('user');
+  console.log('Current user in data model:', currentUser);
+
+  // Read a deeply nested value
+  var productName = this.get('ecommerce.items.0.item_name');
+  console.log('First product:', productName);
+});
+```
+
+## Reading the data model state
+
+The primary use case for pushed functions: reading current data model state to compute a value that depends on what is already there.
+
+```javascript
+// Compute a derived value based on existing data model state
+dataLayer.push(function() {
+  var cartItems = this.get('cart.items') || [];
+  var cartValue = cartItems.reduce(function(total, item) {
+    return total + (item.price * (item.quantity || 1));
+  }, 0);
+
+  // Set the computed value so it's available to GTM variables
+  this.set('cart_computed_value', Math.round(cartValue * 100) / 100);
+});
+
+// After this function executes, a Data Layer Variable
+// reading 'cart_computed_value' will return the computed total
+```
+
+## Writing to the data model
+
+You can also set values in the data model from within the function. Values set via `this.set()` behave exactly like values set via a regular push — they persist until overwritten and are accessible via Data Layer Variables.
+
+```javascript
+// Conditional data injection
+dataLayer.push(function() {
+  var userId = this.get('user.id');
+  var userType = this.get('user.type');
+
+  if (!userId) {
+    // User is not logged in — set anonymous identifiers
+    this.set('user_status', 'anonymous');
+    this.set('personalization_eligible', false);
+  } else if (userType === 'premium') {
+    this.set('user_status', 'premium_member');
+    this.set('personalization_eligible', true);
+  } else {
+    this.set('user_status', 'standard_member');
+    this.set('personalization_eligible', false);
+  }
+});
+```
+
+## Practical use case: ecommerce data validation
+
+Use a pushed function to validate ecommerce data before it reaches your tags:
+
+```javascript
+// Push ecommerce data
+dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    items: [{ item_id: 'SKU001', item_name: 'Widget', price: 29.99 }]
+  }
+});
+
+// Immediately validate and potentially fix the data
+dataLayer.push(function() {
+  var ecommerce = this.get('ecommerce');
+  if (!ecommerce) return;
+
+  var items = this.get('ecommerce.items');
+  if (!items || !Array.isArray(items)) return;
+
+  // Ensure all items have required fields
+  var isValid = items.every(function(item) {
+    return item.item_id && item.item_name && item.price >= 0;
+  });
+
+  this.set('ecommerce_valid', isValid);
+
+  if (!isValid) {
+    console.warn('GTM: Invalid ecommerce data detected', items);
+  }
+});
+```
+
+Now a Data Layer Variable `ecommerce_valid` is available for trigger conditions that can block tags when data is malformed.
+
+## Accessing all keys in the data model
+
+The `this` context inside a pushed function exposes more than `get()` and `set()`. It also exposes `_keys` — an array of all currently defined keys in the data model:
+
+```javascript
+dataLayer.push(function() {
+  // Access the internal keys array
+  var allKeys = this._keys;
+  console.log('All keys in data model:', allKeys);
+  // Output might be: ['gtm.start', 'gtm.uniqueEventId', 'user', 'ecommerce', ...]
+});
+```
+
+This is useful for debugging — you can see exactly what is in the data model at any point without knowing the keys in advance.
+
+## Timing: when does the function execute?
+
+Pushed functions execute **synchronously** when GTM processes the push. The function completes before GTM moves on to the next item in the queue or fires any tags.
+
+This means you can push a function immediately before a push that triggers tags, and the function's `this.set()` calls will be visible when those tags evaluate their variables:
+
+```javascript
+// Step 1: Push a function that computes and sets values
+dataLayer.push(function() {
+  var sessionCount = parseInt(this.get('user_session_count') || 0);
+  this.set('is_returning_user', sessionCount > 1);
+  this.set('user_session_count', sessionCount + 1);
+});
+
+// Step 2: Push event — tags fire here and see 'is_returning_user'
+dataLayer.push({
+  event: 'page_view',
+  page_path: window.location.pathname
+});
+// GA4 tag can now use a DLV for 'is_returning_user'
+```
+
+## Using pushed functions in Custom HTML tags
+
+Custom HTML tags can also push functions to the dataLayer during their execution:
+
+```html
+<!-- GTM Custom HTML Tag -->
+<script>
+(function() {
+  // Push a function to compute data based on current model state
+  window.dataLayer = window.dataLayer || [];
+
+  dataLayer.push(function() {
+    // Read what's currently in the model
+    var pageType = this.get('page_type');
+    var userId = this.get('user.id');
+
+    // Compute content group based on page type
+    var contentGroup = 'other';
+    if (pageType === 'product') contentGroup = 'product_pages';
+    else if (pageType === 'category') contentGroup = 'category_pages';
+    else if (pageType === 'checkout') contentGroup = 'checkout';
+
+    this.set('content_group', contentGroup);
+    this.set('is_authenticated', !!userId);
+  });
+
+  // Now push the actual event
+  dataLayer.push({
+    event: 'enriched_page_view'
+  });
+})();
+</script>
+```
+
+## Comparison with Custom JavaScript variables
+
+<table>
+  <thead>
+    <tr>
+      <th>Aspect</th>
+      <th>Custom JS Variable</th>
+      <th>Pushed Function</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>When it runs</td>
+      <td>When GTM evaluates the variable (on event)</td>
+      <td>When the push is processed (synchronously)</td>
+    </tr>
+    <tr>
+      <td>Access to data model</td>
+      <td>Via `{{DLV Variable Name}}` syntax</td>
+      <td>Direct via `this.get()`</td>
+    </tr>
+    <tr>
+      <td>Can set data model values</td>
+      <td>No (read-only)</td>
+      <td>Yes, via `this.set()`</td>
+    </tr>
+    <tr>
+      <td>Knows all available keys</td>
+      <td>No (must know key names in advance)</td>
+      <td>Yes, via `this._keys`</td>
+    </tr>
+    <tr>
+      <td>Best for</td>
+      <td>Transforming a known value</td>
+      <td>Computing from unknown/dynamic state</td>
+    </tr>
+  </tbody>
+</table>
+
+## Limitations and caveats
+
+**Not documented by Google.** This behavior may change in future GTM versions. Google could modify the internal data model interface without notice. In practice, this feature has been stable for years, but treat it with appropriate caution.
+
+**No async support.** Pushed functions execute synchronously. You cannot use `setTimeout`, Promises, or async/await inside them. If you need async data enrichment, push your event after your async operation completes.
+
+**No access to GTM tags or triggers.** The `this` context only exposes the data model, not GTM's tag registry or firing history. You cannot use this to conditionally execute tags.
+
+**Exceptions inside the function.** If your pushed function throws an error, GTM silently catches it and continues processing. This means bugs in pushed functions can be difficult to detect. Wrap in try/catch and log to console for debugging.
+
+```javascript
+dataLayer.push(function() {
+  try {
+    var value = this.get('some.deep.path');
+    this.set('computed_value', complexComputation(value));
+  } catch(e) {
+    console.error('GTM data model function failed:', e);
+    this.set('computed_value', null); // Set a safe default
+  }
+});
+```
+
+---
+
+<CardGrid>
+  <LinkCard title="Data Model Deep Dive" href="/internals/data-model-deep-dive/" description="The full recursive merge model and how this.get() reads from it." />
+  <LinkCard title="Flushing Stale Variables" href="/internals/flushing-stale-variables/" description="Using pushed functions and regular pushes together to manage SPA state." />
+</CardGrid>

@@ -1,6 +1,210 @@
 ---
 title: "TikTok Events API"
-description: "Server-side TikTok event tracking."
+description: "Implementing TikTok's server-side Events API via sGTM — access token setup, event mapping, user data, and deduplication."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+TikTok's Events API is the server-side counterpart to the TikTok Pixel. Like Meta CAPI, it sends conversion signals from your server to TikTok's attribution platform, bypassing browser-based blocking and improving match quality for ad optimization. The setup pattern in sGTM closely mirrors the Meta CAPI implementation — if you have already set up CAPI, TikTok Events API will be familiar.
+
+## Prerequisites
+
+Before setting up the TikTok Events API tag, you need:
+
+- A TikTok for Business account with Ads Manager access
+- An active TikTok Pixel (the server-side Events API works alongside the browser Pixel, with deduplication)
+- An sGTM container receiving GA4 events
+
+## Step 1: Generate a TikTok access token
+
+1. Log in to [TikTok Ads Manager](https://ads.tiktok.com)
+2. **Tools** → **Events** → **Web Events** → your Pixel
+3. Click **Generate Access Token** under the Events API section
+4. Copy the token — store it as a GTM constant variable in your sGTM container
+
+The access token is a permanent credential. Store it securely and do not expose it in client-side code.
+
+## Step 2: Install the TikTok Events API template
+
+The TikTok Events API template is available from the sGTM Community Template Gallery:
+
+1. In your sGTM container → **Templates** → **Search Gallery**
+2. Search for **TikTok Events API**
+3. Install the template (verify it is published by TikTok)
+
+You can also find the template on TikTok's official GitHub: `tiktok-business/tiktok-gtm-server-side-template`
+
+## Step 3: Configure the tag
+
+Create a new tag using the TikTok Events API template:
+
+**Required fields:**
+- **Pixel ID**: Your TikTok Pixel ID from the Events dashboard
+- **Access Token**: `{{TikTok Access Token}}` (your constant variable)
+
+**Event name configuration**: Map your GA4 events to TikTok's standard event names.
+
+| GA4 event | TikTok standard event |
+|---|---|
+| `page_view` | `Pageview` |
+| `view_item` | `ViewContent` |
+| `add_to_cart` | `AddToCart` |
+| `begin_checkout` | `InitiateCheckout` |
+| `add_payment_info` | `AddPaymentInfo` |
+| `purchase` | `PlaceAnOrder` or `CompletePayment` |
+| `sign_up` | `Register` |
+| `generate_lead` | `SubmitForm` |
+| `search` | `Search` |
+
+<Aside type="note">
+TikTok uses `PlaceAnOrder` for e-commerce purchases and `CompletePayment` for actual payment completion (post-purchase confirmation). For most e-commerce use cases, fire on your order confirmation event and use `CompletePayment`.
+</Aside>
+
+**Content parameters** (for e-commerce events): TikTok's Events API supports product catalog matching when you pass content details:
+
+```javascript
+// Event Model should contain these for AddToCart/Purchase
+{
+  "content_type": "product",  // or "product_group"
+  "content_id": "SKU-123",    // your product ID/SKU
+  "content_name": "Product Name",
+  "price": 29.99,
+  "currency": "USD",
+  "quantity": 1
+}
+```
+
+For purchase events with multiple items, pass an array:
+```javascript
+{
+  "contents": [
+    {"content_id": "SKU-1", "price": 19.99, "quantity": 2},
+    {"content_id": "SKU-2", "price": 9.99, "quantity": 1}
+  ],
+  "value": 49.97,
+  "currency": "USD"
+}
+```
+
+## Step 4: User identification parameters
+
+TikTok matches events to users using several identification methods. Include as many as available to improve match quality:
+
+| Parameter | Description | Hashing required |
+|---|---|---|
+| `email` | User's email address | SHA-256, lowercase |
+| `phone_number` | Phone with country code | SHA-256, no spaces/dashes |
+| `external_id` | Your internal user ID | SHA-256 or plain |
+| `ttclid` | TikTok click ID from URL parameter | Do not hash — pass raw |
+| `ttp` | TikTok Pixel cookie value | Do not hash — pass raw |
+
+**Getting `ttclid`**: When a user clicks a TikTok ad, TikTok appends `ttclid` to the landing page URL. Capture this in your dataLayer:
+
+```javascript
+// Client-side: capture ttclid from URL
+function getUrlParam(name) {
+  const params = new URLSearchParams(window.location.search);
+  return params.get(name);
+}
+
+dataLayer.push({
+  ttclid: getUrlParam('ttclid')
+});
+```
+
+Include `ttclid` in your GA4 tag as a custom parameter so it flows through to the Event Model in sGTM.
+
+**Getting `ttp`**: The `ttp` cookie is set by the TikTok Pixel in the browser. Include it as a custom parameter in your client-side GA4 tag:
+
+```javascript
+// In GTM client-side: read ttp cookie via Cookie variable
+// Variable type: 1st Party Cookie, Cookie name: _ttp
+// Reference as {{Cookie - ttp}} in GA4 tag configuration
+```
+
+## Step 5: Deduplication setup
+
+TikTok deduplication works via a unique `event_id` field:
+
+**Client-side (TikTok Pixel)**:
+```javascript
+// When the TikTok Pixel fires a conversion event,
+// pass the same event_id you sent to the Events API
+ttq.track('CompletePayment', {
+  content_type: 'product',
+  content_id: 'ORDER-123',
+  quantity: 1,
+  price: 99.99,
+  value: 99.99,
+  currency: 'USD'
+}, {
+  event_id: 'PURCHASE_ORDER-123_' + Date.now() // or your UUID
+});
+```
+
+**Server-side (sGTM Events API tag)**: pass the same `event_id` in the Events API tag configuration. Read it from the Event Model via an Event Data variable.
+
+TikTok's deduplication window: events with the same `event_id` within a short window are counted once.
+
+## Step 6: Test event verification
+
+TikTok Events Manager has a Test Events panel similar to Meta's:
+
+1. **Events Manager** → your Pixel → **Test Events**
+2. Note the Pixel Code shown (you do not need to add this to sGTM)
+3. The panel shows real-time events received via both the browser Pixel and Events API
+4. Events API events appear with a server icon
+
+Send a test conversion through your site and verify it appears in Test Events with:
+- Correct event name
+- User data parameters present (shows match quality)
+- Events API source (not just browser Pixel)
+
+## Trigger configuration
+
+For a purchase-focused implementation:
+```
+Trigger: Event Name equals purchase
+```
+
+For full-funnel:
+```
+Trigger: All Events (with event name mapping to handle each TikTok event type)
+```
+
+Recommendation: start with purchase and add-to-cart events. Expand to full funnel once you have verified data quality and deduplication.
+
+## Common mistakes
+
+**Not deduplicating with the browser Pixel.** Same issue as Meta CAPI — without `event_id` matching, every conversion is reported twice. This directly inflates ROAS and corrupts TikTok's optimization signals.
+
+**Sending events without `ttclid` or `ttp`.** These parameters are TikTok's primary attribution signals. Without them, TikTok cannot match your server-side events to ad clicks. Include them in your client-side GA4 tag configuration so they flow through to the Event Model.
+
+**Wrong currency format.** TikTok expects ISO 4217 currency codes (`USD`, `EUR`, `GBP`). Sending `$` or `dollars` causes the event to be accepted but with wrong currency matching.
+
+**Missing `content_type` for product events.** Without `content_type: "product"`, TikTok cannot match your events to your product catalog. This affects campaign optimization for catalog-based campaigns.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Facebook Conversions API"
+    description="Meta CAPI setup — similar pattern with Meta-specific event mapping and EMQ optimization."
+    href="/server-side/tags/facebook-capi/"
+  />
+  <LinkCard
+    title="Event Deduplication"
+    description="Complete deduplication guide for all Conversion API platforms."
+    href="/server-side/advanced/event-deduplication/"
+  />
+  <LinkCard
+    title="Data Redaction & PII"
+    description="Handling user data before it reaches TikTok's servers."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+  <LinkCard
+    title="Event Enrichment"
+    description="Adding user data from server-side sources to improve match quality."
+    href="/server-side/advanced/event-enrichment/"
+  />
+</CardGrid>

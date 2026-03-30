@@ -1,6 +1,179 @@
 ---
 title: "Calculated Metrics"
-description: "Creating calculated metrics in GA4 for custom KPIs."
+description: "Create derived metrics in GA4 without touching BigQuery — revenue per user, conversion rates, ratios, and custom KPIs using the formula editor."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Calculated metrics derive new metrics from existing ones using formulas. They do not require additional data collection — they compute from metrics already in GA4 using simple arithmetic operations.
+
+The most common use cases:
+
+- **Revenue per user**: `purchase_revenue / total_users`
+- **Conversion rate for a specific event**: `event_count / sessions`
+- **Average order value**: `purchase_revenue / transactions`
+- **Cart abandonment rate**: `1 - (transactions / add_to_cart_events)`
+- **Cost per acquisition**: requires custom metric for cost data
+
+## Limits
+
+| Tier | Calculated metrics limit |
+|------|--------------------------|
+| Free GA4 | 5 per property |
+| GA4 360 | 50 per property |
+
+The 5-metric limit for free properties is tight. Choose carefully — focus on metrics that stakeholders regularly need in the GA4 UI and that cannot easily be computed manually. For complex or ad-hoc calculations, BigQuery is more flexible.
+
+## Creating a calculated metric
+
+<Steps>
+1. Go to **Admin → Custom definitions → Calculated metrics tab**.
+
+2. Click **Create calculated metric**.
+
+3. Enter a **Metric name** — this is what appears in reports. Use clear, descriptive names: "Revenue per User", "Lead Conversion Rate".
+
+4. Enter a **Description** — document the formula and purpose.
+
+5. Select a **Unit**:
+   - **Standard**: plain number
+   - **Currency**: formatted as currency
+   - **Feet/Miles/Meters/Kilometers**: distance
+   - **Milliseconds/Seconds/Minutes/Hours**: time
+   - **Percent**: displayed as a percentage
+
+6. Build the **Formula** using the formula editor. Click metrics to add them, use arithmetic operators.
+
+7. Click **Save**.
+</Steps>
+
+## Formula syntax
+
+Formulas use:
+- **Metrics**: click to insert from the picker, or type `{{metric_name}}`
+- **Arithmetic operators**: `+`, `-`, `*`, `/`
+- **Parentheses**: for order of operations
+
+Examples:
+
+```
+# Revenue per session
+{{purchaseRevenue}} / {{sessions}}
+
+# Conversion rate (any conversion event)
+{{conversions}} / {{sessions}}
+
+# Average order value
+{{purchaseRevenue}} / {{transactions}}
+
+# Engagement rate (already built-in, but as example)
+{{engagedSessions}} / {{sessions}}
+
+# Revenue per user
+{{purchaseRevenue}} / {{totalUsers}}
+```
+
+<Aside type="caution">
+GA4 will not warn you if your formula produces division-by-zero for some dimension combinations. When a denominator metric is 0 for a row (e.g., a page that had sessions but no purchases), GA4 typically shows 0 or "(not set)" rather than displaying an error. Verify calculated metrics across different filter contexts to understand how they behave with edge cases.
+</Aside>
+
+## Practical examples
+
+### Revenue per user by channel
+
+**Formula**: `{{purchaseRevenue}} / {{totalUsers}}`
+**Unit**: Currency
+**Use case**: Identify which acquisition channels bring users with the highest average lifetime revenue in the analysis period.
+
+Create this metric, then view the Traffic acquisition report with "Revenue per User" as a metric column. Compare Organic Search vs. Paid Search vs. Email revenue efficiency.
+
+### Lead conversion rate
+
+**Formula**: `{{conversions:lead_form_submission}} / {{sessions}}`
+
+Wait — GA4 does not let you filter by event name within a calculated metric formula. You cannot reference a specific conversion event by name in the formula. The `{{conversions}}` metric represents all conversions.
+
+**Workaround**: Create a custom metric for lead submissions (if you push a numeric value with `lead_form_submission`), or use Explorations to filter by event name.
+
+This is a real limitation of calculated metrics — they operate on aggregate metrics, not filtered slices. For per-event conversion rates, use Explorations with event-level segmentation.
+
+### Cart abandonment rate
+
+**Formula**: `1 - ({{transactions}} / {{addToCartEvents}})`
+
+Note: `addToCartEvents` is an automatically collected event count. The formula shows the proportion of add-to-cart actions that did not result in a transaction.
+
+**Unit**: Percent
+
+### Cost-efficiency metric
+
+If you send ad spend as a custom metric (via the Measurement Protocol or a cost data import), you can compute:
+
+**Formula**: `{{customMetric:ad_spend}} / {{conversions}}`
+**Unit**: Currency
+**Label**: Cost per Conversion
+
+## Using calculated metrics in reports
+
+Calculated metrics appear in the same places as regular metrics:
+- **Standard reports**: add as a metric column in a customized report
+- **Explorations**: available in the metrics picker
+- **Comparisons**: usable in comparison metrics
+
+They are not available in:
+- Audiences (you cannot filter audiences by calculated metric values)
+- Segments (same limitation)
+- Google Ads bidding (Smart Bidding uses native conversions, not calculated metrics)
+
+## Calculated metrics vs. BigQuery
+
+Calculated metrics cover simple arithmetic on GA4 aggregate metrics. For anything more complex, use BigQuery:
+
+| Need | Calculated Metrics | BigQuery |
+|------|-------------------|---------|
+| `revenue / users` | Yes | Yes |
+| Revenue percentile analysis | No | Yes |
+| Attribution-adjusted conversion rate | No | Yes |
+| Cohort-based LTV calculation | No | Yes |
+| Moving averages | No | Yes |
+| Ratios with event-level filters | No | Yes |
+
+If your stakeholders need it in the GA4 UI and it is a simple ratio of existing metrics, use Calculated Metrics. For everything else, build it in BigQuery and connect to Looker Studio.
+
+## Common mistakes
+
+### Trying to filter within a calculated metric formula
+
+You cannot write `{{conversions WHERE event_name = 'purchase'}}` in a formula. The formula editor only accepts metric names and operators. If you need a rate for a specific event, the alternatives are:
+
+1. Create a custom metric for that event's count (requires sending a custom numeric parameter)
+2. Use an Exploration with event name filtering
+3. Compute it in BigQuery
+
+### Using the wrong denominator
+
+`{{purchaseRevenue}} / {{sessions}}` and `{{purchaseRevenue}} / {{totalUsers}}` tell very different stories. Sessions can be much higher than users for repeat visitors. "Revenue per session" rewards high-frequency visitors; "revenue per user" normalizes by person. Know which question you are answering.
+
+### Wasting calculated metric slots on metrics easily computed manually
+
+If a stakeholder needs "revenue per 1000 users" once a quarter and can do the math from existing report numbers, that is not worth a calculated metric slot. Reserve the 5 slots for metrics that appear in regular reports and dashboards.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Metrics"
+    description="Register numeric event parameters for aggregation — the complement to calculated metrics."
+    href="/ga4/configuration/custom-metrics/"
+  />
+  <LinkCard
+    title="Explore Reports"
+    description="Use explorations for complex metric analysis including event-level filtering."
+    href="/ga4/reporting/explore-reports/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="Compute any ratio or derived metric you need in BigQuery."
+    href="/ga4/bigquery/common-queries/"
+  />
+</CardGrid>

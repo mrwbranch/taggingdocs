@@ -1,6 +1,260 @@
 ---
 title: "WooCommerce"
-description: "DataLayer implementation guide for WooCommerce."
+description: "Complete dataLayer implementation for WooCommerce — PHP hooks, AJAX add-to-cart, checkout events, thank you page deduplication, and plugin options."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+WooCommerce gives you more implementation flexibility than most ecommerce platforms. You have direct PHP access to product and order data, a comprehensive hook system, and the ability to inject JavaScript anywhere in the page lifecycle. The tradeoff is that you have to build more from scratch.
+
+## Plugin options vs. custom implementation
+
+Before building a custom implementation, consider the WooCommerce GTM plugin ecosystem:
+
+**GTM4WP (recommended):** The most capable GTM plugin for WordPress. Outputs GA4-compatible ecommerce dataLayer events including the full item array structure, handles AJAX cart, and supports the thank you page with deduplication. Configuration is extensive but well-documented.
+
+**Custom implementation:** More control, no plugin dependency, but requires developer time and maintenance. Use this approach when GTM4WP's output format doesn't match your spec or when you need behavior it doesn't support.
+
+This page covers custom implementation. For GTM4WP deep configuration, see [WooCommerce Advanced](/datalayer/platforms/woocommerce-advanced/).
+
+## Installing GTM via functions.php
+
+Add GTM to your theme's `functions.php` or a custom plugin:
+
+```php
+<?php
+// Add to functions.php or a custom plugin
+
+function add_gtm_snippet() {
+    $gtm_id = 'GTM-XXXXXXX'; // Replace with your container ID
+    ?>
+    <!-- Google Tag Manager -->
+    <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+    new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+    j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+    'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+    })(window,document,'script','dataLayer','<?php echo esc_js($gtm_id); ?>');</script>
+    <!-- End Google Tag Manager -->
+    <?php
+}
+add_action('wp_head', 'add_gtm_snippet', 1);
+
+function add_gtm_noscript() {
+    $gtm_id = 'GTM-XXXXXXX';
+    ?>
+    <!-- Google Tag Manager (noscript) -->
+    <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=<?php echo esc_attr($gtm_id); ?>"
+    height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+    <!-- End Google Tag Manager (noscript) -->
+    <?php
+}
+add_action('wp_body_open', 'add_gtm_noscript', 1);
+```
+
+## Product page dataLayer push
+
+Use WooCommerce's product data accessors to populate the `view_item` push on product pages.
+
+```php
+function push_view_item_datalayer() {
+    if (!is_product()) return;
+
+    global $product;
+
+    $price = wc_get_price_to_display($product);
+    $categories = wp_get_post_terms($product->get_id(), 'product_cat', ['fields' => 'names']);
+    $category_name = !empty($categories) && !is_wp_error($categories) ? $categories[0] : '';
+
+    $item_data = [
+        'item_id'       => $product->get_sku() ?: (string) $product->get_id(),
+        'item_name'     => $product->get_name(),
+        'item_brand'    => $product->get_attribute('brand') ?: get_bloginfo('name'),
+        'item_category' => $category_name,
+        'price'         => (float) $price,
+        'quantity'      => 1,
+    ];
+
+    wc_enqueue_js("
+        dataLayer = window.dataLayer || [];
+        dataLayer.push({ ecommerce: null });
+        dataLayer.push({
+            event: 'view_item',
+            ecommerce: {
+                currency: '" . get_woocommerce_currency() . "',
+                value: " . (float) $price . ",
+                items: [" . wp_json_encode($item_data) . "]
+            }
+        });
+    ");
+}
+add_action('woocommerce_before_single_product', 'push_view_item_datalayer');
+```
+
+## AJAX add-to-cart
+
+WooCommerce uses jQuery's `added_to_cart` event for AJAX cart additions. Hook into it to fire `add_to_cart` events.
+
+```php
+// PHP: output the product data as a JavaScript variable on product archive pages
+function output_product_data_for_ajax_tracking() {
+    if (!is_shop() && !is_product_category() && !is_product_tag()) return;
+
+    $products_data = [];
+    global $wp_query;
+
+    foreach ($wp_query->posts as $post_id) {
+        $product = wc_get_product($post_id);
+        if (!$product) continue;
+        $products_data[$product->get_id()] = [
+            'item_id'   => $product->get_sku() ?: (string) $product->get_id(),
+            'item_name' => $product->get_name(),
+            'price'     => (float) wc_get_price_to_display($product),
+        ];
+    }
+
+    ?>
+    <script>
+    var wcProductsData = <?php echo wp_json_encode($products_data); ?>;
+
+    // Listen for WooCommerce's added_to_cart event
+    jQuery(document).on('added_to_cart', function(event, fragments, cart_hash, $button) {
+        var productId = $button.data('product_id');
+        var quantity = parseInt($button.data('quantity') || 1);
+        var productData = wcProductsData[productId];
+
+        if (!productData) return;
+
+        window.dataLayer = window.dataLayer || [];
+        dataLayer.push({ ecommerce: null });
+        dataLayer.push({
+            event: 'add_to_cart',
+            ecommerce: {
+                currency: '<?php echo get_woocommerce_currency(); ?>',
+                value: productData.price * quantity,
+                items: [{
+                    item_id: productData.item_id,
+                    item_name: productData.item_name,
+                    price: productData.price,
+                    quantity: quantity
+                }]
+            }
+        });
+    });
+    </script>
+    <?php
+}
+add_action('wp_footer', 'output_product_data_for_ajax_tracking');
+```
+
+## Purchase tracking on the thank you page
+
+WooCommerce's thank you page is accessible via the `woocommerce_thankyou` hook. Use a session flag to prevent duplicate fires on page refresh.
+
+```php
+function push_purchase_datalayer($order_id) {
+    // Prevent duplicate tracking on page refresh
+    $tracked_key = '_gtm_purchase_tracked';
+    if (get_post_meta($order_id, $tracked_key, true)) {
+        return;
+    }
+
+    $order = wc_get_order($order_id);
+    if (!$order) return;
+
+    // Mark as tracked
+    update_post_meta($order_id, $tracked_key, true);
+
+    $items = [];
+    $index = 0;
+    foreach ($order->get_items() as $item_id => $item) {
+        $product = $item->get_product();
+        if (!$product) continue;
+
+        $categories = wp_get_post_terms($product->get_parent_id() ?: $product->get_id(), 'product_cat', ['fields' => 'names']);
+        $category = !empty($categories) && !is_wp_error($categories) ? $categories[0] : '';
+
+        $items[] = [
+            'item_id'       => $product->get_sku() ?: (string) $product->get_id(),
+            'item_name'     => $item->get_name(),
+            'item_category' => $category,
+            'item_variant'  => $product->is_type('variation') ? implode(' / ', $product->get_variation_attributes()) : '',
+            'price'         => (float) ($item->get_total() / $item->get_quantity()),
+            'quantity'      => (int) $item->get_quantity(),
+            'index'         => $index++,
+        ];
+    }
+
+    $coupon_codes = array_values($order->get_coupon_codes());
+    $coupon = !empty($coupon_codes) ? $coupon_codes[0] : '';
+
+    $purchase_data = [
+        'event'     => 'purchase',
+        'ecommerce' => [
+            'transaction_id' => (string) $order->get_order_number(),
+            'value'          => (float) $order->get_total(),
+            'tax'            => (float) $order->get_total_tax(),
+            'shipping'       => (float) $order->get_shipping_total(),
+            'currency'       => $order->get_currency(),
+            'coupon'         => $coupon,
+            'items'          => $items,
+        ],
+    ];
+
+    ?>
+    <script>
+    window.dataLayer = window.dataLayer || [];
+    dataLayer.push({ ecommerce: null });
+    dataLayer.push(<?php echo wp_json_encode($purchase_data); ?>);
+    </script>
+    <?php
+}
+add_action('woocommerce_thankyou', 'push_purchase_datalayer', 10, 1);
+```
+
+<Aside type="note">
+The `update_post_meta($order_id, $tracked_key, true)` line is a server-side deduplication mechanism. Once an order has been tracked, the meta flag is set and subsequent refreshes of the thank you page won't fire the purchase event again. This is more reliable than session-based deduplication because it persists across browser sessions.
+</Aside>
+
+## Enqueuing scripts properly
+
+Always use `wp_enqueue_script` rather than printing raw `<script>` tags in hooks. For dataLayer pushes that contain data (not external scripts), `wc_enqueue_js()` is a convenient WooCommerce helper that inlines the script on the correct action.
+
+```php
+// For inline dataLayer pushes
+wc_enqueue_js("dataLayer.push({ event: 'view_cart' });");
+
+// For external scripts
+wp_enqueue_script('my-tracking', get_template_directory_uri() . '/js/tracking.js', ['jquery'], '1.0.0', true);
+
+// Pass PHP data to JavaScript
+wp_localize_script('my-tracking', 'wcTrackingData', [
+    'currency' => get_woocommerce_currency(),
+    'ajaxUrl'  => admin_url('admin-ajax.php'),
+]);
+```
+
+## Common mistakes
+
+**Not sanitizing output.** All WooCommerce data pushed to JavaScript must be sanitized. Use `esc_js()` for strings in JS context and `wp_json_encode()` for arrays/objects. Never use raw PHP output in `<script>` tags.
+
+**Using `woocommerce_thankyou` without deduplication.** The thank you page can be revisited. Without the `post_meta` flag or equivalent, every visit fires a duplicate purchase event.
+
+**Hooking into the wrong action for the product page.** `woocommerce_before_single_product` fires inside the product loop. If you need the product data before the loop, use `wp_footer` with an `is_product()` check instead.
+
+<CardGrid>
+  <LinkCard
+    title="WooCommerce Advanced"
+    description="GTM4WP deep configuration, variable products, subscriptions, HPOS, and full page cache compatibility."
+    href="/datalayer/platforms/woocommerce-advanced/"
+  />
+  <LinkCard
+    title="WordPress"
+    description="General WordPress tracking with GTM — plugin options and manual implementation."
+    href="/datalayer/platforms/wordpress/"
+  />
+  <LinkCard
+    title="Validation Approaches"
+    description="How to validate your WooCommerce dataLayer implementation."
+    href="/datalayer/validation/validation-approaches/"
+  />
+</CardGrid>

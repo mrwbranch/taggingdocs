@@ -1,6 +1,190 @@
 ---
 title: "Version Control"
-description: "Managing GTM versions and rolling back changes."
+description: "Managing GTM container versions, naming versions correctly, comparing changes, rolling back, and running a publishing workflow that doesn't break production."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Every time you publish in GTM, a new version is created and the previous one is preserved. This is GTM's version control system — and most people use only a fraction of its capabilities. Version names are left blank, descriptions are empty, and rollbacks happen in a panic rather than a practiced procedure.
+
+Treat every GTM publish like a production code deployment. Because it is one.
+
+## Version basics
+
+When you publish in GTM, you:
+1. Create a named version from your current workspace state
+2. Deploy that version to the Live environment
+3. Freeze it in history so you can return to it
+
+Previous versions remain accessible under **Admin → Container Version History** (at the account level) or in the **Versions** tab of the container.
+
+Each version stores the complete container state at that point: all tags, triggers, variables, and their configurations.
+
+## Naming versions correctly
+
+**Always name your versions.** A container showing "Version 1," "Version 2," ... "Version 47" tells you nothing. When something breaks at 11pm on a Friday, you need to know which version to roll back to without opening every one.
+
+Good version names:
+- `Add Pinterest Tag + Scroll Depth Tracking`
+- `GA4 Ecommerce Tracking - Checkout Funnel`
+- `Fix: Double purchase event on confirmation page`
+- `Meta CAPI Integration - Phase 1`
+- `Consent Mode v2 Update - GDPR Compliance`
+
+Bad version names:
+- (empty)
+- `Update`
+- `Changes`
+- `Test`
+- `June`
+
+The version name is your commit message. Treat it like one.
+
+## Version descriptions
+
+In addition to the name, GTM provides a description field. Use it for:
+- What changed (the "what")
+- Why it changed (the "why")
+- Who requested it
+- Ticket/task reference number
+- Any manual testing performed before publishing
+
+Example:
+```
+Name: GA4 Purchase Event - Add shipping and tax parameters
+
+Description:
+Added shipping and tax parameters to the purchase event per GA4
+ecommerce spec. Also added ecommerce null clearing before all
+ecommerce pushes (fixes stale data bug reported 2024-02-15).
+
+Requested by: Marketing Analytics team
+Ticket: TRACK-892
+Tested: Preview mode on staging, GA4 DebugView confirmed parameters
+```
+
+This takes 2 minutes to write and saves hours when debugging weeks later.
+
+## The publishing workflow
+
+Don't publish directly from workspace to Live without testing. The correct flow:
+
+<Steps>
+1. **Make changes in your workspace.** Don't work directly in the Default Workspace for anything complex — create a dedicated workspace for the change.
+
+2. **Enter Preview mode.** Test on the target pages. Confirm tags fire, check variable values, verify GA4 DebugView shows the right data.
+
+3. **Screenshot your test results.** Optional but valuable: take a screenshot of Preview mode showing tags firing correctly. Attach it to your change documentation.
+
+4. **Submit → Create Version.** Give the version a descriptive name and description. Review the diff.
+
+5. **Publish the version.** If you have Approval workflows enabled, this goes to an approver. Otherwise, click Publish.
+
+6. **Verify on Live.** After publishing, test on the live site (not in Preview mode — test as a real user) to confirm everything works.
+</Steps>
+
+<Aside type="caution">
+Preview mode tests your workspace changes, not the live container. After publishing, always do a quick sanity check on the live site. In particular, verify that tags that were previously working still work — publishing can occasionally have unexpected interactions if two workspaces had conflicting changes.
+</Aside>
+
+## Comparing versions
+
+Before publishing, review what you're about to deploy. GTM's diff view shows exactly what changed:
+
+1. In the Submit screen (before publishing), click "View Changes"
+2. GTM shows a side-by-side comparison of the current workspace vs. the current live version
+
+Items are marked as:
+- **Added** — new tags/triggers/variables
+- **Modified** — changed configurations
+- **Deleted** — removed items
+
+Use this to catch unintended changes. If you see a modification to a tag you didn't touch, investigate before publishing.
+
+## Rolling back to a previous version
+
+If a publish causes problems, roll back immediately:
+
+<Steps>
+1. Go to **Versions** tab in your GTM container.
+
+2. Find the last known-good version (use your version names to identify it quickly).
+
+3. Click **Publish** on that version.
+
+4. Confirm the rollback.
+</Steps>
+
+Rollback publishes the old version directly to Live — it bypasses the workspace and doesn't create a new version. After rolling back, the current workspace still has your problematic changes — clean it up or create a new workspace from scratch.
+
+<Aside type="tip">
+The rollback takes effect immediately on the live container. GTM containers are versioned and deployed globally via CDN — a rollback is reflected on your live site within seconds.
+</Aside>
+
+## Container export as external backup
+
+GTM's version history is stored in Google's systems. For an external backup, export your container as JSON:
+
+1. **Admin → Container → Export Container**
+2. Select the version to export
+3. Download the JSON file
+
+The exported JSON can be committed to a Git repository. This gives you:
+- An off-system backup in case of GTM account issues
+- A diff-friendly format you can view in code review
+- A way to restore the container if the GTM account is compromised
+
+Recommended cadence: export after every significant publish, and store in your team's repository or documentation system.
+
+## What the version history doesn't capture
+
+GTM's version history captures container configuration. It does not capture:
+- Preview mode test results (capture these yourself)
+- The reasoning behind changes (use your description field)
+- GA4 data changes triggered by the publish (those are permanent — there's no undo)
+- Changes to GA4 property settings made outside GTM
+
+This is why the description field matters. The version tells you *what* changed. Only your description tells you *why*.
+
+## Approval workflows (GTM 360)
+
+Standard GTM doesn't have built-in approval workflows — anyone with Publish permission can publish. GTM 360 adds an Approval step between Edit and Publish.
+
+Without 360, approximate approval workflows by:
+1. Requiring all changes go through a dedicated workspace (not Default)
+2. Having the reviewer check the workspace diff in Preview mode before the author publishes
+3. Using version descriptions to document that a review happened
+
+## Common mistakes
+
+### Publishing without a version name
+
+Empty version names accumulate into an unreadable history. Make it a team rule: no publish without a version name. GTM won't enforce this for you — your team process must.
+
+### Not testing after a publish
+
+Preview mode tests changes before they go live. But it doesn't test the live deployment. Always verify on the live site that previously-working functionality still works and the new functionality fires correctly.
+
+### Editing tags in the Default Workspace for everything
+
+The Default Workspace is shared by everyone. If two people are editing simultaneously in Default, they'll conflict on publish. Use separate workspaces for separate changes.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Workspaces"
+    description="Using workspaces to manage parallel changes without conflicts."
+    href="/client-side/management/workspaces/"
+  />
+  <LinkCard
+    title="Environments"
+    description="Testing on staging before publishing to Live — using GTM environments."
+    href="/client-side/management/environments/"
+  />
+  <LinkCard
+    title="Permissions"
+    description="Who can publish, who can only edit — setting up the right access levels."
+    href="/client-side/management/permissions/"
+  />
+</CardGrid>
