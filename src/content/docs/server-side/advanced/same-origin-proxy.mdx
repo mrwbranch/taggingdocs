@@ -46,43 +46,52 @@ Cloudflare Workers provide the cleanest implementation for most sites that use C
 // Cloudflare Worker: sGTM Same-Origin Proxy
 // Deploy via Cloudflare Dashboard → Workers → Create Service
 
-const SGTM_BACKEND = 'https://collect.yoursite.com'; // your Cloud Run URL or custom domain
+const SGTM_BACKEND = 'https://your-cloud-run-url.a.run.app'; // your Cloud Run backend URL
+const PROXY_PATH = '/measure'; // the path prefix you chose
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Only proxy sGTM paths
-    const sgtmPaths = ['/collect/', '/g/collect', '/mp/collect', '/gtm.js'];
-    const isSgtmPath = sgtmPaths.some(path => url.pathname.startsWith(path));
+    // Strip the proxy path prefix before forwarding
+    const upstreamPath = url.pathname.replace(PROXY_PATH, '') || '/';
+    const upstreamUrl = new URL(SGTM_BACKEND);
+    upstreamUrl.pathname = upstreamPath;
+    upstreamUrl.search = url.search;
 
-    if (!isSgtmPath) {
-      // Pass all other requests through to your origin unchanged
-      return fetch(request);
-    }
-
-    // Build the backend URL
-    // Strip the /collect prefix if you've mounted the Worker at /collect
-    const backendUrl = new URL(url.pathname.replace('/collect', ''), SGTM_BACKEND);
-    backendUrl.search = url.search;
-
-    // Forward the request
-    const backendRequest = new Request(backendUrl.toString(), {
+    // Build the forwarded request with critical headers
+    const reqInit = {
       method: request.method,
-      headers: request.headers,
-      body: request.body,
-    });
+      headers: new Headers(request.headers),
+      body: request.method === 'GET' || request.method === 'HEAD'
+        ? undefined
+        : request.body,
+      redirect: 'follow',
+    };
 
-    // Preserve the original X-Forwarded-For for IP pass-through
+    // CRITICAL: X-Forwarded-Host tells sGTM which domain to set cookies on.
+    // Cloudflare prevents direct Host header manipulation, so this is the workaround.
+    reqInit.headers.set('X-Forwarded-Host', url.host);
+    reqInit.headers.set('X-Forwarded-Proto', url.protocol.replace(':', ''));
+    reqInit.headers.delete('Host');
+
+    // Prevent caching of analytics requests
+    reqInit.headers.set('Cache-Control', 'no-store');
+
+    // Preserve the original client IP for geo/IP-based processing
     const clientIp = request.headers.get('CF-Connecting-IP');
     if (clientIp) {
-      backendRequest.headers.set('X-Forwarded-For', clientIp);
+      reqInit.headers.set('X-Forwarded-For', clientIp);
     }
 
-    const response = await fetch(backendRequest);
+    const upstreamResp = await fetch(upstreamUrl.toString(), reqInit);
 
     // Return the sGTM response — cookies set by sGTM now apply to yoursite.com
-    return response;
+    return new Response(upstreamResp.body, {
+      status: upstreamResp.status,
+      statusText: upstreamResp.statusText,
+      headers: upstreamResp.headers,
+    });
   }
 };
 ```
@@ -90,15 +99,55 @@ export default {
 **Route configuration in Cloudflare:**
 
 1. Workers & Pages → your Worker → Triggers → Routes
-2. Add route: `yoursite.com/collect/*` → your Worker
-3. The Worker intercepts requests to `yoursite.com/collect/*` and proxies to sGTM
+2. Add route: `*.yoursite.com/measure/*` → your Worker
+3. The Worker intercepts requests to `yoursite.com/measure/*` and proxies to sGTM
 
 **Update your GTM tag configuration** to point to the same-origin path:
 
-In your client-side GA4 configuration tag, set **Server Container URL** to `https://yoursite.com/collect`.
+In your client-side GA4 configuration tag, set **Server Container URL** to `https://yoursite.com/measure`.
 
 <Aside type="note">
 Cloudflare Workers execute before your origin server. If your origin is also on Cloudflare and uses Cloudflare-specific features, verify that the proxied sGTM requests do not interfere with your application's cache rules or firewall settings.
+</Aside>
+
+### Critical headers for cookie management
+
+The three headers that make same-origin deployment work:
+
+| Header | Purpose | What happens without it |
+|---|---|---|
+| `X-Forwarded-Host` | Tells sGTM which domain to write cookies on | sGTM sets cookies on the Cloud Run domain, not your domain |
+| `X-Forwarded-Proto` | Maintains HTTPS context for secure cookies | Cookies may not get the `Secure` flag |
+| `Cache-Control: no-store` | Prevents CDN/proxy from caching analytics responses | One user's response gets served to another user |
+
+Cloudflare (and most CDN providers) prevent direct `Host` header manipulation on Workers. The `X-Forwarded-Host` header is the standard workaround — sGTM reads it to determine the cookie domain.
+
+### Choosing a path prefix
+
+The path you choose matters less than the subdomain, since filter lists rarely match on paths. But follow these guidelines:
+
+| Path | Notes |
+|---|---|
+| `/measure/` | Clean, not obviously tracking |
+| `/data/` | Generic, many legitimate uses |
+| `/api/v1/` | Blends with real API endpoints |
+| `/edge/` | Sounds like edge computing |
+
+**Avoid**: `/collect/`, `/track/`, `/analytics/`, `/pixel/`, `/gtm/` — these are increasingly matched by sophisticated filter lists.
+
+### Verifying it works
+
+After deploying the Worker and updating your GTM configuration:
+
+1. Preview both your web and server containers
+2. In the sGTM preview, inspect incoming HTTP requests
+3. Look for a `Set-Cookie` header establishing the `FPID` cookie on your domain
+4. If the FPID cookie appears with the correct domain — your setup is working
+
+If sGTM preview fails to load, check your Worker route configuration and ensure the `X-Forwarded-Host` header is being set correctly.
+
+<Aside type="caution">
+**Risk**: Ad blockers that use dynamic domain mapping could flag your entire main domain as a tracker if they detect sGTM traffic patterns on it. This is the tradeoff of same-origin deployment. Simo Ahava notes that subdomain deployments are generally "easier and perfectly adequate" for most use cases. Only adopt same-origin based on measured technical requirements, not marketing claims about cookie elimination.
 </Aside>
 
 ## nginx reverse proxy

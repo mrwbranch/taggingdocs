@@ -247,6 +247,118 @@ Cookies are scoped correctly to each domain. Cross-domain tracking requires expl
 **Single subdomain for all domains** (not recommended for cookies):
 Using one `collect.example.com` for multiple unrelated domains prevents first-party cookie benefits on `site-b.com`. Use this only if you intentionally share a tracking infrastructure across related domains and understand the cookie scoping implications.
 
+## Loading Google scripts through your server container
+
+As of mid-2025, the **Web Container Client** in sGTM can serve Google's script libraries (`gtm.js`, `gtag.js`) directly from your first-party domain. This means the GTM container snippet itself loads from `collect.yoursite.com` instead of `googletagmanager.com` — a significant improvement for ad blocker resistance and page load control.
+
+### How it works
+
+The Web Container Client unifies the previously separate `gtm.js` and `gtag.js` clients into a single client that can serve all dependent Google scripts. When a browser requests `https://collect.yoursite.com/gtm.js?id=GTM-XXXXXXX`, your sGTM server fetches the container from Google, and returns it as a first-party response.
+
+### Configuration
+
+<Steps>
+1. Open your **server-side GTM container** and navigate to the **Web Container Client** (or GA4 client, depending on your version).
+
+2. Add your web container ID (`GTM-XXXXXXX`) to the **Container ID Allowlist**.
+
+3. Enable **"Automatically serve all dependent Google scripts"**. This ensures that any Google Tags loaded through the web container also route through the server — no separate requests to `googletagmanager.com` or `google-analytics.com`.
+
+4. Enable **"Compress HTTP Response"** if you are on Cloud Run (App Engine handles this automatically).
+
+5. Update your client-side GTM snippet to load from your server domain:
+
+   ```html
+   <!-- Load GTM from your first-party domain -->
+   <script>
+   (function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+   new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+   j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;
+   j.src='https://collect.yoursite.com/gtm.js?id='+i+dl;
+   f.parentNode.insertBefore(j,f);
+   })(window,document,'script','dataLayer','GTM-XXXXXXX');
+   </script>
+   ```
+
+6. If you use `gtag.js` directly (without GTM), update the script source:
+
+   ```html
+   <script async src="https://collect.yoursite.com/gtag/js?id=G-XXXXXXXX"></script>
+   <script>
+     window.dataLayer = window.dataLayer || [];
+     function gtag(){ dataLayer.push(arguments); }
+     gtag('js', new Date());
+     gtag('config', 'G-XXXXXXXX', {
+       server_container_url: 'https://collect.yoursite.com'
+     });
+   </script>
+   ```
+</Steps>
+
+<Aside type="caution">
+When loading the web container through sGTM with dependent script serving enabled, you cannot selectively load some Google Tags from Google's CDN while routing others through the server. It is all-or-nothing — all Google scripts route through your server container.
+</Aside>
+
+### Benefits
+
+- **No requests to Google domains.** The browser never contacts `googletagmanager.com` or `google-analytics.com`. Every request goes to your first-party domain.
+- **Ad blocker resistance.** Block lists target Google's domains. Your domain is not on those lists.
+- **Single point of control.** All script loading and data collection flows through your server, giving you one place to monitor, debug, and control.
+
+## Subdomain naming best practices
+
+Choosing the right subdomain is more important than most teams realize. A poorly chosen name gets blocked by filter lists, while a good name blends in with your legitimate first-party infrastructure.
+
+### Naming principles
+
+1. **Sound like infrastructure, not tracking.** The subdomain should look like it could be a legitimate API endpoint, CDN, or microservice.
+2. **Avoid any tracking-related terminology.** Filter lists match on patterns like `track`, `analytics`, `pixel`, `stats`, `tag`, `gtm`, `collect`, and `beacon`.
+3. **Match your existing infrastructure naming patterns.** If your API lives at `api.yoursite.com` and your CDN at `cdn.yoursite.com`, your sGTM subdomain should follow the same pattern.
+4. **Keep it short.** Shorter subdomains are easier to configure and less likely to cause issues with cookie domain scoping.
+
+### Recommended names by category
+
+**Safe — blend well with typical infrastructure:**
+
+| Subdomain | Rationale |
+|---|---|
+| `m.yoursite.com` | Short, generic, could be mobile or metrics |
+| `s.yoursite.com` | Short, generic, could be static assets |
+| `edge.yoursite.com` | Sounds like an edge computing service |
+| `gateway.yoursite.com` | Sounds like an API gateway |
+| `signal.yoursite.com` | Generic enough, not on common lists |
+| `stream.yoursite.com` | Could be data streaming, video, etc. |
+
+**Acceptable — functional but not on most block lists (yet):**
+
+| Subdomain | Rationale |
+|---|---|
+| `collect.yoursite.com` | Functional, on some newer lists |
+| `metrics.yoursite.com` | Clear purpose, rarely blocked |
+| `data.yoursite.com` | Generic, many legitimate uses |
+| `events.yoursite.com` | Event-driven architecture is common |
+
+**Avoid — commonly blocked or suspicious:**
+
+| Subdomain | Why |
+|---|---|
+| `analytics.yoursite.com` | On nearly every filter list |
+| `tracker.yoursite.com` | Obvious purpose |
+| `gtm.yoursite.com` | Pattern-matched by lists |
+| `pixel.yoursite.com` | Pattern-matched by lists |
+| `stats.yoursite.com` | On several filter lists |
+| `tag.yoursite.com` | Pattern-matched by lists |
+| `beacon.yoursite.com` | Pattern-matched by lists |
+| `sst.yoursite.com` | Becoming a known sGTM convention |
+
+<Aside type="tip">
+The naming landscape evolves. A subdomain safe today may appear on filter lists next year if it becomes a widely adopted convention. The best strategy is to choose something unique to your infrastructure that does not follow any recognizable tracking pattern.
+</Aside>
+
+### Same-origin alternative
+
+Instead of a subdomain, you can route sGTM traffic through a path on your main domain: `yoursite.com/measure/`. This avoids subdomain-based blocking entirely, but requires a reverse proxy (Cloudflare Workers, nginx, etc.). See the [same-origin proxy guide](/server-side/advanced/same-origin-proxy/) for full setup instructions.
+
 ## Common mistakes
 
 **Proxying through Cloudflare.** Orange cloud mode breaks cookie setting. Use grey cloud (DNS only) exclusively.
