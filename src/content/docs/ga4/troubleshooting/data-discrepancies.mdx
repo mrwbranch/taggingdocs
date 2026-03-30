@@ -117,6 +117,78 @@ GROUP BY event_date, event_name
 
 Compare the page_view and session_start counts to GA4's standard reports for the same day. If they match, your BigQuery implementation is correct.
 
+## Consent Mode: the biggest hidden cause of discrepancies
+
+Consent Mode is now the single largest driver of data gaps between GA4 and other systems — especially for sites with European traffic. If you launched Consent Mode and your numbers dropped, that is not a bug. But the size of the drop and how GA4 compensates for it are critical to understand.
+
+### How Consent Mode affects data collection
+
+When a user declines analytics consent:
+
+- **Basic Consent Mode**: GA4 sends **no data at all**. The user is completely invisible. This can mean 30-70% of EU traffic simply disappears from GA4.
+- **Advanced Consent Mode**: GA4 sends **cookieless pings** (no user identifiers, no cookies). Google uses these pings plus machine learning to model the missing data — called **behavioral modeling**. This fills some of the gap, but modeled data is an estimate.
+
+The result: your server logs show 100 sessions, but GA4 shows 60-80. The "missing" sessions are users who declined consent.
+
+### Diagnosing consent-related drops
+
+**Symptom**: Traffic dropped 20-50% on the date you implemented a Consent Management Platform (CMP), with no other changes.
+
+**Verification**:
+
+```sql
+-- Compare traffic before and after CMP launch
+SELECT
+  event_date,
+  COUNT(*) AS events,
+  COUNT(DISTINCT user_pseudo_id) AS users
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_date
+ORDER BY event_date
+```
+
+If you see a cliff on the exact date the CMP went live, consent is the cause.
+
+**Check consent grant rates**: Most CMPs provide a dashboard showing acceptance vs. rejection rates. A 40% acceptance rate in Germany is typical — meaning 60% of users are not tracked (Basic) or tracked without cookies (Advanced).
+
+### Consent Mode and ad platform discrepancies
+
+Consent Mode creates a specific pattern of discrepancies with ad platforms:
+
+- **Google Ads**: Uses conversion modeling to estimate conversions from users who declined consent. GA4 and Google Ads may show different modeled numbers because they use different modeling approaches.
+- **Meta/Facebook**: The Meta Pixel is typically blocked entirely when `ad_storage` is denied. Meta CAPI (server-side) can still receive events, but without `fbp`/`fbc` cookies, match rates drop significantly. This creates large gaps between Meta's reported conversions and GA4's.
+- **Other ad platforms**: Most non-Google platforms have no consent modeling. If consent blocks the pixel, that conversion is simply lost.
+
+### Advanced vs. Basic Consent Mode: the data quality tradeoff
+
+| Aspect | Basic Consent Mode | Advanced Consent Mode |
+|---|---|---|
+| Data sent when consent denied | Nothing | Cookieless pings |
+| Behavioral modeling available | No | Yes (after ~7 days of data) |
+| Typical EU data gap | 30-70% | 5-20% (after modeling) |
+| Privacy compliance | Strictest | Accepted by most DPAs |
+| GA4 Realtime accuracy | Missing consented-only | Near-complete |
+
+<Aside type="tip">
+If you are using Basic Consent Mode and wondering why your EU traffic dropped dramatically — switch to Advanced Consent Mode. The cookieless pings enable behavioral modeling, which recovers a significant portion of the "missing" data as modeled estimates. This is the single biggest improvement you can make to consent-affected data quality.
+</Aside>
+
+### Modeled data caveats
+
+GA4's behavioral modeling fills gaps, but with limitations:
+
+- **Modeling requires volume**: Properties with fewer than ~1,000 daily users may not qualify for behavioral modeling. Small sites see no modeling benefit.
+- **Modeled data is in reports, not BigQuery**: The BigQuery export contains only observed (unmodeled) data. If your GA4 reports show 1,000 sessions but BigQuery shows 700, the difference is modeled data.
+- **You cannot isolate modeled vs. observed**: GA4 does not separate modeled data in standard reports. You can only see the "unsampled range" indicator in Explorations.
+- **Conversion modeling is separate**: Google Ads has its own conversion modeling that is separate from GA4's behavioral modeling. Do not expect them to produce the same numbers.
+
+### What to tell stakeholders
+
+When consent causes a data drop, frame it clearly:
+
+> "Our GA4 data now reflects only users who consented to tracking (plus modeled estimates for those who didn't). The 30% drop is not lost traffic — it's users exercising their privacy rights. Our actual traffic has not changed; our measurement coverage has. Comparing pre-consent and post-consent GA4 numbers is comparing different measurement scopes."
+
 ## Systematic discrepancy investigation
 
 When a stakeholder reports a number mismatch, use this process:
@@ -162,14 +234,19 @@ GA4 has a `refund` event for tracking purchase cancellations, but most implement
 
 <CardGrid>
   <LinkCard
+    title="Consent Mode v2"
+    description="How Consent Mode works and its impact on data collection."
+    href="/consent/consent-mode-v2/"
+  />
+  <LinkCard
+    title="Advanced Consent Mode"
+    description="Cookieless pings and behavioral modeling to recover consent-affected data."
+    href="/consent/advanced-consent-mode/"
+  />
+  <LinkCard
     title="Sessions and Attribution"
     description="Why GA4 session definitions differ from other tools."
     href="/ga4/fundamentals/sessions-and-attribution/"
-  />
-  <LinkCard
-    title="Internal Traffic Filtering"
-    description="Ensure internal traffic is filtered correctly to avoid inflated counts."
-    href="/ga4/troubleshooting/internal-traffic-filtering/"
   />
   <LinkCard
     title="Common Queries"
