@@ -1,6 +1,216 @@
 ---
 title: "Looker Studio Patterns"
-description: "Connecting GA4 BigQuery data to Looker Studio effectively."
+description: "Connect GA4 BigQuery data to Looker Studio — custom SQL queries, blended data sources, data freshness, and performance optimization."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Looker Studio (formerly Data Studio) is the most common visualization layer on top of GA4 BigQuery data. Done well, it gives stakeholders fast, always-current dashboards. Done poorly, it runs expensive queries on raw events tables every time a report is opened. This guide covers the patterns that matter.
+
+## Connecting BigQuery to Looker Studio
+
+From Looker Studio:
+1. **Add data → BigQuery → Custom Query** (recommended) or **Table**
+2. Select your GCP project and billing project
+3. Enter a SQL query or select a table
+4. Configure credentials (your Google account or a service account)
+
+**Use Custom Query, not Table**: Connecting directly to a raw `events_*` table forces Looker Studio to scan the full table for every filter, every page load. Use a Custom Query that applies `_TABLE_SUFFIX` filtering.
+
+## The derived table pattern
+
+The fundamental pattern: never connect Looker Studio directly to raw GA4 events. Always connect to a derived table or a custom SQL query that aggregates appropriately.
+
+**Bad pattern**:
+```sql
+-- This runs against all your raw events on every dashboard refresh
+SELECT * FROM `project.analytics_PROPERTY_ID.events_*`
+```
+
+**Good pattern — connect to a pre-aggregated table**:
+```sql
+-- Connect to your derived daily_metrics table
+SELECT * FROM `project.analytics_derived.daily_metrics`
+```
+
+Or use a **Custom Query** data source that aggregates inline:
+
+```sql
+SELECT
+  session_date AS date,
+  channel,
+  device_category,
+  country,
+  SUM(sessions) AS sessions,
+  SUM(users) AS users,
+  SUM(transactions) AS transactions,
+  SUM(revenue) AS revenue
+FROM `project.analytics_derived.daily_metrics`
+WHERE session_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+GROUP BY date, channel, device_category, country
+```
+
+## Custom SQL with date range parameters
+
+Looker Studio can pass its date range controls as parameters to your BigQuery SQL query:
+
+```sql
+-- Use PARSE_DATE with Looker Studio date parameters
+SELECT
+  session_date,
+  channel,
+  SUM(sessions) AS sessions,
+  SUM(revenue) AS revenue
+FROM `project.analytics_derived.daily_metrics`
+WHERE session_date BETWEEN
+  PARSE_DATE('%Y%m%d', @DS_START_DATE) AND
+  PARSE_DATE('%Y%m%d', @DS_END_DATE)
+GROUP BY session_date, channel
+ORDER BY session_date
+```
+
+`@DS_START_DATE` and `@DS_END_DATE` are Looker Studio's built-in date parameters, passed as `YYYYMMDD` strings. This makes your dashboard's date range picker filter the BigQuery query directly.
+
+<Aside type="tip">
+When using date parameters in Custom Query, Looker Studio still runs the full query each time the dashboard renders — just with the filtered date range. For large date ranges, ensure your underlying table has proper partitioning so BigQuery prunes efficiently.
+</Aside>
+
+## Blended data sources
+
+Looker Studio's data blending feature joins multiple data sources in the visualization layer. Useful for:
+- Joining GA4 sessions with your CRM conversion data
+- Combining GA4 revenue with ad spend data for ROAS calculations
+- Layering GA4 data with server-side data that was not collected client-side
+
+### Blending GA4 with ad spend data
+
+Create two data sources:
+1. GA4 sessions by channel (from BigQuery)
+2. Ad spend by channel (from a separate BigQuery table or Google Sheets upload)
+
+In Looker Studio, create a blended data source with:
+- Left source: GA4 sessions
+- Right source: Ad spend
+- Join key: `channel` (or `date + channel`)
+- Blend type: Left outer join
+
+Add a calculated field: `Revenue / Ad Spend` = ROAS.
+
+### Blended source limitations
+
+- No row-level security — all data in a blend is visible to all viewers
+- Performance can be slow for large data sources
+- Blends are limited to 5 data sources
+- Aggregation in blends can produce unexpected results — always verify against source data
+
+## Data freshness
+
+### Caching
+
+Looker Studio caches query results for 12 hours by default. For daily dashboards this is usually fine. For operational dashboards needing hourly data:
+
+- In the data source settings, set **Cache duration** to 1 hour (minimum)
+- For near-real-time: set to 15 minutes (increases BigQuery query costs proportionally)
+- Stakeholders can manually refresh a report with the **Refresh data** button
+
+### Showing data freshness
+
+Add a score card to your dashboard showing the latest data date:
+
+```sql
+SELECT
+  MAX(session_date) AS latest_date
+FROM `project.analytics_derived.daily_metrics`
+```
+
+Display this as a scorecard with the label "Data current through" so users know when the data was last updated.
+
+## Performance optimization
+
+### Avoid dimension combinations that cause row explosion
+
+A dashboard with dimensions: date × channel × country × device × page = potentially millions of rows. Pre-aggregate at the granularity you actually display.
+
+If your dashboard never shows page-level breakdown, remove page from your derived table and aggregation query. Pre-aggregation at the right level is the single biggest performance improvement.
+
+### Use calculated fields in Looker Studio sparingly
+
+Calculated fields in Looker Studio run in the visualization layer after BigQuery returns data. For simple arithmetic they are fine. For complex logic (CASE statements, regex), do the computation in BigQuery and return the result as a field — it is faster and more reliable.
+
+```sql
+-- ✅ Compute channel classification in BigQuery, return as a field
+SELECT
+  classify_channel(source, medium) AS channel,
+  SUM(sessions) AS sessions
+FROM sessions
+GROUP BY channel
+
+-- ❌ Run complex CASE in Looker Studio calculated field (slower, harder to maintain)
+```
+
+### Reduce dashboard complexity
+
+Each chart on a Looker Studio page generates at least one BigQuery query when the page loads. A page with 12 charts may run 12 simultaneous queries. Combine charts that answer similar questions, use tabs to separate different analysis areas, and remove charts that stakeholders do not use.
+
+## Report structure recommendations
+
+### Executive summary page
+
+Scorecard metrics: Total sessions, Users, Revenue, Conversion Rate, Engagement Rate.
+Time series: Revenue and Sessions over time (weekly).
+Single-dimension breakdown: Revenue by channel (pie or bar).
+
+Data source: `daily_metrics` table, filtered by `@DS_START_DATE/@DS_END_DATE`.
+
+### Acquisition detail page
+
+Table: Channel × Sessions × Users × Conversions × Revenue.
+Bar chart: Sessions by channel (week-over-week comparison).
+Scorecard: Top acquisition channel.
+
+Data source: `daily_metrics` grouped by channel.
+
+### E-commerce page
+
+Table: Product name × Views × Add-to-carts × Purchases × Revenue.
+Funnel: View → Cart → Checkout → Purchase.
+
+Data source: Custom query from `fct_purchases` joined with product dimensions.
+
+## Common mistakes
+
+### Connecting to raw events tables
+
+Direct connections to `events_*` in Looker Studio scan the entire table on every dashboard load. For a 1-year dataset, this can cost $5-10 per dashboard view. Always use derived tables.
+
+### Not testing data freshness assumptions
+
+If GA4 daily export runs at 6 AM but your derived table job runs at 5 AM, your dashboard will always be one day behind. Verify that your Dataform schedule runs after the GA4 export completes.
+
+### Overly complex blends
+
+Data blends in Looker Studio are slow and hard to debug. Whenever possible, pre-join data sources in BigQuery and connect Looker Studio to the joined result. Reserve Looker Studio blending for genuinely dynamic joins that cannot be pre-computed.
+
+### Not controlling viewer access
+
+Looker Studio reports can be shared broadly, and any viewer can see the data returned by the underlying BigQuery queries. If your BigQuery data contains sensitive information, manage access at both the report level (Looker Studio sharing) and the data level (BigQuery IAM).
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Cost Optimization"
+    description="Pre-aggregated derived tables that make Looker Studio dashboards fast and cheap."
+    href="/ga4/bigquery/cost-optimization/"
+  />
+  <LinkCard
+    title="Dataform Workflows"
+    description="Automate the derived table builds that power your Looker Studio reports."
+    href="/ga4/bigquery/dataform-workflows/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="SQL patterns suitable for Looker Studio custom query data sources."
+    href="/ga4/bigquery/common-queries/"
+  />
+</CardGrid>

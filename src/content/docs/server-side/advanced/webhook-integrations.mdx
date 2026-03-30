@@ -1,6 +1,498 @@
 ---
 title: "Webhook Integrations"
-description: "Receiving and processing webhooks through server-side GTM."
+description: "Receiving and processing webhooks through sGTM — custom client templates, signature validation, CRM and Stripe events, and forwarding to ad platform Conversions APIs."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Most sGTM traffic originates from browsers. A user loads a page, the client-side GTM fires the GA4 tag, a hit travels to `collect.yoursite.com`, and sGTM processes it. That flow is well-documented. The less-documented capability is the inverse: receiving events that originate on your backend — from a CRM like HubSpot or Salesforce, an order management system, or a payments platform like Stripe — and forwarding those events to ad platform Conversions APIs.
+
+This is how offline conversions actually work in practice. A lead fills out a form (tracked via CAPI), then a human calls them three days later and they become a customer. That phone sale never touches the browser. To report it as a conversion, you need to send it server-to-server. sGTM can receive that inbound webhook and forward the resulting purchase event to Meta CAPI with the lead's hashed email — completing the conversion attribution chain.
+
+## The architecture
+
+When used as a webhook receiver, sGTM acts as both an inbound HTTP endpoint and an outbound event forwarder:
+
+```
+External System                 sGTM Container              Ad Platforms
+(Stripe, HubSpot, etc.)
+        │                              │                          │
+        │  POST /webhooks/stripe       │                          │
+        │  Authorization: <signature>  │                          │
+        ├─────────────────────────────>│                          │
+        │                              │  Custom client claims    │
+        │                              │  Parses payload          │
+        │                              │  Builds Event Model      │
+        │                              │                          │
+        │                              │  Triggers fire           │
+        │                              │  Tags execute            │
+        │                              │                          │
+        │                              │  POST /conversions       │
+        │                              ├─────────────────────────>│
+        │                              │  (Meta CAPI / GA4 MP)    │
+        │  HTTP 200                    │                          │
+        │<─────────────────────────────│                          │
+```
+
+The key difference from browser-originated traffic: the request body is not a GA4 measurement protocol payload. It is whatever format the external system sends — JSON from Stripe, form-encoded data from HubSpot, or a custom schema from your order management system. A custom client template translates that format into the sGTM Event Model.
+
+## Building a webhook receiver client
+
+The custom client template handles three responsibilities: validate the request is a legitimate webhook, parse the payload, and run the container.
+
+### Stripe webhook client
+
+```javascript
+const claimRequest = require('claimRequest');
+const runContainer = require('runContainer');
+const getRequestPath = require('getRequestPath');
+const getRequestMethod = require('getRequestMethod');
+const getRequestBody = require('getRequestBody');
+const getRequestHeader = require('getRequestHeader');
+const returnResponse = require('returnResponse');
+const setResponseStatus = require('setResponseStatus');
+const JSON = require('JSON');
+const logToConsole = require('logToConsole');
+const computeHmac = require('computeHmac');
+
+const path = getRequestPath();
+const method = getRequestMethod();
+
+// Only handle our webhook path
+if (path !== '/webhooks/stripe' || method !== 'POST') {
+  return;
+}
+
+claimRequest();
+
+// Validate Stripe signature
+const stripeSignature = getRequestHeader('stripe-signature');
+const rawBody = getRequestBody();
+
+if (!stripeSignature || !validateStripeSignature(rawBody, stripeSignature, data.webhookSecret)) {
+  logToConsole(JSON.stringify({
+    level: 'error',
+    client: 'stripe_webhook',
+    error: 'signature_validation_failed',
+  }));
+  setResponseStatus(401);
+  returnResponse();
+  return;
+}
+
+// Parse the Stripe event
+let stripeEvent;
+try {
+  stripeEvent = JSON.parse(rawBody);
+} catch (e) {
+  setResponseStatus(400);
+  returnResponse();
+  return;
+}
+
+const eventType = stripeEvent.type;
+const eventData = stripeEvent.data && stripeEvent.data.object;
+
+if (!eventData) {
+  setResponseStatus(400);
+  returnResponse();
+  return;
+}
+
+// Map Stripe event types to GA4 event names
+const eventNameMap = {
+  'payment_intent.succeeded': 'purchase',
+  'customer.subscription.created': 'subscription_start',
+  'customer.subscription.deleted': 'subscription_cancel',
+  'invoice.payment_succeeded': 'subscription_renewal',
+};
+
+const eventName = eventNameMap[eventType] || 'stripe_event';
+
+// Build the Event Model
+const eventModel = {
+  event_name: eventName,
+  stripe_event_type: eventType,
+  stripe_event_id: stripeEvent.id,
+  // For payment events
+  transaction_id: eventData.id,
+  value: eventData.amount ? eventData.amount / 100 : undefined,
+  currency: eventData.currency ? eventData.currency.toUpperCase() : undefined,
+  // Customer data (for identity matching)
+  stripe_customer_id: eventData.customer,
+  // Email from metadata (if your integration populates it)
+  user_email: eventData.metadata && eventData.metadata.email,
+};
+
+// Run the container — this fires your tags
+runContainer(eventModel, function() {
+  setResponseStatus(200);
+  returnResponse();
+});
+
+// Signature validation helper
+function validateStripeSignature(payload, signatureHeader, secret) {
+  // Stripe signature header format:
+  // t=timestamp,v1=computed_hmac
+  const parts = {};
+  signatureHeader.split(',').forEach(function(part) {
+    const kv = part.split('=');
+    parts[kv[0]] = kv.slice(1).join('=');
+  });
+
+  const timestamp = parts.t;
+  const receivedSig = parts.v1;
+
+  if (!timestamp || !receivedSig) return false;
+
+  // Replay protection: reject webhooks older than 5 minutes
+  const now = Date.now() / 1000;
+  if (Math.abs(now - parseInt(timestamp, 10)) > 300) return false;
+
+  // Compute expected signature: HMAC-SHA256(timestamp + '.' + body, secret)
+  const signedPayload = timestamp + '.' + payload;
+  const expectedSig = computeHmac('SHA-256', secret, signedPayload, 'hex');
+
+  return expectedSig === receivedSig;
+}
+```
+
+**Template fields required:**
+- `webhookSecret` — text field, marked `canBeSensitive: true`. Store the Stripe webhook signing secret from the Stripe Dashboard.
+
+**Template permissions required:**
+- `read_request` for body and headers
+- `logging` for `logToConsole`
+- `compute_hmac` for signature validation
+- `return_response`
+
+### HubSpot CRM webhook client
+
+HubSpot webhooks carry contact or deal data when properties change. This example fires when a contact's lifecycle stage changes to `customer`:
+
+```javascript
+const claimRequest = require('claimRequest');
+const runContainer = require('runContainer');
+const getRequestPath = require('getRequestPath');
+const getRequestBody = require('getRequestBody');
+const getRequestHeader = require('getRequestHeader');
+const returnResponse = require('returnResponse');
+const setResponseStatus = require('setResponseStatus');
+const JSON = require('JSON');
+
+const path = getRequestPath();
+
+if (path !== '/webhooks/hubspot') {
+  return;
+}
+
+claimRequest();
+
+// HubSpot sends a client secret in the X-HubSpot-Signature header
+// Validate before processing
+const clientSecret = data.hubspotClientSecret;
+const signature = getRequestHeader('x-hubspot-signature');
+
+// (Signature validation logic depends on HubSpot API version)
+
+const rawBody = getRequestBody();
+let events;
+try {
+  events = JSON.parse(rawBody);
+} catch (e) {
+  setResponseStatus(400);
+  returnResponse();
+  return;
+}
+
+// HubSpot sends an array of events
+if (!Array.isArray(events) || events.length === 0) {
+  setResponseStatus(200); // Acknowledge to prevent retries
+  returnResponse();
+  return;
+}
+
+// Process the first relevant event
+const event = events[0];
+
+if (event.subscriptionType === 'contact.propertyChange' &&
+    event.propertyName === 'lifecyclestage' &&
+    event.propertyValue === 'customer') {
+
+  const eventModel = {
+    event_name: 'crm_customer_created',
+    hubspot_contact_id: event.objectId.toString(),
+    source: 'hubspot',
+    // email comes from your CRM data — include it if you have it
+    // in the webhook payload or look it up from Firestore
+  };
+
+  runContainer(eventModel, function() {
+    setResponseStatus(200);
+    returnResponse();
+  });
+} else {
+  // Acknowledge events we don't process
+  setResponseStatus(200);
+  returnResponse();
+}
+```
+
+## Webhook signature validation
+
+Every webhook receiver must validate the incoming signature before processing the payload. Without validation, anyone who discovers your sGTM endpoint URL can send arbitrary data that fires your conversion tags.
+
+The validation pattern follows a consistent structure across platforms:
+
+**Stripe**: HMAC-SHA256 over `timestamp.body` using the webhook signing secret. Signature is in the `stripe-signature` header as `t=timestamp,v1=hash`.
+
+**HubSpot**: HMAC-SHA256 or SHA-256 depending on API version. Signature is in `X-HubSpot-Signature` or `X-HubSpot-Signature-v3`.
+
+**Shopify**: HMAC-SHA256 over the raw request body using your webhook secret. Signature is in `X-Shopify-Hmac-Sha256` as a base64 string.
+
+**Generic pattern:**
+
+```javascript
+const computeHmac = require('computeHmac');
+
+function validateWebhookSignature(body, receivedSig, secret, algorithm) {
+  // algorithm: 'SHA-256', 'SHA-1'
+  const expectedSig = computeHmac(algorithm, secret, body, 'hex');
+  // Use a timing-safe comparison in production
+  return expectedSig === receivedSig;
+}
+```
+
+<Aside type="caution">
+The `computeHmac` API is available in sGTM's sandboxed environment. The comparison above is not timing-safe — for webhook validation in high-security contexts, prefer implementing a constant-time comparison by XOR-ing all bytes rather than short-circuit equality.
+</Aside>
+
+## Replay protection
+
+Webhook replay attacks send a previously captured valid webhook payload repeatedly. Even with correct signatures, the replay sends duplicate conversion events. Mitigate this with timestamp validation:
+
+```javascript
+// Extract the timestamp from the signature header
+const eventTimestamp = parseInt(parts.t, 10); // Unix seconds
+const currentTime = getTimestampMillis() / 1000;
+const maxAge = 300; // 5 minutes
+
+if (Math.abs(currentTime - eventTimestamp) > maxAge) {
+  logToConsole(JSON.stringify({
+    level: 'warn',
+    client: 'stripe_webhook',
+    error: 'replay_attack_or_clock_skew',
+    event_age_seconds: currentTime - eventTimestamp,
+  }));
+  setResponseStatus(400);
+  returnResponse();
+  return;
+}
+```
+
+For Stripe and Shopify, the signature header includes a timestamp. Reject any webhook older than 5 minutes.
+
+## Forwarding to Meta CAPI for offline conversions
+
+The primary use case for CRM webhooks is reporting offline conversions — deals closed by sales, subscriptions activated after trials, refunds processed. Here is a tag template that fires on `crm_customer_created` events and forwards to Meta CAPI:
+
+```javascript
+const sendHttpRequest = require('sendHttpRequest');
+const JSON = require('JSON');
+const getEventData = require('getEventData');
+const getTimestampMillis = require('getTimestampMillis');
+const logToConsole = require('logToConsole');
+
+const accessToken = data.metaAccessToken;
+const pixelId = data.pixelId;
+
+// Get identity data
+const email = getEventData('user_email');
+const contactId = getEventData('hubspot_contact_id');
+
+// At least one identity signal required
+if (!email && !contactId) {
+  data.gtmOnFailure();
+  return;
+}
+
+const userData = {};
+if (email) {
+  // Meta requires SHA-256 hashed email
+  // In production, hash this using a variable template
+  userData.em = [email]; // Should already be hashed by variable
+}
+if (contactId) {
+  // Use CRM contact ID as external_id
+  userData.external_id = [contactId];
+}
+
+const payload = {
+  data: [{
+    event_name: 'Lead',
+    event_time: Math.floor(getTimestampMillis() / 1000),
+    event_source_url: 'https://yoursite.com',
+    action_source: 'crm',
+    user_data: userData,
+    custom_data: {
+      value: getEventData('deal_value'),
+      currency: 'USD',
+    },
+  }],
+  access_token: accessToken,
+};
+
+const url = 'https://graph.facebook.com/v18.0/' + pixelId + '/events';
+
+sendHttpRequest(
+  url,
+  {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    timeout: 5000,
+  },
+  function(statusCode, headers, body) {
+    if (statusCode >= 200 && statusCode < 300) {
+      logToConsole(JSON.stringify({
+        level: 'info',
+        tag: 'meta_capi_crm',
+        status: 'success',
+      }));
+      data.gtmOnSuccess();
+    } else {
+      logToConsole(JSON.stringify({
+        level: 'error',
+        tag: 'meta_capi_crm',
+        status: statusCode,
+        body: body,
+      }));
+      data.gtmOnFailure();
+    }
+  }
+);
+```
+
+Note `action_source: 'crm'` — this tells Meta the event did not originate from a web browser. For offline conversions from CRM and order systems, `crm` is the correct value. Other options are `website`, `app`, `phone_call`, `chat`, `physical_store`, `system_generated`.
+
+## Error handling and acknowledgement
+
+Webhook senders retry failed deliveries. Stripe retries over 3 days with exponential backoff. HubSpot retries up to 10 times in 24 hours. This creates a tricky contract: return `200` quickly to stop retries, even if downstream tag execution fails.
+
+The pattern is to acknowledge receipt (`200`) immediately after signature validation, regardless of what happens in your tags:
+
+```javascript
+// After signature validation passes:
+claimRequest();
+
+// Acknowledge receipt immediately — don't wait for tags
+// This prevents retry floods if downstream systems are slow
+setResponseStatus(200);
+
+// Then run the container
+runContainer(eventModel, function() {
+  returnResponse();
+});
+```
+
+The tradeoff: if your tag fails to forward to Meta CAPI, the webhook sender has already received a `200` and won't retry. Log failures to Cloud Logging so you can manually reprocess if needed.
+
+For truly critical events (high-value orders, new customer activations), consider a dedicated Cloud Task queue for retry logic rather than relying on the webhook sender's retry mechanism.
+
+## Debugging webhooks
+
+Browser-originated sGTM requests are debuggable via sGTM Preview mode — you activate Preview, load the page, and the debug session receives the hit. Webhooks from external systems cannot be debugged this way because they don't originate from a browser with the `gtm_debug` cookie.
+
+**The Preview Header technique** solves this. When sGTM Preview mode is active, it generates a debug token. Pass that token in the `X-GTM-Server-Preview` header to force any request into the debug session:
+
+<Steps>
+1. Open your GTM server container and click **Preview**. A debug URL appears: `https://collect.yoursite.com/?gtm_debug=TOKEN`
+
+2. Copy the token value from the URL parameter
+
+3. Add the header to your webhook test request:
+
+   ```bash
+   # Test your webhook endpoint with the Preview Header
+   curl -X POST https://collect.yoursite.com/webhooks/stripe \
+     -H "Content-Type: application/json" \
+     -H "X-GTM-Server-Preview: ZW52LTF8..." \
+     -H "Stripe-Signature: t=1711900000,v1=..." \
+     -d '{"type":"payment_intent.succeeded","data":{"object":{"id":"pi_123","amount":9999,"currency":"usd"}}}'
+   ```
+
+4. In the sGTM Preview panel, the request appears as if it came from a browser. You can see which client claimed it, the full Event Model, which tags fired, and their response payloads.
+</Steps>
+
+<Aside type="note">
+For local development, use a tool like `ngrok` to expose your local sGTM instance. Then configure your Stripe webhook endpoint to point to the ngrok URL. This gives you live webhook traffic in your local Preview session without deploying to production.
+</Aside>
+
+For production debugging without Preview mode, structured Cloud Logging is the fallback:
+
+```bash
+# Filter webhook-specific logs
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND textPayload=~"stripe_webhook"' \
+  --limit 50 \
+  --freshness 1h \
+  --format "table(timestamp,textPayload)"
+```
+
+## Rate limiting
+
+If a misconfigured external system floods your sGTM endpoint, it can exhaust your Cloud Run instance count and generate unexpected costs. Cloud Run itself limits concurrency, but you should add application-level protection:
+
+1. **Cloud Armor**: Google Cloud's WAF/rate limiting layer for Cloud Run HTTP endpoints. Define rules that allow your expected webhook senders' IP ranges and block everything else.
+
+2. **IP allowlisting**: Most webhook providers publish their IP ranges. Stripe, HubSpot, and Shopify all publish their outbound IP lists. Validate the source IP in your client template against the allowed list.
+
+3. **Request size limits**: Reject requests over a maximum body size (typically 1MB for webhooks). Very large payloads indicate misconfigured or malicious senders.
+
+```javascript
+const getRequestBody = require('getRequestBody');
+
+const body = getRequestBody();
+if (body.length > 1024 * 1024) { // 1MB
+  setResponseStatus(413); // Payload Too Large
+  returnResponse();
+  return;
+}
+```
+
+## Common mistakes
+
+**Not acknowledging receipt before processing.** If your client template calls `runContainer()` and waits for all tags to complete before calling `returnResponse()`, and a tag takes 3 seconds, the webhook sender may time out (typically 30 seconds, but some systems have 5-second timeouts). The sender then retries, causing duplicate events. Acknowledge with `200` as soon as signature validation passes.
+
+**Forwarding every webhook event, including test events.** Stripe sends test events with `livemode: false`. Meta CAPI has a test event code, but you do not want test Stripe events generating real Meta CAPI calls in production. Add an explicit check: `if (stripeEvent.livemode === false && data.environment !== 'test') return;`
+
+**Storing webhook secrets in template code.** Webhook signing secrets must be configured as template fields and ideally pulled from Secret Manager via the GCP configuration. Never hardcode them in template JavaScript.
+
+**Not logging the Stripe event ID.** Without the original `stripeEvent.id` in your logs, debugging duplicate or missing conversions after the fact is impossible. Log it on every webhook processed.
+
+**Assuming email is always present.** CRM webhooks often carry contact IDs but not email addresses — the email may live in a separate CRM object. Build your identity resolution to work without email: use `external_id` (the CRM contact ID) as the fallback identity for Meta CAPI, and accept that match quality will be lower than email-based matching.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Clients"
+    description="Full reference for building client templates that receive arbitrary HTTP requests."
+    href="/server-side/clients/custom-clients/"
+  />
+  <LinkCard
+    title="Facebook Conversions API"
+    description="Meta CAPI configuration, hashing requirements, and deduplication with browser pixel events."
+    href="/server-side/tags/facebook-capi/"
+  />
+  <LinkCard
+    title="Event Deduplication"
+    description="Preventing duplicate conversions when both browser and server send the same event."
+    href="/server-side/advanced/event-deduplication/"
+  />
+  <LinkCard
+    title="Conversion Adjustments"
+    description="Sending refunds and value changes to Google Ads after the initial conversion was recorded."
+    href="/server-side/advanced/conversion-adjustments/"
+  />
+</CardGrid>

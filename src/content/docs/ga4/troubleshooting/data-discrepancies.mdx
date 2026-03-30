@@ -1,6 +1,177 @@
 ---
 title: "Data Discrepancies"
-description: "Why your numbers don't match and how to investigate."
+description: "Why GA4 numbers don't match your other tools — a systematic guide to identifying the cause and determining which source is correct."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Data discrepancies between GA4 and other analytics tools are expected, not a bug. The question is not "why don't they match?" but "which discrepancy is expected and which indicates a problem?" This guide helps you answer that.
+
+## Expected discrepancies (not implementation bugs)
+
+These differences are by design. Do not try to eliminate them.
+
+### GA4 vs. Universal Analytics session counts
+
+GA4 sessions are derived from events; UA sessions were collected directly. The differences include:
+- **No midnight session split** in GA4 (UA splits sessions at midnight)
+- **Different bot filtering** — GA4 automatically filters more bot traffic
+- **Cross-device stitching** — GA4 merges sessions when User ID is available
+- **Campaign attribution** — new campaign parameters trigger new sessions in both, but the detection logic differs slightly
+
+A 10-20% difference in session counts between GA4 and UA is typical. This is not a problem.
+
+### GA4 vs. your server logs
+
+Server logs capture every HTTP request. GA4 captures only events from browsers/apps that run JavaScript. Expect differences from:
+- Users who block JavaScript or analytics cookies
+- Bot and crawler traffic (GA4 filters most bots; server logs capture all)
+- Users who navigate away before the GA4 tag loads
+- Direct API calls and non-browser requests
+
+GA4 typically counts 15-40% fewer sessions than server log analysis for the same site, depending on the user base and bot traffic volume.
+
+### GA4 vs. Shopify/Stripe/payment processor revenue
+
+Expect small differences due to:
+- **Currency conversion** — GA4 stores revenue in the property currency; payment processors may handle multi-currency differently
+- **Refunds** — GA4 requires explicit refund events; payment processors record refunds automatically
+- **Pending orders** — GA4 may count an order that is later cancelled; payment processor counts final settled amounts
+- **Timing** — GA4 records on browser event (often thank-you page); processor records on payment authorization/capture
+
+A 2-5% revenue difference between GA4 and your payment processor is normal. More than 10% warrants investigation.
+
+### GA4 vs. ad platform (Google Ads, Meta)
+
+Ad platforms count a click that leads to a session; GA4 counts the resulting session. Expect differences from:
+- Click fraud filtering (Google removes some clicks after the fact)
+- Tag loading failures (click occurs but GA4 tag does not fire)
+- Safari/Firefox ITP limits on click attribution
+- Cross-device journeys (click on mobile, conversion on desktop)
+
+A 10-20% difference in attributed conversions between GA4 and Google Ads is expected when attribution windows and models differ.
+
+## Unexpected discrepancies (potential implementation issues)
+
+These may indicate actual problems worth investigating.
+
+### Revenue 50%+ different from payment processor
+
+This gap usually indicates one of:
+1. **Double-counting** — both client-side and server-side are sending purchase events
+2. **Currency mismatch** — revenue is being sent in local currency but the property currency is set to USD, and no conversion is happening
+3. **Missing purchases** — the purchase event is not firing reliably (mobile/Safari issues, checkout on a separate subdomain without cross-domain tracking)
+
+**Debug**:
+```sql
+-- Check for duplicate transaction IDs
+SELECT
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id') AS transaction_id,
+  COUNT(*) AS occurrences
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY transaction_id
+HAVING COUNT(*) > 1
+ORDER BY occurrences DESC
+```
+
+Any transaction_id with more than 1 occurrence is being counted multiple times.
+
+### Conversion count significantly lower than expected
+
+If GA4 shows 20% of the conversions your CRM records, investigate:
+1. **Missing event fire** — the conversion event is not firing on some checkout paths (mobile, specific browsers, fast connections)
+2. **Filter applied** — an active data filter is excluding the events
+3. **Consent mode blocking** — in EU markets, consent mode may be blocking analytics collection for users who decline
+4. **Cross-domain breakdown** — checkout on a different domain without cross-domain tracking
+
+**Debug**: Use the Realtime report and DebugView to manually complete a conversion and verify the event appears in GA4 within 30 seconds.
+
+### GA4 BigQuery counts differ from GA4 interface
+
+Small differences (< 5%) are expected due to:
+- Processing latency in standard reports vs. raw BigQuery data
+- Reporting identity differences (GA4 UI may apply Blended identity; BigQuery has raw device IDs)
+- Data thresholds in GA4 UI for small counts (privacy protection)
+
+Large differences (> 10%) indicate:
+- The BigQuery export is filtering something (check for active data filters in Admin)
+- Your BigQuery query has an error (incorrect date filtering, wrong session counting)
+- You are comparing different metrics (GA4 UI shows "sessions" using their definition; your SQL query may be counting differently)
+
+**Debug**:
+```sql
+-- Compare event counts in BigQuery vs. what GA4 reports
+SELECT
+  event_date,
+  event_name,
+  COUNT(*) AS bq_count
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name IN ('page_view', 'session_start', 'purchase')
+  AND _TABLE_SUFFIX = '20240115'  -- compare this specific date to GA4 reports
+GROUP BY event_date, event_name
+```
+
+Compare the page_view and session_start counts to GA4's standard reports for the same day. If they match, your BigQuery implementation is correct.
+
+## Systematic discrepancy investigation
+
+When a stakeholder reports a number mismatch, use this process:
+
+**Step 1**: Define exactly what is being compared. "Revenue is different" is not specific. "GA4 shows $45,234 revenue for January, but Shopify shows $47,891 for the same period" is specific.
+
+**Step 2**: Check whether the discrepancy is expected. Consult the "expected discrepancies" list above.
+
+**Step 3**: Verify the comparison is apples-to-apples:
+- Same date range (including time zone)
+- Same metric definition (GA4 "purchase revenue" excludes tax and shipping by default — compare only the revenue GA4 is designed to capture)
+- Same conversion window (GA4 uses session-level attribution; CRM may attribute to original campaign)
+
+**Step 4**: Check for data quality issues in GA4:
+- Is the data filter excluding some traffic?
+- Is the event firing reliably (check DebugView or BigQuery for the specific date)?
+- Is consent mode suppressing events for some users?
+
+**Step 5**: Check for data quality issues in the other system:
+- Is the payment processor including test transactions?
+- Is the CRM including cancelled or refunded orders?
+- Is the ad platform using a different attribution window?
+
+<Aside type="tip">
+When in doubt about which system to trust for a specific metric, use the system that is closer to the source of truth for that metric. Payment processors are the source of truth for money collected. GA4 is the source of truth for on-site behavior and acquisition attribution.
+</Aside>
+
+## Common mistakes
+
+### Assuming GA4 is wrong when numbers differ
+
+GA4 measures different things from most other systems. Lower session counts than server logs is not wrong — GA4 is measuring human sessions with JavaScript enabled. The discrepancy is meaningful data about your bot traffic, ad blockers, and JavaScript coverage.
+
+### Comparing different time zones
+
+If GA4 property time zone is EST and you are comparing to a UTC-based payment processor, a single day's data will differ because the day boundaries are in different places. Always ensure time zone alignment before investigating discrepancies.
+
+### Not tracking refunds
+
+GA4 has a `refund` event for tracking purchase cancellations, but most implementations do not send it. If GA4 revenue is consistently higher than payment processor revenue, missing refund tracking is a common cause.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Sessions and Attribution"
+    description="Why GA4 session definitions differ from other tools."
+    href="/ga4/fundamentals/sessions-and-attribution/"
+  />
+  <LinkCard
+    title="Internal Traffic Filtering"
+    description="Ensure internal traffic is filtered correctly to avoid inflated counts."
+    href="/ga4/troubleshooting/internal-traffic-filtering/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="BigQuery queries to diagnose data quality issues."
+    href="/ga4/bigquery/common-queries/"
+  />
+</CardGrid>

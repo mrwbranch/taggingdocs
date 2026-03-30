@@ -1,6 +1,174 @@
 ---
 title: "Missing Data"
-description: "Diagnosing and fixing missing events, conversions, and dimensions."
+description: "Diagnose why events, conversions, dimensions, or date ranges are absent from GA4 reports — a systematic checklist for every missing data scenario."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Missing data in GA4 falls into two categories: data that was never collected, and data that was collected but is not visible in reports. The diagnosis and fix are different for each.
+
+## Checklist: data never collected
+
+If events are not appearing anywhere — not in Realtime, not in DebugView, not in BigQuery — the data was never collected.
+
+### Tag not firing
+
+The most common cause. Check with GTM Preview mode or the Google Tag Assistant browser extension.
+
+<Steps>
+1. Open your website with GTM Preview mode active (or with `?gtm_debug=true` in the URL).
+
+2. Complete the action that should trigger the event (e.g., submit the form, complete a purchase).
+
+3. In the GTM preview panel, look for the event in the Summary tab.
+
+4. If the tag appears in the "Tags Fired" section, the tag is working. If it is in "Tags Not Fired" or absent, the trigger is not matching.
+</Steps>
+
+**Common trigger issues**:
+- Trigger is configured for the wrong event name (typo, casing)
+- Trigger condition does not match (the variable value differs from what the condition checks)
+- Trigger is firing but the tag is paused or unpublished
+
+### JavaScript error preventing tag execution
+
+If there is a JavaScript error on the page before the GTM snippet executes, the entire page's JavaScript may halt, preventing tag firing.
+
+Check the browser console for errors: open Developer Tools → Console, reload the page, complete the action, and look for red error messages. Errors before `<!-- Google Tag Manager -->` in the HTML can prevent all tags from loading.
+
+### Event sent before GA4 tag is ready
+
+In React, Vue, or Angular single-page apps, your application code may try to fire a custom event before the GTM container loads:
+
+```javascript
+// ❌ May fire before GTM is loaded
+document.addEventListener('DOMContentLoaded', () => {
+  gtag('event', 'page_load', { ... });
+});
+
+// ✅ Check that dataLayer exists first, or push to dataLayer (which GTM reads on load)
+window.dataLayer = window.dataLayer || [];
+dataLayer.push({ event: 'my_event' }); // GTM processes this on load even if pushed early
+```
+
+### Consent mode blocking collection
+
+If Consent Mode is implemented and users decline analytics storage, GA4 operates in cookieless mode and does not fire full events. In markets with high opt-out rates (EU countries), a significant portion of traffic may not be fully tracked.
+
+Check whether Consent Mode is the cause:
+- In the Realtime report, do you see events with the Privacy info → Analytics storage: No label?
+- In BigQuery: `WHERE privacy_info.analytics_storage = 'No'` shows modeled/consent-denied events
+
+This is expected behavior, not a bug. GA4's modeled data for consent-denied users fills in aggregate estimates but individual event data is not available.
+
+### SPA route changes not firing page_view
+
+For Single Page Applications, the GA4 page_view event only fires on initial page load unless you explicitly fire it on route changes. All subsequent navigation is invisible to GA4.
+
+Verify by checking the Realtime report while navigating your SPA. If only one page_view fires regardless of navigation, implement route-change tracking.
+
+## Checklist: data collected but not visible in reports
+
+These scenarios involve data that exists (you can see it in DebugView or BigQuery) but does not appear in certain GA4 reports.
+
+### Custom dimension not registered
+
+Parameters pushed with events are not visible in GA4 reports until you register them as custom dimensions in **Admin → Custom definitions**.
+
+**Verify**: Go to **Admin → Custom definitions**. Is your parameter listed? Check both the parameter name (case-sensitive) and the scope (event vs. user).
+
+**Fix**: Create the custom dimension. Note: it only shows data from the creation date forward. Historical data remains in BigQuery.
+
+### Data filter excluding the events
+
+An active data filter (internal traffic or developer traffic) may be excluding events from reports.
+
+**Verify**: Go to **Admin → Data Filters**. Check for any filters in "Active" state. If a filter is active and your events match the filter condition (your IP is in the internal traffic list), those events are excluded.
+
+**Check**: If you are testing from your office network or with GTM Preview mode active, your events may be filtered.
+
+### Conversion event not marked as conversion
+
+An event that fires but is not marked as a conversion appears in the Events report but not in the Conversions report.
+
+**Verify**: Go to **Admin → Conversions** (or **Admin → Events**). Find the event name and confirm the conversion toggle is on.
+
+### (other) row hiding dimension values
+
+If a report shows an (other) row, dimension values beyond the cardinality threshold are collapsed into it. Your specific dimension value exists but is not shown individually.
+
+**Verify**: Apply a filter for the specific dimension value you expect to see. If the filter reduces the (other) row and shows your value, it was there all along.
+
+**Fix**: Use BigQuery for high-cardinality dimension analysis.
+
+### Date range not covering the events
+
+Events are there, but the date picker does not include the date range when they occurred.
+
+**Verify**: Expand the date range in the reports. GA4's default date range is "Last 28 days" which excludes older data.
+
+### Data retention window exceeded
+
+If you have 2-month data retention (the default) and you are looking for events older than 2 months, they are gone from the GA4 reporting interface. They may exist in BigQuery if you set up the export before they were deleted.
+
+**Verify**: Check **Admin → Data Settings → Data Retention**. If retention is set to 2 months, events older than 2 months are unavailable in Explorations.
+
+**Fix**: Increase retention to 14 months. This does not recover already-deleted data.
+
+### Sampling hiding low-frequency events
+
+In Explorations with large date ranges, sampling may omit rare events from the visible sample. If your event fires 100 times per day but you are sampling 10% of a year of data, individual events may not appear.
+
+**Verify**: Check the sampling indicator in your Exploration. If it shows < 100% sampling, low-frequency events may be underrepresented.
+
+**Fix**: Narrow the date range, or query BigQuery for unsampled analysis.
+
+## BigQuery-specific missing data
+
+### BigQuery export not linked
+
+If BigQuery shows no data for dates before a certain point, the export was not set up until recently. There is no retroactive backfill.
+
+**Verify**: In BigQuery, `SELECT MIN(_TABLE_SUFFIX) FROM project.analytics_PROPERTY_ID.events_*` shows the earliest date with data.
+
+### Intraday table vs. daily table
+
+For the current day (and sometimes yesterday), data may be in `events_intraday_YYYYMMDD` rather than `events_YYYYMMDD`. The daily export typically processes during early morning hours. Until it completes:
+- Previous day's data: may be in `events_intraday_*` until the daily export completes
+- Today's data: in `events_intraday_YYYYMMDD` if streaming is enabled
+
+**Verify**: Query `events_intraday_*` if you do not see recent data in `events_*`.
+
+## Common mistakes
+
+### Checking Realtime for historical data
+
+The Realtime report shows the last 30 minutes. If you are trying to verify an event that fired yesterday, it will not be in Realtime. Use the Events report with the appropriate date range.
+
+### Confirming events fire in DebugView but assuming they are in reports
+
+DebugView events appear almost immediately. Standard reports may have a 24-48 hour delay for processing. If events appear in DebugView but not in standard reports, wait a day before escalating.
+
+### Confusing "parameter not in reports" with "event not collected"
+
+If a parameter is not visible in reports but the event is, the issue is custom dimension registration, not collection. Use DebugView to see collected parameters, and check Admin → Custom definitions to see which are registered.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DebugView"
+    description="See events in real time to confirm they are being collected."
+    href="/ga4/troubleshooting/debugview/"
+  />
+  <LinkCard
+    title="Custom Dimensions"
+    description="Register parameters so they appear in reports."
+    href="/ga4/configuration/custom-dimensions/"
+  />
+  <LinkCard
+    title="Data Limits and Cardinality"
+    description="The (other) row and when data gets hidden by cardinality limits."
+    href="/ga4/configuration/data-limits-cardinality/"
+  />
+</CardGrid>
