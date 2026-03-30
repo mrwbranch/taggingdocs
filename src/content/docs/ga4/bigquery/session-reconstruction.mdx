@@ -23,7 +23,7 @@ The combination of `user_pseudo_id` + `ga_session_id` is the unique session iden
 ```
 
 <Aside type="caution">
-Do not count sessions by counting `session_start` events. Session_start may be missing for some sessions due to data stitching, cross-device attribution, or collection gaps. The reliable session count is `COUNT(DISTINCT CONCAT(user_pseudo_id, '.', CAST(session_id AS STRING)))`.
+Do not count sessions by counting `session_start` events. Session_start may be missing for some sessions due to data stitching, cross-device attribution, or collection gaps. The reliable session count is `COUNT(DISTINCT CONCAT(user_pseudo_id, '-', CAST(session_id AS STRING)))`.
 </Aside>
 
 ## Building a sessions CTE
@@ -34,7 +34,10 @@ The standard pattern is a CTE that aggregates all events per session and extract
 WITH sessions AS (
   SELECT
     user_pseudo_id,
-    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS ga_session_id,
+    CONCAT(user_pseudo_id, '-',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    ) AS session_id,
 
     -- Session metadata
     MIN(event_date) AS session_date,
@@ -51,6 +54,7 @@ WITH sessions AS (
       CASE WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'session_engaged') = '1'
       THEN 1 ELSE 0 END
     ) AS is_engaged,
+    SUM((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec')) / 1000 AS engagement_seconds,
 
     -- Session number
     MAX((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_number')) AS session_number,
@@ -63,10 +67,15 @@ WITH sessions AS (
     COUNTIF(event_name = 'purchase') AS purchases,
     SUM(CASE WHEN event_name = 'purchase' THEN ecommerce.purchase_revenue ELSE 0 END) AS revenue,
 
-    -- Traffic source (from session_start event)
-    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.source END) AS source,
-    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.medium END) AS medium,
-    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.name END) AS campaign,
+    -- Session-level traffic source (using collected_traffic_source)
+    MAX(collected_traffic_source.manual_source) AS source,
+    MAX(collected_traffic_source.manual_medium) AS medium,
+    MAX(collected_traffic_source.manual_campaign_name) AS campaign,
+    MAX(collected_traffic_source.gclid) AS gclid,
+
+    -- First-touch traffic source (user-level)
+    MAX(traffic_source.source) AS first_touch_source,
+    MAX(traffic_source.medium) AS first_touch_medium,
 
     -- Device
     MAX(device.category) AS device_category,
@@ -82,13 +91,17 @@ WITH sessions AS (
     -- Exclude events without a session ID (some system events)
     AND (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') IS NOT NULL
 
-  GROUP BY user_pseudo_id, session_id
+  GROUP BY user_pseudo_id, ga_session_id, session_id
 )
 
 SELECT *
 FROM sessions
 ORDER BY session_start
 ```
+
+<Aside type="tip">
+The `engagement_seconds` metric sums `engagement_time_msec` across all events in the session and converts to seconds. This measures actual user interaction time, not just session wall-clock duration.
+</Aside>
 
 ## Adding landing page to sessions
 
@@ -130,22 +143,27 @@ LEFT JOIN landing_pages l USING (user_pseudo_id, session_id)
 
 ## Session-level source attribution
 
-Getting the session-level source correctly requires care. The `traffic_source` struct on events reflects the user's acquisition source (first touch), not the current session. To get session-level source, extract it from the `session_start` event:
+Getting the session-level source correctly requires care. The top-level `traffic_source` struct reflects the user's original acquisition source (first touch), not the current session. Use `collected_traffic_source` for session-level attribution:
 
 ```sql
--- Session-level campaign parameters
+-- Session-level campaign parameters using collected_traffic_source
 WITH session_sources AS (
   SELECT
+    CONCAT(user_pseudo_id, '-',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    ) AS session_id,
     user_pseudo_id,
-    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
-    traffic_source.source AS source,
-    traffic_source.medium AS medium,
-    traffic_source.name AS campaign,
-    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'utm_content') AS content,
-    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'utm_term') AS term
+    collected_traffic_source.manual_source AS source,
+    collected_traffic_source.manual_medium AS medium,
+    collected_traffic_source.manual_campaign_name AS campaign,
+    collected_traffic_source.manual_content AS content,
+    collected_traffic_source.manual_term AS term,
+    collected_traffic_source.gclid,
+    collected_traffic_source.dclid,
+    collected_traffic_source.srsltid
   FROM `project.analytics_PROPERTY_ID.events_*`
-  WHERE event_name = 'session_start'
-    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+    AND (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'entrances') = 1
 )
 
 SELECT *
@@ -153,7 +171,7 @@ FROM session_sources
 ```
 
 <Aside type="tip">
-For UTM term and UTM content, you must extract them from `event_params` on the `session_start` event — they are not in the `traffic_source` struct. `traffic_source.name` is the campaign name.
+`collected_traffic_source` contains all UTM parameters (`manual_source`, `manual_medium`, `manual_campaign_name`, `manual_term`, `manual_content`) plus Google click IDs (`gclid`, `dclid`, `srsltid`). This is the preferred method for session-level attribution over the older `session_start` + `traffic_source` pattern.
 </Aside>
 
 ## Persisting session data with a permanent table
@@ -233,6 +251,7 @@ WITH events AS (
     event_params,
     user_properties,
     traffic_source,
+    collected_traffic_source,
     device,
     geo,
     ecommerce
@@ -243,14 +262,22 @@ WITH events AS (
 sessions AS (
   SELECT
     user_pseudo_id,
-    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS ga_session_id,
+    CONCAT(user_pseudo_id, '-',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    ) AS session_id,
     MIN(event_date) AS session_date,
     MIN(event_time) AS session_start,
     MAX(event_time) AS session_end,
     TIMESTAMP_DIFF(MAX(event_time), MIN(event_time), SECOND) AS duration_seconds,
-    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.source END) AS source,
-    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.medium END) AS medium,
-    MAX(CASE WHEN event_name = 'session_start' THEN traffic_source.name END) AS campaign,
+    SUM((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec')) / 1000 AS engagement_seconds,
+    -- Session-level source (collected_traffic_source)
+    MAX(collected_traffic_source.manual_source) AS source,
+    MAX(collected_traffic_source.manual_medium) AS medium,
+    MAX(collected_traffic_source.manual_campaign_name) AS campaign,
+    -- First-touch source (user-level)
+    MAX(traffic_source.source) AS first_touch_source,
+    MAX(traffic_source.medium) AS first_touch_medium,
     MAX((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_number')) AS session_number,
     MAX(CASE WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'session_engaged') = '1' THEN 1 ELSE 0 END) AS is_engaged,
     COUNTIF(event_name = 'page_view') AS pageviews,
@@ -261,7 +288,7 @@ sessions AS (
     MAX((SELECT value.string_value FROM UNNEST(user_properties) WHERE key = 'subscription_tier')) AS subscription_tier
   FROM events
   WHERE (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') IS NOT NULL
-  GROUP BY user_pseudo_id, session_id
+  GROUP BY user_pseudo_id, ga_session_id, session_id
 )
 
 SELECT
@@ -269,6 +296,7 @@ SELECT
   COUNT(*) AS total_sessions,
   SUM(is_engaged) AS engaged_sessions,
   ROUND(AVG(duration_seconds), 0) AS avg_duration_seconds,
+  ROUND(AVG(engagement_seconds), 0) AS avg_engagement_seconds,
   SUM(pageviews) AS total_pageviews,
   SUM(purchases) AS total_purchases,
   SUM(revenue) AS total_revenue
@@ -281,11 +309,11 @@ ORDER BY session_date
 
 ### Using session_start count instead of unique session IDs
 
-`SELECT COUNT(*) FROM ... WHERE event_name = 'session_start'` is less reliable than `COUNT(DISTINCT CONCAT(user_pseudo_id, session_id))`. Some sessions legitimately lack a `session_start` event. The distinct count is more accurate.
+`SELECT COUNT(*) FROM ... WHERE event_name = 'session_start'` is less reliable than `COUNT(DISTINCT CONCAT(user_pseudo_id, '-', CAST(session_id AS STRING)))`. Some sessions legitimately lack a `session_start` event. The distinct count is more accurate.
 
-### Not extracting source from session_start events
+### Confusing traffic_source with collected_traffic_source
 
-Using `traffic_source.source` from non-session_start events returns the user's original acquisition source, not the current session's source. Always aggregate session source by filtering to `event_name = 'session_start'` within your session CTE.
+The top-level `traffic_source` struct is the user's **first-touch** acquisition source — it is the same for every event from that user. For **session-level** source/medium, use `collected_traffic_source` which contains the UTM parameters and click IDs for the current session.
 
 ### Missing sessions that span two days
 

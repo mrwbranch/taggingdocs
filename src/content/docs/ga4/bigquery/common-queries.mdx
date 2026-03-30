@@ -18,7 +18,7 @@ SELECT
   event_date,
   COUNT(DISTINCT user_pseudo_id) AS users,
   COUNT(DISTINCT CONCAT(
-    user_pseudo_id, '.',
+    user_pseudo_id, '-',
     CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
   )) AS sessions
 FROM `project.analytics_PROPERTY_ID.events_*`
@@ -40,25 +40,83 @@ GROUP BY event_date
 ORDER BY event_date
 ```
 
-### Sessions by channel
+### Session calculation with composite key
+
+The canonical session identifier is `user_pseudo_id` + `ga_session_id`. This query builds a full sessions table with timing and engagement:
 
 ```sql
 SELECT
-  traffic_source.source AS source,
-  traffic_source.medium AS medium,
-  COUNT(DISTINCT CONCAT(
-    user_pseudo_id, '.',
+  CONCAT(user_pseudo_id, '-',
     CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
-  )) AS sessions
+  ) AS session_id,
+  user_pseudo_id,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS ga_session_id,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_number') AS session_number,
+  MIN(TIMESTAMP_MICROS(event_timestamp)) AS session_start,
+  MAX(TIMESTAMP_MICROS(event_timestamp)) AS session_end,
+  COUNT(*) AS event_count,
+  SUM((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec')) / 1000 AS engagement_seconds
 FROM `project.analytics_PROPERTY_ID.events_*`
-WHERE event_name = 'session_start'
-  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
-GROUP BY source, medium
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY 1, 2, 3, 4
+```
+
+### User identification (client ID + user ID)
+
+```sql
+SELECT
+  user_pseudo_id,  -- Always present (device/browser ID)
+  user_id,         -- Only if you set it (logged-in user ID)
+  COUNT(DISTINCT
+    CONCAT(user_pseudo_id, '-',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    )
+  ) AS sessions
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY 1, 2
+```
+
+### Sessions by channel (session-level attribution)
+
+Use `collected_traffic_source` for session-level source/medium rather than the top-level `traffic_source` (which is first-touch, user-level):
+
+```sql
+SELECT
+  collected_traffic_source.manual_source AS source,
+  collected_traffic_source.manual_medium AS medium,
+  collected_traffic_source.manual_campaign_name AS campaign,
+  collected_traffic_source.gclid,
+  COUNT(DISTINCT
+    CONCAT(user_pseudo_id, '-',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    )
+  ) AS sessions
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'entrances') = 1
+GROUP BY 1, 2, 3, 4
 ORDER BY sessions DESC
 ```
 
+### First-touch attribution
+
+The top-level `traffic_source` struct contains the user's original acquisition source:
+
+```sql
+SELECT
+  traffic_source.source,
+  traffic_source.medium,
+  traffic_source.name AS campaign,
+  COUNT(DISTINCT user_pseudo_id) AS users
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY 1, 2, 3
+ORDER BY users DESC
+```
+
 <Aside type="tip">
-For session-level source/medium, always filter on `session_start` events and use `traffic_source.source` and `traffic_source.medium`. The `traffic_source` struct on non-session_start events may not accurately reflect the current session's source.
+`traffic_source` is user-level (first-touch). `collected_traffic_source` is session-level with full UTM parameters and click IDs (`gclid`, `dclid`, `srsltid`). Use the right one for your attribution model.
 </Aside>
 
 ### Engagement rate
@@ -66,21 +124,21 @@ For session-level source/medium, always filter on `session_start` events and use
 ```sql
 SELECT
   event_date,
-  COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
     CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
   )) AS total_sessions,
   COUNT(DISTINCT CASE
     WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'session_engaged') = '1'
-    THEN CONCAT(user_pseudo_id, '.',
+    THEN CONCAT(user_pseudo_id, '-',
       CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING))
   END) AS engaged_sessions,
   ROUND(
     COUNT(DISTINCT CASE
       WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'session_engaged') = '1'
-      THEN CONCAT(user_pseudo_id, '.',
+      THEN CONCAT(user_pseudo_id, '-',
         CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING))
     END) /
-    COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+    COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
       CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
     )) * 100, 2
   ) AS engagement_rate_pct
@@ -92,19 +150,28 @@ ORDER BY event_date
 
 ## Page analysis
 
-### Top pages by views
+### Page analytics with entrances and engagement
 
 ```sql
 SELECT
-  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_url,
-  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title') AS page_title,
-  COUNT(*) AS page_views,
-  COUNT(DISTINCT user_pseudo_id) AS unique_users
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title') AS title,
+  COUNT(*) AS pageviews,
+  COUNT(DISTINCT user_pseudo_id) AS users,
+  COUNT(DISTINCT
+    CONCAT(user_pseudo_id, '-',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    )
+  ) AS sessions,
+  -- Entrances = session starts on this page
+  COUNTIF((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'entrances') = 1) AS entrances,
+  -- Average engagement time
+  AVG((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec')) / 1000 AS avg_engagement_sec
 FROM `project.analytics_PROPERTY_ID.events_*`
-WHERE event_name = 'page_view'
-  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
-GROUP BY page_url, page_title
-ORDER BY page_views DESC
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name = 'page_view'
+GROUP BY 1, 2
+ORDER BY pageviews DESC
 LIMIT 50
 ```
 
@@ -173,35 +240,71 @@ LIMIT 100
 
 ```sql
 SELECT
-  event_date,
-  COUNT(*) AS transactions,
+  DATE(TIMESTAMP_MICROS(event_timestamp), 'America/New_York') AS date,
+  COUNT(DISTINCT ecommerce.transaction_id) AS transactions,
   SUM(ecommerce.purchase_revenue) AS revenue,
+  SUM(ecommerce.purchase_revenue_in_usd) AS revenue_usd,
   AVG(ecommerce.purchase_revenue) AS avg_order_value,
-  COUNT(DISTINCT user_pseudo_id) AS buyers
+  SUM(ecommerce.total_item_quantity) AS items_sold
 FROM `project.analytics_PROPERTY_ID.events_*`
-WHERE event_name = 'purchase'
-  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
-GROUP BY event_date
-ORDER BY event_date
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name = 'purchase'
+GROUP BY 1
+ORDER BY 1
 ```
 
-### Revenue by product
+<Aside type="tip">
+Use `ecommerce.transaction_id` with `COUNT(DISTINCT ...)` to avoid double-counting purchases when duplicate events exist. Replace the timezone string with your property's timezone.
+</Aside>
+
+### Ecommerce funnel with conversion rates
+
+```sql
+WITH funnel AS (
+  SELECT
+    user_pseudo_id,
+    CONCAT(user_pseudo_id, '-',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    ) AS session_id,
+    MAX(IF(event_name = 'view_item', 1, 0)) AS viewed_product,
+    MAX(IF(event_name = 'add_to_cart', 1, 0)) AS added_to_cart,
+    MAX(IF(event_name = 'begin_checkout', 1, 0)) AS began_checkout,
+    MAX(IF(event_name = 'purchase', 1, 0)) AS purchased
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  GROUP BY 1, 2
+)
+SELECT
+  COUNT(DISTINCT session_id) AS total_sessions,
+  SUM(viewed_product) AS viewed_product,
+  SUM(added_to_cart) AS added_to_cart,
+  SUM(began_checkout) AS began_checkout,
+  SUM(purchased) AS purchased,
+  -- Step-by-step conversion rates
+  SAFE_DIVIDE(SUM(added_to_cart), SUM(viewed_product)) AS view_to_cart_rate,
+  SAFE_DIVIDE(SUM(began_checkout), SUM(added_to_cart)) AS cart_to_checkout_rate,
+  SAFE_DIVIDE(SUM(purchased), SUM(began_checkout)) AS checkout_to_purchase_rate
+FROM funnel
+```
+
+### Product performance
 
 ```sql
 SELECT
-  item.item_id,
-  item.item_name,
-  item.item_category,
-  COUNT(*) AS purchase_count,
-  SUM(item.quantity) AS units_sold,
-  SUM(item.item_revenue) AS total_revenue,
-  AVG(item.price) AS avg_price
+  items.item_id,
+  items.item_name,
+  items.item_category,
+  items.item_brand,
+  COUNT(*) AS views,
+  SUM(IF(event_name = 'add_to_cart', 1, 0)) AS add_to_carts,
+  SUM(IF(event_name = 'purchase', items.quantity, 0)) AS units_sold,
+  SUM(IF(event_name = 'purchase', items.item_revenue, 0)) AS revenue
 FROM `project.analytics_PROPERTY_ID.events_*`,
-  UNNEST(items) AS item
-WHERE event_name = 'purchase'
-  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
-GROUP BY item.item_id, item.item_name, item.item_category
-ORDER BY total_revenue DESC
+  UNNEST(items) AS items
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name IN ('view_item', 'add_to_cart', 'purchase')
+GROUP BY 1, 2, 3, 4
+ORDER BY revenue DESC
 LIMIT 50
 ```
 
@@ -257,11 +360,11 @@ conversions AS (
 SELECT
   s.source,
   s.medium,
-  COUNT(DISTINCT CONCAT(s.user_pseudo_id, '.', CAST(s.session_id AS STRING))) AS sessions,
-  COUNT(DISTINCT CONCAT(c.user_pseudo_id, '.', CAST(c.session_id AS STRING))) AS conversions,
+  COUNT(DISTINCT CONCAT(s.user_pseudo_id, '-', CAST(s.session_id AS STRING))) AS sessions,
+  COUNT(DISTINCT CONCAT(c.user_pseudo_id, '-', CAST(c.session_id AS STRING))) AS conversions,
   ROUND(
-    COUNT(DISTINCT CONCAT(c.user_pseudo_id, '.', CAST(c.session_id AS STRING))) /
-    COUNT(DISTINCT CONCAT(s.user_pseudo_id, '.', CAST(s.session_id AS STRING))) * 100, 2
+    COUNT(DISTINCT CONCAT(c.user_pseudo_id, '-', CAST(c.session_id AS STRING))) /
+    COUNT(DISTINCT CONCAT(s.user_pseudo_id, '-', CAST(s.session_id AS STRING))) * 100, 2
   ) AS conversion_rate_pct
 FROM session_sources s
 LEFT JOIN conversions c USING (user_pseudo_id, session_id)
@@ -278,13 +381,13 @@ ORDER BY conversions DESC
 SELECT
   device.category AS device_type,
   device.operating_system,
-  COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
     CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
   )) AS sessions,
   ROUND(
-    COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+    COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
       CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
-    )) / SUM(COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+    )) / SUM(COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
       CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
     ))) OVER () * 100, 1
   ) AS pct_of_total
@@ -356,6 +459,65 @@ GROUP BY days_to_first_purchase
 ORDER BY days_to_first_purchase
 ```
 
+## Custom event analysis
+
+Analyze any custom event by extracting its parameters with the subquery pattern:
+
+```sql
+-- Example: Analyze a custom 'signup_complete' event
+SELECT
+  DATE(TIMESTAMP_MICROS(event_timestamp), 'America/New_York') AS date,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'signup_method') AS signup_method,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'plan_type') AS plan_type,
+  COUNT(*) AS signups,
+  COUNT(DISTINCT user_pseudo_id) AS unique_users
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name = 'signup_complete'
+GROUP BY 1, 2, 3
+ORDER BY 1, signups DESC
+```
+
+## Incremental load with MERGE
+
+For scheduled queries that incrementally update a derived sessions table:
+
+```sql
+MERGE `project.analytics_derived.sessions` T
+USING (
+  SELECT
+    session_id,
+    user_pseudo_id,
+    session_start,
+    session_end,
+    event_count,
+    engaged
+  FROM (
+    SELECT
+      CONCAT(user_pseudo_id, '-',
+        CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+      ) AS session_id,
+      user_pseudo_id,
+      MIN(TIMESTAMP_MICROS(event_timestamp)) AS session_start,
+      MAX(TIMESTAMP_MICROS(event_timestamp)) AS session_end,
+      COUNT(*) AS event_count,
+      MAX((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'session_engaged')) AS engaged
+    FROM `project.analytics_PROPERTY_ID.events_20240115`
+    GROUP BY 1, 2
+  )
+) S
+ON T.session_id = S.session_id
+WHEN MATCHED THEN UPDATE SET
+  session_end = S.session_end,
+  event_count = S.event_count,
+  engaged = S.engaged
+WHEN NOT MATCHED THEN INSERT ROW
+```
+
+<Aside type="tip">
+The MERGE pattern is ideal for daily scheduled queries that update a sessions table. It handles late-arriving data and cross-day sessions by updating existing rows and inserting new ones.
+</Aside>
+
 ## Common mistakes
 
 ### Not using _TABLE_SUFFIX for date filtering
@@ -364,7 +526,7 @@ Without `WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'`, BigQuery scans 
 
 ### Counting `session_start` events for session count
 
-Session start events may not exist for all sessions (due to identity stitching or collection issues). Use `COUNT(DISTINCT CONCAT(user_pseudo_id, '.', session_id))` for reliable session counts.
+Session start events may not exist for all sessions (due to identity stitching or collection issues). Use `COUNT(DISTINCT CONCAT(user_pseudo_id, '-', CAST(session_id AS STRING)))` for reliable session counts.
 
 ### Not handling NULL from UNNEST
 

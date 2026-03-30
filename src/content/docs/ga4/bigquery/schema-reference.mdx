@@ -15,30 +15,70 @@ Each daily table (`events_YYYYMMDD`) contains one row per event. The top-level c
 
 ```
 events_YYYYMMDD
-├── event_date          STRING
-├── event_timestamp     INT64  (microseconds since epoch)
-├── event_name          STRING
-├── event_params        ARRAY<STRUCT<key, value>>
-├── event_previous_timestamp INT64
-├── event_value_in_usd  FLOAT64
-├── event_bundle_sequence_id INT64
-├── event_server_timestamp_offset INT64
-├── user_id             STRING
-├── user_pseudo_id      STRING
-├── privacy_info        STRUCT
-├── user_properties     ARRAY<STRUCT<key, value>>
-├── user_first_touch_timestamp INT64
-├── user_ltv           STRUCT<revenue, currency>
-├── device              STRUCT
-├── geo                 STRUCT
-├── app_info            STRUCT
-├── traffic_source      STRUCT
-├── stream_id           STRING
-├── platform            STRING
-├── event_dimensions    STRUCT
-├── ecommerce           STRUCT
-└── items               ARRAY<STRUCT>
+├── event_date                        STRING
+├── event_timestamp                   INT64  (microseconds since epoch)
+├── event_name                        STRING
+├── event_params                      ARRAY<STRUCT<key, value>>
+├── event_previous_timestamp          INT64
+├── event_value_in_usd                FLOAT64
+├── event_bundle_sequence_id          INT64
+├── event_server_timestamp_offset     INT64
+├── user_id                           STRING
+├── user_pseudo_id                    STRING
+├── privacy_info                      STRUCT
+├── user_properties                   ARRAY<STRUCT<key, value>>
+├── user_first_touch_timestamp        INT64
+├── user_ltv                          STRUCT<revenue, currency>
+├── device                            STRUCT
+├── geo                               STRUCT
+├── app_info                          STRUCT
+├── traffic_source                    STRUCT  (first-touch)
+├── collected_traffic_source          STRUCT  (session-level)
+├── session_traffic_source_last_click STRUCT  (last-click attribution)
+├── stream_id                         STRING
+├── platform                          STRING
+├── event_dimensions                  STRUCT
+├── ecommerce                         STRUCT
+├── items                             ARRAY<STRUCT>
+├── is_active_user                    BOOLEAN
+├── batch_event_index                 INT64
+├── batch_page_id                     INT64
+└── batch_ordering_id                 INT64
 ```
+
+## Complete top-level fields reference
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event_date` | STRING | Date in YYYYMMDD format |
+| `event_timestamp` | INTEGER | Microseconds since Unix epoch |
+| `event_name` | STRING | Event name (e.g., `page_view`, `purchase`) |
+| `event_params` | RECORD (REPEATED) | Event parameters array |
+| `event_previous_timestamp` | INTEGER | Previous event timestamp for this user |
+| `event_value_in_usd` | FLOAT | Event value converted to USD |
+| `event_bundle_sequence_id` | INTEGER | Bundle sequence ID |
+| `event_server_timestamp_offset` | INTEGER | Server timestamp offset in microseconds |
+| `user_id` | STRING | User ID (only if set in implementation) |
+| `user_pseudo_id` | STRING | Client ID / anonymous device identifier |
+| `privacy_info` | RECORD | Consent mode privacy settings |
+| `user_properties` | RECORD (REPEATED) | User properties array |
+| `user_first_touch_timestamp` | INTEGER | First touch timestamp in microseconds |
+| `user_ltv` | RECORD | Lifetime value information |
+| `device` | RECORD | Device information |
+| `geo` | RECORD | Geographic information |
+| `app_info` | RECORD | App information (mobile streams only) |
+| `traffic_source` | RECORD | First-touch traffic source (user-level) |
+| `collected_traffic_source` | RECORD | Session-level traffic source with UTM and click IDs |
+| `session_traffic_source_last_click` | RECORD | Last-click attribution data |
+| `stream_id` | STRING | Data stream ID |
+| `platform` | STRING | `WEB`, `IOS`, or `ANDROID` |
+| `event_dimensions` | RECORD | Event dimensions |
+| `ecommerce` | RECORD | Ecommerce transaction data |
+| `items` | RECORD (REPEATED) | Ecommerce items array |
+| `is_active_user` | BOOLEAN | Whether the user was active in the reporting period |
+| `batch_event_index` | INTEGER | Index of this event within the batch |
+| `batch_page_id` | INTEGER | Page ID within the batch |
+| `batch_ordering_id` | INTEGER | Ordering ID within the batch |
 
 ## Top-level columns
 
@@ -95,9 +135,21 @@ WHERE event_name LIKE 'video_%'
 
 ## event_params — the key nested field
 
-`event_params` is an `ARRAY<STRUCT<key STRING, value STRUCT<string_value STRING, int_value INT64, float_value FLOAT64, double_value FLOAT64>>>`.
+`event_params` is a repeated record with the following exact structure:
 
-Each parameter is stored as one row in the array, with the value in one of four sub-fields depending on its type. To extract a parameter, UNNEST the array and filter by key:
+```sql
+event_params ARRAY<STRUCT<
+  key STRING,
+  value STRUCT<
+    string_value STRING,
+    int_value INT64,
+    float_value FLOAT64,
+    double_value FLOAT64
+  >
+>>
+```
+
+Each parameter is stored as one row in the array, with the value in one of four sub-fields depending on its type. Only one value field is populated per parameter — the others are NULL. To extract a parameter, UNNEST the array and filter by key:
 
 ```sql
 -- Extract string parameter
@@ -146,100 +198,205 @@ Each parameter is stored as one row in the array, with the value in one of four 
 
 ## user_properties
 
-Same `ARRAY<STRUCT>` structure as `event_params`, but contains user properties set with `gtag('set', 'user_properties', {...})`.
+Similar to `event_params` but with an additional `set_timestamp_micros` field. Contains user properties set with `gtag('set', 'user_properties', {...})`.
 
 ```sql
--- Extract user property
+user_properties ARRAY<STRUCT<
+  key STRING,
+  value STRUCT<
+    string_value STRING,
+    int_value INT64,
+    float_value FLOAT64,
+    double_value FLOAT64,
+    set_timestamp_micros INT64
+  >
+>>
+```
+
+The `set_timestamp_micros` field records when the user property was last set for this user. This is unique to `user_properties` — `event_params` does not have it.
+
+```sql
+-- Extract user property value
 (SELECT value.string_value
  FROM UNNEST(user_properties)
  WHERE key = 'subscription_tier') AS subscription_tier
 
--- User properties also have a set_timestamp_micros field
-(SELECT value.set_timestamp_micros
+-- Extract when the property was last set
+(SELECT TIMESTAMP_MICROS(value.set_timestamp_micros)
  FROM UNNEST(user_properties)
  WHERE key = 'subscription_tier') AS tier_set_at
+
+-- Extract with both value and timestamp
+SELECT
+  user_pseudo_id,
+  up.key AS property_name,
+  COALESCE(up.value.string_value, CAST(up.value.int_value AS STRING)) AS property_value,
+  TIMESTAMP_MICROS(up.value.set_timestamp_micros) AS set_time
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(user_properties) AS up
+WHERE _TABLE_SUFFIX = '20240115'
 ```
 
-## device struct
+<Aside type="tip">
+User properties appear on every event row with the value as it was at the time of the event. Historical changes are preserved — each event snapshot contains the property value at that point in time.
+</Aside>
 
-```sql
-device.category          -- 'mobile', 'desktop', 'tablet'
-device.mobile_brand_name -- 'Apple', 'Samsung', etc.
-device.mobile_model_name -- 'iPhone 14', 'Galaxy S23', etc.
-device.operating_system  -- 'iOS', 'Android', 'Windows', 'Macintosh'
-device.operating_system_version
-device.browser           -- 'Chrome', 'Safari', 'Firefox'
-device.browser_version
-device.language          -- 'en-us', 'de', etc.
-device.is_limited_ad_tracking -- BOOLEAN
-device.time_zone_offset_seconds -- Offset from UTC in seconds
-device.vendor_id         -- iOS vendor ID
-device.advertising_id    -- GAID (Android) or IDFA (iOS), if enabled
-device.web_info.browser
-device.web_info.browser_version
-device.web_info.hostname
-```
+### User property limits
 
-Example:
+- Maximum **25** custom user properties per GA4 property
+- Property names: up to 24 characters
+- Property values: up to 36 characters
+
+## device record
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `device.category` | STRING | `mobile`, `desktop`, or `tablet` |
+| `device.mobile_brand_name` | STRING | e.g., `Apple`, `Samsung` |
+| `device.mobile_model_name` | STRING | e.g., `iPhone 14`, `Galaxy S23` |
+| `device.mobile_marketing_name` | STRING | Marketing name of the device |
+| `device.mobile_os_hardware_model` | STRING | OS-reported hardware model |
+| `device.operating_system` | STRING | `iOS`, `Android`, `Windows`, `Macintosh` |
+| `device.operating_system_version` | STRING | OS version string |
+| `device.vendor_id` | STRING | iOS vendor ID (IDFV) |
+| `device.advertising_id` | STRING | GAID (Android) or IDFA (iOS), if enabled |
+| `device.language` | STRING | Device language (e.g., `en-us`) |
+| `device.is_limited_ad_tracking` | STRING | Whether ad tracking is limited |
+| `device.time_zone_offset_seconds` | INTEGER | Offset from UTC in seconds |
+| `device.browser` | STRING | `Chrome`, `Safari`, `Firefox`, etc. |
+| `device.browser_version` | STRING | Browser version string |
+| `device.web_info.browser` | STRING | Browser (web-specific) |
+| `device.web_info.browser_version` | STRING | Browser version (web-specific) |
+| `device.web_info.hostname` | STRING | Hostname of the page |
+
 ```sql
 SELECT
   device.category,
   device.operating_system,
   device.browser,
+  device.web_info.hostname,
   COUNT(*) AS sessions
-FROM `project.dataset.events_*`
+FROM `project.analytics_PROPERTY_ID.events_*`
 WHERE event_name = 'session_start'
   AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
-GROUP BY 1, 2, 3
+GROUP BY 1, 2, 3, 4
 ORDER BY sessions DESC
 ```
 
-## geo struct
+## geo record
 
-```sql
-geo.continent   -- 'Americas', 'Europe', 'Asia', etc.
-geo.country     -- ISO 3166-1 alpha-2 country code e.g. 'US', 'DE'
-geo.region      -- State/province name
-geo.city        -- City name
-geo.sub_continent
-geo.metro       -- DMA region (US only)
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `geo.continent` | STRING | `Americas`, `Europe`, `Asia`, etc. |
+| `geo.country` | STRING | Country name |
+| `geo.region` | STRING | State or province name |
+| `geo.city` | STRING | City name |
+| `geo.sub_continent` | STRING | Sub-continent region |
+| `geo.metro` | STRING | Designated Market Area (US only) |
 
-## traffic_source struct
+## traffic_source record (first-touch)
 
-Contains the **original** traffic source for the user (the first session's source). Note: this is NOT the source for the current event's session — that requires extracting from `event_params`.
+Contains the **original** traffic source for the user — the source from their very first session. This is user-level, not session-level.
 
-```sql
-traffic_source.name      -- campaign name
-traffic_source.medium    -- medium
-traffic_source.source    -- source
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `traffic_source.name` | STRING | Campaign name |
+| `traffic_source.medium` | STRING | Medium (e.g., `organic`, `cpc`) |
+| `traffic_source.source` | STRING | Source (e.g., `google`, `facebook`) |
 
 <Aside type="caution">
-`traffic_source` at the top level represents the user's original acquisition source (user-level, first-touch). To get the session-level source/medium, you must look at the `session_start` event's event_params or use a window function to carry session source forward to all events in the session.
+`traffic_source` represents the user's original acquisition source (first-touch, user-level). For session-level source/medium, use the `collected_traffic_source` record or extract from the `session_start` event.
 </Aside>
 
-## ecommerce struct
+## collected_traffic_source record (session-level)
 
-Populated for events that use GA4's ecommerce data model (`purchase`, `add_to_cart`, etc.):
+Contains session-level traffic source information, including UTM parameters and Google click IDs. This is the record to use for session-level attribution.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `collected_traffic_source.manual_campaign_id` | STRING | UTM campaign ID (`utm_id`) |
+| `collected_traffic_source.manual_campaign_name` | STRING | UTM campaign name (`utm_campaign`) |
+| `collected_traffic_source.manual_source` | STRING | UTM source (`utm_source`) |
+| `collected_traffic_source.manual_medium` | STRING | UTM medium (`utm_medium`) |
+| `collected_traffic_source.manual_term` | STRING | UTM term (`utm_term`) |
+| `collected_traffic_source.manual_content` | STRING | UTM content (`utm_content`) |
+| `collected_traffic_source.gclid` | STRING | Google Ads click ID |
+| `collected_traffic_source.dclid` | STRING | Display & Video 360 click ID |
+| `collected_traffic_source.srsltid` | STRING | Google Merchant Center click ID |
 
 ```sql
-ecommerce.total_item_quantity    -- INT64
-ecommerce.purchase_revenue_in_usd -- FLOAT64 (in USD regardless of currency)
-ecommerce.purchase_revenue       -- FLOAT64 (in property currency)
-ecommerce.refund_value_in_usd    -- FLOAT64
-ecommerce.refund_value           -- FLOAT64
-ecommerce.shipping_value_in_usd  -- FLOAT64
-ecommerce.shipping_value         -- FLOAT64
-ecommerce.tax_value_in_usd       -- FLOAT64
-ecommerce.tax_value              -- FLOAT64
-ecommerce.unique_items           -- INT64
-ecommerce.transaction_id         -- STRING
+-- Session-level traffic source attribution
+SELECT
+  collected_traffic_source.manual_source AS source,
+  collected_traffic_source.manual_medium AS medium,
+  collected_traffic_source.manual_campaign_name AS campaign,
+  collected_traffic_source.gclid,
+  COUNT(DISTINCT
+    CONCAT(user_pseudo_id, '-',
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    )
+  ) AS sessions
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'entrances') = 1
+GROUP BY 1, 2, 3, 4
+ORDER BY sessions DESC
 ```
+
+## session_traffic_source_last_click record
+
+Contains last-click attribution data for the session. This is a newer field that provides attribution information aligned with Google Ads reporting.
+
+## ecommerce record
+
+Populated for events that use GA4's ecommerce data model (`purchase`, `add_to_cart`, `begin_checkout`, etc.):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ecommerce.total_item_quantity` | INTEGER | Total quantity of all items |
+| `ecommerce.purchase_revenue_in_usd` | FLOAT | Revenue converted to USD |
+| `ecommerce.purchase_revenue` | FLOAT | Revenue in property currency |
+| `ecommerce.refund_value_in_usd` | FLOAT | Refund amount in USD |
+| `ecommerce.refund_value` | FLOAT | Refund amount in property currency |
+| `ecommerce.shipping_value_in_usd` | FLOAT | Shipping cost in USD |
+| `ecommerce.shipping_value` | FLOAT | Shipping cost in property currency |
+| `ecommerce.tax_value_in_usd` | FLOAT | Tax amount in USD |
+| `ecommerce.tax_value` | FLOAT | Tax amount in property currency |
+| `ecommerce.unique_items` | INTEGER | Number of distinct items |
+| `ecommerce.transaction_id` | STRING | Transaction/order ID |
 
 ## items array
 
-The `items` array contains one element per product in the event:
+The `items` array contains one element per product in the event. Each item is a STRUCT with the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `items.item_id` | STRING | Product SKU or ID |
+| `items.item_name` | STRING | Product name |
+| `items.item_brand` | STRING | Product brand |
+| `items.item_variant` | STRING | Product variant (e.g., size, color) |
+| `items.item_category` | STRING | Primary category |
+| `items.item_category2` | STRING | Category level 2 |
+| `items.item_category3` | STRING | Category level 3 |
+| `items.item_category4` | STRING | Category level 4 |
+| `items.item_category5` | STRING | Category level 5 |
+| `items.price_in_usd` | FLOAT | Unit price in USD |
+| `items.price` | FLOAT | Unit price in local currency |
+| `items.quantity` | INTEGER | Quantity |
+| `items.item_revenue_in_usd` | FLOAT | Item revenue in USD |
+| `items.item_revenue` | FLOAT | Item revenue in local currency |
+| `items.item_refund_in_usd` | FLOAT | Item refund amount in USD |
+| `items.item_refund` | FLOAT | Item refund amount in local currency |
+| `items.coupon` | STRING | Item-level coupon code |
+| `items.affiliation` | STRING | Store or affiliate name |
+| `items.location_id` | STRING | Physical location ID |
+| `items.item_list_id` | STRING | ID of the list the item was in |
+| `items.item_list_name` | STRING | Name of the list the item was in |
+| `items.item_list_index` | STRING | Position in the list |
+| `items.promotion_id` | STRING | Promotion ID |
+| `items.promotion_name` | STRING | Promotion name |
+| `items.creative_name` | STRING | Creative associated with the promotion |
+| `items.creative_slot` | STRING | Creative slot name |
 
 ```sql
 -- Unnest items for product-level analysis
@@ -247,19 +404,19 @@ SELECT
   event_date,
   item.item_id,
   item.item_name,
-  item.item_category,
   item.item_brand,
+  item.item_category,
+  item.item_category2,
   item.price,
   item.quantity,
   item.item_revenue,
-  item.coupon
-FROM `project.dataset.events_*`,
+  item.coupon,
+  item.promotion_name
+FROM `project.analytics_PROPERTY_ID.events_*`,
   UNNEST(items) AS item
 WHERE event_name = 'purchase'
   AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
 ```
-
-Item fields include: `item_id`, `item_name`, `item_brand`, `item_category`, `item_category2` through `item_category5`, `item_variant`, `item_list_name`, `item_list_id`, `index`, `quantity`, `price`, `price_in_usd`, `item_revenue`, `item_revenue_in_usd`, `item_refund`, `item_refund_in_usd`, `coupon`, `affiliation`, `location_id`, `promotion_id`, `promotion_name`, `creative_name`, `creative_slot`.
 
 ## app_info struct
 
@@ -288,6 +445,39 @@ privacy_info.uses_transient_token -- 'Yes', 'No'
 ```sql
 user_ltv.revenue  -- Cumulative revenue from this user since first visit
 user_ltv.currency -- Currency of the revenue
+```
+
+## users_* and pseudonymous_users_* tables
+
+In addition to the daily `events_*` tables, the BigQuery export includes user-level tables:
+
+- **`users_*`** — Contains data for users who have a `user_id` set
+- **`pseudonymous_users_*`** — Contains data for all users (identified by `user_pseudo_id`)
+
+These tables contain aggregated user data:
+
+| Field | Description |
+|-------|-------------|
+| `user_id` | User ID (if set) |
+| `user_pseudo_id` | Device/Client ID |
+| `user_info` | User-level aggregates (first touch, last active, first purchase) |
+| `audiences` | Audience memberships |
+| `user_properties` | All user properties |
+| `device` | Device info |
+| `geo` | Location info |
+| `user_ltv` | Lifetime value (revenue, currency) |
+| `predictions` | ML predictions (purchase probability, churn probability) |
+
+```sql
+-- Query the users table for lifetime value
+SELECT
+  user_pseudo_id,
+  user_info.last_active_timestamp_micros,
+  user_info.user_first_touch_timestamp_micros,
+  user_info.first_purchase_date,
+  user_ltv.revenue_in_usd AS lifetime_revenue
+FROM `project.analytics_PROPERTY_ID.users_*`
+WHERE _TABLE_SUFFIX = '20240115'
 ```
 
 ## Common query patterns

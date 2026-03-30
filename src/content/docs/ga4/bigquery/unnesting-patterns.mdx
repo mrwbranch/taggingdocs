@@ -118,20 +118,53 @@ WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
 
 ## User properties
 
-The same patterns apply to `user_properties`:
+The same patterns apply to `user_properties`, which has the same key-value structure as `event_params` plus an additional `set_timestamp_micros` field that records when the property was last set:
 
 ```sql
--- Correlated subquery pattern
+user_properties ARRAY<STRUCT<
+  key STRING,
+  value STRUCT<
+    string_value STRING,
+    int_value INT64,
+    float_value FLOAT64,
+    double_value FLOAT64,
+    set_timestamp_micros INT64
+  >
+>>
+```
+
+### Extracting user property values
+
+```sql
+-- Correlated subquery pattern (same as event_params)
 (SELECT value.string_value
  FROM UNNEST(user_properties)
  WHERE key = 'subscription_tier') AS subscription_tier
 
--- User property with timestamp
-(SELECT value.set_timestamp_micros
+-- Extract with set_timestamp_micros to see when the property was last set
+(SELECT TIMESTAMP_MICROS(value.set_timestamp_micros)
  FROM UNNEST(user_properties)
  WHERE key = 'subscription_tier') AS tier_last_set_at
+```
 
--- Filter by user property value
+### UNNEST with full property details
+
+```sql
+-- List all user properties with their values and timestamps
+SELECT
+  user_pseudo_id,
+  up.key AS property_name,
+  COALESCE(up.value.string_value, CAST(up.value.int_value AS STRING)) AS property_value,
+  TIMESTAMP_MICROS(up.value.set_timestamp_micros) AS set_time
+FROM `project.analytics_PROPERTY_ID.events_*`,
+  UNNEST(user_properties) AS up
+WHERE _TABLE_SUFFIX = '20240115'
+```
+
+### Filter by user property value
+
+```sql
+-- Filter events to only premium users
 FROM `project.analytics_PROPERTY_ID.events_*`,
   UNNEST(user_properties) AS up
 WHERE up.key = 'subscription_tier'
@@ -140,7 +173,7 @@ WHERE up.key = 'subscription_tier'
 
 ## Items array
 
-The `items` array is used in ecommerce events. Each item is a STRUCT (not a key-value array), so access its fields directly:
+The `items` array is used in ecommerce events. Each item is a STRUCT (not a key-value array like `event_params`), so access its fields directly — no key filtering needed:
 
 ```sql
 -- UNNEST items to get product-level rows
@@ -149,15 +182,26 @@ SELECT
   user_pseudo_id,
   item.item_id,
   item.item_name,
+  item.item_brand,
   item.item_category,
+  item.item_category2,
+  item.item_variant,
   item.quantity,
   item.price,
-  item.item_revenue
+  item.item_revenue,
+  item.coupon,
+  item.item_list_name,
+  item.item_list_id,
+  item.promotion_name,
+  item.creative_name,
+  item.creative_slot
 FROM `project.analytics_PROPERTY_ID.events_*`,
   UNNEST(items) AS item
 WHERE event_name = 'purchase'
   AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
 ```
+
+The items struct includes five levels of category hierarchy (`item_category` through `item_category5`), promotion fields (`promotion_id`, `promotion_name`, `creative_name`, `creative_slot`), list context (`item_list_id`, `item_list_name`, `item_list_index`), and both local and USD pricing (`price`, `price_in_usd`, `item_revenue`, `item_revenue_in_usd`, `item_refund`, `item_refund_in_usd`).
 
 ### Aggregating items within a purchase
 
