@@ -163,6 +163,40 @@ Unescaped dots in domain matching are a real source of data leakage. If you're u
 **Putting regex in the wrong variable.** Matching a URL pattern against the `Page URL` variable requires accounting for the full URL including protocol, domain, and query string. Use `Page Path` for path matching, `Query String` for parameter matching, and `Page Hostname` for domain matching — then write simpler, more readable patterns.
 </Aside>
 
+## Matching dataLayer event names
+
+Custom Event triggers match on the `Event Name` — the value of `event` in a `dataLayer.push()` call. You can use "matches RegEx" here too.
+
+**One trigger for multiple events:**
+
+Instead of creating separate triggers for each ecommerce event, use a single Custom Event trigger with regex:
+
+```
+(add_to_cart|remove_from_cart|view_cart)
+```
+
+This fires for all three events. Since "matches RegEx" is a full match, this won't accidentally match an event like `add_to_cart_error`.
+
+**Match all ecommerce events:**
+
+```
+(view_item|view_item_list|select_item|add_to_cart|remove_from_cart|view_cart|begin_checkout|add_shipping_info|add_payment_info|purchase|refund)
+```
+
+**Match events by prefix:**
+
+If your custom events follow a naming convention like `form_submit`, `form_start`, `form_error`:
+
+```
+form_.*
+```
+
+This matches any event starting with `form_`.
+
+<Aside type="tip">
+In the GTM Custom Event trigger, the "Event name" field also accepts regex when you check "Use regex matching." Without that checkbox, it's an exact string match — which is what you want for a single event like `purchase`. Only enable regex when you genuinely need pattern matching across multiple event names.
+</Aside>
+
 ## Regex in Regex Table variables
 
 The full-match behavior applies in Regex Table variables too. Each row's pattern must match the entire input value to return that row's output. If you're building a Regex Table to categorize pages, write patterns accordingly:
