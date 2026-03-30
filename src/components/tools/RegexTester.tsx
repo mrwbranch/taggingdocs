@@ -392,22 +392,22 @@ export default function RegexTester() {
             spellCheck={false}
           />
 
-          {/* RE2 validity badge */}
-          {pattern && (
+          {/* RE2 validity badge — only show when there's an actual problem */}
+          {pattern && !re2Validation.valid && (
             <div className="flex flex-col gap-1">
               <div className="flex items-center gap-1.5">
                 <span
                   className="inline-block w-2 h-2 rounded-full"
-                  style={{ backgroundColor: re2Validation.valid ? '#4ade80' : '#f87171' }}
+                  style={{ backgroundColor: '#f87171' }}
                 />
                 <span
                   className="text-xs font-medium"
-                  style={{ color: re2Validation.valid ? '#4ade80' : '#f87171' }}
+                  style={{ color: '#f87171' }}
                 >
-                  {re2Validation.valid ? 'Valid RE2 pattern' : re2Validation.error}
+                  {re2Validation.error}
                 </span>
               </div>
-              {!re2Validation.valid && re2Validation.suggestion && (
+              {re2Validation.suggestion && (
                 <p className="text-xs pl-3.5" style={{ color: '#94a3b8' }}>
                   {re2Validation.suggestion}
                 </p>
