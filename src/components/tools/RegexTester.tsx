@@ -230,6 +230,162 @@ function makeId() {
   return nextId++;
 }
 
+// ── Regex Reference Guide ────────────────────────────────────────────────────
+
+const SYNTAX_ROWS: { syntax: string; meaning: string; example: string }[] = [
+  { syntax: '.', meaning: 'Any character (except newline)', example: 'a.c matches "abc", "a1c"' },
+  { syntax: '*', meaning: 'Zero or more of previous', example: 'ab*c matches "ac", "abc", "abbc"' },
+  { syntax: '+', meaning: 'One or more of previous', example: 'ab+c matches "abc", "abbc" but not "ac"' },
+  { syntax: '?', meaning: 'Zero or one of previous', example: 'colou?r matches "color", "colour"' },
+  { syntax: '{n}', meaning: 'Exactly n of previous', example: '\\d{3} matches "123" but not "12"' },
+  { syntax: '{n,m}', meaning: 'Between n and m of previous', example: '\\d{2,4} matches "12", "123", "1234"' },
+  { syntax: '^', meaning: 'Start of string', example: '^hello matches "hello world"' },
+  { syntax: '$', meaning: 'End of string', example: 'world$ matches "hello world"' },
+  { syntax: '[abc]', meaning: 'Any character in the set', example: '[aeiou] matches any vowel' },
+  { syntax: '[^abc]', meaning: 'Any character NOT in the set', example: '[^0-9] matches non-digits' },
+  { syntax: '[a-z]', meaning: 'Character range', example: '[A-Za-z] matches any letter' },
+  { syntax: '(a|b)', meaning: 'Alternation (a or b)', example: '(cat|dog) matches "cat" or "dog"' },
+  { syntax: '(...)', meaning: 'Capture group', example: '(\\d+) captures digits' },
+  { syntax: '(?:...)', meaning: 'Non-capturing group', example: '(?:www\\.)? optionally matches "www."' },
+  { syntax: '\\d', meaning: 'Digit [0-9]', example: '\\d+ matches "123"' },
+  { syntax: '\\w', meaning: 'Word char [a-zA-Z0-9_]', example: '\\w+ matches "hello_123"' },
+  { syntax: '\\s', meaning: 'Whitespace', example: '\\s+ matches spaces, tabs' },
+  { syntax: '\\b', meaning: 'Word boundary', example: '\\bcat\\b matches "cat" not "catch"' },
+  { syntax: '\\.', meaning: 'Escaped special character', example: '\\. matches a literal dot' },
+];
+
+const RE2_COMPAT_ROWS: { feature: string; pcre: boolean; re2: boolean; alternative: string }[] = [
+  { feature: 'Lookahead (?=...)', pcre: true, re2: false, alternative: 'Restructure pattern or use alternation' },
+  { feature: 'Lookbehind (?<=...)', pcre: true, re2: false, alternative: 'Capture full match and extract in code' },
+  { feature: 'Backreference \\1', pcre: true, re2: false, alternative: 'Use named groups (?P<name>...)' },
+  { feature: 'Atomic group (?>...)', pcre: true, re2: false, alternative: 'Remove the ?> modifier' },
+  { feature: 'Possessive a++', pcre: true, re2: false, alternative: 'Use standard quantifiers a+' },
+  { feature: 'Named groups (?P<n>)', pcre: true, re2: true, alternative: '—' },
+  { feature: 'Non-greedy *? +?', pcre: true, re2: true, alternative: '—' },
+  { feature: 'Character classes \\d \\w', pcre: true, re2: true, alternative: '—' },
+  { feature: 'Alternation a|b', pcre: true, re2: true, alternative: '—' },
+  { feature: 'Anchors ^ $', pcre: true, re2: true, alternative: '—' },
+  { feature: 'Word boundary \\b', pcre: true, re2: true, alternative: '—' },
+  { feature: 'Flags (?i) (?m) (?s)', pcre: true, re2: true, alternative: '—' },
+  { feature: 'Unicode \\p{L}', pcre: true, re2: true, alternative: '—' },
+];
+
+function RegexReference() {
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<'syntax' | 'compat'>('syntax');
+
+  const cellStyle: React.CSSProperties = {
+    padding: '0.375rem 0.5rem',
+    fontSize: '0.75rem',
+    borderBottom: '1px solid rgb(51 65 85 / 0.4)',
+    verticalAlign: 'top',
+  };
+
+  const headerCellStyle: React.CSSProperties = {
+    ...cellStyle,
+    fontWeight: 600,
+    color: '#94a3b8',
+    borderBottom: '1px solid rgb(51 65 85 / 0.7)',
+  };
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-2 text-xs font-medium cursor-pointer"
+        style={{ color: '#67e8f9', background: 'none', border: 'none', padding: 0 }}
+      >
+        <span style={{ display: 'inline-block', transform: open ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}>
+          &#9654;
+        </span>
+        Regex Reference Guide
+      </button>
+
+      {open && (
+        <div
+          className="mt-3 rounded-md border overflow-hidden"
+          style={{ borderColor: 'rgb(51 65 85 / 0.7)', backgroundColor: 'rgb(15 23 42 / 0.3)' }}
+        >
+          {/* Tabs */}
+          <div className="flex" style={{ borderBottom: '1px solid rgb(51 65 85 / 0.7)' }}>
+            <button
+              type="button"
+              onClick={() => setTab('syntax')}
+              className="flex-1 px-3 py-2 text-xs font-medium cursor-pointer"
+              style={{
+                background: 'none',
+                border: 'none',
+                borderBottom: tab === 'syntax' ? '2px solid #06b6d4' : '2px solid transparent',
+                color: tab === 'syntax' ? '#22d3ee' : '#64748b',
+              }}
+            >
+              Syntax Cheat Sheet
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab('compat')}
+              className="flex-1 px-3 py-2 text-xs font-medium cursor-pointer"
+              style={{
+                background: 'none',
+                border: 'none',
+                borderBottom: tab === 'compat' ? '2px solid #06b6d4' : '2px solid transparent',
+                color: tab === 'compat' ? '#22d3ee' : '#64748b',
+              }}
+            >
+              RE2 vs PCRE Compatibility
+            </button>
+          </div>
+
+          <div className="overflow-x-auto">
+            {tab === 'syntax' ? (
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={{ ...headerCellStyle, width: '15%', textAlign: 'left' }}>Syntax</th>
+                    <th style={{ ...headerCellStyle, width: '35%', textAlign: 'left' }}>Meaning</th>
+                    <th style={{ ...headerCellStyle, textAlign: 'left' }}>Example</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {SYNTAX_ROWS.map((row) => (
+                    <tr key={row.syntax}>
+                      <td style={{ ...cellStyle, fontFamily: "'JetBrains Mono', monospace", color: '#f1fa8c', fontWeight: 600 }}>{row.syntax}</td>
+                      <td style={{ ...cellStyle, color: '#e2e8f0' }}>{row.meaning}</td>
+                      <td style={{ ...cellStyle, color: '#94a3b8', fontFamily: "'JetBrains Mono', monospace", fontSize: '0.6875rem' }}>{row.example}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={{ ...headerCellStyle, textAlign: 'left' }}>Feature</th>
+                    <th style={{ ...headerCellStyle, width: '60px', textAlign: 'center' }}>PCRE</th>
+                    <th style={{ ...headerCellStyle, width: '60px', textAlign: 'center' }}>RE2</th>
+                    <th style={{ ...headerCellStyle, textAlign: 'left' }}>RE2 Alternative</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {RE2_COMPAT_ROWS.map((row) => (
+                    <tr key={row.feature}>
+                      <td style={{ ...cellStyle, color: '#e2e8f0', fontFamily: "'JetBrains Mono', monospace", fontSize: '0.6875rem' }}>{row.feature}</td>
+                      <td style={{ ...cellStyle, textAlign: 'center', color: '#4ade80' }}>&#10003;</td>
+                      <td style={{ ...cellStyle, textAlign: 'center', color: row.re2 ? '#4ade80' : '#f87171' }}>{row.re2 ? '\u2713' : '\u2717'}</td>
+                      <td style={{ ...cellStyle, color: '#94a3b8' }}>{row.alternative}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function RegexTester() {
@@ -564,6 +720,9 @@ export default function RegexTester() {
             + Add test string
           </button>
         </div>
+
+        {/* Regex reference guide */}
+        <RegexReference />
 
         {/* Match details panel — shown when a test string is focused and matched */}
         {focusedResult && focusedResult.matched && focusedString && (
