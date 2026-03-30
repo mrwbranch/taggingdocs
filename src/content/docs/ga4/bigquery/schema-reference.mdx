@@ -1,6 +1,346 @@
 ---
 title: "Schema Reference"
-description: "Complete reference for the GA4 BigQuery export schema."
+description: "Complete field reference for the GA4 BigQuery export — every column, its type, and how to query it."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The GA4 BigQuery export schema has a fixed outer structure with several nested fields. The key challenge is that event parameters and user properties are stored as arrays of structs rather than flat columns — every parameter lookup requires an UNNEST operation.
+
+## Table structure overview
+
+Each daily table (`events_YYYYMMDD`) contains one row per event. The top-level columns are:
+
+```
+events_YYYYMMDD
+├── event_date          STRING
+├── event_timestamp     INT64  (microseconds since epoch)
+├── event_name          STRING
+├── event_params        ARRAY<STRUCT<key, value>>
+├── event_previous_timestamp INT64
+├── event_value_in_usd  FLOAT64
+├── event_bundle_sequence_id INT64
+├── event_server_timestamp_offset INT64
+├── user_id             STRING
+├── user_pseudo_id      STRING
+├── privacy_info        STRUCT
+├── user_properties     ARRAY<STRUCT<key, value>>
+├── user_first_touch_timestamp INT64
+├── user_ltv           STRUCT<revenue, currency>
+├── device              STRUCT
+├── geo                 STRUCT
+├── app_info            STRUCT
+├── traffic_source      STRUCT
+├── stream_id           STRING
+├── platform            STRING
+├── event_dimensions    STRUCT
+├── ecommerce           STRUCT
+└── items               ARRAY<STRUCT>
+```
+
+## Top-level columns
+
+### event_date
+
+**Type**: STRING
+**Format**: `YYYYMMDD` (e.g., `20240115`)
+**Use**: Date filtering. Note this is a string, not a DATE type. Convert with `PARSE_DATE('%Y%m%d', event_date)`.
+
+```sql
+-- Filter by event_date (uses _TABLE_SUFFIX for partition pruning, also filter by event_date for intraday tables)
+WHERE _TABLE_SUFFIX = '20240115'
+-- Or convert for date arithmetic:
+WHERE PARSE_DATE('%Y%m%d', event_date) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+```
+
+### event_timestamp
+
+**Type**: INT64
+**Unit**: Microseconds since Unix epoch
+**Use**: Time-of-day analysis, session reconstruction, ordering events within a session.
+
+```sql
+-- Convert to readable timestamp
+TIMESTAMP_MICROS(event_timestamp) AS event_time
+
+-- Get hour of day
+EXTRACT(HOUR FROM TIMESTAMP_MICROS(event_timestamp) AT TIME ZONE 'America/New_York') AS hour_of_day
+```
+
+### event_name
+
+**Type**: STRING
+**Use**: Filter to specific events. Always pair with `_TABLE_SUFFIX` filter.
+
+```sql
+WHERE event_name = 'purchase'
+WHERE event_name IN ('add_to_cart', 'begin_checkout', 'purchase')
+WHERE event_name LIKE 'video_%'
+```
+
+### user_id
+
+**Type**: STRING
+**Nullable**: Yes — only populated if you set User ID in your implementation
+**Use**: Join with your CRM or first-party data. This is the value you set with `gtag('config', ..., { user_id: '...' })`.
+
+### user_pseudo_id
+
+**Type**: STRING
+**Use**: The anonymous user identifier. Equivalent to the `client_id` on web. Use this as the primary user identifier when User ID is not available.
+
+**Note**: This value resets when a user clears cookies. It is not a persistent identifier across browsers or devices.
+
+## event_params — the key nested field
+
+`event_params` is an `ARRAY<STRUCT<key STRING, value STRUCT<string_value STRING, int_value INT64, float_value FLOAT64, double_value FLOAT64>>>`.
+
+Each parameter is stored as one row in the array, with the value in one of four sub-fields depending on its type. To extract a parameter, UNNEST the array and filter by key:
+
+```sql
+-- Extract string parameter
+(SELECT value.string_value
+ FROM UNNEST(event_params)
+ WHERE key = 'page_title') AS page_title
+
+-- Extract integer parameter
+(SELECT value.int_value
+ FROM UNNEST(event_params)
+ WHERE key = 'ga_session_id') AS session_id
+
+-- Extract float or double (use COALESCE for parameters that might be either)
+(SELECT COALESCE(value.float_value, value.double_value)
+ FROM UNNEST(event_params)
+ WHERE key = 'value') AS transaction_value
+
+-- Safe extraction (returns NULL if param not present)
+(SELECT value.string_value
+ FROM UNNEST(event_params)
+ WHERE key = 'search_term') AS search_term
+```
+
+### Commonly used event_params keys
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `ga_session_id` | int_value | Session identifier |
+| `ga_session_number` | int_value | nth session for this user |
+| `session_engaged` | string_value | '1' if session was engaged |
+| `page_location` | string_value | Full page URL |
+| `page_title` | string_value | Page title |
+| `page_referrer` | string_value | Referring URL |
+| `percent_scrolled` | int_value | Scroll depth (90 for Enhanced Measurement scroll) |
+| `link_url` | string_value | Outbound click destination URL |
+| `search_term` | string_value | Site search query |
+| `file_name` | string_value | Downloaded file name |
+| `video_title` | string_value | YouTube video title |
+| `video_percent` | int_value | Video progress percentage |
+| `engagement_time_msec` | int_value | Engagement time in milliseconds |
+| `transaction_id` | string_value | Purchase transaction ID |
+| `value` | float/double_value | Purchase or event value |
+| `currency` | string_value | ISO 4217 currency code |
+| `coupon` | string_value | Coupon code applied |
+| `affiliation` | string_value | Store or affiliate name |
+
+## user_properties
+
+Same `ARRAY<STRUCT>` structure as `event_params`, but contains user properties set with `gtag('set', 'user_properties', {...})`.
+
+```sql
+-- Extract user property
+(SELECT value.string_value
+ FROM UNNEST(user_properties)
+ WHERE key = 'subscription_tier') AS subscription_tier
+
+-- User properties also have a set_timestamp_micros field
+(SELECT value.set_timestamp_micros
+ FROM UNNEST(user_properties)
+ WHERE key = 'subscription_tier') AS tier_set_at
+```
+
+## device struct
+
+```sql
+device.category          -- 'mobile', 'desktop', 'tablet'
+device.mobile_brand_name -- 'Apple', 'Samsung', etc.
+device.mobile_model_name -- 'iPhone 14', 'Galaxy S23', etc.
+device.operating_system  -- 'iOS', 'Android', 'Windows', 'Macintosh'
+device.operating_system_version
+device.browser           -- 'Chrome', 'Safari', 'Firefox'
+device.browser_version
+device.language          -- 'en-us', 'de', etc.
+device.is_limited_ad_tracking -- BOOLEAN
+device.time_zone_offset_seconds -- Offset from UTC in seconds
+device.vendor_id         -- iOS vendor ID
+device.advertising_id    -- GAID (Android) or IDFA (iOS), if enabled
+device.web_info.browser
+device.web_info.browser_version
+device.web_info.hostname
+```
+
+Example:
+```sql
+SELECT
+  device.category,
+  device.operating_system,
+  device.browser,
+  COUNT(*) AS sessions
+FROM `project.dataset.events_*`
+WHERE event_name = 'session_start'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY 1, 2, 3
+ORDER BY sessions DESC
+```
+
+## geo struct
+
+```sql
+geo.continent   -- 'Americas', 'Europe', 'Asia', etc.
+geo.country     -- ISO 3166-1 alpha-2 country code e.g. 'US', 'DE'
+geo.region      -- State/province name
+geo.city        -- City name
+geo.sub_continent
+geo.metro       -- DMA region (US only)
+```
+
+## traffic_source struct
+
+Contains the **original** traffic source for the user (the first session's source). Note: this is NOT the source for the current event's session — that requires extracting from `event_params`.
+
+```sql
+traffic_source.name      -- campaign name
+traffic_source.medium    -- medium
+traffic_source.source    -- source
+```
+
+<Aside type="caution">
+`traffic_source` at the top level represents the user's original acquisition source (user-level, first-touch). To get the session-level source/medium, you must look at the `session_start` event's event_params or use a window function to carry session source forward to all events in the session.
+</Aside>
+
+## ecommerce struct
+
+Populated for events that use GA4's ecommerce data model (`purchase`, `add_to_cart`, etc.):
+
+```sql
+ecommerce.total_item_quantity    -- INT64
+ecommerce.purchase_revenue_in_usd -- FLOAT64 (in USD regardless of currency)
+ecommerce.purchase_revenue       -- FLOAT64 (in property currency)
+ecommerce.refund_value_in_usd    -- FLOAT64
+ecommerce.refund_value           -- FLOAT64
+ecommerce.shipping_value_in_usd  -- FLOAT64
+ecommerce.shipping_value         -- FLOAT64
+ecommerce.tax_value_in_usd       -- FLOAT64
+ecommerce.tax_value              -- FLOAT64
+ecommerce.unique_items           -- INT64
+ecommerce.transaction_id         -- STRING
+```
+
+## items array
+
+The `items` array contains one element per product in the event:
+
+```sql
+-- Unnest items for product-level analysis
+SELECT
+  event_date,
+  item.item_id,
+  item.item_name,
+  item.item_category,
+  item.item_brand,
+  item.price,
+  item.quantity,
+  item.item_revenue,
+  item.coupon
+FROM `project.dataset.events_*`,
+  UNNEST(items) AS item
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+```
+
+Item fields include: `item_id`, `item_name`, `item_brand`, `item_category`, `item_category2` through `item_category5`, `item_variant`, `item_list_name`, `item_list_id`, `index`, `quantity`, `price`, `price_in_usd`, `item_revenue`, `item_revenue_in_usd`, `item_refund`, `item_refund_in_usd`, `coupon`, `affiliation`, `location_id`, `promotion_id`, `promotion_name`, `creative_name`, `creative_slot`.
+
+## app_info struct
+
+Populated for app streams:
+
+```sql
+app_info.id              -- Bundle ID / package name
+app_info.version         -- App version string
+app_info.install_store   -- 'google' or 'apple'
+app_info.firebase_app_id -- Firebase app ID
+app_info.install_source  -- Install source
+```
+
+## privacy_info struct
+
+```sql
+privacy_info.ads_storage        -- 'Yes', 'No', 'Unset'
+privacy_info.analytics_storage  -- 'Yes', 'No', 'Unset'
+privacy_info.uses_transient_token -- 'Yes', 'No'
+```
+
+`analytics_storage = 'No'` means the event was collected with consent mode analytics denied — the data is modeled/estimated, not from a real user session.
+
+## user_ltv struct
+
+```sql
+user_ltv.revenue  -- Cumulative revenue from this user since first visit
+user_ltv.currency -- Currency of the revenue
+```
+
+## Common query patterns
+
+### All events for a specific date range
+
+```sql
+SELECT *
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+LIMIT 1000
+```
+
+### Count events by name for a date
+
+```sql
+SELECT
+  event_name,
+  COUNT(*) AS count
+FROM `project.analytics_PROPERTY_ID.events_20240115`
+GROUP BY event_name
+ORDER BY count DESC
+```
+
+### Page views with title and path
+
+```sql
+SELECT
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_url,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title') AS page_title,
+  COUNT(*) AS views
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'page_view'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY 1, 2
+ORDER BY views DESC
+LIMIT 50
+```
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Unnesting Patterns"
+    description="Detailed guide to working with nested ARRAY and STRUCT fields."
+    href="/ga4/bigquery/unnesting-patterns/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="Ready-to-use SQL for frequent analysis tasks."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Export Setup"
+    description="How to link GA4 to BigQuery and start the export."
+    href="/ga4/bigquery/export-setup/"
+  />
+</CardGrid>
