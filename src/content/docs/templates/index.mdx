@@ -82,15 +82,15 @@ The choice is not always obvious. Here is how to think about it:
 - You want a built-in test runner
 - You are distributing to containers you don't control
 
-  </div>
-  <div slot="right">
+</div>
+<div slot="right">
 
 - You need a quick one-off implementation
 - You require browser APIs the sandbox doesn't expose directly
 - The tag fires in a single container you control fully
 - Speed of implementation matters more than long-term maintainability
 
-  </div>
+</div>
 </Comparison>
 
 In practice, if the Custom HTML tag you are writing could be installed by someone else — even just another developer at your company — it should be a template. The declarative permissions alone make code review dramatically easier.

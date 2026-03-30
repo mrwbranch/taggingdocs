@@ -179,7 +179,7 @@ The reusable tag reads `{{Event}}` as the event name, `{{DLV - page_type}}` and 
   name="GA4 - Event - Ecommerce (Reusable)"
   type="Google Analytics: GA4 Event"
   trigger="CE - ecommerce_events (matches: add_to_cart, remove_from_cart, view_item, begin_checkout, purchase)"
-  variables={['{{Event}}', 'DLV - page_type', 'DLV - user_logged_in', 'Send Ecommerce Data: ✓']}
+  variables={['`{{Event}}`', 'DLV - page_type', 'DLV - user_logged_in', 'Send Ecommerce Data: ✓']}
 />
 
 This works when your events share consistent parameter names. For events with truly unique parameters (a `live_chat_started` event with parameters unrelated to all other events), a dedicated tag is fine.

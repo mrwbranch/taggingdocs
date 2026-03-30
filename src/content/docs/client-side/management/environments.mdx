@@ -32,18 +32,18 @@ Custom environments let you associate specific pages or site environments with s
 
 4. GTM generates a unique container snippet for this environment. The snippet is different from your production snippet — it includes the environment ID and authorization code:
 
-```html
-<!-- Example: Staging environment snippet -->
-<!-- Google Tag Manager -->
-<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
-new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
-j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
-'https://www.googletagmanager.com/gtm.js?id='+i+dl+
-'&gtm_auth=YOUR_STAGING_AUTH_CODE&gtm_preview=env-2&gtm_cookies_win=x';
-f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer','GTM-XXXX');
-</script>
-<!-- End Google Tag Manager -->
-```
+   ```html
+   <!-- Example: Staging environment snippet -->
+   <!-- Google Tag Manager -->
+   <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+   new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+   j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+   'https://www.googletagmanager.com/gtm.js?id='+i+dl+
+   '&gtm_auth=YOUR_STAGING_AUTH_CODE&gtm_preview=env-2&gtm_cookies_win=x';
+   f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer','GTM-XXXX');
+   </script>
+   <!-- End Google Tag Manager -->
+   ```
 
 5. Install the environment-specific snippet on your staging site. Keep the production snippet on your production site.
 </Steps>

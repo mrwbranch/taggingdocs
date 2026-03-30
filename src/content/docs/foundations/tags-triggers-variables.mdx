@@ -35,7 +35,7 @@ The two parts of a trigger are:
 
 A variable is a **named slot that resolves to a value at evaluation time**. Variables make triggers and tags dynamic.
 
-Without variables, you would need a separate trigger for every URL, a separate tag for every product name, a separate condition for every possible click text. Variables let you write one trigger that says "Click Text equals {{Form Submit Button Text}}" where `{{Form Submit Button Text}}` is a variable that reads the button's text content at the moment the click happens.
+Without variables, you would need a separate trigger for every URL, a separate tag for every product name, a separate condition for every possible click text. Variables let you write one trigger that says "Click Text equals `{{Form Submit Button Text}}`" where `{{Form Submit Button Text}}` is a variable that reads the button's text content at the moment the click happens.
 
 Variables appear in double curly braces: `{{Variable Name}}`. They can be used in trigger conditions, in tag configuration fields, and in other variables.
 
@@ -48,7 +48,7 @@ Here is the evaluation flow when any event occurs:
 
 2. **GTM evaluates all triggers registered for that event type.** It goes through every trigger listening for that event and checks each one's conditions.
 
-3. **GTM resolves variables to evaluate conditions.** For a trigger condition like "Page URL contains /checkout", GTM resolves the {{Page URL}} built-in variable to get the current URL, then tests the condition.
+3. **GTM resolves variables to evaluate conditions.** For a trigger condition like "Page URL contains /checkout", GTM resolves the `{{Page URL}}` built-in variable to get the current URL, then tests the condition.
 
 4. **Matching triggers activate.** Any trigger whose conditions all pass is now active for this event.
 
@@ -175,7 +175,7 @@ One tag: "CTA Click"
 - Parameter `button_id`: `{{Click ID}}`
 - Trigger: Click Text matches RegEx `Get Started|Sign Up|Try Free|Request Demo`
 
-  </div>
+</div>
 </Comparison>
 
 ### Using DOM-based triggers when a dataLayer event is available

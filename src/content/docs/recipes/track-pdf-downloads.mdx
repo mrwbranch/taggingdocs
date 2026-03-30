@@ -38,7 +38,7 @@ The fastest approach when you cannot touch the site code. GTM watches for clicks
    Variable `DLV - file_name`:
    ```javascript
    function() {
-     var url = {{Click URL}};
+     var url = `{{Click URL}}`;
      return url ? url.split('/').pop().split('?')[0] : undefined;
    }
    ```
@@ -46,7 +46,7 @@ The fastest approach when you cannot touch the site code. GTM watches for clicks
    Variable `DLV - file_extension`:
    ```javascript
    function() {
-     var url = {{Click URL}};
+     var url = `{{Click URL}}`;
      var match = url && url.match(/\.([a-z0-9]+)(\?|$)/i);
      return match ? match[1].toLowerCase() : undefined;
    }

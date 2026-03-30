@@ -1,6 +1,231 @@
 ---
 title: "Hosting Comparison"
-description: "Detailed comparison of all sGTM hosting options — GCP, AWS, Stape, and more."
+description: "Detailed comparison of all sGTM hosting options — GCP Cloud Run, App Engine, Stape, AWS ECS Fargate, Addingwell, and self-hosted Docker — with cost tables and decision guidance by team size and traffic."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The sGTM container is a Docker image. Where you run that image is a decision with significant implications for cost, operational overhead, regional availability, and support options. There is no universal best choice — the right hosting depends on your existing infrastructure, team capabilities, traffic volume, and how much time you want to spend managing servers.
+
+## Google Cloud Run (recommended default)
+
+Cloud Run is the officially recommended hosting environment for sGTM and the most common choice for self-managed deployments.
+
+**What it is**: A managed serverless container platform. You provide the container image; GCP handles provisioning, scaling, health checks, and TLS termination. You configure scaling parameters and pay for actual compute time.
+
+**Strengths**:
+- Native integration with sGTM setup wizard (GTM generates the deployment commands)
+- Automatic TLS certificate provisioning and renewal
+- Autoscaling from 0 to thousands of instances
+- Tight integration with Cloud Logging, Cloud Monitoring, Secret Manager, and Firestore
+- Custom domain mapping with automatic HTTPS
+- No cluster management — no Kubernetes, no node pools
+
+**Limitations**:
+- Cold starts when minimum instances = 0 (2–8 seconds)
+- Limited to GCP regions
+- Minimum instance cost adds ~$66/month base cost for production deployments
+
+**Cost at scale:**
+
+| Monthly Requests | Approx. Monthly Cost |
+|---|---|
+| 100K | ~$70 |
+| 1M | ~$85 |
+| 5M | ~$120 |
+| 10M | ~$160 |
+| 50M | ~$350 |
+| 100M | ~$620 |
+
+Costs assume 1 minimum instance, 1 vCPU, 512MB memory, 100ms average request duration, minimal egress.
+
+**Best for**: Teams that want self-managed control with minimal infrastructure overhead. The default choice unless you have a specific reason to use something else.
+
+## Google App Engine (legacy option)
+
+App Engine was the original hosting environment for sGTM before Cloud Run was available. GTM's setup wizard still includes App Engine as an option.
+
+**Differences from Cloud Run**:
+- Instances run continuously (no scale-to-zero) — higher baseline cost
+- Less granular scaling control
+- Standard and Flexible environments have different cold start characteristics
+- App Engine Flexible runs in the same underlying infrastructure as Cloud Run but with different configuration options
+
+**Why most teams choose Cloud Run instead**: Cloud Run offers more control, better cost optimization (scale-to-zero), and equivalent or better performance. There is no compelling reason to choose App Engine for new sGTM deployments unless your organization has existing App Engine infrastructure and standardized deployment processes.
+
+App Engine remains fully functional for sGTM and is a reasonable choice if you already use it. It is not the recommended default.
+
+## Stape (managed hosting)
+
+Stape is a purpose-built managed hosting platform for sGTM. They handle the GCP infrastructure — you configure your container in the Stape dashboard and connect your GTM account, without ever touching a Cloud Run deployment.
+
+**What Stape manages for you**:
+- Cloud Run (or equivalent) provisioning and maintenance
+- Custom domain setup and SSL certificate management
+- Automatic updates when the sGTM container image updates
+- Monitoring dashboard and basic alerting
+- The underlying GCP billing (you pay Stape directly, not GCP)
+
+**Stape Power-Ups** (add-on features):
+- **Cookie Keeper**: Extended cookie lifetime on Stape's managed domain
+- **Custom Loader**: Custom GTM loader script path to resist blocking
+- **FPID**: Server-generated First-Party ID cookie management
+- **Shared Domains**: Access to Stape's network of pre-configured first-party domains
+
+**Pricing tiers (approximate):**
+
+| Plan | Monthly Requests | Monthly Cost |
+|---|---|---|
+| Starter | 500K | $20 |
+| Professional | 2M | $50 |
+| Business | 10M | $120 |
+| Enterprise | 50M+ | Contact |
+
+**Strengths**:
+- No GCP account needed — the fastest path to a running sGTM server
+- UI-based configuration — no CLI or terraform required
+- Support included — Stape has customer success resources for sGTM questions
+- Power-Ups provide useful additional features without custom development
+
+**Limitations**:
+- Less control than self-hosted — you cannot modify Cloud Run configuration directly
+- Vendor dependency — Stape is the operator of your analytics infrastructure
+- Power-Ups are proprietary to Stape — switching hosting means losing them
+- Not suitable for organizations with data residency requirements in specific regions Stape does not support
+
+**Best for**: Agencies managing multiple client sGTM deployments, teams without GCP/DevOps expertise, organizations wanting to move fast without infrastructure setup.
+
+## AWS ECS Fargate
+
+Running sGTM on AWS uses ECS (Elastic Container Service) with Fargate as the compute engine. This is the correct choice for organizations that are already deeply invested in AWS infrastructure and want to keep their sGTM deployment in the same ecosystem as their application backend.
+
+**Architecture components**:
+- Application Load Balancer (ALB) for HTTPS termination and traffic routing
+- ECS Fargate tasks running the sGTM container
+- ECR (Elastic Container Registry) storing the container image
+- ACM (AWS Certificate Manager) for SSL certificates
+- Route 53 for DNS
+- CloudWatch for logging and monitoring
+
+**Setup complexity**: Significantly higher than Cloud Run. You manage ALB configuration, ECS task definitions, IAM roles, ECR image management, and auto-scaling policies explicitly. Plan 1–2 days of DevOps work for initial setup.
+
+**Cost at scale** (us-east-1, 0.25 vCPU, 0.5GB memory per task, 2 minimum tasks):
+
+| Monthly Requests | ALB | ECS Fargate | Data Transfer | Approx. Total |
+|---|---|---|---|---|
+| 1M | ~$25 | ~$30 | ~$5 | ~$60 |
+| 10M | ~$30 | ~$60 | ~$15 | ~$105 |
+| 100M | ~$50 | ~$300 | ~$80 | ~$430 |
+
+ALB has a fixed monthly cost (~$16-25) plus per-LCU charges. Fargate costs are based on vCPU and memory time. At high volume, AWS can be slightly cheaper than GCP Cloud Run, but the difference is modest.
+
+**Best for**: Organizations with existing AWS infrastructure, dedicated DevOps teams, or compliance requirements to keep data within AWS.
+
+## Addingwell (European managed hosting)
+
+Addingwell is a European managed sGTM hosting provider with a particular focus on GDPR compliance and European data residency. Similar positioning to Stape but with a European base of customers and European data centers.
+
+**Differentiators from Stape**:
+- European headquarters — relevant for GDPR DPA (Data Processing Agreement) requirements
+- European-first infrastructure deployment
+- Focus on compliance consulting alongside technical hosting
+
+**Limitations**:
+- Smaller ecosystem and feature set compared to Stape
+- Less documentation available in English
+
+**Best for**: European organizations with strict data residency requirements who prefer a European vendor relationship for their DPA.
+
+## Self-hosted Docker (any VPS or cloud)
+
+The sGTM container is a standard Docker image available from Google's Container Registry. You can run it anywhere Docker runs: any VPS (DigitalOcean, Hetzner, Linode), any cloud (Azure, IBM Cloud, Oracle Cloud), or on-premise.
+
+Pull the current image:
+```bash
+docker pull gcr.io/cloud-tagging-10302018/gtm-cloud-image:latest
+```
+
+Run it with the required environment variables:
+```bash
+docker run -p 8080:8080 \
+  -e CONTAINER_CONFIG="YOUR_BASE64_CONFIG_FROM_GTM" \
+  -e RUN_AS_PREVIEW_SERVER=false \
+  gcr.io/cloud-tagging-10302018/gtm-cloud-image:latest
+```
+
+**Strengths**:
+- Complete control over infrastructure, geography, and network topology
+- Can run in regions not covered by GCP or AWS
+- Potentially lower cost on discount VPS providers
+- No vendor lock-in
+
+**Limitations**:
+- Fully responsible for TLS, load balancing, scaling, health checks, updates, and monitoring
+- sGTM container image updates require manual pull and redeploy
+- No native integration with GTM's setup wizard
+- Firestore, Cloud Monitoring, and other GCP integrations require explicit credential configuration
+
+**Realistic cost comparison** (Hetzner VPS, 2 vCPU, 4GB RAM, Germany):
+- Server: €15–20/month
+- Very cost-effective for low-to-medium traffic
+- No autoscaling — you manually right-size for peak traffic or accept degraded performance during spikes
+
+**Best for**: Cost-sensitive deployments, organizations requiring specific geographic regions not supported by major cloud providers, teams with existing self-hosted infrastructure.
+
+## Decision framework
+
+| Factor | Cloud Run | App Engine | Stape | AWS ECS | Self-hosted |
+|---|---|---|---|---|---|
+| Setup time | 1–2 hours | 1–2 hours | 30 minutes | 4–8 hours | 2–4 hours |
+| GCP required | Yes | Yes | No | No | No |
+| Managed updates | Partial | Partial | Yes | No | No |
+| Data residency control | GCP regions | GCP regions | Stape regions | AWS regions | Any |
+| Scale-to-zero | Yes | No | Managed | No | No |
+| Integrated GCP services | Native | Native | Limited | Via API | Via API |
+| Support included | GCP docs | GCP docs | Yes | AWS docs | None |
+| Cost (1M req/month) | ~$85 | ~$100 | ~$35 | ~$60 | ~$20 |
+
+**Choose Cloud Run if**: You want self-managed control, use GCP for other infrastructure, or plan to use Firestore enrichment, Secret Manager, or other GCP-native features.
+
+**Choose Stape if**: Your team lacks GCP expertise, you are an agency managing multiple deployments, or you want a fast production deployment without infrastructure work.
+
+**Choose AWS if**: You are already on AWS and want your analytics infrastructure in the same ecosystem as your application.
+
+**Choose Addingwell if**: You are European, your DPA requires a European data processor, and Stape's non-European entity is a concern.
+
+**Choose self-hosted if**: You have specific geographic requirements not met by cloud providers, you are cost-sensitive at moderate scale, or your organization has on-premise infrastructure requirements.
+
+## Common mistakes
+
+**Choosing Stape to "save time" then hitting its limits immediately.** Stape is genuinely the fastest path to running sGTM. But if your deployment requires complex Firestore enrichment, custom Google Cloud service account access, or specific Cloud Run configuration, you will spend that time savings plus extra debugging Stape's limitations. Match the hosting choice to your actual requirements.
+
+**Running sGTM on AWS without CloudWatch log export.** sGTM's native debugging integrates with GCP Cloud Logging. On AWS, debugging relies entirely on CloudWatch. Set up CloudWatch log streaming from ECS before your first production deployment, not after you need it.
+
+**Self-hosting without a container update procedure.** The sGTM container image updates periodically. A self-hosted deployment that is never updated may run outdated code with security issues or missing features. Document and schedule a monthly update procedure on day one.
+
+**Migrating hosting providers mid-deployment without coordination.** Moving from Stape to Cloud Run (or vice versa) requires updating your custom domain's DNS, updating the GTM Server Container URL in your client-side tags, and publishing both changes atomically. A migration done piece-by-piece creates a window where client-side and server-side configurations mismatch.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GCP Setup"
+    description="Step-by-step guide for deploying sGTM on Google Cloud Run."
+    href="/server-side/setup/gcp-setup/"
+  />
+  <LinkCard
+    title="AWS Setup"
+    description="ECS Fargate deployment guide for AWS-based sGTM infrastructure."
+    href="/server-side/setup/aws-setup/"
+  />
+  <LinkCard
+    title="Stape Setup"
+    description="Managed hosting setup walkthrough — the fastest path to production."
+    href="/server-side/setup/stape-setup/"
+  />
+  <LinkCard
+    title="Cost Management"
+    description="Cost modeling and optimization across hosting providers."
+    href="/server-side/operations/cost-management/"
+  />
+</CardGrid>

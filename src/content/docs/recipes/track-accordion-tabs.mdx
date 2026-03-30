@@ -48,16 +48,16 @@ If your accordion uses semantic HTML:
    Variable `Click - Panel Name`:
    ```javascript
    function() {
-     var el = {{Click Element}};
+     var el = `{{Click Element}}`;
      while (el && !el.dataset.panel) el = el.parentElement;
-     return el ? el.dataset.panel : {{Click ID}};
+     return el ? el.dataset.panel : `{{Click ID}}`;
    }
    ```
 
    Variable `Click - Panel State`:
    ```javascript
    function() {
-     var el = {{Click Element}};
+     var el = `{{Click Element}}`;
      while (el && !el.hasAttribute('aria-expanded')) el = el.parentElement;
      // aria-expanded is the state BEFORE the click
      // 'false' = was closed, now opening

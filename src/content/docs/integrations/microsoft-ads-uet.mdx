@@ -92,16 +92,16 @@ For e-commerce purchases with dynamic order values, use variable revenue:
 
 2. In GTM, create a tag that fires on your purchase event and passes the order value:
 
-```html
-<!-- GTM Custom HTML tag: UET Purchase with Revenue -->
-<script>
-window.uetq = window.uetq || [];
-window.uetq.push('event', 'purchase', {
-  'revenue_value': {{DL - Revenue}},
-  'currency': {{DL - Currency}}
-});
-</script>
-```
+   ```html
+   <!-- GTM Custom HTML tag: UET Purchase with Revenue -->
+   <script>
+   window.uetq = window.uetq || [];
+   window.uetq.push('event', 'purchase', {
+     'revenue_value': {{DL - Revenue}},
+     'currency': {{DL - Currency}}
+   });
+   </script>
+   ```
 
 3. Trigger: Custom Event — `purchase`
 

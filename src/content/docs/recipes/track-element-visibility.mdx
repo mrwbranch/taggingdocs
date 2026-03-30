@@ -46,7 +46,7 @@ GTM has a built-in Element Visibility trigger that watches for DOM elements ente
    Create a Custom JavaScript Variable `VE - content_name`:
    ```javascript
    function() {
-     var el = {{Visible Element}};
+     var el = `{{Visible Element}}`;
      return el ? (el.dataset.contentName || el.id || el.className) : undefined;
    }
    ```

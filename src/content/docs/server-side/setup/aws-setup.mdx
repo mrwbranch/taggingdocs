@@ -66,54 +66,55 @@ aws secretsmanager create-secret \
 
 2. Paste the following, replacing the region, account ID, and secret ARN:
 
-```json
-{
-  "family": "sgtm-task",
-  "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "512",
-  "memory": "1024",
-  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskRole",
-  "containerDefinitions": [
-    {
-      "name": "sgtm",
-      "image": "gcr.io/cloud-tagging-10302018/gtm-cloud-image:stable",
-      "portMappings": [
-        {
-          "containerPort": 8080,
-          "protocol": "tcp"
-        }
-      ],
-      "secrets": [
-        {
-          "name": "CONTAINER_CONFIG",
-          "valueFrom": "arn:aws:secretsmanager:eu-west-1:ACCOUNT_ID:secret:sgtm/container-config"
-        }
-      ],
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-group": "/ecs/sgtm",
-          "awslogs-region": "eu-west-1",
-          "awslogs-stream-prefix": "ecs"
-        }
-      },
-      "healthCheck": {
-        "command": ["CMD-SHELL", "curl -f http://localhost:8080/healthz || exit 1"],
-        "interval": 30,
-        "timeout": 5,
-        "retries": 3
-      }
-    }
-  ]
-}
-```
+   ```json
+   {
+     "family": "sgtm-task",
+     "networkMode": "awsvpc",
+     "requiresCompatibilities": ["FARGATE"],
+     "cpu": "512",
+     "memory": "1024",
+     "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+     "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskRole",
+     "containerDefinitions": [
+       {
+         "name": "sgtm",
+         "image": "gcr.io/cloud-tagging-10302018/gtm-cloud-image:stable",
+         "portMappings": [
+           {
+             "containerPort": 8080,
+             "protocol": "tcp"
+           }
+         ],
+         "secrets": [
+           {
+             "name": "CONTAINER_CONFIG",
+             "valueFrom": "arn:aws:secretsmanager:eu-west-1:ACCOUNT_ID:secret:sgtm/container-config"
+           }
+         ],
+         "logConfiguration": {
+           "logDriver": "awslogs",
+           "options": {
+             "awslogs-group": "/ecs/sgtm",
+             "awslogs-region": "eu-west-1",
+             "awslogs-stream-prefix": "ecs"
+           }
+         },
+         "healthCheck": {
+           "command": ["CMD-SHELL", "curl -f http://localhost:8080/healthz || exit 1"],
+           "interval": 30,
+           "timeout": 5,
+           "retries": 3
+         }
+       }
+     ]
+   }
+   ```
 
 3. Create the log group in CloudWatch first:
-```bash
-aws logs create-log-group --log-group-name /ecs/sgtm --region eu-west-1
-```
+
+   ```bash
+   aws logs create-log-group --log-group-name /ecs/sgtm --region eu-west-1
+   ```
 </Steps>
 
 ## Step 4: Configure IAM roles

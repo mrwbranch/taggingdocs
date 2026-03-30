@@ -107,34 +107,34 @@ Shopify requires special handling for purchase events because the order confirma
 3. Name it "GTM Server-Side"
 4. Add this code:
 
-```javascript
-analytics.subscribe('checkout_completed', (event) => {
-  const order = event.data.checkout;
+   ```javascript
+   analytics.subscribe('checkout_completed', (event) => {
+     const order = event.data.checkout;
 
-  // Push to parent page's dataLayer (for GTM web container)
-  window.parent.postMessage({
-    type: 'GTM_EVENT',
-    payload: {
-      event: 'purchase',
-      ecommerce: {
-        transaction_id: order.order.id,
-        value: parseFloat(order.totalPrice.amount),
-        currency: order.totalPrice.currencyCode,
-        tax: parseFloat(order.totalTax?.amount || 0),
-        shipping: parseFloat(order.shippingLine?.price?.amount || 0),
-        items: order.lineItems.map((item, index) => ({
-          item_id: item.variant?.sku || item.variant?.id,
-          item_name: item.title,
-          item_variant: item.variant?.title,
-          price: parseFloat(item.variant?.price?.amount || 0),
-          quantity: item.quantity,
-          index: index
-        }))
-      }
-    }
-  }, '*');
-});
-```
+     // Push to parent page's dataLayer (for GTM web container)
+     window.parent.postMessage({
+       type: 'GTM_EVENT',
+       payload: {
+         event: 'purchase',
+         ecommerce: {
+           transaction_id: order.order.id,
+           value: parseFloat(order.totalPrice.amount),
+           currency: order.totalPrice.currencyCode,
+           tax: parseFloat(order.totalTax?.amount || 0),
+           shipping: parseFloat(order.shippingLine?.price?.amount || 0),
+           items: order.lineItems.map((item, index) => ({
+             item_id: item.variant?.sku || item.variant?.id,
+             item_name: item.title,
+             item_variant: item.variant?.title,
+             price: parseFloat(item.variant?.price?.amount || 0),
+             quantity: item.quantity,
+             index: index
+           }))
+         }
+       }
+     }, '*');
+   });
+   ```
 
 5. Save and activate the pixel
 </Steps>
@@ -182,7 +182,7 @@ The `{% if first_time_accessed %}` guard prevents duplicate purchase events on p
 3. Add GTM snippet in `<head>`:
    ```html
    <!-- GTM head snippet -->
-   {{ '<!-- Google Tag Manager -->' }}
+   `{{ '<!-- Google Tag Manager -->' }}`
    <script>(function(w,d,s,l,i){...})(window,document,'script','dataLayer','GTM-XXXXXX');</script>
    <!-- End GTM -->
    ```

@@ -41,7 +41,7 @@ GTM can detect anchor link clicks using a trigger condition that matches `href` 
    Variable `Click - Anchor Target`:
    ```javascript
    function() {
-     var url = {{Click URL}};
+     var url = `{{Click URL}}`;
      var hash = url ? url.split('#')[1] : undefined;
      return hash || undefined;
    }
