@@ -1,6 +1,184 @@
 ---
 title: "Track Clipboard Content"
-description: "Track what content users copy from your pages."
+description: "Track what content users copy from your pages — selected text, code blocks, article sections — with privacy-safe truncation and content identification."
+sidebar:
+  badge:
+    text: Intermediate
+    variant: note
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Knowing what users copy from your pages reveals what content resonates. On documentation sites, it shows which code snippets developers actually use. On news or research sites, it shows which quotes and statistics get cited. On pricing or legal pages, it can signal comparison shopping or due diligence.
+
+<Aside type="caution">
+Always truncate copied text before sending it to GA4. Never send full clipboard contents — they may contain content copied from other tabs, passwords from form fields, or other sensitive data your users did not intend to share.
+</Aside>
+
+## Implementation
+
+<DataLayerExample event="content_copy" description="Tracks what text the user copies, limited to 150 characters, with source section identification.">
+```javascript
+(function() {
+  // Only track copies on specific page types — adjust as needed
+  var trackablePaths = ['/docs/', '/blog/', '/pricing/', '/products/'];
+  var currentPath = window.location.pathname;
+  var isTrackablePage = trackablePaths.some(function(p) {
+    return currentPath.indexOf(p) === 0;
+  });
+
+  if (!isTrackablePage) return;
+
+  document.addEventListener('copy', function(event) {
+    // Only track user-initiated copies
+    if (!event.isTrusted) return;
+
+    var selection = window.getSelection();
+    if (!selection || selection.toString().trim().length === 0) return;
+
+    var copiedText = selection.toString().trim();
+
+    // Identify the content section
+    var section = null;
+    var anchorNode = selection.anchorNode;
+    var el = anchorNode.nodeType === Node.TEXT_NODE
+      ? anchorNode.parentElement
+      : anchorNode;
+
+    while (el && el !== document.body) {
+      if (el.dataset.section || el.dataset.trackSection || el.id) {
+        section = el.dataset.section || el.dataset.trackSection || el.id;
+        break;
+      }
+      if (el.tagName === 'ARTICLE' || el.tagName === 'SECTION' || el.tagName === 'MAIN') {
+        section = el.id || el.className.split(' ')[0] || el.tagName.toLowerCase();
+        break;
+      }
+      el = el.parentElement;
+    }
+
+    // Determine if this is code
+    var anchorEl = anchorNode.nodeType === Node.TEXT_NODE
+      ? anchorNode.parentElement
+      : anchorNode;
+    var isCode = false;
+    var codeEl = anchorEl;
+    while (codeEl && codeEl !== document.body) {
+      if (codeEl.tagName === 'CODE' || codeEl.tagName === 'PRE') {
+        isCode = true;
+        break;
+      }
+      codeEl = codeEl.parentElement;
+    }
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'content_copy',
+      // Truncate for privacy and GA4 parameter limits
+      copy_text_preview: copiedText.substring(0, 150),
+      copy_character_count: copiedText.length,
+      copy_word_count: copiedText.trim().split(/\s+/).length,
+      copy_type: isCode ? 'code' : 'text',
+      copy_section: section || 'unknown',
+      page_path: window.location.pathname,
+      page_title: document.title
+    });
+  });
+})();
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add the code as a Custom HTML tag** in GTM
+   - Trigger: **DOM Ready** (filter to content pages using a Page Path condition)
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `content_copy`
+
+3. **Create Data Layer Variables**
+
+   - `DLV - copy_text_preview` → `copy_text_preview`
+   - `DLV - copy_character_count` → `copy_character_count`
+   - `DLV - copy_type` → `copy_type`
+   - `DLV - copy_section` → `copy_section`
+
+4. **Create a GA4 Event Tag**
+
+   - Event name: `content_copy`
+   - Parameters:
+     - `copy_text_preview` → `{{DLV - copy_text_preview}}`
+     - `copy_character_count` → `{{DLV - copy_character_count}}`
+     - `copy_type` → `{{DLV - copy_type}}`
+     - `copy_section` → `{{DLV - copy_section}}`
+   - Trigger: the Custom Event trigger
+
+5. **Add section markers to your HTML** for better identification:
+   ```html
+   <section data-section="features">...</section>
+   <section data-section="pricing">...</section>
+   <pre data-section="code-example-authentication"><code>...</code></pre>
+   ```
+
+6. **Test in Preview Mode**
+
+   Select some text and press Ctrl+C (Cmd+C on Mac). The `content_copy` event should fire with the truncated text preview and section identification.
+</Steps>
+
+<TagConfig
+  name="GA4 - content_copy"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - content_copy"
+  variables={["DLV - copy_text_preview", "DLV - copy_character_count", "DLV - copy_type", "DLV - copy_section"]}
+/>
+
+## Privacy-safe alternatives
+
+If `copy_text_preview` feels too invasive for your users, track without the content:
+
+```javascript
+window.dataLayer.push({
+  event: 'content_copy',
+  copy_character_count: copiedText.length,
+  copy_word_count: copiedText.trim().split(/\s+/).length,
+  copy_type: isCode ? 'code' : 'text',
+  copy_section: section || 'unknown'
+  // No copy_text_preview
+});
+```
+
+This tells you how much content was copied and from where, without any risk of capturing sensitive text.
+
+## Using clipboard data in analysis
+
+In GA4, explore `content_copy` events alongside other engagement signals:
+
+- **High copy volume + low scroll depth** = users found what they needed quickly
+- **Code copy events** on documentation pages = content is actually being used
+- **Long copy character counts** on legal pages = users are extracting terms for review
+- **Section-level analysis** = which sections generate the most copies
+
+## Test it
+
+1. Open GTM Preview and navigate to a content page
+2. Click and drag to select a sentence of text, then press Ctrl+C
+3. The `content_copy` event should appear in the Summary pane
+4. Verify `copy_text_preview` shows the first 150 characters of what you copied
+5. Select a code block and copy it — verify `copy_type` is `code`
+6. Check `copy_section` reflects the correct section
+
+## Common gotchas
+
+**`event.isTrusted` blocks programmatic copies.** The `isTrusted` check prevents "Copy to clipboard" buttons from being tracked here. If you want to track button-triggered copies too, either remove the check or handle them separately with a button click event.
+
+**Copied text from outside the tracked area.** If a user copies text from a form field or input, it will not be tracked (form fields are not within the page content sections). This is intentional — form field content is often PII.
+
+**`selection.anchorNode` can be null.** Some clipboard events fire with no active selection (e.g., after triple-click selects all text in an input). The `selection.toString().trim().length === 0` check handles this.
+
+<CardGrid>
+  <LinkCard title="Track Copy & Paste" href="/recipes/track-copy-paste/" description="Simpler version tracking just that a copy happened, not what." />
+  <LinkCard title="PII Detection & Removal" href="/recipes/pii-detection-removal/" description="Additional safeguards for stripping sensitive content." />
+</CardGrid>

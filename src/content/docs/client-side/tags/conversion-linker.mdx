@@ -1,6 +1,165 @@
 ---
 title: "Conversion Linker"
-description: "The Conversion Linker tag explained — what it does and when you need it."
+description: "What the Conversion Linker tag does, why it is required for Google Ads conversion tracking via GTM, and how to configure it correctly."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+The Conversion Linker is a GTM tag that reads click IDs from landing page URLs and stores them as first-party cookies. If you are running Google Ads and tracking conversions via GTM, this tag is not optional — without it, your conversions will not be attributed to your campaigns.
+
+It is one of the simplest tags to configure (usually no settings to change), and one of the most commonly missed. Add it to every container that has Google Ads conversion tags.
+
+## What the Conversion Linker does
+
+When a user clicks on a Google Ads advertisement, Google appends a click parameter to the destination URL:
+
+- `gclid` — Google Click ID, present on most search and display ad clicks
+- `wbraid` — Web-to-app attribution parameter for iOS traffic
+- `gbraid` — App-to-web attribution parameter
+
+These parameters look like: `https://example.com/landing-page?gclid=Cj0KCQiAy...`
+
+The parameter contains the attribution data Google needs to connect the conversion back to the specific ad, campaign, keyword, and bidding signal that drove the click.
+
+Here is the problem: when the user navigates from the landing page to subsequent pages (like a product page, then a cart, then a checkout confirmation), the `gclid` parameter drops off the URL. By the time the conversion fires on the thank-you page, there is no click parameter in the URL.
+
+The Conversion Linker solves this by reading the `gclid` (and `wbraid`/`gbraid`) from the initial landing page URL and storing it in a first-party cookie (`_gcl_aw`, `_gcl_gb`, `_gcl_au`). When the conversion tag fires on the confirmation page, it reads these cookies to retrieve the click attribution data.
+
+Without the Conversion Linker:
+1. User clicks ad → lands on `example.com/product?gclid=abc123`
+2. Navigates to cart, checkout, confirmation (gclid drops off URL)
+3. Conversion tag fires on confirmation page
+4. No cookie exists → no click ID → **conversion is not attributed to the ad click**
+
+With the Conversion Linker:
+1. User clicks ad → lands on `example.com/product?gclid=abc123`
+2. Conversion Linker fires on All Pages → reads `gclid=abc123` → stores `_gcl_aw` cookie
+3. User navigates to confirmation page
+4. Conversion tag fires → reads `_gcl_aw` cookie → **correctly attributed to the ad click**
+
+## Creating the Conversion Linker tag
+
+<Steps>
+1. In GTM, go to **Tags → New**.
+2. Select **Conversion Linker** as the tag type. It is in the Google Ads category.
+3. Leave all settings at their defaults unless you need cross-domain configuration (see below).
+4. Set the trigger to **All Pages (Page View)**.
+5. Set the **Tag Firing Priority** to `100` (or another high number) to ensure it fires before your conversion tags on the same page.
+6. Name it: `Conversion Linker`.
+7. Save and publish.
+</Steps>
+
+<TagConfig
+  name="Conversion Linker"
+  type="Conversion Linker"
+  trigger="All Pages (Page View)"
+/>
+
+That is it. No Conversion ID, no parameters to configure. One tag, fires on All Pages, runs before everything else. Done.
+
+## One Conversion Linker per container
+
+You only need one Conversion Linker tag per GTM container, regardless of how many Google Ads conversion tags you have. The Conversion Linker stores the click IDs in first-party cookies that persist across the session. Every conversion tag on any page can read those cookies.
+
+Do not create separate Conversion Linker tags for each conversion action. One tag covers all of them.
+
+## How it relates to the Google Tag
+
+The Google Tag (GA4 Configuration Tag) includes Conversion Linker functionality when it is configured with a Google Ads Conversion ID. When the Google Tag is present and configured for Google Ads, it handles the `gclid` cookie storage.
+
+However, most GTM implementations have the Google Tag configured for GA4 only — not for Google Ads. In that case, the Conversion Linker tag is separately needed.
+
+The safest approach: add both the Google Tag (for GA4) and the Conversion Linker (for Ads). They do not conflict. The Conversion Linker is lightweight and adds no meaningful performance cost.
+
+## Cross-domain tracking
+
+If your funnel spans multiple domains — users start on `example.com` and convert on `checkout.payments-partner.com` — the Conversion Linker must be configured to pass click IDs across domain boundaries.
+
+When a user navigates from your domain to an external domain, the click ID cookies are not accessible on the other domain (same-origin policy). The Conversion Linker handles this by appending the click ID data to the URL when the user navigates to the linked domain.
+
+To configure cross-domain conversion linking:
+
+<Steps>
+1. Open your Conversion Linker tag.
+2. Expand **Configure Conversion Linker Options**.
+3. Enable **Auto-Link Domains**.
+4. Add the domains that should receive the click ID. Enter each domain that is part of your conversion funnel: `checkout.partner.com`, `secure.payments.example.net`.
+5. Save.
+</Steps>
+
+With Auto-Link Domains configured, when the user clicks a link to `checkout.partner.com`, the Conversion Linker appends a `_gl` parameter to the URL containing the encoded click ID. The Conversion Linker running on `checkout.partner.com` reads that parameter and stores the cookie there.
+
+<Aside type="caution">
+Cross-domain Conversion Linking requires the Conversion Linker tag to be deployed on **both** domains. If you cannot install GTM on the partner domain (a third-party checkout, for example), cross-domain attribution via client-side cookies is not possible. In that case, use server-side conversion importing via the Google Ads Conversion Import API.
+</Aside>
+
+## How the Conversion Linker interacts with Consent Mode
+
+When Consent Mode is active and `ad_storage` is denied:
+- The Conversion Linker **still reads the gclid from the URL** — it does not require consent to read URL parameters
+- The Conversion Linker **does not write the `_gcl_aw` cookie** — writing cookies requires `ad_storage: granted`
+
+This means conversions for users who deny consent cannot be attributed via cookies. Google Ads handles this through conversion modeling — using statistical patterns from consenting users to estimate the conversions that were not observed.
+
+For modeling to work well:
+- Configure Consent Mode correctly so Google receives the consent state signal
+- Do not block the Conversion Linker tag when consent is denied — let it fire on All Pages so it can read the URL parameter (even if it cannot write the cookie, the signal still supports modeling)
+
+## Verifying the Conversion Linker is working
+
+1. Click one of your Google Ads → land on your site (URL will have `gclid=...`)
+2. Open DevTools → Application → Cookies → your domain
+3. Look for `_gcl_aw` cookie — it should be set with a value
+4. Navigate to your confirmation page
+5. Check that your conversion tag fires (use GTM Preview or the Network tab looking for `googleadservices.com/pagead/conversion/`)
+
+If `_gcl_aw` is not set despite the gclid being in the landing page URL:
+- Verify the Conversion Linker tag is published (not just in Preview)
+- Verify Consent Mode is not blocking `ad_storage` for this user
+- Check for CSP restrictions that might block the Conversion Linker's cookie-writing behavior
+
+## Common mistakes
+
+### Not having a Conversion Linker at all
+
+This is the number one cause of "my Google Ads conversions are not recording." The tag fires, the parameters look right, but no attribution happens. Add the Conversion Linker.
+
+### Adding one Conversion Linker per conversion action
+
+One per container. Not one per conversion. Not one per campaign. One total.
+
+### Firing the Conversion Linker on specific pages only
+
+Some people try to optimize by firing the Conversion Linker only on the conversion page. This defeats the entire purpose — the Conversion Linker must fire on the landing page (where the gclid is in the URL) to capture the click ID. By the time the user reaches the conversion page, the gclid is no longer in the URL.
+
+Fire on **All Pages**.
+
+### Forgetting to add the Conversion Linker when setting up a new container
+
+When migrating from one container to another, or creating a new container for a new site, the Conversion Linker is easy to overlook because it is not associated with a specific conversion action. Checklist it as a required setup item for any container that runs Google Ads.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Google Ads Troubleshooting"
+    description="Comprehensive guide to why Google Ads conversions fail — the Conversion Linker is Problem 1."
+    href="/client-side/tags/google-ads-troubleshooting/"
+  />
+  <LinkCard
+    title="GA4 Configuration Tag"
+    description="The Google Tag that pairs with the Conversion Linker for complete Google tracking setup."
+    href="/client-side/tags/ga4-configuration-tag/"
+  />
+  <LinkCard
+    title="Cross-Domain Tracking"
+    description="Full guide to cross-domain tracking when your funnel spans multiple websites."
+    href="/client-side/tracking/cross-domain-tracking/"
+  />
+  <LinkCard
+    title="Google Consent Mode"
+    description="How Consent Mode interacts with the Conversion Linker and ad_storage cookies."
+    href="/client-side/setup/google-consent-mode/"
+  />
+</CardGrid>

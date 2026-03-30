@@ -1,6 +1,214 @@
 ---
 title: "Custom Event Design"
-description: "Principles for designing your own dataLayer events."
+description: "Hands-on guide to building new dataLayer events — when to create, how to name them, how to document, and how to test before shipping to production."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Designing a custom event is not just writing a `dataLayer.push()` call. It's making an architectural decision that affects your GTM configuration, your GA4 custom dimensions, your team's analytics vocabulary, and your reporting for the lifetime of the implementation. This page walks through the practical process of doing it right.
+
+## When you actually need a new event
+
+The honest answer is: less often than you think.
+
+Before creating a new custom event, check three things:
+
+**1. Is there a GA4 recommended event?**
+GA4's recommended event list covers most common scenarios. `generate_lead`, `search`, `login`, `share`, `select_content` — if one of these fits your use case, use it. You get pre-built reports, proper categorization, and a schema that matches what Google expects.
+
+**2. Can this be a parameter on an existing event?**
+If you already track `form_submit` and you want to track a new form type, adding `form_type: 'newsletter'` to your existing event is better than creating `newsletter_subscribe`. Events represent fundamentally different action types. Parameters carry variation within a type.
+
+**3. Do you need this to trigger a separate GTM tag?**
+If the answer is no — you just want to see counts in GA4 — a parameter on an existing event is probably enough. If yes, a distinct event name makes GTM trigger configuration unambiguous.
+
+## The naming decision
+
+Once you've decided you need a new event, naming it correctly is the most important step.
+
+Apply these rules in order:
+
+```
+1. snake_case only — add_to_cart, not addToCart or add-to-cart
+2. Under 40 characters — count before you commit
+3. No reserved prefixes — not gtm.*, ga_*, google_*
+4. Matches GA4 recommended name if one exists — use 'login', not 'user_login'
+5. Uses a namespace prefix for custom events — content_*, form_*, error_*
+6. Describes an action, not data — 'video_play', not 'video_id_12345'
+7. Consistent verb_object pattern — 'form_submit', 'content_share', 'video_play'
+```
+
+Naming checklist:
+
+```
+□ snake_case
+□ Under 40 characters
+□ No reserved prefix (gtm., ga_, google_)
+□ Not a renamed GA4 recommended event
+□ Namespace prefix applied if it's a custom event
+□ Verb_object structure
+□ Doesn't already exist in your spec
+□ Will make sense to a new team member in 18 months
+```
+
+## Parameter design
+
+For each new event, define its parameters before implementation. Ask for each potential parameter:
+
+- Is this required or optional?
+- What data type? (string, number, boolean)
+- What are the valid values? (categorical values should have a defined set)
+- Is this high-cardinality? (if yes, does it need a custom dimension slot?)
+- Does this parameter already exist with the same name on another event? (reuse it)
+
+A well-designed parameter set for a hypothetical `appointment_booked` event:
+
+```javascript
+dataLayer.push({
+  event: 'appointment_booked',
+
+  // Required parameters
+  appointment_type: 'consultation',    // string, enum: consultation, fitting, styling
+  appointment_service: 'leather_care', // string — which service was booked
+
+  // Optional parameters
+  appointment_date: '2024-04-15',     // ISO date string — when it's booked for
+  appointment_location: 'london_store', // which store
+  appointment_duration_minutes: 60,   // number
+  is_first_appointment: true          // boolean
+});
+```
+
+## Documentation template
+
+Document every new event before it ships. This template captures what you need:
+
+```markdown
+## Event: appointment_booked
+
+**Purpose**: Fires when a user successfully books a store appointment.
+
+**When it fires**: After the booking API returns a success response. Not on button
+  click — after server confirmation.
+
+**Where it fires**: Appointment booking flow (all steps ≥ 3), mobile and desktop.
+
+**Spec version**: 2.3.0 (minor addition — backward compatible)
+
+### Parameters
+
+| Parameter | Type | Required | Enum / Format | Description |
+|-----------|------|----------|---------------|-------------|
+| appointment_type | string | Yes | consultation, fitting, styling | Category of appointment |
+| appointment_service | string | Yes | — | Specific service name from booking system |
+| appointment_date | string | No | YYYY-MM-DD | Date of the appointment |
+| appointment_location | string | No | — | Store slug, e.g., london_store |
+| appointment_duration_minutes | number | No | — | Expected duration |
+| is_first_appointment | boolean | No | — | First-time booking flag |
+
+### Example
+
+```javascript
+dataLayer.push({
+  event: 'appointment_booked',
+  appointment_type: 'consultation',
+  appointment_service: 'personal_styling',
+  appointment_date: '2024-04-15',
+  appointment_location: 'london_store',
+  appointment_duration_minutes: 60,
+  is_first_appointment: true
+});
+```
+
+### GA4 impact
+- Custom dimensions needed: appointment_type (new), appointment_service (new) — 2 slots
+- Event name count after addition: 28/500
+- Weekly event volume estimate: ~50 events
+
+### GTM trigger
+CE - appointment_booked
+
+### Approved by
+Analytics team: [name, date]
+Engineering review: [name, date]
+```
+
+## Testing before production
+
+Never deploy a new event to production as the first place it runs.
+
+### Development validation
+
+Add a debug layer during development that logs when events don't match their spec:
+
+```javascript
+function pushEvent(eventData) {
+  if (process.env.NODE_ENV === 'development') {
+    validateEvent(eventData);
+  }
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push(eventData);
+}
+
+function validateEvent(data) {
+  if (!data.event) {
+    console.error('DataLayer push missing event name:', data);
+  }
+  if (data.event && data.event !== data.event.toLowerCase()) {
+    console.warn('Event name should be lowercase snake_case:', data.event);
+  }
+  if (typeof data.event === 'string' && data.event.length > 40) {
+    console.error('Event name exceeds 40 characters:', data.event);
+  }
+}
+```
+
+### GA4 DebugView verification
+
+1. Open the page in Chrome with the GA Debugger extension enabled, or trigger GTM Preview mode.
+2. Open GA4 Admin > DebugView.
+3. Trigger the event.
+4. Confirm it appears in DebugView with the correct event name.
+5. Click on it and verify all parameters show the expected values and types.
+6. Check that no parameters show as `undefined`, `null`, or empty string when they should have values.
+
+### QA checklist before shipping
+
+```
+□ Event fires at the correct moment (not too early, not on every re-render)
+□ All required parameters have values on every trigger
+□ No parameters contain PII (email, name, phone, address)
+□ Numeric parameters are numbers, not strings
+□ Event name is under 40 characters
+□ Event appears correctly in GA4 DebugView
+□ Event does not fire multiple times per action
+□ ecommerce null clear is present (for ecommerce events)
+□ Custom dimensions are registered in GA4 for parameters you want to report on
+□ Documentation is updated in spec repository
+```
+
+## Common mistakes
+
+**Designing the event to fit the data you have, not the question you want to answer.** Start from the question — "which appointment types convert to purchases?" — then design the event to answer it. Don't start from "we have these fields in our database" and dump them all into an event.
+
+**Creating events for monitoring, not analytics.** Error counts, API response times, and server health metrics belong in your monitoring stack (Datadog, Sentry, etc.) — not in GA4. Track user-facing errors in GA4. Track system-level metrics in your infrastructure tools.
+
+**Not reviewing the event before building GTM configuration.** If the event spec changes after GTM variables and tags are built, someone has to update all of it. Get the spec reviewed and approved before building GTM.
+
+<CardGrid>
+  <LinkCard
+    title="Designing Custom Events (Specification)"
+    description="The formal framework for event design — decision trees, impact assessment, review process."
+    href="/datalayer/specification/designing-custom-events/"
+  />
+  <LinkCard
+    title="Event Naming Rules"
+    description="Detailed naming rules — GA4 recommended events, the 40-character limit, anti-patterns."
+    href="/datalayer/specification/event-naming-rules/"
+  />
+  <LinkCard
+    title="Validation Approaches"
+    description="How to validate your events before and after shipping to production."
+    href="/datalayer/validation/validation-approaches/"
+  />
+</CardGrid>

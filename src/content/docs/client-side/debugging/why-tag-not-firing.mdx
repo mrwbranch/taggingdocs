@@ -1,6 +1,315 @@
 ---
 title: "Why Isn't My Tag Firing?"
-description: "Systematic troubleshooting for tags that don't fire."
+description: "A systematic diagnostic flowchart for tags that don't fire — work through 12 possible causes in order."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import DecisionTree from '../../../../components/DecisionTree.tsx';
+
+A tag that doesn't fire has a specific cause. It is not random. Work through the flowchart below systematically — every non-firing tag falls into one of these categories.
+
+<DecisionTree
+  client:visible
+  title="Tag Not Firing Diagnostic"
+  startNode="start"
+  nodes={{
+    start: {
+      question: "Is the GTM container loading on this page?",
+      options: [
+        {
+          label: "Yes — I can see the gtm.js network request",
+          next: "container_published"
+        },
+        {
+          label: "No — I don't see a gtm.js request in the Network tab",
+          next: "container_not_loading"
+        },
+        {
+          label: "I'm not sure how to check",
+          next: "check_network"
+        }
+      ]
+    },
+    check_network: {
+      question: "Open DevTools → Network tab → reload the page → filter by 'gtm.js'. Do you see a request to googletagmanager.com/gtm.js?",
+      options: [
+        {
+          label: "Yes, I see a gtm.js request",
+          next: "container_published"
+        },
+        {
+          label: "No gtm.js request found",
+          next: "container_not_loading"
+        }
+      ]
+    },
+    container_not_loading: {
+      question: "Why isn't the container loading?",
+      options: [
+        {
+          label: "The GTM snippet is missing from this page",
+          result: "Missing GTM snippet",
+          resultDescription: "The GTM container snippet (the <script> block with your GTM-XXXXXXX ID) is not present in the page HTML. Add it to the <head> of every page. For SPAs, ensure it's in the root layout.",
+          resultLink: "/client-side/setup/container-installation/"
+        },
+        {
+          label: "An ad blocker or extension is blocking the script",
+          result: "Ad blocker interference",
+          resultDescription: "Test in a fresh incognito window without browser extensions. If the container loads there, an extension is blocking it. For production diagnosis, test without extensions installed.",
+          resultLink: "/client-side/debugging/console-debugging/"
+        },
+        {
+          label: "A Content Security Policy might be blocking it",
+          result: "CSP blocking GTM",
+          resultDescription: "Check the browser console for CSP violation messages. Look for 'Content-Security-Policy' errors mentioning googletagmanager.com. You need to allowlist googletagmanager.com in your script-src directive."
+        }
+      ]
+    },
+    container_published: {
+      question: "Is the container published? (Not just in Preview mode)",
+      options: [
+        {
+          label: "Yes, it's published to Live",
+          next: "preview_connected"
+        },
+        {
+          label: "I only tested it in Preview mode and the tag should be live",
+          result: "Container not published",
+          resultDescription: "Preview mode tests your workspace changes — they are NOT visible to real users until you publish. Click Submit → Publish in GTM to push your changes to the Live container.",
+          resultLink: "/client-side/management/version-control/"
+        },
+        {
+          label: "I'm not sure if it's published",
+          result: "Check publish status",
+          resultDescription: "In GTM, check the container version number shown in the top bar. If your workspace shows changes (orange dot), those changes haven't been published yet. The version on the site is the last published version."
+        }
+      ]
+    },
+    preview_connected: {
+      question: "Is GTM Preview mode connected and showing this page?",
+      options: [
+        {
+          label: "Yes, Preview mode is active and I can see events",
+          next: "trigger_firing"
+        },
+        {
+          label: "Preview mode won't connect or shows a blank screen",
+          result: "Preview mode connection issue",
+          resultDescription: "Try in a fresh incognito window without extensions. Disable ad blockers. Check for CSP violations in the console. If on a different network than your GTM account (VPN, corporate firewall), try without VPN.",
+          resultLink: "/client-side/debugging/preview-mode/"
+        }
+      ]
+    },
+    trigger_firing: {
+      question: "In Preview mode, when you perform the action that should fire the tag — does the tag appear in 'Tags Not Fired'?",
+      options: [
+        {
+          label: "Yes, the tag is in 'Tags Not Fired'",
+          next: "check_trigger"
+        },
+        {
+          label: "The expected event doesn't even appear in the Timeline",
+          next: "event_not_appearing"
+        },
+        {
+          label: "The tag appears in 'Tags Fired' but data is wrong",
+          next: "data_wrong"
+        }
+      ]
+    },
+    event_not_appearing: {
+      question: "What type of trigger are you using?",
+      options: [
+        {
+          label: "Custom Event trigger (dataLayer.push with event key)",
+          result: "dataLayer push not happening",
+          resultDescription: "The dataLayer.push() call with your event is not executing. Open the browser console, run: window.dataLayer — check if your event appears. If not, add console.log inside your push to verify the code is running.",
+          resultLink: "/client-side/debugging/datalayer-debugging/"
+        },
+        {
+          label: "Click or Form trigger",
+          result: "Interaction not detected",
+          resultDescription: "GTM may not be detecting the click/form event. Try enabling All Clicks built-in variables and verifying Click Element appears in the Variables tab when you click. Check if the element is inside an iframe or Shadow DOM.",
+          resultLink: "/client-side/triggers/click-triggers/"
+        },
+        {
+          label: "Page View trigger (not firing on a specific page)",
+          result: "Page view not matching URL condition",
+          resultDescription: "Check the Page URL filter on your trigger. Verify the actual page path in the Variables tab matches your condition. Check for trailing slashes, query parameters, or hash fragments.",
+          resultLink: "/client-side/triggers/page-view-triggers/"
+        }
+      ]
+    },
+    check_trigger: {
+      question: "Click the tag in 'Tags Not Fired', then click the Triggers tab in the right panel. Which condition shows a red indicator?",
+      options: [
+        {
+          label: "Event name doesn't match (Custom Event trigger)",
+          result: "Event name mismatch",
+          resultDescription: "The trigger listens for event name X but the dataLayer push uses name Y. This is case-sensitive. Your push uses 'form_submission' but the trigger expects 'form_Submit', for example. Fix the push or the trigger to use identical names.",
+          resultLink: "/client-side/triggers/custom-event-triggers/"
+        },
+        {
+          label: "A trigger condition (URL, element class, etc.) isn't matching",
+          next: "condition_not_matching"
+        },
+        {
+          label: "A blocking trigger is shown",
+          next: "blocking_trigger"
+        },
+        {
+          label: "Consent mode is shown as blocking the tag",
+          next: "consent_blocking"
+        }
+      ]
+    },
+    condition_not_matching: {
+      question: "Check the Variables tab in Preview mode. What is the actual value of the variable your trigger condition checks?",
+      options: [
+        {
+          label: "The value is different from what I expected (wrong value)",
+          result: "Variable value mismatch",
+          resultDescription: "Your condition expects a specific value but the variable returns something different. Update your trigger condition to match the actual value, or fix your dataLayer push to send the expected value. Check for URL encoding, trailing slashes, and case differences.",
+          resultLink: "/client-side/variables/datalayer-variables/"
+        },
+        {
+          label: "The value is undefined or empty",
+          result: "Variable not populated",
+          resultDescription: "The variable has no value at the time the trigger evaluates. For Data Layer Variables: check the key name exactly matches your push. Check Data Layer Version is set to 2. For URL variables: the page URL may not have the path you expect.",
+          resultLink: "/client-side/debugging/datalayer-debugging/"
+        }
+      ]
+    },
+    blocking_trigger: {
+      question: "A blocking trigger (exception trigger) is preventing the tag from firing. Where is it configured?",
+      options: [
+        {
+          label: "I can see the blocking trigger in the tag settings",
+          result: "Exception trigger blocking the tag",
+          resultDescription: "Open the tag in GTM. Scroll to the bottom. Under 'Exceptions', you'll see the blocking triggers. Check their conditions — one of them is evaluating to true and preventing the tag from firing. Either remove the exception or fix its conditions.",
+          resultLink: "/client-side/triggers/trigger-types-overview/"
+        },
+        {
+          label: "I don't see a blocking trigger in the tag, but Preview shows one",
+          result: "Trigger group exception",
+          resultDescription: "A Trigger Group may have an exception trigger. Check all Trigger Groups in your container for exceptions that reference this tag's triggers. Also check if the tag itself has exceptions under Advanced Settings."
+        }
+      ]
+    },
+    consent_blocking: {
+      question: "Consent mode is blocking the tag. What is the current consent state?",
+      options: [
+        {
+          label: "The user hasn't accepted consent yet (consent banner showing)",
+          result: "Waiting for consent — expected behavior",
+          resultDescription: "The tag correctly waits for consent. This is Consent Mode working as designed. The tag will fire after the user grants consent. If you need this tag to fire before consent (e.g., for essential functionality), mark it as consent-exempt in the tag's Consent settings.",
+          resultLink: "/consent/"
+        },
+        {
+          label: "The user accepted consent but the tag still doesn't fire",
+          result: "Consent update not reaching GTM",
+          resultDescription: "The consent grant signal isn't reaching GTM. Check that your CMP calls gtag('consent', 'update', { analytics_storage: 'granted' }) after user acceptance. Verify in the Timeline that a consent update event appears after consent is granted.",
+          resultLink: "/consent/consent-mode-v2/"
+        }
+      ]
+    },
+    data_wrong: {
+      question: "The tag fires but the data in GA4 is wrong. What kind of wrong?",
+      options: [
+        {
+          label: "Variables show correct values in Preview but wrong data in GA4",
+          result: "Tag parameter configuration issue",
+          resultDescription: "The data exists in GTM but isn't mapped correctly to the GA4 tag. Open the GA4 Event tag and check each event parameter — verify the variable reference (e.g., {{DLV - transaction_id}}) points to the right variable. Check for typos in parameter names.",
+          resultLink: "/client-side/tags/ga4-event-tag/"
+        },
+        {
+          label: "Ecommerce data is missing or from a different product",
+          result: "Stale ecommerce data / missing null clear",
+          resultDescription: "You're seeing data from a previous ecommerce push bleeding into the current event. Always push { ecommerce: null } immediately before every ecommerce dataLayer.push(). Without this, GTM's data model merges objects and old data persists.",
+          resultLink: "/client-side/tracking/ecommerce-tracking/"
+        }
+      ]
+    }
+  }}
+/>
+
+## Walkthrough by symptom
+
+If the flowchart didn't resolve your issue, here are the 12 most common causes with direct solutions:
+
+### 1. Container not on the page
+
+Run in console: `typeof window.google_tag_manager`. If it returns `"undefined"`, the container isn't loaded. Check your installation.
+
+### 2. Container loaded but not published
+
+Check the version number in the console:
+```javascript
+Object.keys(window.google_tag_manager).filter(function(k) { return k.startsWith('GTM-'); })
+```
+The published version is what users see. Preview mode shows your workspace changes.
+
+### 3. Event name typo
+
+In Preview mode, click your custom event in the timeline. The event name shown must exactly match your trigger's event name condition. `form_submission` ≠ `form_Submit`.
+
+### 4. Trigger condition not matching actual variable value
+
+Click your failing tag → Triggers tab → find the red condition → note the actual value → compare it to what you expected. Fix either the data or the trigger condition.
+
+### 5. Blocking trigger active
+
+In the Tags panel, if a tag shows "Blocked by Exception," find the exception trigger and check why it's evaluating to true.
+
+### 6. Consent mode blocking
+
+In the Timeline, check whether a consent update event appeared. If consent is denied, tags configured with consent requirements won't fire.
+
+### 7. Tag paused
+
+A pause icon on the tag in GTM means it won't fire regardless of triggers.
+
+### 8. Tag firing but script error prevents it from running
+
+The tag fires (blue in Preview mode) but throws an error. Check the Errors tab for JavaScript errors in Custom HTML tags.
+
+### 9. Ad blocker preventing tag execution
+
+Test in a clean incognito window with no extensions. If the tag fires there but not in your normal browser, an extension is the cause.
+
+### 10. CSP blocking the script
+
+Check the browser console for Content-Security-Policy errors. The required domains need to be in your allowlist.
+
+### 11. Tag sequencing failure
+
+If this tag depends on a Setup Tag, and the Setup Tag failed, this tag won't fire. Check the Setup Tag status in Preview mode.
+
+### 12. Data is in GA4 but not visible in reports
+
+Wait 24-48 hours. Check GA4 → Configure → Events to see if the event is registered. Check for active data filters in Admin → Data Filters.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Preview Mode"
+    description="The complete guide to using GTM's debugger — used in every step above."
+    href="/client-side/debugging/preview-mode/"
+  />
+  <LinkCard
+    title="Common Errors"
+    description="Reference list of specific problems with targeted fixes."
+    href="/client-side/debugging/common-errors/"
+  />
+  <LinkCard
+    title="Console Debugging"
+    description="When Preview mode isn't available — console-based alternatives."
+    href="/client-side/debugging/console-debugging/"
+  />
+  <LinkCard
+    title="DataLayer Debugging"
+    description="When the problem is in your dataLayer pushes specifically."
+    href="/client-side/debugging/datalayer-debugging/"
+  />
+</CardGrid>

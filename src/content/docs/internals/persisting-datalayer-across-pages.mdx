@@ -1,6 +1,349 @@
 ---
-title: "Persisting DataLayer Across Pages"
-description: "Maintaining dataLayer state across hard page navigations."
+title: "Persisting DataLayer State Across Pages"
+description: "Maintaining dataLayer values across hard page navigations using localStorage, sessionStorage, and cookies — campaign data persistence, multi-step form data, and server-side session patterns."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+The GTM data model resets on every hard page navigation. If a user clicks a link that loads a new page, every value you pushed to the dataLayer on the previous page is gone. For SPAs, this is not a problem — navigate without reloading and the data persists. But for traditional multi-page sites and hybrid applications, this creates a real data continuity challenge.
+
+The use cases are common:
+- Attribution data from landing pages needs to persist to the checkout confirmation page
+- User segment data pushed on login needs to be available across all subsequent pages
+- Multi-step checkout: data from step 1 must be available when step 3 fires the purchase event
+- Experiment assignments: A/B test variant data must persist throughout the session
+
+## Why the data resets
+
+Each page load creates a fresh browser context. `window.dataLayer` starts as an empty array. GTM loads, replays the queue, and builds a data model — but the queue is empty except for the initial push from the GTM snippet itself.
+
+Any data from previous pages is simply gone unless you persist it somewhere outside the page lifecycle: localStorage, sessionStorage, cookies, or a server-side session.
+
+## Approach 1: sessionStorage bridge
+
+sessionStorage persists for the lifetime of the browser tab. Values survive page reloads and hard navigations within the same tab but are cleared when the tab is closed.
+
+```javascript
+// On the page where you want to persist data:
+// (e.g., landing page, product page, login page)
+
+function persistToSession(key, value) {
+  try {
+    sessionStorage.setItem('gtm_' + key, JSON.stringify(value));
+  } catch(e) {
+    // sessionStorage may be unavailable in some privacy modes
+  }
+}
+
+// Save user segment when it's known
+persistToSession('user_segment', 'high_value');
+persistToSession('ab_variant', 'variant_b');
+persistToSession('landing_page', window.location.pathname);
+
+// --- On subsequent pages ---
+// Add this BEFORE the GTM snippet in your page template
+
+(function() {
+  window.dataLayer = window.dataLayer || [];
+
+  var keysToRestore = ['user_segment', 'ab_variant', 'landing_page'];
+  var restoredData = {};
+
+  keysToRestore.forEach(function(key) {
+    try {
+      var stored = sessionStorage.getItem('gtm_' + key);
+      if (stored !== null) {
+        restoredData[key] = JSON.parse(stored);
+      }
+    } catch(e) {}
+  });
+
+  if (Object.keys(restoredData).length > 0) {
+    window.dataLayer.push(restoredData);
+  }
+})();
+```
+
+This restores data to the dataLayer before GTM loads, so it participates in the replay queue and appears in the data model from the first event.
+
+## Approach 2: localStorage with expiry
+
+localStorage persists beyond session boundaries. Use it for values that should survive across browser sessions (within a defined window).
+
+```javascript
+function persistAcrossSessions(key, value, expiryDays) {
+  try {
+    localStorage.setItem('gtm_' + key, JSON.stringify({
+      value: value,
+      expiry: Date.now() + (expiryDays * 24 * 60 * 60 * 1000)
+    }));
+  } catch(e) {}
+}
+
+function restoreFromStorage(key) {
+  try {
+    var stored = JSON.parse(localStorage.getItem('gtm_' + key) || 'null');
+    if (!stored) return null;
+    if (Date.now() > stored.expiry) {
+      localStorage.removeItem('gtm_' + key);
+      return null;
+    }
+    return stored.value;
+  } catch(e) {
+    return null;
+  }
+}
+
+// Persist UTM parameters for 30 days
+persistAcrossSessions('first_touch_utm', {
+  source: 'google',
+  medium: 'cpc',
+  campaign: 'brand'
+}, 30);
+
+// Restore on every page
+var firstTouchUtm = restoreFromStorage('first_touch_utm');
+if (firstTouchUtm) {
+  dataLayer.push({
+    first_touch_source: firstTouchUtm.source,
+    first_touch_medium: firstTouchUtm.medium,
+    first_touch_campaign: firstTouchUtm.campaign
+  });
+}
+```
+
+<Aside type="caution">
+localStorage persists until explicitly cleared. Never store PII (names, emails, phone numbers) in localStorage. Never store consent-dependent data without a consent check. Apply the same privacy standards to localStorage as you would to any tracking cookie.
+</Aside>
+
+## Approach 3: Cookie-based persistence
+
+Cookies are the most compatible option — they work across tabs, survive session boundaries, and are accessible server-side. The trade-off: they're more complex to set and are subject to browser ITP restrictions on cookie lifetimes.
+
+**Persisting campaign data via cookies:**
+
+```javascript
+// Campaign data persistence
+function setTrackingCookie(name, value, days) {
+  var expires = new Date();
+  expires.setTime(expires.getTime() + (days * 24 * 60 * 60 * 1000));
+
+  document.cookie = name + '=' + encodeURIComponent(JSON.stringify(value))
+    + '; expires=' + expires.toUTCString()
+    + '; path=/'
+    + '; SameSite=Lax'
+    + (location.protocol === 'https:' ? '; Secure' : '');
+}
+
+function getTrackingCookie(name) {
+  var cookies = document.cookie.split('; ');
+  for (var i = 0; i < cookies.length; i++) {
+    var parts = cookies[i].split('=');
+    if (parts[0] === name) {
+      try {
+        return JSON.parse(decodeURIComponent(parts.slice(1).join('=')));
+      } catch(e) {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+// Save UTM data on landing (only if not already set — first-touch model)
+if (!getTrackingCookie('first_touch_campaign')) {
+  var utmSource = new URLSearchParams(window.location.search).get('utm_source');
+  if (utmSource) {
+    setTrackingCookie('first_touch_campaign', {
+      source: utmSource,
+      medium: new URLSearchParams(window.location.search).get('utm_medium'),
+      campaign: new URLSearchParams(window.location.search).get('utm_campaign'),
+      content: new URLSearchParams(window.location.search).get('utm_content'),
+      term: new URLSearchParams(window.location.search).get('utm_term'),
+      timestamp: Date.now()
+    }, 30);
+  }
+}
+
+// Restore on every page
+var firstTouch = getTrackingCookie('first_touch_campaign');
+if (firstTouch) {
+  dataLayer.push({
+    first_touch_source: firstTouch.source,
+    first_touch_medium: firstTouch.medium,
+    first_touch_campaign: firstTouch.campaign
+  });
+}
+```
+
+## Approach 4: Server-side session injection
+
+The cleanest approach for applications with server-side rendering: the server reads the user's session and injects persisted values into the initial dataLayer push on every page render.
+
+```html
+<!-- Server-rendered page template -->
+<script>
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    // Server injects session data here
+    userId: '<%= session.userId %>',
+    userSegment: '<%= session.userSegment %>',
+    abVariant: '<%= session.abVariant %>',
+    cartItemCount: <%= session.cartItemCount || 0 %>,
+    // These are available to GTM from the very first event
+  });
+</script>
+```
+
+This is immune to localStorage/cookie restrictions and does not require any client-side JavaScript to run before GTM loads. The values are present in the initial page HTML, processed by GTM during the queue replay.
+
+## Campaign data: the most common use case
+
+Persisting UTM parameters across the user's session is the canonical use case for cross-page dataLayer persistence. A user arrives from a Google Ads campaign, browses multiple product pages, and converts on the checkout page. You want every event in that journey — not just the landing page view — to have the campaign attribution data.
+
+```javascript
+// Full campaign persistence solution
+// Add this to your page template, before GTM snippet
+
+(function() {
+  window.dataLayer = window.dataLayer || [];
+
+  // Capture UTM parameters from current URL
+  var urlParams = new URLSearchParams(window.location.search);
+  var currentUtm = {
+    source: urlParams.get('utm_source'),
+    medium: urlParams.get('utm_medium'),
+    campaign: urlParams.get('utm_campaign'),
+    content: urlParams.get('utm_content'),
+    term: urlParams.get('utm_term'),
+    gclid: urlParams.get('gclid')
+  };
+
+  // If UTM params are present, save as last-touch and potentially first-touch
+  var hasUtm = Object.values(currentUtm).some(Boolean);
+
+  if (hasUtm) {
+    // Save as last-touch (always overwrite)
+    try {
+      sessionStorage.setItem('gtm_last_touch', JSON.stringify(currentUtm));
+    } catch(e) {}
+
+    // Save as first-touch (only if not already set in this session)
+    try {
+      if (!sessionStorage.getItem('gtm_first_touch')) {
+        sessionStorage.setItem('gtm_first_touch', JSON.stringify(currentUtm));
+      }
+    } catch(e) {}
+  }
+
+  // Restore attribution to dataLayer
+  var pushData = {};
+  var lastTouch = null;
+  var firstTouch = null;
+
+  try { lastTouch = JSON.parse(sessionStorage.getItem('gtm_last_touch') || 'null'); } catch(e) {}
+  try { firstTouch = JSON.parse(sessionStorage.getItem('gtm_first_touch') || 'null'); } catch(e) {}
+
+  if (lastTouch && lastTouch.source) {
+    pushData.session_source = lastTouch.source;
+    pushData.session_medium = lastTouch.medium;
+    pushData.session_campaign = lastTouch.campaign;
+  }
+
+  if (firstTouch && firstTouch.source) {
+    pushData.first_source = firstTouch.source;
+    pushData.first_medium = firstTouch.medium;
+    pushData.first_campaign = firstTouch.campaign;
+  }
+
+  if (Object.keys(pushData).length > 0) {
+    window.dataLayer.push(pushData);
+  }
+})();
+```
+
+## Multi-step checkout persistence
+
+Multi-step checkout forms present a specific challenge: each step may be a separate page, and you need step 1 data on the final confirmation page.
+
+```javascript
+// Step 1: customer info page — save order context
+window.addEventListener('checkout_step_completed', function(e) {
+  if (e.detail.step === 1) {
+    try {
+      sessionStorage.setItem('checkout_context', JSON.stringify({
+        step1_completed_at: Date.now(),
+        customer_type: e.detail.customerType,  // 'new' or 'returning'
+        // NOT the email address — don't persist PII
+      }));
+    } catch(e) {}
+  }
+});
+
+// Confirmation page — restore and use context
+(function() {
+  try {
+    var context = JSON.parse(sessionStorage.getItem('checkout_context') || 'null');
+    if (context) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        customer_type: context.customer_type,
+        checkout_duration_seconds: Math.round((Date.now() - context.step1_completed_at) / 1000)
+      });
+      // Clean up after use
+      sessionStorage.removeItem('checkout_context');
+    }
+  } catch(e) {}
+})();
+```
+
+## Choosing the right persistence mechanism
+
+<Comparison leftTitle="sessionStorage" rightTitle="localStorage + expiry" leftType="neutral" rightType="neutral">
+  <div slot="left">
+
+**Use when**: data should only persist for the current tab session.
+
+Values clear when tab is closed. Scoped to the tab — not shared across tabs.
+
+Best for: A/B variant assignments, session-level attribution, checkout context.
+
+  </div>
+  <div slot="right">
+
+**Use when**: data should survive across sessions within a defined window.
+
+Values persist until explicitly cleared or expired.
+
+Best for: first-touch attribution (30 days), user preferences, returning visitor context.
+
+  </div>
+</Comparison>
+
+Use cookies when:
+- You need server-side access to the value
+- You need the value to persist across subdomains
+- You need control over domain scope (e.g., shared between `shop.example.com` and `blog.example.com`)
+
+Use server-side session injection when:
+- You have a server-side rendering architecture
+- The data originates from a database or CRM (user segment, loyalty tier)
+- You want persistence without any client-side JavaScript risk
+
+## Common mistakes
+
+**Restoring data after GTM has already loaded.** If the restoration script runs after the GTM snippet, the restored data is not in the dataLayer when GTM builds its initial data model. Always restore before the GTM snippet.
+
+**Persisting arrays that should be event-specific.** `ecommerce.items` should never be persisted — it changes with every product interaction. Only persist session-level or user-level data.
+
+**Not expiring persisted values.** localStorage values without expiry dates accumulate indefinitely. A user's stale A/B assignment from 3 months ago may still be pushing to the dataLayer today. Always include expiry logic.
+
+**Persisting PII.** Never store email addresses, names, phone numbers, or other personally identifiable information in client-side storage. These values may persist beyond the user's consent validity period and are accessible to any JavaScript running on the page (XSS risk).
+
+---
+
+<CardGrid>
+  <LinkCard title="Flushing Stale Variables" href="/internals/flushing-stale-variables/" description="How to clear data that should NOT persist across SPA navigations." />
+  <LinkCard title="Data Model Deep Dive" href="/internals/data-model-deep-dive/" description="Understanding the data model that receives restored values." />
+</CardGrid>

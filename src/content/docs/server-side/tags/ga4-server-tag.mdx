@@ -1,6 +1,168 @@
 ---
 title: "GA4 Server Tag"
-description: "Forwarding events to GA4 from your server container."
+description: "Configuring the GA4 server tag in sGTM — forwarding events to Google Analytics with parameter control and deduplication."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The GA4 server tag is the server-side equivalent of your client-side GA4 event tag. It reads the Event Model built by the GA4 client and sends that data to Google Analytics via the Measurement Protocol v2 API. For most sGTM deployments, this is the first tag you configure and the anchor of your entire server-side data pipeline.
+
+## How it works
+
+The data flow for a GA4 event through sGTM:
+
+1. Browser sends a GA4 Measurement Protocol request to your sGTM endpoint
+2. GA4 client claims the request and builds the Event Model
+3. GA4 server tag fires, reads from the Event Model
+4. Tag sends a new Measurement Protocol request to `www.google-analytics.com/mp/collect`
+
+The GA4 server does not just forward the original request. It reads the Event Model, formats a new Measurement Protocol request, and sends it to Google. This forwarding step is where you can modify what GA4 receives — adding parameters, overriding values, or stripping data.
+
+## Basic configuration
+
+The GA4 server tag has minimal required configuration:
+
+**Measurement ID**: Enter your GA4 Measurement ID (format: `G-XXXXXXXX`). This tells the tag which GA4 property to send data to.
+
+**API Secret**: Required for server-to-server Measurement Protocol requests. Unlike client-side GA4 tags (which use the stream's built-in authorization), the GA4 server tag sends as an authenticated server-to-server request.
+
+To get your API Secret:
+1. GA4 Admin → Data Streams → your web stream
+2. Measurement Protocol API Secrets → Create
+
+<Aside type="caution">
+The API Secret authorizes server-to-server data collection. Do not expose it in client-side JavaScript or version control. Store it as a GTM variable (not hardcoded in the tag) referencing an environment variable or Secret Manager.
+</Aside>
+
+**Default behavior**: With only Measurement ID and API Secret configured, the tag forwards the entire Event Model to GA4 — all event parameters, user properties, and user identifiers present in the Event Model.
+
+## Parameter control: overriding and adding
+
+The GA4 server tag lets you override specific Event Model fields before forwarding to GA4. This is useful for:
+
+- **Renaming parameters**: The client sent `prod_id`, but you want GA4 to receive `item_id`
+- **Adding enrichment**: A Firestore lookup variable resolved to a user segment — add it as a custom parameter
+- **Redacting data**: Replace a raw email address with a hashed version before it reaches GA4
+
+In the tag configuration, find the **Parameter Handling** section:
+
+- **Override event parameter**: specify a parameter name and the new value (can reference any sGTM variable)
+- **Override user property**: same, for user properties
+- **Remove from event data**: specify parameter names to exclude from the outbound request
+
+Example: adding a user segment from a Firestore lookup:
+
+```
+Override event parameter:
+  Parameter name: user_segment
+  Parameter value: {{Firestore - User Segment}}
+```
+
+Where `{{Firestore - User Segment}}` is a Firestore Lookup variable that reads the user's segment based on their `client_id`.
+
+## The relationship between event name and triggers
+
+By default, the GA4 server tag fires on all events (if configured with an All Events trigger). In practice, you often want different configurations per event type:
+
+- Some events go to GA4 unmodified
+- Purchase events get enrichment (margin data, customer tier)
+- Events with PII need redaction before forwarding
+
+Configure separate GA4 server tags with specific triggers if you need per-event-type handling:
+
+| Tag name | Trigger | Configuration |
+|---|---|---|
+| GA4 - All events | event_name not equals purchase | Forward as-is |
+| GA4 - Purchase (enriched) | event_name equals purchase | Add margin, CLV parameters |
+
+## Deduplication: avoiding double-counting
+
+The most common mistake when transitioning from client-side to server-side GA4 is double-counting events. It happens because:
+
+1. Your client-side GA4 tag still sends to Google directly (`server_container_url` not yet set)
+2. Your sGTM GA4 server tag also sends to Google
+
+Result: every event appears twice in GA4.
+
+The correct transition:
+
+<Steps>
+1. Deploy sGTM with the GA4 server tag. Do not yet update the client-side tag.
+
+2. Set up a parallel measurement period: enable the server-side GA4 tag on a sample of traffic (use a trigger condition like `Random Number < 10` for 10% of requests) and compare server-side event counts to client-side counts.
+
+3. Once you confirm data parity, update the client-side GA4 tag's `server_container_url` to point at your sGTM endpoint.
+
+4. Set `server_container_url` on the client-side tag. Now all GA4 data flows through sGTM.
+
+5. You should no longer have a direct Google Analytics tag client-side. The sGTM GA4 server tag is the single point of forwarding.
+</Steps>
+
+If you must run both paths simultaneously (e.g., gradual rollout), use GA4's deduplication mechanism:
+
+- Set a consistent `session_id` on both the client-side and server-side paths
+- GA4 will deduplicate events with matching `session_id` + `event_name` combinations within a short window
+
+This is more complex than simply switching to server-side. The cleanest approach is a clean cutover, not a prolonged dual-send period.
+
+## Session continuity
+
+One subtle issue when switching from client-side to server-side GA4: session attribution. GA4 sessions are scoped to the `_ga` cookie and the `_ga_XXXXXXXX` session cookie. When these cookies transition from being set by client-side JavaScript to being set by the sGTM server, there is a brief period where:
+
+- Existing users have old client-side-set cookies (short expiration on Safari)
+- New users get server-side-set cookies (full duration)
+
+This creates a temporary apparent spike in new users as Safari users' old short-lived cookies expire and get replaced by new server-side ones. This is expected. Plan for a 1–2 week normalization period in your reporting.
+
+## What the GA4 server tag does NOT do
+
+**It does not run on the client side.** The tag executes on your sGTM server. No client-side JavaScript is executed by this tag.
+
+**It does not interact with GA4 DebugView directly.** GA4's DebugView is populated by the `_dbg=1` parameter in Measurement Protocol requests. If your client-side tag is in debug mode, that debug parameter flows through to the server and is forwarded by the GA4 server tag — DebugView should work. If it does not, check that the sGTM preview is linked to the client-side preview.
+
+**It does not send data to the wrong property.** The Measurement ID in the tag configuration determines which GA4 property receives data. If you have multiple GA4 properties, create separate tags with separate Measurement IDs and triggers.
+
+## Monitoring GA4 data quality
+
+After deploying the GA4 server tag, verify data quality with these checks:
+
+**Session count parity**: Compare sessions in GA4 Realtime against your expected traffic. A significant drop (>15%) suggests the client-side tag is not routing to your sGTM endpoint correctly.
+
+**Event parity**: For a known event like `purchase`, compare GA4 event count against your backend order count. The server-side GA4 tag should reduce the gap caused by ad blockers.
+
+**Cookie inspection**: DevTools → Application → Cookies. The `_ga` and `FPID` cookies should have expiration dates of ~2 years, not 7 days.
+
+## Common mistakes
+
+**Hardcoding the API Secret in the tag.** The API Secret is a credential — it must not be visible in client-side JavaScript or stored in a GTM variable that could be exported. Use a GTM constant variable referencing an environment variable.
+
+**Forgetting to set `server_container_url` on the client-side tag.** The GA4 server tag receives no data unless the client-side GA4 tag is configured to send to your sGTM endpoint. Forgetting this step means the tag is configured but idle.
+
+**Running client-side GA4 to Google directly AND the sGTM GA4 server tag simultaneously without deduplication.** Every event gets counted twice. The transition to server-side should be a clean cutover, not a parallel run.
+
+**Not monitoring for API Secret expiration or revocation.** GA4 API Secrets can be revoked. If the secret rotates or is deleted, the GA4 server tag silently stops sending data. Add monitoring for GA4 event volume drops.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GA4 Web Client"
+    description="The client that receives and parses incoming GA4 data before the server tag fires."
+    href="/server-side/clients/ga4-web-client/"
+  />
+  <LinkCard
+    title="Event Enrichment"
+    description="Adding server-side data to events before the GA4 server tag forwards them."
+    href="/server-side/advanced/event-enrichment/"
+  />
+  <LinkCard
+    title="Event Deduplication"
+    description="Preventing double-counting when migrating from client-side to server-side GA4."
+    href="/server-side/advanced/event-deduplication/"
+  />
+  <LinkCard
+    title="Debugging sGTM"
+    description="Using Preview mode to verify the GA4 server tag is firing correctly."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+</CardGrid>

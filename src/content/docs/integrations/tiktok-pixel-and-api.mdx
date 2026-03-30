@@ -1,6 +1,279 @@
 ---
 title: "TikTok Pixel & Events API"
-description: "TikTok Pixel and Events API setup via GTM."
+description: "TikTok Pixel via GTM Community Template, standard events with all parameters, Advanced Matching, server-side Events API setup via sGTM, and event deduplication."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+TikTok advertising relies on pixel and Events API data to optimize campaigns, build lookalike audiences, and attribute conversions. The pixel fires client-side in the browser. The Events API sends data server-to-server, bypassing browser restrictions. For any meaningful TikTok advertising spend, both should be running in tandem with proper deduplication.
+
+## Prerequisites
+
+- TikTok Pixel ID from TikTok Ads Manager → Assets → Events → Web Events
+- Events API Access Token (if implementing server-side)
+- Access to TikTok Ads Manager for verification
+
+## Installation via Community Template
+
+Use the TikTok Pixel community template in GTM. TikTok publishes an official template that initializes the pixel library correctly.
+
+<Steps>
+1. In GTM, Tags → New → Community Template Gallery
+2. Search "TikTok Pixel" — select TikTok's official template
+3. Add to workspace
+
+4. Create: **TikTok Pixel — PageView**
+   - Tag Type: TikTok Pixel
+   - Pixel ID: your TikTok Pixel ID
+   - Event: PageView
+   - Trigger: All Pages
+   - Save
+
+5. Publish and verify in TikTok's test events interface
+</Steps>
+
+## Standard events and parameters
+
+TikTok's standard events follow a pattern very similar to Meta's. The most important difference: TikTok uses `content_id` (singular string) in addition to `contents` (array).
+
+### ViewContent
+
+Fire on product detail pages.
+
+```
+Event: ViewContent
+Parameters:
+  content_type: "product"
+  content_id: {{DL - Product ID}}      (string)
+  content_name: {{DL - Product Name}}
+  currency: {{DL - Currency}}
+  value: {{DL - Price}}
+  contents: [                            (array)
+    {
+      content_id: {{DL - Product ID}},
+      content_name: {{DL - Product Name}},
+      quantity: 1,
+      price: {{DL - Price}}
+    }
+  ]
+```
+
+Trigger: Custom Event — `view_item`
+
+### AddToCart
+
+```
+Event: AddToCart
+Parameters:
+  content_type: "product"
+  content_id: {{DL - Product ID}}
+  content_name: {{DL - Product Name}}
+  currency: {{DL - Currency}}
+  value: {{DL - Price}}
+  quantity: {{DL - Quantity}}
+  contents: [
+    {
+      content_id: {{DL - Product ID}},
+      content_name: {{DL - Product Name}},
+      quantity: {{DL - Quantity}},
+      price: {{DL - Price}}
+    }
+  ]
+  event_id: {{DL - Event ID}}
+```
+
+### PlaceAnOrder (Purchase)
+
+TikTok's purchase equivalent is called `PlaceAnOrder` or `CompletePayment` — both are recognized standard events. `PlaceAnOrder` is the most commonly used for e-commerce.
+
+```
+Event: PlaceAnOrder
+Parameters:
+  content_type: "product"
+  currency: {{DL - Currency}}
+  value: {{DL - Revenue}}              (number)
+  order_id: {{DL - Transaction ID}}
+  contents: [                           (all items in the order)
+    {
+      content_id: {{DL - Item ID}},
+      content_name: {{DL - Item Name}},
+      quantity: {{DL - Item Quantity}},
+      price: {{DL - Item Price}}
+    }
+  ]
+  event_id: {{DL - Event ID}}          (required for deduplication)
+```
+
+Trigger: Custom Event — `purchase`
+
+<Aside type="danger">
+`event_id` is mandatory if you are running both the pixel and Events API. Without matching `event_id` values on both client and server, TikTok counts every event twice.
+</Aside>
+
+### InitiateCheckout
+
+```
+Event: InitiateCheckout
+Parameters:
+  content_type: "product"
+  currency: {{DL - Currency}}
+  value: {{DL - Cart Value}}
+  contents: {{DL - Cart Items Array}}
+  event_id: {{DL - Event ID}}
+```
+
+### CompleteRegistration
+
+```
+Event: CompleteRegistration
+Parameters:
+  event_id: {{DL - Event ID}}
+```
+
+### Subscribe
+
+For newsletter signups, lead gen, or subscription product sign-ups.
+
+```
+Event: Subscribe
+Parameters:
+  value: {{Lead Value if known}}
+  currency: {{DL - Currency}}
+  event_id: {{DL - Event ID}}
+```
+
+## Advanced Matching
+
+TikTok's Advanced Matching sends hashed user identifiers with events to improve match quality.
+
+**Supported fields:**
+- `email` — SHA-256 hashed email
+- `phone_number` — SHA-256 hashed phone (E.164 format: `+15551234567`)
+- `external_id` — Your internal user ID (SHA-256 hashed)
+
+**Configuration in the template:**
+
+The TikTok Pixel template has an Advanced Matching section. Map your hashed variables. Hash server-side and push to dataLayer — do not hash in the browser.
+
+```javascript
+// dataLayer push from your backend with pre-hashed values
+{
+  user: {
+    hashed_email: "b4c9a289...", // SHA-256 of normalized email
+    hashed_phone: "8843d7f9...", // SHA-256 of E.164 phone
+    external_id: "f52fbd32..."   // SHA-256 of your user_id
+  }
+}
+```
+
+## TikTok Events API via sGTM
+
+The Events API sends conversion data server-to-server. Configure it in your sGTM container.
+
+<Steps>
+1. Generate an Events API Access Token:
+   - TikTok Ads Manager → Assets → Events → Web Events → your pixel → Manage → API Access
+   - Click "Generate Access Token" — store it securely
+
+2. In your sGTM container, add the TikTok Events API template from the gallery
+
+3. Configure the tag:
+   - **Pixel ID:** your TikTok Pixel ID
+   - **Access Token:** your Variable referencing the access token
+   - **Event Name:** mapped from GA4 event name
+   - **Contents:** mapped from the ecommerce items array
+   - **Value:** mapped from ecommerce.value
+   - **Currency:** mapped from ecommerce.currency
+   - **Event ID:** mapped from the event_id parameter
+
+4. Set firing triggers to match your client-side pixel events
+
+5. For user data, add Cookie Variables to read TikTok's cookies:
+   - `_ttp` — TikTok's user cookie (their equivalent of `_fbp`)
+   - Read `ttclid` URL parameter from click links for `ttp` field
+</Steps>
+
+**Reading TikTok cookies in sGTM:**
+
+```
+Create sGTM Cookie Variable: _ttp
+Reads the _ttp cookie from incoming requests
+```
+
+TikTok uses `_ttp` (TikTok Pixel ID) as a stable browser identifier, analogous to Meta's `_fbp`. Pass it with every Events API call.
+
+## Deduplication
+
+TikTok's deduplication mechanism is identical to Meta's: the same `event_id` on both client-side and server-side events causes TikTok to count only one conversion.
+
+**Generate per-event IDs in your dataLayer:**
+
+```javascript
+function generateEventId() {
+  return [Date.now(), Math.floor(Math.random() * 1e9)].join('_');
+}
+
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'purchase',
+  event_id: generateEventId(),
+  ecommerce: { ... }
+});
+```
+
+**Verify deduplication in TikTok Events Manager:**
+
+In TikTok Ads Manager → Events → your pixel → Event Summary: check the "Deduplicated Events" column. If deduplication is working, most of your server events should show as deduplicated against the corresponding pixel events.
+
+## Testing
+
+TikTok Events Manager has a Test Events feature:
+1. TikTok Ads Manager → Events → your pixel → Test Events
+2. Enter a test event code
+3. Add the test code to your sGTM tag's test event field
+4. Fire events on your site
+5. Verify in the Test Events panel
+
+**TikTok Pixel Helper Chrome extension:** Install this to see which pixel events fired on the current page, their parameters, and whether Advanced Matching data was included.
+
+## Common mistakes
+
+### Using `PlaceAnOrder` vs `CompletePayment` inconsistently
+
+Both are recognized TikTok standard events for purchases. Pick one and use it consistently across both client-side and server-side. Using different event names on client vs. server means TikTok cannot match them for deduplication.
+
+### Not including the `contents` array
+
+TikTok's optimization algorithms use the `contents` array to understand what products were involved in the conversion. Omitting it reduces campaign optimization quality, particularly for Dynamic Product Ads.
+
+### Passing `ttclid` incorrectly
+
+`ttclid` is the click ID appended to URLs when users click TikTok ads. It enables click-based attribution. Read it from the landing page URL and include it in Events API calls:
+
+```javascript
+// Read from URL on landing page
+const ttclid = new URLSearchParams(window.location.search).get('ttclid');
+if (ttclid) {
+  sessionStorage.setItem('ttclid', ttclid);
+}
+// Use stored value for subsequent events
+```
+
+### Missing `_ttp` cookie in server-side events
+
+The `_ttp` cookie is set by TikTok's client-side pixel and represents the TikTok Pixel user identifier. Including it in server-side events is important for match quality — ensure your sGTM Cookie Variable is reading it correctly.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="The same dual pixel + API pattern, for Meta. Similar architecture and deduplication approach."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Snapchat Pixel"
+    description="Another social platform with pixel and Conversions API dual implementation."
+    href="/integrations/snapchat-pixel/"
+  />
+</CardGrid>
