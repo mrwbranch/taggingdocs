@@ -1,6 +1,172 @@
 ---
 title: "Data Filters"
-description: "Filtering internal traffic and bot activity."
+description: "Exclude internal traffic and developer traffic from GA4 reports using property-level Data Filters — setup, testing mode, and limitations."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Data Filters in GA4 exclude events from reports at the property level. Unlike Universal Analytics views (which are gone in GA4), Data Filters are the mechanism for ensuring that developer testing, office browsing, and quality assurance traffic do not contaminate your production data.
+
+There is one important limitation up front: **Data Filters are not retroactive**. Once events are collected and stored, they cannot be removed by a filter. Filters only affect new data from the moment the filter goes active.
+
+## Filter types
+
+GA4 currently supports two Data Filter types:
+
+**Internal Traffic** — excludes events from IP addresses you designate as internal. This handles office IPs, developer laptops, and QA team traffic.
+
+**Developer Traffic** — excludes events where the `debug_mode` event parameter is `1` (or `true`). This handles events sent during GTM Preview mode or with `?gtm_debug=true` active.
+
+## Setting up an Internal Traffic filter
+
+The process has two parts: defining which IP addresses count as internal, and then activating the filter.
+
+### Step 1: Define internal traffic IPs
+
+<Steps>
+1. Go to **Admin → Data Streams → [your stream]**.
+
+2. Click **Configure tag settings**.
+
+3. Click **Define internal traffic**.
+
+4. Click **Create**.
+
+5. Enter a **Rule name** (e.g., "Office IP Range", "Developer VPN").
+
+6. Select the IP **match type**:
+   - **IP address equals** — exact match for a single IP
+   - **IP address begins with** — for IP ranges (e.g., `192.168.1.`)
+   - **IP address ends with**
+   - **IP address contains**
+   - **IP address matches regex** — for complex ranges
+
+7. Enter the IP address or pattern.
+
+8. Click **Add condition** to add more IP rules to the same definition.
+
+9. Click **Create**.
+</Steps>
+
+Add all relevant IPs: office static IPs, developer home IPs if remote work is common, VPN exit nodes, QA server IPs.
+
+The internal traffic definition sets the `traffic_type` parameter to `internal` on any events matching these IPs. The actual exclusion happens in the Data Filter.
+
+### Step 2: Create the Data Filter
+
+<Steps>
+1. Go to **Admin → Data Filters → Create Filter**.
+
+2. Select **Internal traffic** as the filter type.
+
+3. Set **Parameter value** to `internal` (this is the default and matches the `traffic_type` parameter set in step 1).
+
+4. Set the filter state to **Testing** first.
+
+5. Click **Create**.
+</Steps>
+
+### Testing mode
+
+With the filter in **Testing** state, traffic from internal IPs is marked for exclusion but still processed and visible. You can see it in:
+- Standard reports with the "Filter test data" toggle
+- In BigQuery, events have `traffic_type = 'internal'`
+
+This lets you verify the filter is catching the right traffic before activating it.
+
+Once you have confirmed the filter catches internal traffic (but not production user traffic), switch it to **Active** in the filter settings.
+
+<Aside type="caution">
+Switching a filter from Testing to Active is not retroactive. Events already collected while the filter was in Testing mode remain in your data. The Active state only affects new events going forward.
+</Aside>
+
+## Setting up a Developer Traffic filter
+
+The developer traffic filter excludes events with `debug_mode = 1`, which is set automatically when:
+- GTM Preview mode is active
+- You use `?gtm_debug=true` query parameter
+- You set `debug_mode: true` in Measurement Protocol events
+- The GA4 DebugView browser extension is active
+
+<Steps>
+1. Go to **Admin → Data Filters → Create Filter**.
+
+2. Select **Developer traffic** as the filter type.
+
+3. Set the state to **Testing** initially.
+
+4. Click **Create**.
+
+5. Verify in the Realtime report that your own debugging sessions are caught.
+
+6. Switch to **Active**.
+</Steps>
+
+## Verifying your filters
+
+To check what IP GA4 sees for your current browser session:
+
+1. Open your website in a browser tab
+2. In a separate tab, go to **GA4 → Admin → Data Streams → [stream] → Configure tag settings → Troubleshoot tag issues**
+3. Or use Tag Assistant: open your site with Google Tag Assistant enabled and look at the IP in the network request
+
+For the filter testing phase:
+1. Browse your site from an internal IP with the filter in Testing mode
+2. Check **Admin → Data Filters** — the filter's "Filtered events" count should increment
+3. In Reports, use the "Filter test data: include/exclude" toggle to see the impact
+
+## Limitations
+
+### Filters do not work for IPv6 if you only add IPv4
+
+If your office network uses IPv6 (or dual-stack IPv4/IPv6), make sure to add both IPv4 and IPv6 addresses. Most IPv4-only filter rules will not match IPv6 traffic from the same physical location.
+
+### Dynamic IP addresses
+
+Employees working from home or using mobile data do not have static IPs. The Developer Traffic filter handles in-office testing through GTM Preview mode without needing IP addresses — prefer this approach for development testing. For home IPs, consider using a dedicated testing property instead.
+
+### No view-level filtering
+
+Unlike Universal Analytics, GA4 has no "views." There is one data set per property. Data Filters at the property level are the only mechanism for exclusion. This means you cannot have one "unfiltered" view and one "filtered" view simultaneously.
+
+If you need both filtered and unfiltered data, create two GA4 properties: one production (with filters active) and one for raw data (no filters). This is more expensive to maintain but provides the same capability as UA views.
+
+### Filters do not remove collected data
+
+If the filter is in Testing mode while developers are actively testing, all that test data is in your property. Activating the filter afterward does not remove previously collected data. The only way to remove already-collected data is the User Deletion API, which deletes by user identifier, not by filter condition.
+
+This is why you should activate filters before launch, not after.
+
+## Common mistakes
+
+### Activating the filter without testing first
+
+Activating an incorrectly configured filter immediately excludes real user data. Always use Testing mode first to verify the filter catches the right traffic.
+
+### Not filtering developer traffic (only internal IPs)
+
+Developers at home, using mobile data, or on VPNs will not be excluded by IP-based filters. Enable the Developer Traffic filter as well to exclude GTM Preview mode sessions regardless of IP.
+
+### Forgetting to filter in a staging environment
+
+If you have a staging property, configure the same filters there. Unfiltered staging data creates misleading patterns in your staging reports, which propagates to your production implementation if you use staging data to validate changes.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Internal Traffic Filtering"
+    description="Detailed walkthrough of excluding internal traffic including IP ranges and VPNs."
+    href="/ga4/troubleshooting/internal-traffic-filtering/"
+  />
+  <LinkCard
+    title="DebugView"
+    description="Use debug mode to validate tracking — and understand how it relates to Developer Traffic filters."
+    href="/ga4/troubleshooting/debugview/"
+  />
+  <LinkCard
+    title="Property Setup"
+    description="Set up filters as part of the initial property configuration checklist."
+    href="/ga4/configuration/property-setup/"
+  />
+</CardGrid>

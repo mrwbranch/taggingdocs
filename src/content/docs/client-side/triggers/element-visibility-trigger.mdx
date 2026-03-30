@@ -3,4 +3,229 @@ title: "Element Visibility Trigger"
 description: "GTM's most powerful and underused trigger — track when elements become visible."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+The Element Visibility trigger fires when a specific DOM element enters the user's viewport. Not when the page loads. Not when the user scrolls a percentage. When that particular element becomes visible to the user. This distinction is what makes it so powerful — and so underused.
+
+Most impression tracking in analytics is a proxy: "the user loaded the page, therefore they probably saw the product card." The Element Visibility trigger eliminates the proxy. You can track actual visibility, for specific elements, with configurable thresholds for what counts as "visible."
+
+## How it works under the hood
+
+GTM implements Element Visibility triggers using the browser's `IntersectionObserver` API. This is the same API used by lazy-loading images and ad viewability measurement. `IntersectionObserver` asynchronously watches target elements and notifies your code when they intersect with the viewport — without expensive scroll event listeners.
+
+This makes the trigger performant even with multiple observed elements. Unlike polling or scroll listener approaches, `IntersectionObserver` does not block the main thread.
+
+The GTM event name is `gtm.elementVisibility`.
+
+## Configuration options
+
+### Element selection
+
+You can target elements by:
+
+**Element ID**: The `id` attribute of the element. Fastest and most precise. Use this when you can.
+
+```html
+<!-- GTM can target this with ID: hero-cta -->
+<div id="hero-cta" class="cta-block">
+  <h2>Start your free trial</h2>
+  <a href="/signup">Get Started</a>
+</div>
+```
+
+**CSS Selector**: Any valid CSS selector. More flexible but slightly more expensive. Use when you need to target elements by class, attribute, or structural position.
+
+```css
+/* Target all product cards */
+.product-card[data-product-id]
+
+/* Target a specific section */
+section[data-section="pricing"]
+
+/* Target the first promotion banner */
+.promo-banner:first-of-type
+```
+
+### Minimum Percent Visible
+
+How much of the element must be visible before the trigger fires, expressed as a percentage of the element's total area. Options range from 1% to 100%.
+
+- **1%**: Fires the moment any corner of the element appears in the viewport. Use for elements you want to track as soon as they are partially visible.
+- **50%**: Fires when half the element is visible. A reasonable proxy for "the user can read this."
+- **100%**: Fires only when the entire element is fully visible. Good for small badges or icons where partial visibility is meaningless. Not appropriate for large content blocks — a user may never scroll to show 100% of a tall card.
+
+For most product cards and CTAs, 50% is a sensible default.
+
+### Minimum On-Screen Duration
+
+How long the element must be continuously visible before the trigger fires, in milliseconds. This filters out users who rapidly scroll past an element.
+
+- `0` (default): Fires immediately when the visibility threshold is met
+- `1000` (1 second): Fires only if the element was visible for at least 1 continuous second
+- `2000` (2 seconds): Filters out scrolling past, captures intentional viewing
+
+For impression tracking where you care about actual attention (not just passing visibility), set a minimum duration of 500-1000ms.
+
+### Fire on options
+
+**Once per element per page**: The trigger fires at most once per element, per page load. If the user scrolls down, sees the element, scrolls away, and scrolls back, it fires only once. This is the right choice for impression tracking — you want to count the impression once, not repeatedly.
+
+**Once per page**: For a CSS selector that matches multiple elements, this fires only once in total per page load (for whichever element becomes visible first).
+
+**Every time an element becomes visible**: Fires each time the element enters the viewport, even if the user has already seen it. Use this for elements that change between views, or if you intentionally want to count repeated exposures.
+
+## Visibility variables
+
+Enable under **Variables → Built-In Variables → Visibility**:
+
+| Variable | Value |
+|----------|-------|
+| `Percent Visible` | The percentage of the element currently visible when the trigger fired |
+| `On-Screen Duration` | How long the element was visible when the trigger fired (ms) |
+
+## Use cases
+
+### Product card impression tracking
+
+Track when product cards enter the viewport — not just when the page loads:
+
+```html
+<!-- Products with data attributes for tracking -->
+<div class="product-card" data-product-id="SKU-123" data-product-name="Leather Jacket">
+  <img src="..." alt="Leather Jacket">
+  <h3>Leather Jacket</h3>
+  <span class="price">$299</span>
+</div>
+```
+
+```
+Trigger configuration:
+- CSS Selector: .product-card[data-product-id]
+- Minimum Percent Visible: 50%
+- Minimum On-Screen Duration: 500ms
+- Fire: Once per element per page
+```
+
+<TagConfig
+  name="GA4 - Event - Product Impression"
+  type="Google Analytics: GA4 Event"
+  trigger="EV - Product Card - 50% Visible - 500ms"
+  variables={['Percent Visible', 'On-Screen Duration']}
+/>
+
+To capture which product was seen, use a Custom JavaScript variable that reads the product attributes from the visible element:
+
+```javascript
+// Custom JavaScript Variable: "Visible Product ID"
+function() {
+  try {
+    // GTM stores the triggering element in a private variable
+    // Access it via the event model
+    var el = document.querySelector('.product-card[data-product-id]:hover') ||
+             document.activeElement.closest('.product-card[data-product-id]');
+    return el ? el.getAttribute('data-product-id') : undefined;
+  } catch(e) { return undefined; }
+}
+```
+
+<Aside type="caution">
+Accessing the specific element that triggered an Element Visibility event from within GTM variables is awkward — there is no native `{{Visible Element}}` variable. For tracking which specific product card was viewed, push the data from your application code via a custom dataLayer event instead. Element Visibility works best for yes/no visibility questions ("was this CTA block seen?") rather than "which of these 50 product cards was seen."
+</Aside>
+
+### CTA block visibility
+
+Track whether the user ever saw your primary call to action:
+
+```html
+<section id="pricing-cta" data-section="pricing-cta">
+  <h2>Ready to start?</h2>
+  <a href="/signup" class="btn-primary">Start Free Trial</a>
+</section>
+```
+
+```
+Trigger configuration:
+- Element ID: pricing-cta
+- Minimum Percent Visible: 50%
+- Fire: Once per element per page
+```
+
+Combine with conversion data to understand: "of users who saw the pricing CTA, what percentage converted?" This is a much more meaningful funnel metric than scroll depth alone.
+
+### Ad unit viewability
+
+Track whether ad placements are actually viewable — the standard for display advertising:
+
+```
+Trigger configuration:
+- CSS Selector: .ad-unit[data-ad-slot]
+- Minimum Percent Visible: 50%  (IAB standard for display)
+- Minimum On-Screen Duration: 1000ms  (IAB: 1 continuous second)
+- Fire: Once per element per page
+```
+
+This matches the IAB MRC viewability standard for display ads.
+
+### Lazy-loaded content engagement
+
+If your page loads additional content as the user scrolls (lazy-loaded sections, infinite scroll items), fire tracking when those sections become visible:
+
+```
+Trigger configuration:
+- CSS Selector: [data-section="testimonials"]
+- Minimum Percent Visible: 25%
+- Minimum On-Screen Duration: 0
+- Fire: Once per page
+```
+
+## Performance considerations
+
+Multiple Element Visibility observers can add up. Each CSS selector you target creates an `IntersectionObserver` instance that watches the DOM. On a page with 50 product cards, one Element Visibility trigger creates 50 observers.
+
+In practice, `IntersectionObserver` is efficient and the overhead is small. But on pages with large product grids or infinite scroll lists, test performance before deploying. A slow page with 200 observed elements is a real possibility.
+
+Prefer ID-based targeting over CSS selectors for elements you know have unique IDs — it is faster and unambiguous.
+
+## Common mistakes
+
+### Expecting this trigger to tell you which element fired
+
+GTM does not expose the triggering element as a built-in variable for Element Visibility. Unlike click triggers where `Click Element` tells you exactly what was clicked, visibility triggers do not have an equivalent. For tracking which specific element became visible when you have many matching elements, you either need to use IDs (one trigger per element) or push dataLayer events from your application with the element data included.
+
+### Setting Minimum Percent Visible to 100% for tall elements
+
+A 600px tall product card on a laptop viewport of 700px will never be 100% visible — the card is taller than part of the viewport. If you set 100% minimum visible, this trigger never fires for tall elements. Use 50% or 75% for realistic coverage.
+
+### Tracking visibility when a dataLayer event is more appropriate
+
+If your application already knows when a product is displayed (React renders the component, Vue mounts it), push a dataLayer impression event at that moment. This is more accurate than relying on IntersectionObserver — you know the element is in the DOM and was intentionally displayed. Use Element Visibility when you do not have application-level control.
+
+### Firing on every visibility instead of once
+
+The "every time an element becomes visible" option is appropriate for dynamic content that changes. For static impression tracking, always use "once per element per page." Otherwise, a user scrolling up and down the page generates duplicate impressions.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Scroll Triggers"
+    description="Track how far down the page a user scrolled — a simpler approach when you do not need element-specific data."
+    href="/client-side/triggers/scroll-triggers/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="Push impression data from your application code when you need to know which specific element was seen."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Click Triggers"
+    description="Track what users click after they see an element — the natural follow-up to visibility tracking."
+    href="/client-side/triggers/click-triggers/"
+  />
+  <LinkCard
+    title="Trigger Types Overview"
+    description="A complete reference for all GTM trigger types."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+</CardGrid>

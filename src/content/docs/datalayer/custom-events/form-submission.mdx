@@ -1,6 +1,251 @@
 ---
 title: "Form Submission"
-description: "DataLayer events for form completion tracking."
+description: "Custom form event specifications for contact forms, lead generation, newsletters, multi-step forms, and form error tracking — with complete dataLayer examples."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+Form submission events are the primary mechanism for tracking lead generation, newsletter signups, contact requests, and any other conversion that happens through a form. The challenge is that forms vary enormously — some are simple one-pagers, some are multi-step wizards, some are AJAX-powered, and some navigate to a new page on submit.
+
+This page covers the event design for each type.
+
+## Core rule: never push form field values with PII
+
+Before anything else: never push the values users type into form fields. Email addresses, names, phone numbers, physical addresses — any of this pushed to the dataLayer is a privacy violation and potentially a legal liability.
+
+What you push is **metadata** about the form: which form, which type, which location, whether it succeeded. Not what the user entered.
+
+```javascript
+// ✅ Correct — metadata about the form
+dataLayer.push({
+  event: 'form_submit',
+  form_name: 'contact_us',
+  form_type: 'contact',
+  form_location: 'contact_page'
+});
+
+// ❌ Wrong — actual field values
+dataLayer.push({
+  event: 'form_submit',
+  user_email: 'user@example.com',   // PII
+  user_name: 'John Smith',          // PII
+  user_phone: '+1-555-0100'         // PII
+});
+```
+
+## Contact form submission
+
+```javascript
+dataLayer.push({
+  event: 'form_submit',
+  form_name: 'contact_us',
+  form_id: 'contact-form-main',
+  form_type: 'contact',
+  form_location: 'contact_page'
+});
+```
+
+## Lead generation form
+
+```javascript
+dataLayer.push({
+  event: 'generate_lead',    // Use GA4 recommended event
+  form_name: 'product_demo_request',
+  form_type: 'lead_gen',
+  form_location: 'pricing_page',
+  lead_type: 'demo_request',
+  estimated_deal_size: 'enterprise'   // categorical, not actual deal value
+});
+```
+
+For lead gen forms, `generate_lead` is the GA4 recommended event name. Use it for its pre-built reporting integration.
+
+## Newsletter signup
+
+```javascript
+dataLayer.push({
+  event: 'sign_up',         // GA4 recommended event (also used for newsletter)
+  method: 'newsletter',
+  form_name: 'newsletter_footer',
+  form_location: 'footer'
+});
+
+// Or use a custom event if you need to distinguish from account signup
+dataLayer.push({
+  event: 'newsletter_subscribe',
+  form_name: 'newsletter_footer',
+  form_location: 'footer',
+  subscription_source: 'organic'
+});
+```
+
+## Form events event schema
+
+<EventSchema
+  event="form_submit"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'The event name — form_submit, generate_lead, or a custom name for your form type.' },
+    { name: 'form_name', type: 'string', required: true, description: 'Unique identifier for the form. Use snake_case. e.g., contact_us, newsletter_footer, product_demo_request.' },
+    { name: 'form_id', type: 'string', required: false, description: 'HTML ID of the form element if you need to tie back to DOM.' },
+    { name: 'form_type', type: 'string', required: false, description: 'Category of form: contact, lead_gen, newsletter, support, application, registration.' },
+    { name: 'form_location', type: 'string', required: false, description: 'Where on the site the form appears: contact_page, homepage_hero, product_page_sidebar.' },
+    { name: 'success', type: 'boolean', required: false, description: 'Whether the submission succeeded. Include for forms where success/failure is tracked separately.' },
+  ]}
+/>
+
+## Multi-step form tracking
+
+Multi-step forms (lead funnels, applications, onboarding wizards) require a family of events to track progression through the funnel.
+
+```javascript
+// Step 1: user begins the form
+dataLayer.push({
+  event: 'form_start',
+  form_name: 'business_application',
+  form_type: 'application',
+  form_total_steps: 4
+});
+
+// Step N complete: user completes a step and advances
+dataLayer.push({
+  event: 'form_step_complete',
+  form_name: 'business_application',
+  form_step: 2,              // which step was just completed (1-based)
+  form_step_name: 'company_details',
+  form_total_steps: 4
+});
+
+// Final submission: all steps complete
+dataLayer.push({
+  event: 'form_submit',
+  form_name: 'business_application',
+  form_type: 'application',
+  form_total_steps: 4,
+  form_completion_time_seconds: 420   // optional: how long the form took
+});
+```
+
+## Form error tracking
+
+Track validation errors separately — they tell you where users get stuck and abandon forms.
+
+```javascript
+// Client-side validation error
+dataLayer.push({
+  event: 'form_error',
+  form_name: 'contact_us',
+  form_error_type: 'validation',
+  form_error_field: 'phone_number',   // which field had the error
+  form_error_message: 'invalid_format'  // the error type, NOT the user's input
+});
+
+// Server-side submission error
+dataLayer.push({
+  event: 'form_error',
+  form_name: 'contact_us',
+  form_error_type: 'server_error',
+  form_error_message: 'submission_failed'
+});
+```
+
+## Implementation: AJAX forms
+
+The GTM built-in Form Submission trigger doesn't work with AJAX forms. Push to the dataLayer from your form handler instead.
+
+```javascript
+// AJAX form submission handler
+async function handleFormSubmit(event) {
+  event.preventDefault();
+
+  const formData = new FormData(event.target);
+  const formName = event.target.dataset.formName;
+
+  try {
+    const response = await fetch('/api/contact', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (response.ok) {
+      // Success
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'form_submit',
+        form_name: formName,
+        form_type: 'contact',
+        form_location: document.body.dataset.pageType || 'unknown'
+      });
+    } else {
+      // Server error
+      window.dataLayer.push({
+        event: 'form_error',
+        form_name: formName,
+        form_error_type: 'server_error',
+        form_error_message: 'api_error_' + response.status
+      });
+    }
+  } catch (error) {
+    // Network error
+    window.dataLayer.push({
+      event: 'form_error',
+      form_name: formName,
+      form_error_type: 'network_error',
+      form_error_message: 'request_failed'
+    });
+  }
+}
+```
+
+## Implementation: React forms
+
+```tsx
+async function handleSubmit(values: ContactFormValues) {
+  try {
+    await submitContactForm(values);
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submit',
+      form_name: 'contact_us',
+      form_type: 'contact',
+      form_location: 'contact_page'
+    });
+
+    setSubmitted(true);
+  } catch (error) {
+    window.dataLayer.push({
+      event: 'form_error',
+      form_name: 'contact_us',
+      form_error_type: 'server_error',
+      form_error_message: 'submission_failed'
+    });
+  }
+}
+```
+
+## Common mistakes
+
+**Using GTM's built-in Form trigger for AJAX forms.** The built-in trigger listens for native HTML form submit events. AJAX forms intercept the event and submit via JavaScript — the trigger never fires. Always use dataLayer pushes for AJAX and JS framework forms.
+
+**Firing on every validation error.** If your form validates in real-time as the user types, don't fire a `form_error` event on every keystroke. Fire on submission attempt, not during typing.
+
+**Form tracking without form_name.** Without `form_name`, you can't distinguish which form submitted in GA4 reports. If all your form events look the same, the data is nearly useless.
+
+<CardGrid>
+  <LinkCard
+    title="Error Events"
+    description="Application-level error tracking beyond form validation errors."
+    href="/datalayer/custom-events/error-events/"
+  />
+  <LinkCard
+    title="Login & Sign Up"
+    description="Authentication events — the counterpart to registration forms."
+    href="/datalayer/custom-events/login-signup/"
+  />
+  <LinkCard
+    title="Custom Event Design"
+    description="Framework for designing events when GA4 recommended events don't fit."
+    href="/datalayer/custom-events/custom-event-design/"
+  />
+</CardGrid>

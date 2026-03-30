@@ -1,6 +1,145 @@
 ---
 title: "Track Print Actions"
-description: "Track when users print a page."
+description: "Track when users print a page using window.onbeforeprint and matchMedia print events — with page context and GA4 event configuration."
+sidebar:
+  badge:
+    text: Beginner
+    variant: success
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Print actions are a surprisingly useful signal. Users who print your pricing page, terms of service, or product spec sheets are often further along in their decision process. Tracking prints lets you identify high-intent content and measure engagement with documents that exist to be consumed offline.
+
+## Implementation
+
+There are two reliable ways to detect print events: `window.beforeprint` / `window.afterprint` events, and `window.matchMedia('print')`. Use both for maximum coverage.
+
+<DataLayerExample event="page_print" description="Fires when the user initiates a print (Ctrl+P or File → Print). Fires before the print dialog appears.">
+```javascript
+(function() {
+  var printFired = false;
+
+  function handleBeforePrint() {
+    if (printFired) return;
+    printFired = true;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'page_print',
+      page_path: window.location.pathname,
+      page_title: document.title,
+      print_method: 'before_print_event'
+    });
+
+    // Reset after print dialog closes
+    setTimeout(function() { printFired = false; }, 2000);
+  }
+
+  // Method 1: window.onbeforeprint event (supported in all modern browsers)
+  window.addEventListener('beforeprint', handleBeforePrint);
+
+  // Method 2: matchMedia print query (backup for some browsers)
+  if (window.matchMedia) {
+    var printMedia = window.matchMedia('print');
+    if (printMedia.addEventListener) {
+      printMedia.addEventListener('change', function(mq) {
+        if (mq.matches) handleBeforePrint();
+      });
+    } else if (printMedia.addListener) {
+      // Older API, deprecated but needed for older Safari
+      printMedia.addListener(function(mq) {
+        if (mq.matches) handleBeforePrint();
+      });
+    }
+  }
+})();
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add the code as a Custom HTML tag** in GTM
+   - Trigger: **DOM Ready** (All Pages, or filter to specific content pages)
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `page_print`
+
+3. **Create a GA4 Event Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `page_print`
+   - Parameters:
+     - `page_path` → `{{Page Path}}`
+     - `page_title` → `{{Page Title}}`
+   - Trigger: the Custom Event trigger
+
+4. **Test in Preview Mode**
+
+   Open GTM Preview, visit a page, then press **Ctrl+P** (or Cmd+P on Mac) to open the print dialog. The `page_print` event should appear in the Summary pane. Cancel the print dialog — you do not need to actually print.
+</Steps>
+
+<TagConfig
+  name="GA4 - page_print"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - page_print"
+  variables={["Page Path", "Page Title"]}
+/>
+
+## Adding print-specific context
+
+If you want to know what specific content triggered the print (e.g., which product spec sheet or which blog article), add more context:
+
+```javascript
+window.dataLayer.push({
+  event: 'page_print',
+  page_path: window.location.pathname,
+  page_title: document.title,
+  // Add content metadata if available on the page
+  content_type: document.querySelector('meta[name="content-type"]')?.content || 'unknown',
+  content_id: document.querySelector('meta[name="content-id"]')?.content || undefined,
+  word_count: document.body.innerText.split(/\s+/).length
+});
+```
+
+## Tracking print for specific sections
+
+If only part of your page is printable (e.g., a print button that triggers `window.print()` for a specific div), attach the dataLayer push to that button:
+
+```javascript
+document.getElementById('print-invoice').addEventListener('click', function() {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'page_print',
+    page_path: window.location.pathname,
+    print_section: 'invoice',
+    invoice_id: this.dataset.invoiceId
+  });
+  window.print();
+});
+```
+
+## Test it
+
+1. Open GTM Preview, visit a content page
+2. Press Ctrl+P (Windows) or Cmd+P (Mac)
+3. The `page_print` event should appear immediately in the Summary pane
+4. Check `page_path` and `page_title` are correct
+5. Cancel the print dialog (no need to print)
+6. In GA4 DebugView, verify the `page_print` event appears
+
+## Common gotchas
+
+**Double firing.** Some browsers fire both `beforeprint` and the matchMedia `print` event when printing. The `printFired` flag and the setTimeout reset prevent duplicates. If you see double events in Preview mode, check that only one of the two methods is active in your browser.
+
+**afterprint timing.** The `afterprint` event fires after the print dialog is closed (whether or not the user actually printed). Do not use `afterprint` to confirm an actual print — you cannot know whether the user clicked Print or Cancel.
+
+**Programmatic vs. user-initiated prints.** If your page calls `window.print()` programmatically on load (e.g., a dedicated print-version page), the event will fire immediately. This is correct behavior.
+
+<CardGrid>
+  <LinkCard title="Track PDF Downloads" href="/recipes/track-pdf-downloads/" description="Track when users download a printable PDF version." />
+  <LinkCard title="Track Tab Visibility" href="/recipes/track-tab-visibility/" description="Another indirect engagement signal using browser events." />
+</CardGrid>

@@ -1,6 +1,185 @@
 ---
 title: "Search"
-description: "DataLayer events for site search tracking."
+description: "GA4 site search event specification — search_term, results count, zero-result queries, filter interactions, and autocomplete tracking."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+Site search tracking is one of the most undervalued analytics implementations. Search queries tell you exactly what users are looking for — in their own words. Zero-result queries are a product roadmap. High-volume searches for out-of-stock products are revenue leaking out of your catalog.
+
+GA4 has a recommended `search` event. Use it.
+
+## When to fire
+
+Fire `search` when:
+- The user submits a search query and results load
+- Autocomplete suggestions are shown (optional — see below)
+- Search filters are changed on a results page
+
+Fire once per search action, not once per character typed. If your search has a submit button, fire on submit. If it triggers on Enter key, fire on keypress. If it's an instant-search that queries on every keystroke, fire after a debounce — not on every character change.
+
+## Basic search event
+
+```javascript
+// User searches for "leather jacket"
+dataLayer.push({
+  event: 'search',
+  search_term: 'leather jacket'
+});
+```
+
+## Extended search event with additional context
+
+```javascript
+dataLayer.push({
+  event: 'search',
+  search_term: 'leather jacket',
+  search_results_count: 24,         // number of results returned
+  search_type: 'full_text',         // full_text, autocomplete, filter_change
+  search_category: 'all',           // which category was searched within
+  search_filters_applied: false,    // were filters pre-applied?
+  search_sort: 'relevance'          // how results are sorted
+});
+```
+
+## Event schema
+
+<EventSchema
+  event="search"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "search"' },
+    { name: 'search_term', type: 'string', required: true, description: 'The query string the user typed. This is the key parameter — always include it.' },
+    { name: 'search_results_count', type: 'number', required: false, description: 'Number of results returned. Enables zero-result query analysis.' },
+    { name: 'search_type', type: 'string', required: false, description: 'Type of search: full_text, autocomplete, barcode_scan, voice.' },
+    { name: 'search_category', type: 'string', required: false, description: 'Category context if the search was scoped to a category.' },
+    { name: 'search_filters_applied', type: 'boolean', required: false, description: 'Whether any filters were applied to the search.' },
+    { name: 'search_sort', type: 'string', required: false, description: 'Current sort order: relevance, price_asc, price_desc, newest.' },
+  ]}
+/>
+
+## Tracking zero-result searches
+
+Zero-result searches are your most valuable search data — they reveal what users want that you don't have. Track them explicitly.
+
+```javascript
+// Zero results returned
+dataLayer.push({
+  event: 'search',
+  search_term: 'waterproof leather jacket',
+  search_results_count: 0,
+  search_type: 'full_text'
+});
+```
+
+In GA4, create a custom report or exploration that filters `search` events where `search_results_count = 0`. Group by `search_term`. This is your product gap analysis.
+
+## Filter change tracking
+
+When a user applies or changes filters on a search results page, fire another `search` event to capture the refined query context.
+
+```javascript
+// User applies a "Sale Items" filter on search results
+dataLayer.push({
+  event: 'search',
+  search_term: 'leather jacket',   // original query — preserve it
+  search_results_count: 8,
+  search_type: 'filter_change',
+  search_filters_applied: true,
+  active_filters: 'on_sale,brand:Heritage Co.'   // optional: which filters
+});
+```
+
+## Autocomplete selection
+
+If you have an autocomplete/typeahead feature, consider tracking when users select a suggestion vs. type and submit manually. This helps you evaluate how useful your autocomplete is.
+
+```javascript
+// User selects an autocomplete suggestion
+dataLayer.push({
+  event: 'search',
+  search_term: 'leather jacket',   // the selected suggestion
+  search_type: 'autocomplete',
+  search_results_count: 24
+});
+```
+
+## Implementation patterns
+
+### Vanilla JavaScript
+
+```javascript
+const searchForm = document.querySelector('#search-form');
+const resultsContainer = document.querySelector('#search-results');
+
+searchForm.addEventListener('submit', function(e) {
+  const query = this.querySelector('input[name="q"]').value.trim();
+  if (!query) return;
+
+  // Fire immediately on submit — results count not yet known
+  dataLayer.push({
+    event: 'search',
+    search_term: query
+  });
+
+  // Or wait for results and fire with count:
+  fetchSearchResults(query).then(results => {
+    dataLayer.push({
+      event: 'search',
+      search_term: query,
+      search_results_count: results.total
+    });
+  });
+});
+```
+
+### React
+
+```tsx
+function SearchPage({ query, results }: { query: string; results: SearchResults }) {
+  useEffect(() => {
+    if (!query) return;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'search',
+      search_term: query,
+      search_results_count: results.total,
+      search_type: 'full_text'
+    });
+  }, [query]);  // Re-fires when query changes
+
+  return (/* ... */);
+}
+```
+
+## GTM configuration
+
+1. Create a Custom Event trigger for `search`.
+2. Create Data Layer Variables for `search_term`, `search_results_count`, and any other parameters you push.
+3. Create a GA4 Event tag for `search` with `search_term` mapped as an event parameter. In GA4, register `search_term` as a custom dimension if you want to filter reports by it.
+
+<Aside type="note">
+GA4's Enhanced Measurement includes site search tracking, but it works by reading URL parameters (e.g., `?q=leather+jacket`). This only works if your search uses URL parameters and if the parameter name is configured in GA4. For AJAX search that doesn't change the URL, you must use dataLayer events.
+</Aside>
+
+## Common mistakes
+
+**Not stripping whitespace from search terms.** Leading and trailing spaces create spurious variations. `'leather jacket'` and `' leather jacket'` are different dimension values in GA4 even though they're the same search intent. Trim search terms before pushing.
+
+**Using different casing.** `'Leather Jacket'` and `'leather jacket'` are different values. Normalize to lowercase unless case is semantically meaningful.
+
+**Firing on every keystroke.** Instant-search products fire as users type. Debounce with a 500–800ms delay before pushing, or fire only on actual result-load events.
+
+<CardGrid>
+  <LinkCard
+    title="Content Engagement"
+    description="Tracking what users do after they find content — article reads, video plays."
+    href="/datalayer/custom-events/content-engagement/"
+  />
+  <LinkCard
+    title="view_item_list"
+    description="Tracking product list impressions — the ecommerce complement to search tracking."
+    href="/datalayer/ecommerce/view-item-list/"
+  />
+</CardGrid>

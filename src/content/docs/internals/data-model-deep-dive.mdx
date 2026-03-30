@@ -1,6 +1,312 @@
 ---
-title: "Data Model Deep Dive"
-description: "The critical difference between the dataLayer array and GTM's internal Abstract Data Model."
+title: "GTM Data Model Deep Dive"
+description: "The critical difference between the dataLayer array and GTM's internal Abstract Data Model — recursive merge behavior, sticky values, the _clear key, and how to inspect internal state from the browser console."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+The dataLayer is not GTM. The dataLayer is a JavaScript array on `window` that serves as a message queue. GTM is a separate system that reads from that queue and maintains its own internal state. These are two different data structures, and confusing them is the source of the majority of "data appearing where it shouldn't" bugs.
+
+This distinction is what Simo Ahava calls the **Abstract Data Model** — GTM's internal representation of the current data state, constructed by recursively merging every push in the dataLayer queue. Understanding how this merge works is the single most valuable piece of GTM internal knowledge you can acquire.
+
+## The two data structures
+
+**The dataLayer array** (`window.dataLayer`):
+- A plain JavaScript array
+- Grows by appending new objects (via `Array.prototype.push`)
+- Contains the raw push history — every object ever pushed, in order
+- Never modified by GTM — it is a one-way message queue
+
+**GTM's Abstract Data Model**:
+- An internal key-value store maintained by GTM
+- Built by applying each push from the dataLayer queue in order
+- The actual source of truth that Data Layer Variables read from
+- Updated continuously as new pushes arrive
+
+The critical insight: **Data Layer Variables read from the Abstract Data Model, not from the dataLayer array.**
+
+## How the merge works
+
+When you call `dataLayer.push(obj)`, GTM processes the push by recursively merging `obj` into its internal data model. The merge algorithm is:
+
+- For each key in the pushed object:
+  - If the key's value is a **plain object** (`{}` style): recursively merge it with any existing object at that key
+  - If the key's value is an **array** (`[]` style): replace any existing value at that key
+  - If the key's value is a **primitive** (string, number, boolean, null, undefined): replace any existing value at that key
+
+This means objects accumulate — properties from multiple pushes persist alongside each other. Arrays and primitives overwrite.
+
+### Demonstrating the merge
+
+```javascript
+// Push 1: establish initial state
+dataLayer.push({
+  user: {
+    id: '12345',
+    type: 'premium'
+  },
+  pageCategory: 'product'
+});
+
+// Push 2: add more user data
+dataLayer.push({
+  user: {
+    email: 'user@example.com'
+  }
+});
+
+// What is GTM's internal model now?
+// RESULT: { user: { id: '12345', type: 'premium', email: 'user@example.com' }, pageCategory: 'product' }
+// NOT: { user: { email: 'user@example.com' } }
+// The user object was MERGED, not replaced
+```
+
+Verify this in your browser console:
+
+```javascript
+// Replace GTM-XXXX with your container ID
+// Found in the GTM snippet or in your GTM account
+google_tag_manager["GTM-XXXX"].dataLayer.get("user")
+// Returns: { id: '12345', type: 'premium', email: 'user@example.com' }
+```
+
+### The array replacement behavior
+
+```javascript
+// Push 1
+dataLayer.push({
+  items: ['apple', 'banana']
+});
+
+// Push 2
+dataLayer.push({
+  items: ['cherry']
+});
+
+// GTM model state:
+// { items: ['cherry'] }  ← array was REPLACED, not merged
+
+// Verify:
+google_tag_manager["GTM-XXXX"].dataLayer.get("items")
+// Returns: ['cherry']
+```
+
+This array replacement behavior is important for ecommerce. Every time you push a new `ecommerce` object with an `items` array, the array is replaced. This is why the `ecommerce: null` clearing pattern works — you push null (a primitive) which replaces the entire ecommerce key.
+
+## The sticky value problem
+
+Because the merge accumulates state, values pushed early persist until explicitly overwritten. This is the mechanism behind the most common class of SPA data bugs.
+
+Scenario:
+1. User views Product A. You push `{ event: 'view_item', item_name: 'Product A' }`.
+2. User navigates to Product B in an SPA (no page reload).
+3. You push `{ event: 'view_item', item_name: 'Product B' }`.
+4. The `item_name` variable in GTM correctly shows "Product B" for the Product B event.
+
+So far, so good. But now:
+
+5. User clicks "Add to Cart" — a different event.
+6. You push `{ event: 'add_to_cart' }` — without an `item_name`.
+7. GTM reads `item_name` from the data model.
+8. The data model still contains `item_name: 'Product B'` from Push 3.
+9. Your add_to_cart event has `item_name: 'Product B'` — which may be incorrect if the user browsed multiple products.
+
+This is the sticky value problem. The data model retains values indefinitely until you explicitly overwrite them.
+
+## Inspecting the internal data model
+
+The GTM namespace is accessible in the browser console under `google_tag_manager`:
+
+```javascript
+// Get the full data model key-value store
+// (returns an object with all internal state)
+var model = google_tag_manager["GTM-XXXX"].dataLayer;
+
+// Get a specific key
+model.get("ecommerce")
+model.get("user")
+model.get("pageCategory")
+
+// Get a nested key using dot notation
+model.get("user.id")
+model.get("ecommerce.items.0.item_name")
+
+// The model object itself
+console.log(model);
+// Exposes: get(), set(), keys(), and internal _keys array
+```
+
+To find your container ID programmatically:
+
+```javascript
+// If you don't know your container ID
+var containerIds = Object.keys(window.google_tag_manager)
+  .filter(k => k.startsWith('GTM-'));
+console.log(containerIds);
+// e.g., ['GTM-XXXXXXX']
+```
+
+**Practical debugging workflow:**
+
+```javascript
+// 1. Before an event fires, check what the model currently holds
+google_tag_manager["GTM-XXXX"].dataLayer.get("ecommerce")
+
+// 2. Push your event
+dataLayer.push({ event: 'purchase', ecommerce: { transaction_id: 'T001' } })
+
+// 3. Check model state after the push
+google_tag_manager["GTM-XXXX"].dataLayer.get("ecommerce")
+```
+
+## The `_clear: true` key
+
+GTM supports a special key `_clear: true` in any pushed object that causes the data model to be reset for all keys set in the same push. This is distinct from pushing `null` for individual keys.
+
+```javascript
+// Push with _clear: true
+// Resets ALL keys in this push back to undefined in the data model
+dataLayer.push({
+  _clear: true,
+  event: 'new_page',
+  pageCategory: 'checkout'
+});
+
+// After this push:
+// - pageCategory is 'checkout' (from this push)
+// - user (from a previous push) is CLEARED — returns undefined
+// - ecommerce (from a previous push) is CLEARED
+```
+
+Wait — that is not quite right. Let me be precise about what `_clear: true` actually does. It does NOT clear the entire data model. It only affects keys that appear in the same push. Other keys in the data model that are not in this push are unaffected.
+
+To be more accurate:
+
+```javascript
+// _clear: true only clears the keys in THIS push
+dataLayer.push({
+  _clear: true,
+  ecommerce: {
+    items: [{ item_name: 'Product A' }]
+  }
+});
+// This clears ecommerce and then sets it to the new value
+// Keys not in this push (user, pageCategory, etc.) are unaffected
+```
+
+This makes `_clear: true` most useful for the ecommerce pattern — clear and reset in one atomic operation.
+
+## The ecommerce clearing pattern
+
+The most well-known application of the data model understanding: clearing ecommerce data between pushes.
+
+**Wrong approach** (causes stale ecommerce data):
+```javascript
+// Push 1: view_item
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    items: [{ item_id: 'SKU001', item_name: 'Blue Widget', price: 29.99 }]
+  }
+});
+
+// Push 2: add_to_cart — without clearing first
+// The items array from Push 1 is STILL in the data model
+// because arrays replace but only when pushed, not when absent
+dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    items: [{ item_id: 'SKU001', item_name: 'Blue Widget', quantity: 1 }]
+  }
+});
+// Seems fine because ecommerce.items was fully specified
+```
+
+The problem is not obvious with fully-specified pushes. It becomes critical when partial pushes are involved:
+
+```javascript
+// Push 3: partial ecommerce push (missing items)
+dataLayer.push({
+  event: 'begin_checkout',
+  ecommerce: {
+    currency: 'USD',
+    coupon: 'SAVE10'
+  }
+});
+// ecommerce.items still contains SKU001 from Push 2
+// Your begin_checkout event has stale item data
+```
+
+**Correct approach** (always clear before ecommerce push):
+```javascript
+// Clear first
+dataLayer.push({ ecommerce: null });
+
+// Then push your event
+dataLayer.push({
+  event: 'begin_checkout',
+  ecommerce: {
+    currency: 'USD',
+    coupon: 'SAVE10',
+    items: [
+      { item_id: 'SKU001', item_name: 'Blue Widget', quantity: 1, price: 29.99 }
+    ]
+  }
+});
+```
+
+After `dataLayer.push({ ecommerce: null })`, the data model's `ecommerce` key is set to `null` — a primitive that replaces the previous object. The subsequent push then sets ecommerce to the new value with no residue from previous pushes.
+
+## Why Data Layer Variable versions matter
+
+GTM's Data Layer Variable has two versions:
+- **Version 1**: reads from the raw dataLayer array (direct array access)
+- **Version 2**: reads from the Abstract Data Model
+
+**Always use Version 2.** Version 1 is a legacy behavior from early GTM. Version 2 benefits from the merged state, nested key access via dot notation, and proper handling of values pushed before GTM loaded.
+
+To check: when you create or edit a Data Layer Variable, the "Data Layer Version" dropdown should be set to **Version 2**.
+
+## The dataLayer before GTM loads
+
+GTM's snippet is asynchronous — the container JavaScript downloads in the background. During this time, code on your page may push events to `window.dataLayer`. Since GTM hasn't loaded yet, these pushes go into the raw array unprocessed.
+
+When GTM finally loads, it replays every push in the dataLayer array in order, building the internal data model from scratch. This is the "replay" mechanism.
+
+```javascript
+// This runs before GTM loads
+window.dataLayer = window.dataLayer || [];
+dataLayer.push({
+  userType: 'logged_in',
+  userId: 'user-123'
+});
+// → Goes into the array, not yet processed
+
+// ... GTM loads here ...
+// → GTM replays the queue, processes push above
+// → data model now has { userType: 'logged_in', userId: 'user-123' }
+
+// A Data Layer Variable for 'userType' will correctly return 'logged_in'
+// even though the push happened before GTM loaded
+```
+
+## Common mistakes
+
+**Assuming `dataLayer.push({key: undefined})` clears the key.** Pushing `undefined` as a value does set the key to `undefined` in the data model, which makes Data Layer Variables return their default value. But the key still exists — it is not removed. Push `null` to explicitly set a key to no-value.
+
+**Expecting object assignment (`dataLayer.user = {...}`) to update the model.** Direct property assignment to `window.dataLayer` (e.g., `dataLayer.user = {...}`) does NOT update GTM's data model. GTM only processes pushes via the overridden `push()` method. Use `dataLayer.push({ user: {...} })`.
+
+**Using `dataLayer[0]`, `dataLayer[1]` to read values.** These array indices contain raw push objects, not the merged state. Always use Data Layer Variables in GTM or `google_tag_manager["GTM-XXXX"].dataLayer.get()` to read values correctly.
+
+**Not accounting for pre-GTM pushes in debugging.** When debugging, remember that the raw array contains all pushes including pre-GTM ones. The data model may look different from the last few items in the array because earlier pushes contributed data that merged in.
+
+---
+
+<CardGrid>
+  <LinkCard title="Flushing Stale Variables" href="/internals/flushing-stale-variables/" description="How to properly clear the data model between SPA navigations." />
+  <LinkCard title="DataLayer Push Functions" href="/internals/datalayer-push-functions/" description="Pushing functions to the dataLayer to read and manipulate the data model programmatically." />
+  <LinkCard title="Race Conditions and Tag Timing" href="/internals/race-conditions-tag-timing/" description="How data model state at tag evaluation time causes unexpected behavior." />
+</CardGrid>

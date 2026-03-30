@@ -3,4 +3,198 @@ title: "History Change Triggers"
 description: "Detecting SPA navigation with the History Change trigger."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+The History Change trigger is GTM's built-in solution for tracking navigation in single-page applications. When a modern JavaScript framework changes the URL without a full page reload — which is how React Router, Vue Router, Next.js, and virtually every SPA framework operates — the History Change trigger fires. It is the mechanism that makes GTM-based SPA tracking possible without any custom JavaScript.
+
+That said, it has real limitations. Understanding them is as important as knowing how to configure it.
+
+## What the History Change trigger detects
+
+Modern browsers expose the History API: `window.history.pushState()`, `window.history.replaceState()`, and the `popstate` event. SPA frameworks use these APIs to change the URL and manage browser history without triggering a full page load.
+
+GTM patches these APIs on initialization and fires a `gtm.historyChange` event whenever any of the following occurs:
+
+- `pushState()` is called — navigation to a new URL (forward navigation)
+- `replaceState()` is called — current URL is replaced without adding to history
+- `popstate` fires — user presses the browser back/forward buttons
+
+The GTM event name is `gtm.historyChange`.
+
+## History variables
+
+Enable under **Variables → Built-In Variables → History**:
+
+| Variable | Value |
+|----------|-------|
+| `New History Fragment` | The URL fragment (hash) after navigation |
+| `Old History Fragment` | The URL fragment before navigation |
+| `New History State` | The state object pushed with `pushState` |
+| `Old History State` | The previous history state |
+| `History Source` | `pushState`, `replaceState`, or `popstate` |
+
+For most SPA tracking, you will use standard page variables (`Page Path`, `Page URL`) rather than these history-specific variables — after navigation, they reflect the new URL.
+
+## Basic SPA pageview configuration
+
+<TagConfig
+  name="GA4 - Event - Virtual Pageview (History Change)"
+  type="Google Analytics: GA4 Event"
+  trigger="HC - History Change"
+  variables={['Page Path', 'Page Title']}
+/>
+
+<Steps>
+1. Create a new trigger with type **History Change**
+2. Leave it as **All History Changes** (no conditions needed for basic SPA tracking)
+3. Name it: `HC - History Change`
+4. Attach to a GA4 Event tag with event name `page_view` and parameters for `page_location` and `page_title`
+</Steps>
+
+This is the minimal setup. It fires a GA4 `page_view` event every time the URL changes via the History API.
+
+## Hash-based vs. pushState navigation
+
+Not all URL changes trigger History Change. The distinction:
+
+**`pushState` navigation** (React Router v6, Vue Router, Next.js, most modern SPAs):
+- URL changes from `/products` to `/products/jacket-123`
+- GTM History Change fires
+- `History Source` = `pushState`
+
+**Hash-based navigation** (older SPAs, some simple routers):
+- URL changes from `/page#section1` to `/page#section2`
+- GTM fires `gtm.historyChange` for hash changes too
+- `History Source` = `popstate` for browser back/forward
+
+**`replaceState` navigation**:
+- URL is replaced without adding to browser history
+- Some frameworks call `replaceState` on initial navigation or for canonical redirects
+- GTM History Change fires, but `History Source` = `replaceState`
+
+If you want to track only meaningful navigation (not replace-state redirects), add a condition:
+
+```
+Trigger condition: History Source does not equal replaceState
+```
+
+## The double-fire problem
+
+A common issue with History Change triggers: the trigger fires on the initial page load as well as on navigation. This happens because some SPA frameworks call `replaceState` or `pushState` during initialization to normalize the URL.
+
+The result: your GA4 receives two pageviews for the initial page — one from the GTM `gtm.js` event (if you have a Page View trigger), and one from the History Change event.
+
+**Option 1**: Remove the Page View trigger from your GA4 Configuration tag and use History Change as the only source of pageviews. Add an artificial `pushState` call in your app to fire the first pageview.
+
+**Option 2**: Add a condition to your History Change trigger to exclude the initial load:
+
+```javascript
+// Custom JavaScript Variable: "Is Initial Load"
+// Returns true if this is within 500ms of page start
+function() {
+  return (Date.now() - performance.timing.navigationStart) < 500;
+}
+```
+
+Then add trigger condition: `Is Initial Load equals false`.
+
+**Option 3** (recommended): Use custom `page_view` dataLayer events instead of History Change for all pageviews. Push from your framework's router lifecycle hook (after render), which gives you accurate timing and full control over what data accompanies each pageview. See [SPA Setup](/client-side/setup/spa-setup/).
+
+## When History Change fires relative to rendering
+
+The critical limitation of the History Change trigger: it fires at the moment the URL changes, which in most SPA frameworks happens before the new route's component has rendered.
+
+Timeline in a React Router navigation:
+
+```
+1. User clicks link
+2. React Router calls pushState() — URL changes
+3. GTM History Change fires ← HERE
+4. React schedules re-render
+5. New component begins rendering
+6. Component mounts
+7. document.title updates to new page title
+```
+
+If your GA4 pageview tag reads `document.title`, step 3 gives you the previous page's title. If it reads dataLayer variables that the new page component will push (like `page_type`), those values are not there yet.
+
+For simple tracking where you only need the URL and do not depend on page-level data, this is fine. For tracking that requires page-level context, use custom dataLayer events pushed from within the framework's post-render lifecycle.
+
+<Aside type="tip">
+The rule of thumb: use History Change for simple SPA setups where the URL is your only pageview differentiator. Use custom `page_view` dataLayer events for anything where page-level data (product category, page type, user tier) must accompany the pageview.
+</Aside>
+
+## Filtering specific navigation types
+
+You may want to exclude certain URL changes from tracking:
+
+```
+// Only track pushState navigations (exclude back/forward and replaceState)
+History Source equals pushState
+
+// Only track navigation to specific sections
+Page Path starts with /products/
+
+// Exclude query parameter changes on the same path
+// (New URL = Old URL except for query string)
+// This requires a Custom JavaScript variable
+```
+
+## Custom dataLayer events as the reliable alternative
+
+For most production SPA setups, custom `page_view` events are more reliable than History Change. Here is the comparison:
+
+| | History Change trigger | Custom dataLayer event |
+|--|------------------------|----------------------|
+| Timing | At URL change (before render) | After component mount |
+| Page title accuracy | Previous title | Current title |
+| Page-level data | Not available | Whatever you push |
+| Developer access needed | No | Yes |
+| Complexity | Low | Medium |
+| Reliability | Medium | High |
+
+If you have developer access to the SPA codebase, always prefer custom events. If you are configuring GTM without developer support, History Change is a reasonable fallback.
+
+## Common mistakes
+
+### Not testing with your specific SPA framework
+
+Different SPA frameworks use the History API differently. Some call `replaceState` on initialization. Some call `pushState` for every navigation including the first. Some do not use the History API at all (hash routing). Always test in GTM Preview mode by navigating through your application and verifying which events fire and when.
+
+### Expecting accurate `document.title` in History Change tags
+
+`document.title` updates happen as part of framework rendering, which occurs after `pushState`. At the moment History Change fires, `document.title` reflects the previous page. If you need the current page title, either defer reading it (set a timer and read it 100ms later — hacky but sometimes necessary without code changes) or use custom dataLayer events that include the title explicitly.
+
+### Missing the initial pageview
+
+History Change triggers only fire on navigation events, not on the initial page load. If your GA4 pageview setup relies entirely on History Change, first-time visitors will not have their initial pageview tracked. You need either a Page View trigger for the initial load or a custom `page_view` event pushed on application mount.
+
+### Not verifying in Preview mode
+
+The single most important step: open Preview, navigate around your SPA, and verify that exactly one `gtm.historyChange` event appears per navigation and zero appear on page load (or exactly one on page load if that matches your framework's behavior). What you think will fire is not always what fires.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="SPA Setup"
+    description="The complete guide to GTM in single-page applications, including the recommended custom event approach."
+    href="/client-side/setup/spa-setup/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The more reliable alternative to History Change for SPA navigation tracking."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Page View Triggers"
+    description="The built-in page view triggers that History Change supplements in SPA setups."
+    href="/client-side/triggers/page-view-triggers/"
+  />
+  <LinkCard
+    title="Trigger Types Overview"
+    description="A complete reference for all GTM trigger types."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+</CardGrid>

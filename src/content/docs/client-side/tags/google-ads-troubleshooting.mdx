@@ -1,6 +1,243 @@
 ---
-title: "Google Ads Troubleshooting"
-description: "Why Google Ads conversions aren't working — complete diagnostic guide."
+title: "Google Ads Conversion Troubleshooting"
+description: "Why your Google Ads conversions are not recording — a systematic diagnostic guide covering every common failure mode from missing Conversion Linker to Enhanced Conversions issues."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Google Ads conversion tracking is one of the most common setups people get wrong in GTM, and it fails in subtle ways. The conversion might not fire at all, it might fire but not record, it might fire on the wrong page, or it might duplicate. Each failure has a specific cause and a specific fix.
+
+Work through this guide in order. Most problems are in the first half.
+
+## Diagnostic checklist
+
+Before diving into specifics, quickly verify these foundational items:
+
+- [ ] Conversion Linker tag is present and firing on All Pages
+- [ ] Container is published (not just in Preview)
+- [ ] Conversion ID and Label are correct (copied from Google Ads, not from memory)
+- [ ] Tag fires on the correct thank-you/confirmation page
+- [ ] No consent mode blocking `ad_storage`
+- [ ] Google Ads conversion is in "Recording" status (not "Unverified")
+
+If all of these check out and conversions still are not recording, continue to the specific issues below.
+
+---
+
+## Problem 1: Conversion Linker tag is missing
+
+**Symptoms**: Conversions never record. Google Ads shows "No recent conversions." The tag fires correctly in GTM Preview, but Google Ads never sees it.
+
+**What is happening**: Google Ads conversion tracking relies on a cookie called `_gcl_aw` (and `_gcl_gb` for gbraid) to attribute the conversion to the right campaign and keyword. That cookie is set by the Conversion Linker tag, which reads the `gclid` or `wbraid`/`gbraid` parameter from the landing page URL and stores it as a first-party cookie.
+
+Without the Conversion Linker, the conversion tag fires but has no click ID to attribute to, so Google Ads cannot match it to an ad click. The conversion appears in your Google Ads account as unattributed and may not be counted at all depending on your attribution model.
+
+**Fix**: Add a Conversion Linker tag (Tag type: Conversion Linker) and fire it on All Pages with high priority. There is no additional configuration needed. See the [Conversion Linker article](/client-side/tags/conversion-linker/) for full details.
+
+---
+
+## Problem 2: Consent Mode is blocking ad_storage
+
+**Symptoms**: Conversions record for some users but not others. Conversions show up as "Modeled" in Google Ads but not as observed conversions. Users who reject cookies never convert in the data.
+
+**What is happening**: When Consent Mode is active and the user has not consented to `ad_storage`, Google Ads does not set the `_gcl_aw` cookie. The conversion tag fires, but without the click ID, it cannot be attributed. With Consent Mode v2, Google models conversions based on consenting users — but you need to verify that Consent Mode is configured correctly.
+
+**Check**:
+1. Open GTM Preview mode and look at the **Consent** tab in the Tag Assistant panel
+2. Verify that `ad_storage` shows as `granted` for users who have consented
+3. If `ad_storage` is `denied` even when users accept cookies, your CMP integration is not updating the consent state correctly
+
+**Fix**:
+- Verify your CMP is calling `gtag('consent', 'update', { ad_storage: 'granted' })` after the user accepts advertising cookies
+- Ensure the Conversion Linker tag's consent setting allows it to fire with pending/denied state (the Conversion Linker should fire on all pages to capture the gclid from the URL, even before full consent — it stores the click ID in a way that respects consent when the conversion fires)
+
+---
+
+## Problem 3: Container is not published
+
+**Symptoms**: Conversions work in GTM Preview but not on the live site. You added the tags "yesterday" but they never started recording.
+
+**What is happening**: GTM Preview mode loads a local version of your container that is not yet published. Changes you make are only visible to users on the live site after you publish a new container version.
+
+**Check**: In GTM, look at the container version number. Compare it to what you see in the browser console on your live site: `window.google_tag_manager` shows the loaded container version. If they differ, your changes have not been published.
+
+**Fix**: Publish the container. Go to **Submit** in GTM, add a description of your changes, and click **Publish**.
+
+---
+
+## Problem 4: Wrong Conversion ID or Label
+
+**Symptoms**: Tags fire, container is published, but conversions are attributed to the wrong campaign or do not record at all.
+
+**What is happening**: Every Google Ads conversion action has a unique Conversion ID (the account-level number, like `AW-123456789`) and a Conversion Label (a unique string for the specific conversion action). If either is wrong, the hit goes to the wrong property, the wrong conversion action, or is rejected.
+
+**Check**:
+1. In Google Ads, go to **Tools → Conversions → [Your Conversion] → Tag Setup → Use Google Tag Manager**
+2. Copy the exact Conversion ID and Conversion Label shown
+3. Compare them to what is in your GTM tag configuration — character by character
+
+**Common error**: The Conversion ID and Label from a Google Ads import (imported from GA4 or another source) may differ from the GTM-based tag format. Ensure you are using the values for the specific conversion action that should be tracked via GTM.
+
+**Fix**: Update the Constant Variables for your Conversion ID and Conversion Label with the correct values from Google Ads.
+
+---
+
+## Problem 5: Conversion counting set incorrectly
+
+**Symptoms**: Every purchase generates 2-3 conversions. Or leads only record once even though a user submits multiple forms.
+
+**What is happening**: Each Google Ads conversion action has a "Counting" setting:
+- **Every**: Counts all conversions. Use for purchases, transactions — every sale is valuable.
+- **One**: Counts only the first conversion per click. Use for leads, signups — a second form submission from the same person is not a new lead.
+
+**Check**: In Google Ads → Conversions → [Your Conversion] → Edit settings → **Count**
+
+**Fix**: Set the count based on the business value:
+- Purchases → **Every**
+- Leads → **One**
+- Sign-ups → **One**
+- App installs → **One**
+
+---
+
+## Problem 6: GA4 → Google Ads import misconfigured
+
+**Symptoms**: You are importing a GA4 conversion event into Google Ads rather than using a dedicated GTM tag. The conversion shows in GA4 but not in Google Ads after import.
+
+**What is happening**: When you import a GA4 event as a Google Ads conversion, Google Ads relies on the Google Tag (or the linked GA4 property) to transmit conversion data. There is a known bug in the sequence of operations: if you link GA4 to Google Ads *before* setting up the conversion action, the "Use Google Tag Manager" option disappears for that conversion. You then cannot use a GTM-based tag.
+
+**Also check**:
+- The GA4 event you are importing is actually being sent (verify in GA4 DebugView or Realtime)
+- The Google Ads account is correctly linked to the GA4 property in both Google Ads (Tools → Linked Accounts) and GA4 (Admin → Google Ads Links)
+- The conversion window in Google Ads matches the window you expect
+
+**Fix for the linking order bug**: If you need a GTM-based tag and the option is grayed out, create a new conversion action in Google Ads and configure it fresh. Do not link GA4 to Google Ads until after you have set up the conversion actions you need GTM tags for.
+
+---
+
+## Problem 7: Value not passing correctly
+
+**Symptoms**: Conversions record but show $0 value. Or value appears as `NaN` or is incorrect.
+
+**What is happening**: Google Ads conversion tags accept a `value` parameter. If the value is a string (`"199.99"`) instead of a number (`199.99`), some implementations pass it incorrectly. A missing currency code, or a currency mismatch between the conversion action settings and the tag, can also cause value to be zeroed out.
+
+**Check**:
+1. In GTM Preview, look at the Variables tab when the conversion tag fires
+2. Check the value of `{{DLV - ecommerce.value}}` — is it a number or a string?
+3. Check that the currency code matches your Google Ads account currency
+
+**Fix**: Ensure your dataLayer pushes `value` as a number: `value: 199.99` not `value: '199.99'`. If the value comes from a Data Layer Variable, add a Custom JavaScript Variable that converts it:
+
+```javascript
+function() {
+  var val = {{DLV - ecommerce.value}};
+  if (!val) return 0;
+  return parseFloat(val);
+}
+```
+
+---
+
+## Problem 8: Enhanced Conversions not hashing data correctly
+
+**Symptoms**: Enhanced Conversions is configured but matching rate is poor. Google Ads reports "Awaiting matching" or very low enhancement rate.
+
+**What is happening**: Enhanced Conversions hashes user data (email, phone, name) and uses it to match conversions to Google accounts. If the raw data is formatted incorrectly before hashing, the hash will not match.
+
+**Requirements before hashing**:
+- Email: lowercase, trimmed of whitespace (`user@example.com` not ` User@example.com `)
+- Phone: E.164 format (`+12125551234` not `(212) 555-1234`)
+- Name: trimmed, proper case
+
+The GTM Enhanced Conversions implementation handles hashing, but you must ensure the raw values are clean before they reach the tag.
+
+**Check**:
+1. In the GTM tag for Enhanced Conversions, inspect the values passed for email/phone/name in Preview mode
+2. Verify the email variable returns a clean, lowercase, trimmed value
+3. Verify the phone variable returns E.164 format or a consistent format
+
+**Fix**: Add a Custom JavaScript Variable to normalize the email:
+
+```javascript
+function() {
+  var email = {{DLV - user_email}};
+  if (!email) return null;
+  return email.toLowerCase().trim();
+}
+```
+
+---
+
+## Problem 9: Tag firing on wrong pages
+
+**Symptoms**: Conversion count is inflated. Conversions record on pages other than the confirmation page.
+
+**What is happening**: Your trigger conditions are too broad, matching pages that are not actually conversions. Common causes:
+
+- Trigger fires on `Page Path contains /checkout` — but this matches all checkout steps, not just the confirmation
+- The confirmation page has multiple URL patterns across campaigns or traffic sources
+- A/B test variants have different confirmation URLs
+- The tag fires on page refresh because "Once per event" (Page View) resets on reload
+
+**Check**: In GTM Preview, browse the checkout flow and watch which trigger fires the conversion tag. If it fires on `/checkout/payment` as well as `/checkout/confirmation`, your trigger is too broad.
+
+**Fix**:
+- Use `Page Path equals /order-confirmation` (exact match) rather than `Page Path contains /checkout`
+- If the confirmation URL varies, use a `dataLayer.push({ event: 'purchase_confirmed' })` from your server-rendered confirmation page and trigger on that custom event instead of URL matching
+- Add `Once per page` firing to prevent refresh-based duplication (though a server-side `transaction_id` deduplication is more reliable)
+
+---
+
+## Problem 10: Conversion window mismatch
+
+**Symptoms**: Conversions appear to be missing. Analysis shows users clicked an ad, converted later, but it was not credited.
+
+**What is happening**: Google Ads conversion windows determine how long after a click a conversion can be attributed. The default is 30 days for clicks. If your purchase cycle is longer than your conversion window, late conversions are not counted.
+
+**Check**: Google Ads → Conversions → [Your Conversion] → **Click-through conversion window** and **View-through conversion window**.
+
+**Fix**: Adjust windows to match your typical purchase cycle. For B2B with long sales cycles, extend to 90 days. For impulse purchases, 7-14 days is often sufficient.
+
+---
+
+## Systematic debugging workflow
+
+When a conversion is not recording and you do not know why:
+
+<Steps>
+1. **Open the live site** (not Preview mode) and go to the thank-you page.
+2. **Open Network tab** and filter for `googleadservices.com` requests. A successful conversion tag fires a request to `https://www.googleadservices.com/pagead/conversion/XXXXXXXXX/`.
+3. **Check the request URL** — verify the Conversion ID (XXXXXXXXX) matches your Google Ads account's Conversion ID.
+4. **Check the parameters** in the request — look for `value`, `currency`, `label` to verify they are correct.
+5. **Open Google Tag Assistant** (Chrome extension) and load the confirmation page. Look at which tags fired and their status.
+6. **Check Google Ads → Conversions** the next day — there is a 24-hour processing delay. Do not panic if conversions do not appear in the hour you tested.
+</Steps>
+
+<Aside type="tip">
+The most common root cause of "conversions not recording" by far is: the Conversion Linker tag is missing. Check this first, every time.
+</Aside>
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Conversion Linker"
+    description="The required companion tag for all Google Ads conversion tracking — what it does and how to deploy it."
+    href="/client-side/tags/conversion-linker/"
+  />
+  <LinkCard
+    title="Google Consent Mode"
+    description="How Consent Mode affects ad_storage and your conversion tracking attribution."
+    href="/client-side/setup/google-consent-mode/"
+  />
+  <LinkCard
+    title="Preview Mode"
+    description="How to use GTM Preview mode to debug tag firing behavior."
+    href="/client-side/debugging/preview-mode/"
+  />
+  <LinkCard
+    title="GA4 Configuration Tag"
+    description="The Google Tag foundation that also powers the Google Ads tracking infrastructure."
+    href="/client-side/tags/ga4-configuration-tag/"
+  />
+</CardGrid>

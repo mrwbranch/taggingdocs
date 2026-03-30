@@ -1,6 +1,269 @@
 ---
 title: "DataLayer Debugging"
-description: "Inspecting and validating dataLayer pushes."
+description: "Debug dataLayer-specific problems — merge behavior, stale data, wrong data types, timing issues, and validation patterns."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Most GTM bugs are dataLayer bugs. The tag fired. The trigger matched. The data was wrong. Understanding how the dataLayer works — specifically the merge behavior and what "stale data" looks like — turns a two-hour debugging session into a ten-minute one.
+
+## Understanding what you're debugging
+
+The `window.dataLayer` array is not what GTM reads when a tag fires. It's a queue of pushes. GTM processes each push and merges the data into an internal **Abstract Data Model** (ADM). Data Layer Variables read from the ADM, not from the array.
+
+This means:
+- Data from a previous push persists in the ADM until it's explicitly overwritten
+- Pushing `{ ecommerce: null }` doesn't delete the previous ecommerce data from the ADM — it sets `ecommerce` to `null`, which is then overridden by the next push
+- Arrays in the ADM replace (they don't merge), but objects do merge
+
+To see the ADM state directly:
+
+```javascript
+// Replace GTM-XXXX with your container ID
+var model = window.google_tag_manager['GTM-XXXX'].dataLayer;
+
+// Read any key
+model.get('ecommerce');
+model.get('user_id');
+model.get('page_type');
+```
+
+## Stale data problems
+
+The most common dataLayer bug on single-page applications and multi-step flows: data from a previous event persists in the ADM and contaminates a later event.
+
+**Classic example:** A user views product A (view_item push with product A's data), then views product B. The `view_item` push for product B includes the new `ecommerce.items` array, but if you forgot to push `{ ecommerce: null }` first, the ADM still contains product A's `item_list_name` from the previous push.
+
+To reproduce stale data:
+
+```javascript
+// Step 1: Simulate what the page pushes for product A
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    items: [{ item_id: 'SKU-A', item_name: 'Product A', item_list_name: 'Search Results' }]
+  }
+});
+
+// Step 2: Simulate the buggy product B push (forgot to clear)
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    items: [{ item_id: 'SKU-B', item_name: 'Product B' }]
+  }
+});
+
+// Step 3: Read the ADM
+var model = window.google_tag_manager['GTM-XXXX'].dataLayer;
+console.log(model.get('ecommerce.items.0.item_list_name'));
+// Returns "Search Results" from Product A — even though Product B's push didn't include it
+```
+
+The fix: always push `{ ecommerce: null }` before every ecommerce event. This sets `ecommerce` to null in the ADM, and the next push sets it to the new object from scratch.
+
+## Wrong data types
+
+GA4 silently handles some type mismatches but not all. Common type problems:
+
+```javascript
+// ❌ Price as string
+{ price: '89.99' }   // GA4 may coerce this, but it's unreliable
+
+// ✅ Price as number
+{ price: 89.99 }
+
+// ❌ Quantity as string
+{ quantity: '2' }
+
+// ✅ Quantity as number
+{ quantity: 2 }
+
+// ❌ Revenue as null or undefined
+{ value: null }     // Will not be sent correctly to GA4
+
+// ❌ Boolean as string
+{ logged_in: 'true' }   // GA4 treats this as a string, not boolean
+```
+
+To validate types in the console:
+
+```javascript
+// Check types of the last ecommerce push
+var lastEcom = window.dataLayer.slice().reverse().find(function(d) {
+  return d.ecommerce && d.ecommerce.items;
+});
+
+if (lastEcom) {
+  lastEcom.ecommerce.items.forEach(function(item, i) {
+    console.log('Item ' + i + ':');
+    console.log('  price type:', typeof item.price, '=', item.price);
+    console.log('  quantity type:', typeof item.quantity, '=', item.quantity);
+    console.log('  discount type:', typeof item.discount, '=', item.discount);
+  });
+}
+```
+
+## Timing issues
+
+Data pushed before GTM loads is handled differently from data pushed after. GTM captures pre-load pushes from the array (replay behavior) but there's a timing window during initialization where pushes may be processed in an unexpected order.
+
+**Symptom:** Variable values are empty or undefined, even though you can see the push in the dataLayer array.
+
+**Causes:**
+1. The tag fires before the push (trigger fired on Page View, but the relevant push happens after DOM Ready)
+2. The push happens after GTM has already evaluated the trigger for that event
+3. In SPAs: navigating to a new route triggers a history change event before the new page's dataLayer push has been made
+
+**Debugging timing:**
+
+```javascript
+// Find out when each push happened relative to when GTM loaded
+var gtmInitTime = window.dataLayer.find(function(d) {
+  return d.event === 'gtm.js';
+});
+
+console.log('GTM initialized at:', gtmInitTime && gtmInitTime['gtm.start']);
+
+window.dataLayer.forEach(function(push, index) {
+  if (push['gtm.start']) {
+    console.log('Push ' + index + ': gtm.start at', push['gtm.start']);
+  } else {
+    console.log('Push ' + index + ': event = ', push.event || '(no event)', '| keys:', Object.keys(push).join(', '));
+  }
+});
+```
+
+## DataLayer variable mismatch
+
+A common source of empty variable values: the Data Layer Variable in GTM uses a different key name than the one in your `dataLayer.push()`.
+
+Your push:
+```javascript
+dataLayer.push({ user_id: '12345' });
+```
+
+Your GTM variable name: `userId` (camelCase) instead of `user_id`.
+
+These don't match. GTM variable names are case-sensitive.
+
+To systematically check: look at every Data Layer Variable in GTM, then search your codebase for those exact key names:
+
+```javascript
+// Find all unique keys pushed to the dataLayer across all pushes
+var allKeys = new Set();
+window.dataLayer.forEach(function(push) {
+  Object.keys(push).forEach(function(key) {
+    if (key !== 'gtm.start' && key !== 'event') {
+      allKeys.add(key);
+    }
+  });
+});
+console.log('All dataLayer keys:', Array.from(allKeys).sort().join('\n'));
+```
+
+Compare this list with your GTM Data Layer Variable names.
+
+## DataLayer version mismatch
+
+GTM Data Layer Variables have a "Data Layer Version" setting: Version 1 or Version 2. Version 1 reads from an older format. Version 2 (the default and correct choice) uses dot-notation paths.
+
+If you're seeing `undefined` for nested values like `ecommerce.transaction_id`, check whether your Data Layer Variable is set to Version 2. Version 1 won't correctly navigate nested object paths.
+
+Always use Version 2. There is no legitimate reason to use Version 1 for new implementations.
+
+## The _clear key for nested object reset
+
+GTM supports a `_clear: true` key within a push to reset the data model before merging. This is less commonly used than `ecommerce: null` but important to know:
+
+```javascript
+// This does NOT replace the ecommerce object — it merges
+dataLayer.push({ ecommerce: { transaction_id: 'new_id' } });
+
+// This resets the ecommerce namespace and then sets from scratch
+dataLayer.push({ 'ecommerce._clear': true });
+dataLayer.push({ ecommerce: { transaction_id: 'new_id' } });
+```
+
+The `_clear` pattern is more surgical than pushing null — it resets a specific namespace without affecting other ADM state.
+
+## Building a validation function
+
+For production implementations, validate your dataLayer pushes before they reach GTM:
+
+```javascript
+function validateEcommerceEvent(eventName, ecommerce) {
+  var errors = [];
+
+  if (!ecommerce) {
+    errors.push('ecommerce object is missing');
+    return errors;
+  }
+
+  if (!ecommerce.currency) errors.push('Missing: ecommerce.currency');
+  if (ecommerce.value === undefined) errors.push('Missing: ecommerce.value');
+
+  if (!ecommerce.items || !ecommerce.items.length) {
+    errors.push('Missing or empty: ecommerce.items');
+    return errors;
+  }
+
+  ecommerce.items.forEach(function(item, i) {
+    if (!item.item_id) errors.push('Item ' + i + ': missing item_id');
+    if (!item.item_name) errors.push('Item ' + i + ': missing item_name');
+    if (typeof item.price !== 'number') errors.push('Item ' + i + ': price must be number, got ' + typeof item.price);
+    if (typeof item.quantity !== 'number') errors.push('Item ' + i + ': quantity must be number, got ' + typeof item.quantity);
+  });
+
+  if (eventName === 'purchase' && !ecommerce.transaction_id) {
+    errors.push('purchase event missing: ecommerce.transaction_id');
+  }
+
+  return errors;
+}
+
+// Usage:
+var errors = validateEcommerceEvent('purchase', myEcommerceObject);
+if (errors.length > 0) {
+  console.error('DataLayer validation errors:', errors);
+} else {
+  dataLayer.push({ ecommerce: null });
+  dataLayer.push({ event: 'purchase', ecommerce: myEcommerceObject });
+}
+```
+
+## Common mistakes
+
+### Debugging the array instead of the ADM
+
+Looking at `window.dataLayer` tells you what was pushed, not what GTM is currently reading. The ADM is the source of truth for variable values. Use `model.get()` to debug what GTM actually sees.
+
+### Assuming null clears the ADM
+
+Pushing `{ ecommerce: null }` sets the `ecommerce` key in the ADM to `null`. Then the next push sets it to a new object. This sequence works, but if there's code that checks `ecommerce` before the clearing push, it will see the old data. The order matters.
+
+### Not validating in automated tests
+
+DataLayer validation should happen in your CI pipeline, not just manually in the browser. Write integration tests that fire user interactions and assert on the dataLayer pushes. Playwright and Cypress both provide easy access to `window.dataLayer` in tests.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DataLayer Deep Dive"
+    description="The complete technical explanation of how the dataLayer and GTM's internal data model work."
+    href="/foundations/datalayer-deep-dive/"
+  />
+  <LinkCard
+    title="Console Debugging"
+    description="All the console commands needed to inspect the dataLayer and GTM's internal state."
+    href="/client-side/debugging/console-debugging/"
+  />
+  <LinkCard
+    title="Ecommerce Tracking"
+    description="The ecommerce dataLayer structure — most common source of stale data problems."
+    href="/client-side/tracking/ecommerce-tracking/"
+  />
+</CardGrid>

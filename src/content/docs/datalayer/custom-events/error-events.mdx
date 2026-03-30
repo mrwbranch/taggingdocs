@@ -1,6 +1,165 @@
 ---
 title: "Error Events"
-description: "DataLayer events for application error tracking."
+description: "Application error event specifications — 404 pages, API failures, form validation errors, JavaScript exceptions, and structured error tracking for debugging."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+Error events are analytics-as-observability. When users hit a 404, when an API call fails, when a JavaScript exception crashes a component — these are events you want to know about, and knowing the frequency and distribution of errors in GA4 is genuinely useful for product and engineering teams.
+
+The goal is structured error data that's actionable: enough context to reproduce and fix the error, not so much that you flood GA4 with noise.
+
+## 404 page error
+
+```javascript
+// On the 404 page — use the page's actual URL in the push
+dataLayer.push({
+  event: 'error_404',
+  error_type: '404',
+  error_page_url: window.location.href,
+  referrer_url: document.referrer || 'direct'
+});
+```
+
+The `referrer_url` is valuable here — it tells you where users came from before hitting a broken link. Internal 404s (links from your own site) are fixable. External 404s tell you which other sites link to your broken URLs.
+
+## API failure error
+
+```javascript
+// After an API call fails
+async function fetchProductData(productId) {
+  try {
+    const response = await fetch(`/api/products/${productId}`);
+    if (!response.ok) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'error_api_failure',
+        error_type: 'api_error',
+        error_context: 'product_data_fetch',
+        error_status_code: response.status,
+        error_endpoint: '/api/products',
+        error_severity: response.status >= 500 ? 'critical' : 'warning'
+      });
+      return null;
+    }
+    return response.json();
+  } catch (networkError) {
+    window.dataLayer.push({
+      event: 'error_api_failure',
+      error_type: 'network_error',
+      error_context: 'product_data_fetch',
+      error_message: 'request_failed',
+      error_severity: 'critical'
+    });
+    return null;
+  }
+}
+```
+
+## Form validation error
+
+```javascript
+// When a form fails client-side validation on submission
+dataLayer.push({
+  event: 'error_form_validation',
+  error_type: 'form_validation',
+  form_name: 'checkout_address',
+  error_field: 'zip_code',       // which field failed
+  error_message: 'invalid_format' // the error TYPE, never the user's input
+});
+```
+
+<Aside type="caution">
+Never push the actual field value in error events. `error_field: 'email'` and `error_message: 'invalid_format'` is correct. `error_value: 'notanemail@@example'` is wrong — you'd be collecting user input in GA4, which has privacy and data retention implications.
+</Aside>
+
+## JavaScript exception tracking
+
+```javascript
+// Global JavaScript error handler
+window.addEventListener('error', function(errorEvent) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'error_javascript',
+    error_type: 'javascript_exception',
+    error_message: errorEvent.message,
+    error_source_file: errorEvent.filename,
+    error_line: errorEvent.lineno,
+    error_severity: 'error',
+    page_url: window.location.pathname
+  });
+});
+
+// Unhandled Promise rejections
+window.addEventListener('unhandledrejection', function(event) {
+  window.dataLayer.push({
+    event: 'error_javascript',
+    error_type: 'unhandled_promise_rejection',
+    error_message: event.reason?.message || String(event.reason),
+    error_severity: 'error',
+    page_url: window.location.pathname
+  });
+});
+```
+
+<Aside type="note">
+Be selective with JavaScript error tracking. Production JavaScript on complex sites generates a high volume of errors — some critical, many trivial (third-party script errors, browser extension conflicts). Filter the noise before it hits GA4. Track errors from your own code, not from `chrome-extension://` or unrelated third-party scripts.
+</Aside>
+
+## Application error event schema
+
+<EventSchema
+  event="error_*"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Error event name: error_404, error_api_failure, error_javascript, error_form_validation.' },
+    { name: 'error_type', type: 'string', required: true, description: 'Category of error: 404, api_error, network_error, javascript_exception, form_validation.' },
+    { name: 'error_message', type: 'string', required: false, description: 'A short description of the error. Keep it generic enough to be categorical, specific enough to be actionable.' },
+    { name: 'error_severity', type: 'string', required: false, description: 'Impact level: critical, error, warning, info.' },
+    { name: 'error_context', type: 'string', required: false, description: 'Where in the application the error occurred: checkout_flow, product_search, user_auth.' },
+    { name: 'error_status_code', type: 'number', required: false, description: 'HTTP status code for API errors.' },
+    { name: 'error_endpoint', type: 'string', required: false, description: 'API endpoint that failed. Use the path template, not the full URL with IDs.' },
+    { name: 'error_source_file', type: 'string', required: false, description: 'JavaScript file that threw the error.' },
+    { name: 'page_url', type: 'string', required: false, description: 'Page URL where the error occurred. Use pathname only, not full URL with query params.' },
+  ]}
+/>
+
+## Severity levels
+
+Use consistent severity levels across your error events:
+
+| Level | When to use |
+|-------|-------------|
+| `critical` | User cannot complete their intended action. Checkout broken, product page fails to load. |
+| `error` | Feature is broken, but user can navigate around it. A widget fails to load. |
+| `warning` | Degraded experience, but core functionality works. Slow load, partial content. |
+| `info` | Informational. Expected edge cases that are worth monitoring. |
+
+## GTM configuration
+
+Error events follow the same GTM pattern as other custom events:
+
+1. Create Custom Event triggers for each error event name (`error_404`, `error_api_failure`, etc.) — or use a single trigger with regex matching: event name matches `^error_`.
+2. Create Data Layer Variables for the parameters you want to pass to GA4.
+3. Create GA4 Event tags. Register `error_type`, `error_severity`, and `error_context` as custom dimensions in GA4 if you want to filter on them in reports.
+
+## Common mistakes
+
+**Tracking every minor error.** Third-party script errors, browser extension conflicts, and failed pixel loads create enormous noise. Focus on errors from your own code that affect user experience.
+
+**Error messages that are too specific.** `error_message: 'Failed to load product SKU-12345 at 14:32:07'` creates a unique error for every SKU and every timestamp. GA4 dimension values with high cardinality cause the "(other)" row. Use categorical messages: `error_message: 'product_load_failed'`.
+
+**Not filtering by severity.** All error events look the same without severity. When an engineer wants to investigate "what's breaking in production right now," they need to filter to `critical` and `error` — not wade through `warning` and `info` events.
+
+<CardGrid>
+  <LinkCard
+    title="Form Submission"
+    description="Form submission tracking including form-level error events."
+    href="/datalayer/custom-events/form-submission/"
+  />
+  <LinkCard
+    title="Custom Event Design"
+    description="Framework for designing error events that are actionable without causing noise."
+    href="/datalayer/custom-events/custom-event-design/"
+  />
+</CardGrid>

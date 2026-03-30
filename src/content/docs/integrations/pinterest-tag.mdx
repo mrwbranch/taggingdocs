@@ -1,6 +1,249 @@
 ---
 title: "Pinterest Tag"
-description: "Pinterest Tag setup via GTM — client-side and server-side."
+description: "Pinterest Tag setup via GTM — base tag, all standard events with correct parameters, Enhanced Match, and deduplication with the Pinterest Conversions API."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The Pinterest Tag tracks user actions on your website and reports them back to Pinterest Ads. It enables conversion optimization, audience building, and attribution for Pinterest advertising campaigns. The standard events — Checkout, AddToCart, PageVisit, Search, ViewCategory — map to natural shopping and browsing moments that align with how Pinterest users discover and purchase products.
+
+## Prerequisites
+
+- Pinterest Tag ID from your Pinterest Ads account (a numeric ID like `2612345678901`)
+- Access to Pinterest Ads Manager to verify events in the Conversions section
+
+## Installation via Community Template
+
+Use the Pinterest Tag community template rather than Custom HTML — Pinterest maintains an official template in the GTM Community Template Gallery that handles the base code initialization correctly.
+
+<Steps>
+1. In GTM, create a new Tag → Discover more tag types → Community Template Gallery
+2. Search for "Pinterest Tag" — select the template published by **Pinterest**
+3. Add to workspace
+
+4. Create your base tag: **Pinterest Tag — PageVisit**
+   - Tag Type: Pinterest Tag
+   - Tag ID: your Pinterest Tag ID
+   - Event: PageVisit
+   - Trigger: All Pages
+   - Save
+
+5. Publish the base tag before adding additional events
+</Steps>
+
+<Aside type="note">
+The base PageVisit tag on All Pages initializes the Pinterest Tag library and fires a PageVisit event on every page load. This is required — you cannot fire standard events without the base initialization running first on the same page.
+</Aside>
+
+## Standard events
+
+### Checkout (Purchase)
+
+The most important event for conversion optimization.
+
+```
+Event: Checkout
+Parameters:
+  value: {{DL - Revenue}}              (required — number)
+  currency: {{DL - Currency}}          (required — ISO 4217 code, e.g., "USD")
+  order_id: {{DL - Transaction ID}}    (required for deduplication)
+  line_items: [                         (array of products)
+    {
+      product_name: {{DL - Item Name}},
+      product_id: {{DL - Item ID}},
+      product_price: {{DL - Item Price}},
+      product_quantity: {{DL - Item Quantity}}
+    }
+  ]
+  event_id: {{DL - Event ID}}          (required if using Conversions API)
+```
+
+Trigger: Custom Event — `purchase`
+
+### AddToCart
+
+```
+Event: AddToCart
+Parameters:
+  value: {{DL - Price}}
+  currency: {{DL - Currency}}
+  line_items: [
+    {
+      product_name: {{DL - Product Name}},
+      product_id: {{DL - Product ID}},
+      product_price: {{DL - Price}},
+      product_quantity: {{DL - Quantity}}
+    }
+  ]
+  event_id: {{DL - Event ID}}
+```
+
+Trigger: Custom Event — `add_to_cart`
+
+### ViewCategory
+
+Fire on category or collection pages.
+
+```
+Event: ViewCategory
+Parameters:
+  value: {{DL - Category}}
+  line_items: [{ product_category: {{DL - Category Name}} }]
+```
+
+Trigger: Custom Event — `view_item_list`
+
+### PageVisit
+
+This fires automatically with your base tag on All Pages. No additional configuration needed for standard page tracking. If you want to pass additional data on specific page types (e.g., product pages), you can create additional PageVisit tags with parameters:
+
+```
+Event: PageVisit
+Parameters:
+  property: {{Page Type}}
+  line_items: [{ product_name: {{DL - Product Name}} }]
+```
+
+### Search
+
+```
+Event: Search
+Parameters:
+  search_query: {{DL - Search Term}}
+```
+
+Trigger: Custom Event — `search`
+
+### Lead
+
+```
+Event: Lead
+Parameters:
+  lead_type: {{Form Type}}
+  value: {{Lead Value}}
+  currency: {{DL - Currency}}
+  event_id: {{DL - Event ID}}
+```
+
+Trigger: Custom Event — `generate_lead`
+
+### Signup
+
+```
+Event: Signup
+Parameters:
+  lead_type: "Account Registration"
+  event_id: {{DL - Event ID}}
+```
+
+Trigger: Custom Event — `sign_up`
+
+## Enhanced Match
+
+Enhanced Match sends hashed customer information with events to improve match rates and attribution accuracy. Pinterest matches the hashed data against their user profiles.
+
+**Supported fields:**
+- Email address (SHA-256 hashed)
+- Phone number (SHA-256 hashed, E.164 format: `+15551234567`)
+
+**Configuration:**
+
+In the Pinterest Tag template, there is an Enhanced Match section. Map your hashed variables:
+
+```javascript
+// Custom JavaScript Variable: Pinterest - Hashed Email
+// (Assumes hashed email is pushed to dataLayer by your backend)
+function() {
+  return {{DL - User Hashed Email}} || undefined;
+}
+```
+
+As with Meta, hash server-side and push the hash to the dataLayer — do not hash in the browser.
+
+## Pinterest Conversions API (CAPI)
+
+Pinterest's Conversions API is the server-side companion to the client-side tag. Configure it in sGTM using the Pinterest Conversions API community template for sGTM.
+
+**Setup:**
+
+1. In your sGTM container, add the Pinterest Conversions API template from the gallery
+2. Configure:
+   - **Ad Account ID:** from Pinterest Ads Manager
+   - **Conversion Token:** generate in Pinterest Ads Manager → Conversions → CAPI → Create new access token
+   - **Event Name:** Map from GA4 event name
+   - **Event ID:** Map from event parameter (same ID as client-side)
+
+**Deduplication:**
+
+Pinterest deduplicates using `event_id`. The same `event_id` passed in both the client-side tag and CAPI results in Pinterest counting the event only once.
+
+Generate and push `event_id` to the dataLayer before the purchase event:
+
+```javascript
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'purchase',
+  event_id: 'ev-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9),
+  ecommerce: {
+    transaction_id: 'ORDER-123',
+    currency: 'USD',
+    value: 59.99,
+    items: [...]
+  }
+});
+```
+
+**User data for CAPI:**
+
+Pinterest CAPI accepts the same set of hashed user data as the Enhanced Match feature. Pass hashed email and phone when available. Also pass the `_pinterest_ct` cookie (Pinterest's click tracking cookie) if present.
+
+## Verifying your implementation
+
+1. Go to Pinterest Ads Manager → Ads → Conversions
+2. Select your Tag ID
+3. Check "Recent activity" to see events that fired in the last 24 hours
+4. Verify event names, parameter values, and match quality
+
+Pinterest also has a **Tag Health** feature that shows active and inactive events and flags configuration issues.
+
+## Common mistakes
+
+### Firing PageVisit without parameters on product pages
+
+On product pages, your PageVisit event should include product details in `line_items`. This improves Pinterest's Dynamic Product Ads targeting. A blank PageVisit on product pages misses the product attribution opportunity.
+
+### Not including `order_id` in the Checkout event
+
+Pinterest uses `order_id` to detect and deduplicate checkout events. Without it, users who refresh the thank-you page generate duplicate conversions. Always include `order_id` on the Checkout event.
+
+### Using the wrong currency format
+
+Pinterest expects ISO 4217 currency codes: `USD`, `EUR`, `GBP`, etc. Do not pass currency symbols (`$`, `€`) or informal abbreviations.
+
+### Passing revenue as a formatted string
+
+```javascript
+// ❌ String with formatting
+value: "$59.99"
+
+// ❌ String without symbol
+value: "59.99"
+
+// ✅ Number
+value: 59.99
+```
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Meta Pixel (Client-Side)"
+    description="Similar client-side pixel setup with comparable standard events and parameters."
+    href="/integrations/meta-pixel-client-side/"
+  />
+  <LinkCard
+    title="TikTok Pixel & Events API"
+    description="Another social platform with similar pixel + CAPI dual-implementation pattern."
+    href="/integrations/tiktok-pixel-and-api/"
+  />
+</CardGrid>

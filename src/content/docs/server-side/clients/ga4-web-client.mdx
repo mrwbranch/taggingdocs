@@ -1,6 +1,179 @@
 ---
 title: "GA4 Web Client"
-description: "The default GA4 client and how it processes incoming requests."
+description: "How the default GA4 client works — request claiming, Event Model construction, cookie management, and configuration options."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The GA4 web client is the default client in every sGTM container. It handles the Measurement Protocol v2 requests sent by client-side GA4 tags and transforms them into the Event Model that your server-side tags consume. Understanding what the GA4 client does — and what it does not do — is essential for diagnosing data quality issues.
+
+## What the GA4 client handles
+
+The GA4 client processes requests sent to these endpoints:
+
+- `/g/collect` — the standard GA4 collection path used by gtag.js and the Google Tag
+- `/mp/collect` — the Measurement Protocol v2 direct-send path
+- `/g/collect?*` — same path with query parameters (GET requests)
+
+These are the same paths used by Google's own collection servers. When your client-side GA4 tag's `server_container_url` points to your sGTM domain, all GA4 hits sent by that tag arrive at one of these paths and are processed by the GA4 client.
+
+## The claiming decision
+
+The GA4 client claims a request if:
+
+1. The request path is `/g/collect` or `/mp/collect`
+2. The request contains a valid `tid` (Measurement ID / Tracking ID) parameter
+3. The request contains a `v=2` (protocol version) parameter
+
+If any of these conditions fail, the GA4 client passes the request to the next client in priority order. This is why sending custom data to `/g/collect` without a `v=2` parameter will not be processed by the GA4 client.
+
+## Event Model construction
+
+Once the GA4 client claims a request, it parses the request and builds the Event Model. Here is how the most important fields map:
+
+| GA4 Measurement Protocol parameter | Event Model field |
+|---|---|
+| `en` | `event_name` |
+| `cid` | `client_id` |
+| `uid` | `user_id` |
+| `dl` | `page_location` |
+| `dt` | `page_title` |
+| `dr` | `page_referrer` |
+| `ep.*` | event parameters (e.g., `ep.value` → `value`) |
+| `up.*` | user properties (e.g., `up.user_tier` → user property) |
+| Any custom `ep.*` parameter | available as Event Data variable with that name |
+| `_ga` cookie (from request) | `client_id` (when `cid` not present) |
+| `FPID` cookie (from request) | `client_id` (takes precedence over `_ga`) |
+| Request IP header | `ip_override` |
+| `User-Agent` header | `user_agent` |
+
+### Ecommerce parameters
+
+For purchase events, the GA4 client parses the serialized ecommerce data from the `ep.items` parameter and makes it available in the Event Model as a structured array. Tags can access individual item fields using dot-notation Event Data variables: `items.0.item_name`, `items.0.price`, etc.
+
+### The `client_id` resolution order
+
+The GA4 client determines `client_id` using this priority:
+
+1. `FPID` cookie (if present) — highest priority
+2. `_ga` cookie (if `FPID` not present)
+3. `cid` query parameter (if neither cookie present)
+4. Generated new UUID (if none of the above)
+
+When a user's first visit reaches your sGTM server with no cookies, the GA4 client generates a new `client_id` and sets the `_ga` and `FPID` cookies in the response. On subsequent visits, the cookies arrive in the request headers and the GA4 client reads the existing `client_id`.
+
+## Cookie behavior
+
+The GA4 client manages three cookies:
+
+**`_ga`**: Contains the GA4 `client_id`. Set as a first-party cookie via HTTP `Set-Cookie` header. Format: `GA1.1.<client_id>`.
+
+**`FPID`**: First-Party ID — a server-generated UUID that takes precedence over `_ga` for user identification. Set as HttpOnly. Immune to JavaScript-based cookie clearing.
+
+**`_ga_XXXXXXXX`**: Session cookie for the specific GA4 measurement ID. Tracks session count and session engagement. Set per measurement ID.
+
+All three are set with `Domain=.<yourdomain>` to be accessible across all subdomains, and with `Max-Age=63072000` (2 years) to avoid ITP restrictions on JavaScript-set cookies.
+
+## Configuration options
+
+The GA4 client has minimal configuration — most of its behavior is built-in. Available settings:
+
+**Allowed Origins**: Specify which domains can send requests to your sGTM endpoint. If set, requests with an `Origin` header not matching this list are rejected with 403. Useful for preventing other sites from sending data to your endpoint.
+
+```
+https://yoursite.com
+https://www.yoursite.com
+https://staging.yoursite.com
+```
+
+Leave empty to allow requests from any origin (appropriate for most setups where you control the client-side implementation).
+
+**Event Data to Process**: Whitelist specific event names. Leave empty to process all events. Rarely needed — if you want to filter events, use trigger conditions on your server-side tags instead.
+
+## The response the client sends back
+
+After processing the request and building the Event Model, the GA4 client sends a response back to the browser:
+
+- **Status**: 200 OK or 204 No Content
+- **Body**: typically empty or a 1×1 transparent GIF (for pixel-style requests)
+- **Headers**: includes `Set-Cookie` headers for `_ga`, `FPID`, and `_ga_XXXXXXXX`
+- **Headers**: CORS headers if the request came from a different origin than the sGTM endpoint
+
+The browser does not wait for your server-side tags to complete before receiving this response. The GA4 client returns the response as soon as the Event Model is built, and tag execution continues asynchronously. This is important for response time — your server's visible latency to the browser is determined by the GA4 client response time, not by how long your tags take to run.
+
+<Aside type="note">
+This async tag execution model means a tag failure does not produce an error visible to the browser. If a server-side tag silently fails, the browser receives a successful 200 response. You must check Cloud Logging or sGTM Preview to see tag-level errors.
+</Aside>
+
+## Inspecting the Event Model in Preview
+
+The most valuable debugging tool for the GA4 client is the sGTM Preview mode. To see the Event Model built from a specific request:
+
+1. Open your sGTM container → **Preview**
+2. Trigger an event on your site with client-side Preview also active
+3. In the sGTM Preview, click the request
+4. Click **Event Model** tab
+
+You will see every field in the Event Model for that request: event name, all parameters, cookies that were read, IP address, user agent. This is the data your tags actually received.
+
+If a tag is receiving wrong data, start here — not in the tag configuration. The Event Model view tells you exactly what arrived.
+
+## Common issues with the GA4 client
+
+### Client not claiming requests
+
+**Symptom**: Requests arrive at your sGTM endpoint (visible in Cloud Logging) but no client processes them.
+
+**Causes**:
+- Request is not going to `/g/collect` or `/mp/collect`
+- Request is missing `v=2` parameter (old UA format)
+- Custom domain is not correctly routing to Cloud Run
+
+**Debug**: In sGTM Preview, look for "No client claimed" in the request list.
+
+### Missing parameters in the Event Model
+
+**Symptom**: An event parameter sent from client-side is not visible in the Event Model.
+
+**Causes**:
+- Parameter was not included in the GA4 tag's configuration client-side
+- Parameter name exceeds GA4 limits (100 char name, 500 char value)
+- Parameter was stripped by a client-side transformation
+
+**Debug**: Use the sGTM Preview Event Model tab to see exactly which parameters arrived.
+
+### Incorrect client_id
+
+**Symptom**: User counts differ significantly between what you expect and what GA4 reports.
+
+**Causes**:
+- FPID cookie conflict with existing `_ga` cookie on migration
+- Cookie domain mismatch (cookie set on `collect.yoursite.com` not accessible at `yoursite.com`)
+- User deleting cookies between sessions
+
+**Debug**: Check the `client_id` field in the Event Model. Verify cookie attributes include `Domain=.yoursite.com`.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="What Are Clients?"
+    description="The client concept explained — claiming, Event Model, and why clients exist."
+    href="/server-side/clients/what-are-clients/"
+  />
+  <LinkCard
+    title="Client Claiming"
+    description="Priority order, claiming logic, and debugging which client handled a request."
+    href="/server-side/clients/client-claiming/"
+  />
+  <LinkCard
+    title="Server-Side Cookies"
+    description="How the GA4 client sets cookies and how to configure cookie attributes."
+    href="/server-side/advanced/server-side-cookies/"
+  />
+  <LinkCard
+    title="GA4 Server Tag"
+    description="The tag that forwards Event Model data from the GA4 client to Google Analytics."
+    href="/server-side/tags/ga4-server-tag/"
+  />
+</CardGrid>

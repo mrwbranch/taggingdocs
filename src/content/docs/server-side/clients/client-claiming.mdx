@@ -1,6 +1,215 @@
 ---
 title: "Client Claiming"
-description: "How client claiming works and priority resolution."
+description: "How the client claiming mechanism works in sGTM — priority order, claiming logic, and debugging unclaimed requests."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Client claiming is the mechanism that determines which client processes each incoming request. Get it wrong and requests go unprocessed. Get it right and your sGTM server cleanly routes different data sources to their appropriate processing logic. This article explains exactly how claiming works and how to debug problems with it.
+
+## The claiming lifecycle
+
+When an HTTP request arrives at your sGTM server, the container evaluates clients in priority order (lowest number first). For each client, it runs the client's claiming logic — a function inside the client template that decides whether this client should handle this request.
+
+The moment a client calls `claimRequest()`, that client takes exclusive ownership of the request. No other client is evaluated. The claiming client is responsible for:
+
+1. Processing the request data
+2. Building the Event Model
+3. Running the container (firing triggers and tags)
+4. Sending an HTTP response back to the caller
+
+If the first client does not call `claimRequest()` (because the request does not match its criteria), evaluation moves to the next client in priority order. If no client claims the request, the fallback behavior applies: sGTM returns a default response (typically 200 OK) with no event processing.
+
+```
+Request arrives
+│
+▼
+Client priority 10: GA4 client
+├── Does path match /g/collect? → YES → claimRequest() → PROCESS
+└── No? → Move to next client
+
+Client priority 20: Custom Stripe webhook client
+├── Does path match /webhooks/stripe? → YES → claimRequest() → PROCESS
+└── No? → Move to next client
+
+Client priority 30: Custom CRM client
+├── Does path match /webhooks/crm? → YES → claimRequest() → PROCESS
+└── No? → Move to next client
+
+No client claimed → Default behavior → 200 OK, no processing
+```
+
+## How claiming logic works in templates
+
+Inside a client template, claiming is controlled by whether `claimRequest()` is called. The pattern:
+
+```javascript
+// Do not claim if path does not match
+if (getRequestPath() !== '/my-endpoint') {
+  return; // Exit without claiming — next client evaluates
+}
+
+// Conditions met — claim the request
+claimRequest();
+
+// Now process it...
+```
+
+The logic before `claimRequest()` is the claiming decision. The logic after is the processing. Separating these mentally helps when debugging: "why didn't the client claim?" is a different problem from "why did the client claim but produce wrong data?"
+
+## Priority: the number that controls evaluation order
+
+Each client has a priority number. Lower numbers are evaluated first.
+
+**Default priorities in a new sGTM container:**
+- GA4 client: 10
+- Universal Analytics client: 20 (if present)
+
+**When you add custom clients:**
+Assign priorities with gaps between them — 30, 40, 50 — so you can insert new clients between existing ones later without renumbering everything.
+
+**Priority example:**
+
+```
+Priority 10  → GA4 client (handles /g/collect and /mp/collect)
+Priority 20  → GA4 UA client (if present)
+Priority 30  → Stripe webhook client (handles /webhooks/stripe)
+Priority 40  → CRM webhook client (handles /webhooks/crm)
+Priority 50  → Mobile app client (handles /app/events)
+```
+
+The GA4 client claiming `/g/collect` does not prevent the Stripe client from claiming `/webhooks/stripe` — they are independent because neither client claims the other's path.
+
+## Changing client priority
+
+In the sGTM container:
+1. Go to **Clients**
+2. Click the priority number on any client
+3. Edit the number and save
+
+Priority changes require a container publish to take effect in production.
+
+<Aside type="note">
+When two clients have the same priority number, the order of evaluation between them is undefined. Do not rely on same-priority clients for ordering guarantees. Every client should have a unique priority.
+</Aside>
+
+## What happens when a client claims but does not respond
+
+A critical invariant: if a client calls `claimRequest()`, it must also eventually call `returnResponse()`. If it does not, the HTTP connection to the caller stays open until the request timeout (60 seconds by default in Cloud Run).
+
+This is how sGTM differs from most HTTP servers — the responsibility for sending the response is explicitly delegated to whichever client claimed the request. If a custom client's code has a bug that causes it to claim but never respond, the browser's tracking request hangs, the event is never processed, and you see 60-second timeouts in your logs.
+
+Debug this in Cloud Logging by searching for requests with response time > 10 seconds.
+
+## Debugging claiming problems
+
+### In sGTM Preview
+
+The sGTM Preview panel shows every incoming request with the client that handled it. Look for:
+
+- **Client name shown**: the client successfully claimed and processed the request
+- **"No client claimed"**: no client's claiming logic matched this request
+- **"Client: [name], no runContainer call"**: the client claimed but did not fire tags
+
+For "No client claimed" cases, inspect:
+1. Is the request reaching the correct path?
+2. Does the client's claiming logic correctly match this path?
+3. Is the client's priority set correctly?
+4. Is the container published with the client's current configuration?
+
+### Via curl with Preview header
+
+To debug a request type that does not originate from a browser (webhooks, API calls), use the Preview Header technique:
+
+```bash
+# Get the preview header value from the sGTM Preview session
+# Then add it to your test request
+curl -X POST https://collect.yoursite.com/webhooks/stripe \
+  -H "x-gtm-server-preview: YOUR_PREVIEW_HEADER_VALUE" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"test","data":{}}'
+```
+
+The request appears in the sGTM Preview panel with full detail — which client claimed it, what Event Model was built, which tags fired.
+
+### Via Cloud Logging
+
+For production debugging, filter Cloud Logs for requests that returned unexpected status codes:
+
+```
+resource.type=cloud_run_revision
+resource.labels.service_name=sgtm-production
+httpRequest.status!=200
+```
+
+A 404 response suggests the request reached your server but no client handled it correctly. A 500 suggests a client claimed the request but threw an error during processing.
+
+## Multiple clients for the same endpoint
+
+You can have multiple clients configured for overlapping paths, but only the first one (by priority) that calls `claimRequest()` will handle the request. This enables a "try this first, fall through to default" pattern:
+
+```
+Priority 10: GA4 client (claims /g/collect)
+Priority 20: Enhanced GA4 client (claims /g/collect with additional validation)
+```
+
+In this setup, the GA4 client at priority 10 always claims `/g/collect` requests before the enhanced client at priority 20 gets a chance. The priority 20 client would never fire for those requests.
+
+To make a fallback work, the first client must explicitly choose not to claim under certain conditions:
+
+```javascript
+// Priority 10 client: only claim if specific parameter present
+if (getRequestPath() === '/g/collect' &&
+    getRequestQueryParameter('enhanced') === 'true') {
+  claimRequest();
+  // ... enhanced processing
+  return;
+}
+// Otherwise, fall through to standard GA4 client at priority 20
+```
+
+## The default client
+
+The "default client" in sGTM is not a separate configured client — it is the built-in fallback behavior when no client claims a request. This fallback:
+- Returns HTTP 200 OK
+- Returns an empty body or a small GIF depending on the request type
+- Does not build an Event Model
+- Does not fire any triggers or tags
+
+The health check path `/healthz` is handled by this default behavior — it is not claimed by any client, just returns `ok` directly.
+
+## Claiming and consent
+
+The claiming step happens before any consent check. If a request arrives at your sGTM server, the client claims it regardless of whether consent was granted. The consent check happens at the tag level — tags that require consent do not fire if the consent parameters in the Event Model indicate consent was not given.
+
+This architecture means your server always receives and acknowledges requests (so the browser's tracking request completes quickly), but consent-gated tags only forward data to vendors when appropriate.
+
+## Common mistakes
+
+**Two clients with the same priority.** Evaluation order between same-priority clients is undefined. Every client must have a unique priority number.
+
+**Claiming in a conditional branch.** If your claiming logic has complex branching and `claimRequest()` is called inside an `if` block, verify all paths through the code either claim and respond correctly, or do neither. Claiming in one branch but not calling `returnResponse()` in that branch causes hanging requests.
+
+**Using path matching alone when multiple services send to the same path.** If two different services send webhooks to `/webhooks`, use additional discriminating logic (a custom header, a field in the body, a query parameter) to distinguish between them before claiming.
+
+**Publishing tags without checking that the client is published.** Adding a new custom client requires a container publish. It is easy to add a client, test it in Preview, see it working, then forget to publish — and wonder why production traffic is not being claimed.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="What Are Clients?"
+    description="The client concept — claiming, Event Model, and the overall architecture."
+    href="/server-side/clients/what-are-clients/"
+  />
+  <LinkCard
+    title="Custom Clients"
+    description="Building client templates for webhooks and non-GA4 data sources."
+    href="/server-side/clients/custom-clients/"
+  />
+  <LinkCard
+    title="Debugging sGTM"
+    description="Preview mode, Preview Header technique, and Cloud Logging for diagnosing issues."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+</CardGrid>

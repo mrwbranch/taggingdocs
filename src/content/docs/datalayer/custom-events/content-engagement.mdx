@@ -1,6 +1,223 @@
 ---
 title: "Content Engagement"
-description: "DataLayer events for content interaction tracking."
+description: "DataLayer event specifications for article reads, video plays, content shares, file downloads, and other content engagement patterns."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+Content engagement events measure what users do with your content beyond the page view. Did they read the article or just scroll past? Did they watch the video or click play and immediately stop? Did they share or save the piece? These events transform your content analytics from "how many people visited" to "how many people engaged."
+
+## Article read event
+
+Fire when a user has meaningfully engaged with an article — not just scrolled past it. The most defensible trigger is scroll depth, typically 75–90% of the article body height.
+
+```javascript
+// User has scrolled to 90% of the article
+dataLayer.push({
+  event: 'content_article_read',
+  content_type: 'article',
+  content_id: 'article-how-to-choose-a-leather-jacket',
+  content_title: 'How to Choose the Perfect Leather Jacket',
+  content_author: 'Alex Morgan',
+  content_category: 'Style Guide',
+  content_word_count: 1850,
+  content_publish_date: '2024-02-15',
+  reading_depth_percent: 90
+});
+```
+
+<EventSchema
+  event="content_article_read"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: '"content_article_read" or "article_read" depending on your namespace convention.' },
+    { name: 'content_type', type: 'string', required: true, description: 'Type of content: article, guide, review, news.' },
+    { name: 'content_id', type: 'string', required: true, description: 'Unique identifier for the content piece — URL slug or CMS ID.' },
+    { name: 'content_title', type: 'string', required: true, description: 'The article title.' },
+    { name: 'content_author', type: 'string', required: false, description: 'Author name.' },
+    { name: 'content_category', type: 'string', required: false, description: 'Primary content category.' },
+    { name: 'content_word_count', type: 'number', required: false, description: 'Word count of the article — helps normalize engagement by length.' },
+    { name: 'content_publish_date', type: 'string', required: false, description: 'ISO 8601 publish date: 2024-02-15.' },
+    { name: 'reading_depth_percent', type: 'number', required: false, description: 'Scroll depth percentage at which the event fires. Typically 75 or 90.' },
+  ]}
+/>
+
+## Video play event
+
+For custom video players (not YouTube or Vimeo with GA4's Enhanced Measurement enabled), implement video tracking manually.
+
+```javascript
+// Video play started
+dataLayer.push({
+  event: 'content_video_play',
+  content_type: 'video',
+  content_id: 'video-summer-lookbook-2024',
+  content_title: 'Summer Lookbook 2024',
+  video_duration: 187,        // total duration in seconds
+  video_current_time: 0,      // position when play was clicked
+  video_provider: 'self_hosted'
+});
+
+// Video progress milestone
+dataLayer.push({
+  event: 'content_video_progress',
+  content_id: 'video-summer-lookbook-2024',
+  video_percent: 50,           // 25, 50, 75, 100 are standard milestones
+  video_current_time: 93
+});
+
+// Video completed
+dataLayer.push({
+  event: 'content_video_complete',
+  content_id: 'video-summer-lookbook-2024',
+  content_title: 'Summer Lookbook 2024',
+  video_duration: 187
+});
+```
+
+<Aside type="note">
+If you use YouTube embeds with GA4's Enhanced Measurement enabled (and the video has `enablejsapi=1`), GA4 automatically tracks video_start, video_progress (at 10%, 25%, 50%, 75%), and video_complete. Use your own events only for custom players or when you need more granular data than Enhanced Measurement provides.
+</Aside>
+
+## Content share event
+
+```javascript
+// User shares content via a share button
+dataLayer.push({
+  event: 'content_share',
+  content_type: 'article',
+  content_id: 'article-how-to-choose-a-leather-jacket',
+  content_title: 'How to Choose the Perfect Leather Jacket',
+  share_method: 'twitter',    // twitter, facebook, copy_link, email, whatsapp
+  share_location: 'article_end'
+});
+```
+
+<EventSchema
+  event="content_share"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: '"content_share" — or GA4 recommended "share" if you prefer.' },
+    { name: 'content_type', type: 'string', required: true, description: 'Type of content being shared.' },
+    { name: 'content_id', type: 'string', required: true, description: 'Unique content identifier.' },
+    { name: 'content_title', type: 'string', required: false, description: 'Title of the content.' },
+    { name: 'share_method', type: 'string', required: true, description: 'Platform or method: twitter, facebook, copy_link, email, whatsapp.' },
+    { name: 'share_location', type: 'string', required: false, description: 'Where in the page the share action occurred: article_top, article_end, sidebar.' },
+  ]}
+/>
+
+## File download event
+
+```javascript
+// User clicks a download link
+dataLayer.push({
+  event: 'file_download',
+  file_name: 'heritage-co-style-guide-2024.pdf',
+  file_extension: 'pdf',
+  file_size_kb: 2400,
+  content_id: 'style-guide-2024',
+  content_title: '2024 Style Guide',
+  link_url: '/downloads/heritage-co-style-guide-2024.pdf'
+});
+```
+
+<Aside type="note">
+GA4's Enhanced Measurement tracks file downloads automatically for standard file extensions (pdf, xlsx, docx, etc.) by detecting clicks on links to files. If you have dynamically generated downloads or non-standard extensions, use a custom event. If Enhanced Measurement covers it, disable the duplicate by not pushing a custom event.
+</Aside>
+
+## Content save / bookmark event
+
+```javascript
+dataLayer.push({
+  event: 'content_save',
+  content_type: 'product_guide',
+  content_id: 'sizing-guide-jackets',
+  content_title: 'Jacket Sizing Guide'
+});
+```
+
+## Time-on-content events
+
+Instead of a single "article read" event, you can fire time milestones to measure genuine engagement. This is more nuanced but harder to implement.
+
+```javascript
+// After 30 seconds on the article (tab must be active)
+dataLayer.push({
+  event: 'content_time_spent',
+  content_id: 'article-how-to-choose-a-leather-jacket',
+  content_type: 'article',
+  time_spent_seconds: 30
+});
+
+// After 60 seconds
+dataLayer.push({
+  event: 'content_time_spent',
+  content_id: 'article-how-to-choose-a-leather-jacket',
+  content_type: 'article',
+  time_spent_seconds: 60
+});
+```
+
+Time-based events should only count active time (tab in focus). Use the Page Visibility API to pause counting when the tab is hidden.
+
+```javascript
+let activeTime = 0;
+let lastActivated = Date.now();
+let isActive = !document.hidden;
+const milestones = [30, 60, 120, 300]; // seconds
+const firedMilestones = new Set();
+
+function tick() {
+  if (isActive) {
+    activeTime += (Date.now() - lastActivated) / 1000;
+    lastActivated = Date.now();
+
+    milestones.forEach(milestone => {
+      if (activeTime >= milestone && !firedMilestones.has(milestone)) {
+        firedMilestones.add(milestone);
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({
+          event: 'content_time_spent',
+          content_id: window.__CONTENT_ID__,
+          content_type: 'article',
+          time_spent_seconds: milestone
+        });
+      }
+    });
+  } else {
+    lastActivated = Date.now();
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  isActive = !document.hidden;
+  lastActivated = Date.now();
+});
+
+setInterval(tick, 1000);
+```
+
+## Common mistakes
+
+**Firing article_read on page load.** A page view is not a content engagement event. Fire content engagement events only after the user has demonstrated engagement through scroll depth, time, or explicit action.
+
+**Tracking every scroll position as an event.** Scroll depth events should fire at milestones (25%, 50%, 75%, 90%) — once per threshold, once per page load. Firing on every percentage point floods GA4 with low-value events.
+
+**Not normalizing by content length.** A 90% read rate on a 200-word page is meaningless. On a 2,000-word article it's meaningful. Include `content_word_count` so you can segment engagement by content length.
+
+<CardGrid>
+  <LinkCard
+    title="Search"
+    description="Tracking what users search for — a complement to content engagement data."
+    href="/datalayer/custom-events/search/"
+  />
+  <LinkCard
+    title="Error Events"
+    description="Tracking content load failures and media playback errors."
+    href="/datalayer/custom-events/error-events/"
+  />
+  <LinkCard
+    title="Custom Event Design"
+    description="Framework for designing content events that fit your specific content types."
+    href="/datalayer/custom-events/custom-event-design/"
+  />
+</CardGrid>

@@ -1,6 +1,289 @@
 ---
-title: "Flushing Stale Variables"
-description: "How to properly clear dataLayer variables between events in SPAs."
+title: "Flushing Stale Variables in SPAs"
+description: "How to properly clear dataLayer state between virtual pageviews — the exact patterns for ecommerce data, product variables, and all custom keys, with timing diagrams and the GTM console verification workflow."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+In a single-page application, navigating from Product A to Product B does not reload the page. GTM's data model accumulates state across the entire session unless you explicitly clear it. Product A's data sits in the data model when Product B's page view fires, and any variables that read from the model return stale values.
+
+This is not a bug in GTM — it is a feature. Persistence across events is what enables complex user journey tracking. But in SPAs, you need to actively manage what persists and what should be cleared on each navigation.
+
+## What stale variables look like in practice
+
+Here is the sequence that causes stale data:
+
+```javascript
+// User views Product A
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    items: [{ item_id: 'A001', item_name: 'Product A', price: 49.99 }]
+  }
+});
+
+// User navigates to Product B page (SPA route change)
+// Your router fires a virtual pageview:
+dataLayer.push({
+  event: 'page_view',
+  page_path: '/products/product-b',
+  page_title: 'Product B | Example Store'
+});
+
+// Note: ecommerce was NOT cleared
+// GTM data model still has ecommerce.items[0].item_name = 'Product A'
+
+// Now a view_item fires for Product B
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    items: [{ item_id: 'B001', item_name: 'Product B', price: 79.99 }]
+  }
+});
+// This is fine — ecommerce.items was replaced because the array replaced
+
+// BUT: if you track an event on Product B that doesn't include ecommerce:
+dataLayer.push({
+  event: 'product_interaction',
+  interaction_type: 'zoom_image'
+  // No ecommerce here
+});
+// If any tag on product_interaction reads ecommerce.items[0].item_name,
+// it gets 'Product B' — which might be correct here, but what about
+// the next user action after they navigate to Product C?
+```
+
+The fragility grows with complexity. When you have multiple products, multiple event types, and some events that include product data and some that don't, the model becomes an unpredictable mix of current and stale values.
+
+## The clearing strategy
+
+**Principle**: At every SPA route change, clear all keys that are page-specific. Retain only session-level or user-level values that should persist across navigations.
+
+```javascript
+// Comprehensive SPA route change flush
+function flushDataLayerOnRouteChange() {
+  window.dataLayer = window.dataLayer || [];
+
+  dataLayer.push({
+    // Clear ecommerce completely
+    'ecommerce': null,
+
+    // Clear page-specific product data
+    'item_name': undefined,
+    'item_id': undefined,
+    'item_category': undefined,
+    'item_brand': undefined,
+
+    // Clear page-level context
+    'page_type': undefined,
+    'page_category': undefined,
+
+    // Clear event-specific data
+    'interaction_type': undefined,
+    'search_query': undefined,
+
+    // Do NOT clear session/user data:
+    // user_id, user_type, cart_value, etc. should persist
+  });
+}
+```
+
+Call this function at the beginning of every SPA route change, before pushing the new page's data.
+
+## Timing: when to flush
+
+The timing of the flush relative to your virtual pageview push matters.
+
+**Correct order:**
+
+```javascript
+// Route change detected (e.g., in a React Router afterNavigation hook)
+
+// 1. Flush stale data first
+dataLayer.push({ ecommerce: null, page_type: undefined });
+
+// 2. Push new page data
+dataLayer.push({
+  page_path: '/new-path',
+  page_type: 'category',
+  category_name: 'Shoes'
+});
+
+// 3. Push virtual pageview event (triggers GTM to fire page_view tag)
+dataLayer.push({ event: 'page_view' });
+```
+
+If you push the flush after the pageview event, any tag triggered by `page_view` still sees the stale data. If you push the flush before the new page data, tags have a window where key values are `undefined` — acceptable if you handle default values correctly.
+
+**React Router example:**
+
+```javascript
+import { useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
+
+function useVirtualPageView() {
+  const location = useLocation();
+
+  useEffect(() => {
+    // Flush on route change
+    window.dataLayer = window.dataLayer || [];
+
+    // Clear stale state
+    window.dataLayer.push({
+      ecommerce: null,
+      page_type: undefined,
+      item_id: undefined,
+      item_name: undefined
+    });
+
+    // Push new pageview
+    window.dataLayer.push({
+      event: 'page_view',
+      page_path: location.pathname + location.search,
+      page_title: document.title
+    });
+  }, [location.pathname]);
+}
+```
+
+## Verifying the flush worked
+
+After pushing the flush, verify via the browser console:
+
+```javascript
+// Check ecommerce is cleared
+google_tag_manager["GTM-XXXX"].dataLayer.get("ecommerce")
+// Should return: null
+
+// Check page_type is cleared
+google_tag_manager["GTM-XXXX"].dataLayer.get("page_type")
+// Should return: undefined (not 'product' from previous page)
+
+// Check item_name is cleared
+google_tag_manager["GTM-XXXX"].dataLayer.get("item_name")
+// Should return: undefined
+```
+
+If any of these return the previous page's value, the flush either didn't fire before GTM processed the next event, or the key path was wrong (remember, nested object paths use dot notation).
+
+## Clearing nested objects
+
+Pushing `undefined` for a top-level key works. But what about nested keys?
+
+```javascript
+// This clears the entire ecommerce key:
+dataLayer.push({ ecommerce: null });
+
+// This clears only ecommerce.items but leaves other ecommerce keys:
+dataLayer.push({ ecommerce: { items: null } });
+
+// This tries to clear a nested path — but creates a NEW object
+// that merges with the existing ecommerce object:
+dataLayer.push({ ecommerce: { transaction_id: undefined } });
+// Result: ecommerce.transaction_id is undefined,
+//         but ecommerce.items from previous push is still there
+```
+
+For complex nested clearing, use `null` at the level you want to clear, then re-push the values you want to keep:
+
+```javascript
+// Clear ecommerce entirely, then restore currency
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  ecommerce: {
+    currency: 'USD'
+    // items: deliberately not set — will be set when a product event fires
+  }
+});
+```
+
+## Using `_clear: true` for batch clearing
+
+GTM supports `_clear: true` to reset keys atomically alongside setting new values:
+
+```javascript
+// _clear: true resets all keys in the same push
+dataLayer.push({
+  _clear: true,
+  event: 'page_view',
+  page_path: '/new-page',
+  page_type: 'landing'
+  // Any keys NOT listed here are not cleared by _clear
+  // ecommerce from previous push: still in model
+  // user.id from earlier push: still in model
+});
+```
+
+`_clear: true` is useful but scoped — it only applies to keys explicitly set in the same push. It does not clear your entire data model.
+
+## The "flush all custom variables" approach for strict SPAs
+
+For complex SPAs where managing individual keys becomes unwieldy, some implementations push a null value for every custom variable using a registry pattern:
+
+```javascript
+// Define all page-specific variables in one place
+const PAGE_SCOPED_VARIABLES = [
+  'ecommerce',
+  'page_type',
+  'category_name',
+  'category_id',
+  'item_id',
+  'item_name',
+  'item_brand',
+  'item_category',
+  'search_term',
+  'search_results_count',
+  'error_code',
+  'error_message',
+  'promotion_id',
+  'promotion_name'
+];
+
+function flushPageScopedVariables() {
+  var flush = {};
+  PAGE_SCOPED_VARIABLES.forEach(function(key) {
+    flush[key] = undefined;
+  });
+  dataLayer.push(flush);
+}
+```
+
+Maintain this list alongside your dataLayer specification. When a developer adds a new page-scoped variable, they add it to this array.
+
+## Common timing mistakes
+
+**Flushing after the route change event fires in GTM.** If GTM's History Change trigger fires before you flush, the tag on that trigger sees stale data. Always flush in a `beforeEach`/`beforeNavigation`-type hook, not an `afterEach` hook.
+
+**Not flushing when navigating between similar page types.** Developers often test product A → category → product B and the flush works because category doesn't push product data. But product A → product A (same page type, different product ID) skips the category page, and if you only flush on certain transitions, product A's data can appear on the second product A view.
+
+**Pushing the flush as a separate event (triggering tags).** `dataLayer.push({ ecommerce: null })` does not include an `event` key. This is intentional — you are updating the data model without triggering any GTM event. If you accidentally include `event: 'flush'` in your clearing push, you may trigger unwanted GTM tags.
+
+```javascript
+// Wrong: triggers GTM event evaluation
+dataLayer.push({ event: 'clear', ecommerce: null });
+
+// Correct: updates model without triggering evaluation
+dataLayer.push({ ecommerce: null });
+```
+
+## GTM Preview mode diagnosis
+
+In GTM Preview mode, you can see the data model state at any point by clicking an event and checking the Variables tab. The Variables tab shows the current value of each GTM variable at the moment that event was processed.
+
+If you see a stale value for a Data Layer Variable at a specific event, work backward in the timeline:
+1. Find the event where the stale value was first set
+2. Look for a flush push between that event and the current one
+3. If no flush exists, you found your missing cleanup
+
+The absence of a flush is the most common finding. The fix is always the same: add `dataLayer.push({ [key]: undefined })` before the event that should not have the stale value.
+
+---
+
+<CardGrid>
+  <LinkCard title="Data Model Deep Dive" href="/internals/data-model-deep-dive/" description="How the recursive merge creates stale values and how to inspect the data model directly." />
+  <LinkCard title="Persisting DataLayer Across Pages" href="/internals/persisting-datalayer-across-pages/" description="The flip side — what you want to persist and how to do it correctly." />
+  <LinkCard title="Race Conditions and Tag Timing" href="/internals/race-conditions-tag-timing/" description="How flush timing relative to tag evaluation determines whether you get stale data." />
+</CardGrid>

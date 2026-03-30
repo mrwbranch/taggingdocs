@@ -1,6 +1,293 @@
 ---
 title: "Custom Clients"
-description: "Building custom clients for non-standard data sources."
+description: "Building custom client templates in sGTM to receive webhooks, process non-GA4 data, and handle proprietary request formats."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The built-in GA4 client handles one data source: browser-originated GA4 Measurement Protocol requests. Custom clients let your sGTM server receive and process any HTTP request — CRM webhooks, mobile app events, order management notifications, server-to-server API calls — and transform them into the standard Event Model that your existing server-side tags already understand.
+
+## When to build a custom client
+
+Build a custom client when:
+
+- You want to receive **webhooks** from Stripe, HubSpot, Shopify, or another service and forward conversion data to ad platforms
+- Your **mobile app** sends custom events in a proprietary format
+- You are building a **server-to-server tracking** pipeline that bypasses the browser entirely
+- You want to receive events from a **third-party analytics platform** and redistribute them
+- You need to process **offline conversion data** from your CRM or order management system
+
+Do not build a custom client when the GA4 client handles your use case. Custom clients add development overhead and maintenance burden. If your data source can send standard GA4 Measurement Protocol requests, use the built-in client.
+
+## The sandboxed JavaScript environment
+
+sGTM client templates execute in a sandboxed JavaScript environment — not standard browser JavaScript. The available APIs are specifically designed for server-side template development:
+
+**Request APIs** (reading incoming data):
+- `getRequestPath()` — path of the incoming request (e.g., `/webhooks/stripe`)
+- `getRequestMethod()` — GET, POST, PUT, etc.
+- `getRequestHeader(name)` — value of a specific request header
+- `getRequestBody()` — raw request body as a string
+- `getRequestQueryParameter(name)` — value of a query parameter
+- `getAllRequestQueryParameters()` — object with all query parameters
+
+**Response APIs** (sending back to the caller):
+- `returnResponse()` — send the HTTP response back to the caller
+- `setResponseStatus(code)` — set HTTP status code (200, 204, 403, etc.)
+- `setResponseHeader(name, value)` — set a response header
+- `setResponseBody(body)` — set the response body text
+
+**Processing APIs** (building the Event Model and running the container):
+- `claimRequest()` — claim this request for this client
+- `runContainer(event, onComplete, onSuccess, onFailure)` — run the sGTM container with the event model you built
+- `setEventData(event)` — set the Event Model data
+
+**Utility APIs**:
+- `JSON.parse()` — parse JSON strings (available in the sandbox)
+- `getTimestampMillis()` — current timestamp in milliseconds
+- `logToConsole(message)` — write to Cloud Logging
+
+## Basic custom client structure
+
+Every client template follows this structure:
+
+```javascript
+// 1. Decide whether to claim this request
+const requestPath = getRequestPath();
+if (requestPath !== '/webhooks/my-service') {
+  // Not our request — do not claim, let other clients evaluate
+  return;
+}
+
+// 2. Claim the request
+claimRequest();
+
+// 3. Parse the request body
+const requestBody = getRequestBody();
+let payload;
+try {
+  payload = JSON.parse(requestBody);
+} catch (e) {
+  // Invalid JSON — return error response and stop
+  setResponseStatus(400);
+  setResponseBody('Invalid JSON payload');
+  returnResponse();
+  return;
+}
+
+// 4. Build the Event Model
+const eventData = {
+  event_name: payload.event_type,
+  client_id: payload.user_id || payload.anonymous_id,
+  // Map payload fields to Event Model properties
+  order_id: payload.order.id,
+  value: payload.order.total_price,
+  currency: payload.order.currency,
+};
+
+// 5. Run the container (fires triggers → tags)
+runContainer(eventData, () => {
+  // onComplete callback — container finished executing
+  setResponseStatus(200);
+  returnResponse();
+});
+```
+
+## Practical example: Stripe webhook client
+
+Stripe sends webhook events when payments are processed. This client receives Stripe purchase events and makes them available to server-side tags for conversion forwarding:
+
+```javascript
+// Stripe webhook client template
+const requestPath = getRequestPath();
+const requestMethod = getRequestMethod();
+
+// Only claim POST requests to /webhooks/stripe
+if (requestPath !== '/webhooks/stripe' || requestMethod !== 'POST') {
+  return;
+}
+
+claimRequest();
+
+// Validate Stripe signature (recommended in production)
+const stripeSignature = getRequestHeader('stripe-signature');
+if (!stripeSignature) {
+  setResponseStatus(401);
+  setResponseBody('Missing signature');
+  returnResponse();
+  return;
+}
+
+// Parse the Stripe event
+const rawBody = getRequestBody();
+let stripeEvent;
+try {
+  stripeEvent = JSON.parse(rawBody);
+} catch (e) {
+  setResponseStatus(400);
+  returnResponse();
+  return;
+}
+
+// Only process payment_intent.succeeded events for conversion tracking
+if (stripeEvent.type !== 'payment_intent.succeeded') {
+  // Acknowledge other event types without processing
+  setResponseStatus(200);
+  returnResponse();
+  return;
+}
+
+const paymentIntent = stripeEvent.data.object;
+
+// Build the Event Model for a purchase event
+const eventModel = {
+  event_name: 'purchase',
+  // Use your customer ID system to map to a client_id
+  client_id: paymentIntent.metadata.ga_client_id || paymentIntent.customer,
+  transaction_id: paymentIntent.id,
+  value: paymentIntent.amount / 100, // Stripe uses cents
+  currency: paymentIntent.currency.toUpperCase(),
+  // Pass through to enable downstream enrichment
+  stripe_customer_id: paymentIntent.customer,
+  payment_method: paymentIntent.payment_method_types[0],
+};
+
+runContainer(eventModel, () => {
+  setResponseStatus(200);
+  setResponseBody(JSON.stringify({received: true}));
+  returnResponse();
+});
+```
+
+<Aside type="caution">
+In production, validate webhook signatures before processing. Stripe provides a signature in the `Stripe-Signature` header that you can verify using the webhook secret. The sGTM sandboxed environment does not have native HMAC functions — you need to use the `computeHmac()` API available in sGTM templates, or accept the signature-less approach for lower-security scenarios.
+</Aside>
+
+## Practical example: simple webhook receiver
+
+A minimal custom client for receiving any JSON POST request:
+
+```javascript
+const requestPath = getRequestPath();
+
+// Claim any POST to /events
+if (requestPath !== '/events') {
+  return;
+}
+
+claimRequest();
+
+const rawBody = getRequestBody();
+let payload = {};
+
+if (rawBody) {
+  try {
+    payload = JSON.parse(rawBody);
+  } catch (e) {
+    setResponseStatus(400);
+    returnResponse();
+    return;
+  }
+}
+
+// Map payload to Event Model
+// Assumes payload has standard fields; adapt to your format
+runContainer({
+  event_name: payload.event || 'custom_event',
+  client_id: payload.client_id || payload.user_id || 'anonymous',
+  // Spread all payload properties into the Event Model
+  // Access them as Event Data variables in tags
+  ...payload,
+}, () => {
+  setResponseStatus(200);
+  returnResponse();
+});
+```
+
+## Setting response headers and cookies
+
+Custom clients can set response cookies — useful for server-side identity assignment when processing non-browser requests that eventually result in a browser response:
+
+```javascript
+// Set a tracking cookie in the response
+setResponseHeader(
+  'Set-Cookie',
+  '_my_id=abc123; Max-Age=63072000; Path=/; Domain=.yoursite.com; Secure; SameSite=Lax'
+);
+```
+
+For webhook-only clients (no browser is waiting for the response), cookie setting has no effect — the webhook sender does not store cookies.
+
+## Testing custom clients
+
+The sGTM Preview mode does not easily simulate incoming POST requests from external systems. Use these approaches instead:
+
+**Postman or curl for initial testing:**
+```bash
+# Test your custom client endpoint directly
+curl -X POST https://collect.yoursite.com/webhooks/stripe \
+  -H "Content-Type: application/json" \
+  -H "stripe-signature: test_signature_value" \
+  -d '{
+    "type": "payment_intent.succeeded",
+    "data": {
+      "object": {
+        "id": "pi_test_123",
+        "amount": 9999,
+        "currency": "usd",
+        "metadata": {"ga_client_id": "123456789.1711900000"}
+      }
+    }
+  }'
+```
+
+**Preview Header technique for sGTM Preview:**
+When sending test requests via curl/Postman, you can attach a sGTM preview header to route the request through Preview mode:
+
+1. Start a sGTM Preview session
+2. Copy the `x-gtm-server-preview` header value shown in Preview
+3. Include it in your curl/Postman request:
+   ```bash
+   curl -X POST https://collect.yoursite.com/webhooks/stripe \
+     -H "x-gtm-server-preview: YOUR_PREVIEW_HEADER_VALUE" \
+     -H "Content-Type: application/json" \
+     -d '...'
+   ```
+4. The request appears in the sGTM Preview panel as if it came from a browser
+
+This technique makes custom client debugging dramatically easier.
+
+## Common mistakes
+
+**Not claiming the request before returning.** If your client's claiming logic fails (wrong path, wrong method), the client should `return` without calling `claimRequest()`. If you call `claimRequest()` and then return without calling `runContainer()`, you have claimed the request but never processed it — no tags fire, and the caller gets no response.
+
+**Parsing JSON inside a conditional block without error handling.** `JSON.parse()` throws on invalid input. Always wrap JSON parsing in try/catch and return a 400 response if parsing fails.
+
+**Not calling `returnResponse()`.** If you call `claimRequest()`, you take ownership of the HTTP response. You must call `returnResponse()` at some point, or the caller's connection hangs until timeout.
+
+**Putting sensitive data in the Event Model unnecessarily.** The Event Model is accessible to all tags in the container. Do not put raw credit card numbers, passwords, or other credentials in the Event Model, even temporarily.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Client Claiming"
+    description="How priority order works and debugging which client handled which request."
+    href="/server-side/clients/client-claiming/"
+  />
+  <LinkCard
+    title="Webhook Integrations"
+    description="Complete patterns for receiving and processing webhooks through sGTM."
+    href="/server-side/advanced/webhook-integrations/"
+  />
+  <LinkCard
+    title="Custom Templates"
+    description="The full sandboxed JavaScript API reference for building templates."
+    href="/server-side/advanced/custom-templates/"
+  />
+  <LinkCard
+    title="Debugging sGTM"
+    description="The Preview Header technique and other tools for debugging custom clients."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+</CardGrid>

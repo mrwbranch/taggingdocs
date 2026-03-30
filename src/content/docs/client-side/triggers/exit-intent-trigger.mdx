@@ -3,4 +3,262 @@ title: "Exit Intent Trigger"
 description: "Detecting when a user is about to leave the page."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+GTM does not have a built-in Exit Intent trigger. What it has is a set of browser events you can combine to build one — and a Custom HTML tag or dataLayer event to tie it together. This article covers the browser mechanics, the correct detection patterns for desktop and mobile, and how to push a reliable exit intent signal to GTM.
+
+Exit intent detection is useful for: showing a final offer to users about to leave, capturing email addresses with an overlay, firing a final engagement event for analytics, and saving session state before the user departs.
+
+## The desktop approach: mouseout on documentElement
+
+The classic exit intent detection technique monitors the user's mouse moving toward the top of the browser window — toward the tab bar, the address bar, or the close button. When the cursor leaves the document area through the top edge, the user is likely about to close the tab or navigate away.
+
+```javascript
+function detectExitIntent(callback) {
+  let callbackFired = false;
+
+  document.documentElement.addEventListener('mouseout', function(event) {
+    // Only fire when cursor moves toward the top of the screen
+    if (event.clientY < 0 && !callbackFired) {
+      callbackFired = true;
+      callback();
+    }
+  });
+}
+```
+
+The key check: `event.clientY < 0`. This means the cursor has moved above the document viewport — toward the browser chrome. This is specific enough to avoid false positives from mouse movement to the sides of the window.
+
+<Aside type="caution">
+Exit intent via `mouseout` only works on desktop. Mobile and tablet devices have no mouse cursor. On mobile, you need a completely different approach. A combined implementation handles both contexts, which we cover below.
+</Aside>
+
+## The `beforeunload` event
+
+The `beforeunload` event fires when the page is about to unload — the user is navigating away, closing the tab, or refreshing. It fires reliably across all devices.
+
+Limitations:
+- You cannot show a custom UI in `beforeunload` (browsers have removed that capability to prevent abuse)
+- Network requests in `beforeunload` may be cancelled before they complete
+- It fires on page refreshes and back/forward navigation, not just close
+
+```javascript
+window.addEventListener('beforeunload', function() {
+  // Standard tracking calls here may not complete
+  // Use navigator.sendBeacon for reliable delivery
+  navigator.sendBeacon('/api/exit-tracking', JSON.stringify({
+    event: 'page_exit',
+    page_path: window.location.pathname,
+    time_on_page: Math.round((Date.now() - performance.timing.navigationStart) / 1000)
+  }));
+});
+```
+
+`navigator.sendBeacon` is the correct API for exit tracking. Unlike `fetch` or `XMLHttpRequest`, `sendBeacon` sends the data asynchronously and the browser guarantees delivery even as the page unloads. The browser queues the request and ensures it completes even after the page is gone.
+
+## Mobile: using the Page Visibility API
+
+On mobile, users switch apps, minimize the browser, or lock their phone rather than "closing a tab" in the traditional sense. The Page Visibility API (`visibilitychange` event) is the right signal for mobile exit intent.
+
+```javascript
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'hidden') {
+    // Page is now hidden: user switched apps, locked screen, or backgrounded browser
+    navigator.sendBeacon('/api/exit-tracking', JSON.stringify({
+      event: 'page_hidden',
+      page_path: window.location.pathname
+    }));
+  }
+});
+```
+
+This fires whenever the page becomes hidden — which on mobile is a strong proxy for exit intent. On desktop, it also fires when users switch to another tab, which may or may not be exit intent depending on your use case.
+
+## Combined desktop + mobile implementation
+
+The most complete exit intent implementation handles all contexts:
+
+```javascript
+(function() {
+  // Prevent duplicate firing
+  let exitTracked = false;
+
+  function fireExitIntent(method) {
+    if (exitTracked) return;
+    exitTracked = true;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'exit_intent',
+      exit_method: method,  // 'mouse_exit', 'visibility_hidden', 'beforeunload'
+      page_path: window.location.pathname,
+      time_on_page: Math.round((Date.now() - performance.timing.navigationStart) / 1000),
+      scroll_depth: getMaxScrollDepth()
+    });
+  }
+
+  function getMaxScrollDepth() {
+    try {
+      var docHeight = document.documentElement.scrollHeight - window.innerHeight;
+      return docHeight > 0 ? Math.round((window.pageYOffset / docHeight) * 100) : 0;
+    } catch(e) { return 0; }
+  }
+
+  // Desktop: mouse leaving viewport via top edge
+  document.documentElement.addEventListener('mouseout', function(e) {
+    if (e.clientY < 0) {
+      fireExitIntent('mouse_exit');
+    }
+  });
+
+  // Mobile: page becoming hidden
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden') {
+      fireExitIntent('visibility_hidden');
+    }
+  });
+
+  // Fallback: beforeunload for all remaining cases
+  window.addEventListener('beforeunload', function() {
+    if (!exitTracked) {
+      // Use sendBeacon since we can't do a full dataLayer push reliably
+      navigator.sendBeacon('/api/exit-tracking', JSON.stringify({
+        event: 'exit_intent',
+        exit_method: 'beforeunload',
+        page_path: window.location.pathname,
+        time_on_page: Math.round((Date.now() - performance.timing.navigationStart) / 1000)
+      }));
+    }
+  });
+})();
+```
+
+Place this in a Custom HTML tag that fires on Page View (DOM Ready), so it is set up early in the page lifecycle.
+
+## GTM setup via Custom HTML
+
+Since GTM has no native Exit Intent trigger, implement exit intent detection in a Custom HTML tag that pushes to the dataLayer:
+
+<TagConfig
+  name="Custom HTML - Exit Intent Detection Setup"
+  type="Custom HTML"
+  trigger="DOM Ready - All Pages"
+  variables={[]}
+/>
+
+The Custom HTML tag contains the detection code above. When exit intent is detected, it pushes `event: 'exit_intent'` to the dataLayer. You then create a Custom Event trigger in GTM that listens for this event:
+
+```
+Custom Event trigger configuration:
+- Event name: exit_intent
+- Fire on: All Custom Events (or add conditions)
+```
+
+<TagConfig
+  name="GA4 - Event - Exit Intent"
+  type="Google Analytics: GA4 Event"
+  trigger="CE - exit_intent"
+  variables={['DLV - exit_method', 'DLV - time_on_page', 'DLV - scroll_depth']}
+/>
+
+## Using sendBeacon for final tracking without GTM
+
+For events that must fire reliably when the page is unloading, `sendBeacon` is more reliable than firing a GTM tag via a dataLayer push in `beforeunload`. GTM's tag execution pipeline may not complete before the page unloads.
+
+```javascript
+// Reliable exit tracking that bypasses GTM
+window.addEventListener('beforeunload', function() {
+  navigator.sendBeacon('/analytics/collect', JSON.stringify({
+    event_name: 'page_exit',
+    page_location: window.location.href,
+    engagement_time_msec: Date.now() - performance.timing.navigationStart,
+    // Include any session/user identifiers from cookies if needed
+  }));
+});
+```
+
+For server-side GTM users, this beacon can go to your sGTM endpoint, which then forwards to GA4 or other destinations. This is the most robust approach for exit tracking.
+
+## Combining exit intent with engagement data
+
+The most valuable exit intent data includes context about the user's engagement before they left:
+
+```javascript
+function fireExitIntent(method) {
+  if (exitTracked) return;
+  exitTracked = true;
+
+  // Gather all engagement data before the push
+  var scrollDepth = getMaxScrollDepth();
+  var timeOnPage = Math.round((Date.now() - performance.timing.navigationStart) / 1000);
+  var interactionCount = window.__interactionCount || 0; // Track separately
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'exit_intent',
+    exit_method: method,
+    page_path: window.location.pathname,
+    page_type: window.__pageType || undefined,  // Set by your page code
+    time_on_page_seconds: timeOnPage,
+    max_scroll_depth_pct: scrollDepth,
+    interaction_count: interactionCount,
+    // Category helps segment: long readers, bouncers, engaged non-converters
+    engagement_category: timeOnPage > 60 && scrollDepth > 75 ? 'deep_read' :
+                         timeOnPage > 30 ? 'medium_engagement' : 'low_engagement'
+  });
+}
+```
+
+This gives you rich segmentation in GA4: you can compare exit intent patterns for deep readers vs. bouncers, for users who saw your CTA vs. users who did not.
+
+## Common mistakes
+
+### Using exit intent for pop-ups without throttling
+
+Exit intent is often used to trigger pop-ups or overlays. If you use a GTM Custom Event trigger to show an exit intent overlay, you will almost certainly show it multiple times to the same user (every time their cursor approaches the top, every page they visit). Rate-limit by checking a session cookie or localStorage:
+
+```javascript
+function shouldShowExitOffer() {
+  if (sessionStorage.getItem('exitOfferShown')) return false;
+  sessionStorage.setItem('exitOfferShown', '1');
+  return true;
+}
+```
+
+### Relying on beforeunload for GTM tag firing
+
+A dataLayer push in `beforeunload` may not give GTM enough time to process the event and fire associated tags before the page unloads. GTM's tag execution is asynchronous. For exit tracking, either use `sendBeacon` directly (bypassing GTM) or use `mouseleave` detection (which fires while the page is still active) instead of `beforeunload`.
+
+### Treating mouse_exit as a conversion-quality signal
+
+Exit intent is a soft signal. A user moving their cursor to open a bookmark is not "about to leave" in a meaningful sense. A user whose cursor drifts off the page while reading is not necessarily leaving. Weight exit intent data appropriately — it is useful for segmentation and behavioral analysis, but it is not a high-confidence exit signal like a click to an external page.
+
+### Not testing on mobile
+
+Exit intent implementations frequently work on desktop but fail silently on mobile. Test your implementation on actual mobile devices. The `visibilitychange` approach fires differently on iOS Safari, Android Chrome, and in-app browsers. Verify in GTM Preview mode (using remote debugging or device testing) that the event fires when you switch away from the browser tab.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The trigger type that listens for your exit_intent dataLayer push."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Timer Triggers"
+    description="An alternative for saving final engagement state — fire on a long timer rather than on exit."
+    href="/client-side/triggers/timer-triggers/"
+  />
+  <LinkCard
+    title="Scroll Triggers"
+    description="Combine exit intent with scroll depth to understand what users saw before they left."
+    href="/client-side/triggers/scroll-triggers/"
+  />
+  <LinkCard
+    title="Trigger Types Overview"
+    description="A complete reference for all GTM trigger types."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+</CardGrid>

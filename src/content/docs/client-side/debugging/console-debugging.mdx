@@ -1,6 +1,259 @@
 ---
 title: "Console Debugging"
-description: "Browser console techniques for GTM debugging."
+description: "Browser console commands for GTM debugging — inspect the dataLayer, monitor pushes in real-time, decode GA4 payloads, and find container problems without Preview mode."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The browser console gives you direct access to things Preview mode doesn't show: the raw dataLayer array, real-time push monitoring, the internal GTM data model state, and the exact GA4 network payloads. These techniques are essential for debugging in environments where Preview mode isn't available — third-party sites, authenticated dashboards, and staging environments with access restrictions.
+
+## Inspecting the dataLayer
+
+The simplest starting point:
+
+```javascript
+// View the entire dataLayer array
+window.dataLayer
+
+// Pretty-printed for readability
+JSON.stringify(window.dataLayer, null, 2)
+
+// Count how many items are in the dataLayer
+window.dataLayer.length
+
+// View the most recent push
+window.dataLayer[window.dataLayer.length - 1]
+
+// View the last 5 pushes
+window.dataLayer.slice(-5)
+```
+
+## Monitoring dataLayer pushes in real-time
+
+To see every push as it happens without reloading the page:
+
+```javascript
+// Override dataLayer.push to log every push
+(function() {
+  var originalPush = window.dataLayer.push.bind(window.dataLayer);
+  window.dataLayer.push = function() {
+    var args = Array.prototype.slice.call(arguments);
+    console.group('%cdataLayer.push', 'color: #4CAF50; font-weight: bold;');
+    console.log('Data:', JSON.stringify(args[0], null, 2));
+    console.log('Event:', args[0] && args[0].event ? args[0].event : '(no event key)');
+    console.groupEnd();
+    return originalPush.apply(this, args);
+  };
+  console.log('✅ dataLayer push monitoring active');
+})();
+```
+
+After running this in the console, every subsequent `dataLayer.push()` call on the page will log its contents with a green label. This works even when you can't see the source code.
+
+<Aside type="tip">
+This override persists until you reload the page. If the site pushes a lot of events, filter the console to only show messages containing "dataLayer.push" using the console filter box.
+</Aside>
+
+## Reading the GTM internal data model
+
+GTM's internal data model is different from the dataLayer array. The array is a queue of pushes; the internal model is the merged state. Data Layer Variables read from the internal model, not the array.
+
+To inspect the internal model directly:
+
+```javascript
+// Replace GTM-XXXX with your actual container ID
+var containerId = 'GTM-XXXX';
+var model = window.google_tag_manager[containerId].dataLayer;
+
+// Get a specific key
+model.get('ecommerce');
+
+// Get a nested key
+model.get('ecommerce.transaction_id');
+
+// Get the current event
+model.get('event');
+
+// Get user_id if it was pushed
+model.get('user_id');
+```
+
+To find your container ID without checking GTM:
+```javascript
+Object.keys(window.google_tag_manager).filter(function(k) {
+  return k.startsWith('GTM-');
+})
+```
+
+## Decoding GA4 network payloads
+
+Filter the Network tab for `collect` requests to see the raw data GA4 receives. But the payload is URL-encoded and hard to read.
+
+Use this console function to decode it:
+
+```javascript
+// Paste this function, then pass it a URL from the Network tab
+function decodeGA4Hit(url) {
+  var urlObj = new URL(url);
+  var params = {};
+  urlObj.searchParams.forEach(function(value, key) {
+    params[key] = value;
+  });
+  return params;
+}
+
+// Or if you have the POST body (for GA4's POST requests):
+function decodeGA4Body(bodyString) {
+  var params = {};
+  bodyString.split('&').forEach(function(pair) {
+    var parts = pair.split('=');
+    params[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1] || '');
+  });
+  return params;
+}
+```
+
+Key parameters to look for in GA4 payloads:
+- `en` — event name
+- `ep.[parameter_name]` — event parameter
+- `up.[property_name]` — user property
+- `uid` — user ID
+- `cid` — client ID
+- `sid` — session ID
+- `_p` — payload hash (ignore this)
+- `pr1` — first product (ecommerce)
+
+## Quick container diagnostics
+
+```javascript
+// Is GTM loaded?
+typeof window.google_tag_manager !== 'undefined' ? 'GTM loaded ✅' : 'GTM NOT loaded ❌'
+
+// Which containers are present?
+Object.keys(window.google_tag_manager || {})
+
+// What's the container version?
+var gtmId = Object.keys(window.google_tag_manager).find(function(k) {
+  return k.startsWith('GTM-');
+});
+if (gtmId) {
+  console.log('Container:', gtmId);
+  console.log('Version:', window.google_tag_manager[gtmId].version);
+}
+
+// When did GTM initialize?
+window.dataLayer.find(function(item) {
+  return item.event === 'gtm.js';
+})
+```
+
+## Checking consent state
+
+```javascript
+// Check what consent defaults were set
+window.dataLayer.filter(function(item) {
+  return item[0] === 'consent';
+})
+
+// More detailed: use gtag if available
+if (typeof gtag === 'function') {
+  gtag('get', 'G-XXXXXXXXXX', 'analytics_storage', function(value) {
+    console.log('analytics_storage:', value);
+  });
+}
+
+// Check the consent string from your CMP
+document.cookie.split(';').filter(function(c) {
+  return c.indexOf('CookieConsent') !== -1 || c.indexOf('consent') !== -1;
+})
+```
+
+## Finding all custom event pushes on a page
+
+If you're taking over an existing implementation and want to understand what events the page pushes:
+
+```javascript
+// Run this, then interact with the page
+// All events pushed after this runs will be logged
+(function() {
+  var events = [];
+  var originalPush = window.dataLayer.push.bind(window.dataLayer);
+  window.dataLayer.push = function(data) {
+    if (data && data.event) {
+      events.push({ event: data.event, time: new Date().toISOString(), data: data });
+      console.log('Event fired:', data.event, data);
+    }
+    return originalPush.call(this, data);
+  };
+  console.log('Recording events. Run: window.__gtmEvents to see all events.');
+  window.__gtmEvents = events;
+})();
+
+// Later, to see all recorded events:
+window.__gtmEvents
+```
+
+## Verifying ecommerce data
+
+```javascript
+// Check the ecommerce object from the last push
+var lastEcomPush = window.dataLayer.slice().reverse().find(function(item) {
+  return item.ecommerce && item.event;
+});
+
+if (lastEcomPush) {
+  console.log('Event:', lastEcomPush.event);
+  console.log('Ecommerce:', JSON.stringify(lastEcomPush.ecommerce, null, 2));
+
+  // Validate items array
+  var items = lastEcomPush.ecommerce && lastEcomPush.ecommerce.items;
+  if (items) {
+    items.forEach(function(item, i) {
+      var issues = [];
+      if (!item.item_id) issues.push('Missing item_id');
+      if (!item.item_name) issues.push('Missing item_name');
+      if (typeof item.price !== 'number') issues.push('price is not a number: ' + typeof item.price);
+      if (typeof item.quantity !== 'number') issues.push('quantity is not a number');
+      if (issues.length > 0) {
+        console.warn('Item ' + i + ' issues:', issues.join(', '));
+      }
+    });
+  }
+} else {
+  console.log('No ecommerce events found in dataLayer');
+}
+```
+
+## Common mistakes
+
+### Running monitoring code too late
+
+If you paste the `dataLayer.push` override after the page has already loaded and pushed events, you'll miss all the events that fired on page load. Use a bookmarklet that you activate before navigating to the page, or add the override to your browser's DevTools snippets so you can run it on every page load.
+
+### Looking at the wrong container ID
+
+Sites with multiple GTM containers will have multiple keys in `window.google_tag_manager`. Make sure you're inspecting the right one.
+
+### Not checking the Network tab
+
+The console shows what GTM pushed but not what actually reached GA4. Always cross-check with the Network tab. Filter by "google-analytics.com" or "analytics.google.com" and check the `collect` requests.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DataLayer Debugging"
+    description="Deeper analysis of dataLayer-specific problems — merge behavior, stale data, type mismatches."
+    href="/client-side/debugging/datalayer-debugging/"
+  />
+  <LinkCard
+    title="Preview Mode"
+    description="GTM's visual debugging tool — use alongside the console techniques for complete coverage."
+    href="/client-side/debugging/preview-mode/"
+  />
+  <LinkCard
+    title="DataLayer Deep Dive"
+    description="How the dataLayer array and GTM's internal data model differ — essential context for the console commands above."
+    href="/foundations/datalayer-deep-dive/"
+  />
+</CardGrid>

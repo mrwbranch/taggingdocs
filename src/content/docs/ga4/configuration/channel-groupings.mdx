@@ -1,6 +1,228 @@
 ---
 title: "Channel Groupings"
-description: "Understanding and customizing traffic source groupings."
+description: "How GA4's default channel groupings work, why traffic gets misclassified, and how to fix it with custom channel groups and BigQuery SQL."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Channel groupings in GA4 classify traffic sources into categories like Organic Search, Paid Social, Email, and Direct. They are derived — not collected directly — which means the classification logic can produce wrong answers if your UTM parameters are inconsistent or your traffic sources do not match Google's assumptions.
+
+Understanding how channel groupings work (and where they fail) is essential for accurate acquisition analysis.
+
+## How GA4 classifies channels
+
+GA4 applies a priority-ordered ruleset to every session. The first rule that matches determines the channel:
+
+| Rule priority | Channel | Conditions |
+|--------------|---------|------------|
+| 1 | Direct | Source = direct AND Medium is unset or not a medium |
+| 2 | Cross-network | Campaign name contains "cross-network" |
+| 3 | Paid Shopping | Source matches a shopping site AND Medium is cpc, ppc, or paid |
+| 4 | Paid Search | Source matches a search engine AND Medium is cpc, ppc, or paid |
+| 5 | Paid Social | Source matches a social network AND Medium is cpc, ppc, or paid |
+| 6 | Paid Video | Source matches a video site AND Medium is cpc, ppc, or paid |
+| 7 | Display | Medium is display, banner, or expandable |
+| 8 | Paid Other | Medium is cpc, ppc, or paid (not matched above) |
+| 9 | Organic Shopping | Source matches a shopping site AND Medium is organic |
+| 10 | Organic Social | Source matches a social network |
+| 11 | Organic Video | Source matches a video site |
+| 12 | Organic Search | Source matches a search engine AND Medium is organic |
+| 13 | Email | Source or Medium contains "email" or "e-mail" |
+| 14 | Affiliates | Medium is affiliate |
+| 15 | Referral | Medium is referral |
+| 16 | Audio | Medium is audio |
+| 17 | SMS | Source = sms or medium = sms |
+| 18 | Mobile Push Notifications | Medium ends with "push" or is "mobile", "notification" |
+| (None) | Unassigned | No rule matched |
+
+The "source matches a search engine" rule uses Google's maintained list of recognized search engines. Sources not on that list are not classified as Organic Search, even if they are search engines.
+
+## Why traffic gets misclassified
+
+### Missing or inconsistent UTM parameters
+
+If a paid campaign links have no UTM parameters (or have `utm_medium=link` instead of `utm_medium=cpc`), GA4 may classify paid traffic as Referral or Direct. Consistent UTM tagging is the most important factor in accurate channel classification.
+
+Standard paid search UTM:
+```
+utm_source=google&utm_medium=cpc&utm_campaign=brand_us
+```
+
+If someone tags it as `utm_medium=paid_search` instead of `cpc`, it will not match the Paid Search channel rule — it falls to "Paid Other" or "Unassigned."
+
+### Email campaigns without utm_medium=email
+
+Email newsletters tagged with `utm_source=newsletter&utm_medium=nl` will not match the Email channel rule (which requires medium to contain "email" or "e-mail"). They will be classified as "Referral" or "Unassigned."
+
+Correct email UTM: `utm_source=mailchimp&utm_medium=email&utm_campaign=march_newsletter`
+
+### Organic social appearing as Referral
+
+If your social media profiles link to your site without UTM parameters, GA4 classifies them using the referrer. Most social networks are on GA4's "social" source list, so organic social visits usually classify correctly as Organic Social — but some smaller networks may not be recognized and will appear as Referral.
+
+### Subdomains appearing as Referral
+
+If cross-domain tracking is not configured, traffic from your own subdomains (e.g., `blog.example.com` to `shop.example.com`) appears as Referral from a subdomain. Configure cross-domain tracking in your stream settings.
+
+## Custom channel groupings
+
+GA4 allows you to create custom channel groups to override or extend the default classification. This is useful when:
+- Your UTM structure uses non-standard medium values
+- You want industry-specific channels (e.g., "Podcast Advertising")
+- You need to combine channels for reporting (e.g., all paid channels as "Paid Media")
+
+### Creating a custom channel group
+
+<Steps>
+1. Go to **Admin → Channel Groups → Create new channel group**.
+
+2. Name the channel group.
+
+3. Define channel rules. Each channel has a name and conditions based on source, medium, campaign, or other traffic parameters.
+
+4. Set the priority order — rules are evaluated top to bottom.
+
+5. Save and set as the default channel group if desired.
+</Steps>
+
+Custom channel groups appear as an option in the Traffic Acquisition report's "Session default channel group" dimension. You can switch between the default system group and your custom group.
+
+<Aside type="caution">
+Custom channel groups apply from the date you create them forward. They do not restate historical data. Create them early, before you need to compare historical periods.
+</Aside>
+
+## Fixing common misclassifications
+
+### Fix: Email going to Unassigned
+
+If your email platform uses `utm_medium=email_newsletter` or any variant, add a custom channel rule:
+
+```
+Channel name: Email
+Rule: Medium contains "email" OR Medium contains "e-mail" OR Medium contains "newsletter"
+```
+
+### Fix: Paid media going to Unassigned due to non-standard medium
+
+If your agency uses `utm_medium=paid_social` instead of `cpc`:
+
+```
+Channel name: Paid Social
+Rule: (Medium = "paid_social" OR Medium = "cpc" OR Medium = "ppc")
+     AND Source matches regex "facebook|instagram|twitter|linkedin|tiktok"
+```
+
+### Fix: Partner traffic appearing as Referral
+
+If you have specific partner domains that should be their own channel:
+
+```
+Channel name: Partner Referral
+Rule: Source matches regex "partner1\.com|partner2\.com|distributor\.example\.com"
+```
+
+## Channel groupings in BigQuery
+
+The default channel grouping in GA4 uses a logic that you can replicate in BigQuery. Here is a simplified version for common channels:
+
+```sql
+-- Channel classification in BigQuery
+WITH traffic_data AS (
+  SELECT
+    event_date,
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    traffic_source.source AS source,
+    traffic_source.medium AS medium,
+    traffic_source.name AS campaign
+  FROM `project.dataset.events_*`
+  WHERE event_name = 'session_start'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+)
+
+SELECT
+  event_date,
+  CASE
+    WHEN source = '(direct)' AND (medium = '(none)' OR medium = '(not set)')
+      THEN 'Direct'
+    WHEN REGEXP_CONTAINS(LOWER(medium), r'email|e-mail|e_mail')
+      THEN 'Email'
+    WHEN LOWER(medium) IN ('cpc', 'ppc', 'paid')
+      AND REGEXP_CONTAINS(LOWER(source), r'google|bing|yahoo|baidu')
+      THEN 'Paid Search'
+    WHEN LOWER(medium) IN ('cpc', 'ppc', 'paid')
+      AND REGEXP_CONTAINS(LOWER(source), r'facebook|instagram|twitter|linkedin|tiktok|pinterest|snapchat')
+      THEN 'Paid Social'
+    WHEN LOWER(medium) = 'organic'
+      AND REGEXP_CONTAINS(LOWER(source), r'google|bing|yahoo|duckduckgo|baidu')
+      THEN 'Organic Search'
+    WHEN REGEXP_CONTAINS(LOWER(source), r'facebook|instagram|twitter|linkedin|tiktok|pinterest|snapchat')
+      THEN 'Organic Social'
+    WHEN LOWER(medium) = 'referral'
+      THEN 'Referral'
+    WHEN LOWER(medium) = 'affiliate'
+      THEN 'Affiliates'
+    ELSE 'Unassigned'
+  END AS channel,
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '.', CAST(session_id AS STRING))) AS sessions
+FROM traffic_data
+GROUP BY event_date, channel
+ORDER BY event_date, sessions DESC
+```
+
+See [Custom Channel Grouping in BigQuery](/ga4/bigquery/custom-channel-grouping/) for a more complete implementation.
+
+## Monitoring for misclassification
+
+Run this BigQuery query periodically to identify traffic going to Unassigned:
+
+```sql
+SELECT
+  traffic_source.source AS source,
+  traffic_source.medium AS medium,
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  )) AS sessions
+FROM `project.dataset.events_*`
+WHERE event_name = 'session_start'
+  AND _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+GROUP BY source, medium
+HAVING sessions > 10
+ORDER BY sessions DESC
+```
+
+Any source/medium combination with significant volume that should be in a named channel but is not indicates a tagging or classification issue.
+
+## Common mistakes
+
+### Expecting UTM tags to fix themselves
+
+UTM tagging requires discipline across your entire marketing team. A single campaign with `utm_medium=social` (instead of `cpc` for paid social) will misclassify permanently for those sessions. Establish a UTM taxonomy document and audit campaigns regularly.
+
+### Not knowing which channels are in GA4's default lists
+
+GA4's recognized source lists for search engines, social networks, and video platforms are maintained by Google and update over time. New platforms may not be on the list. Check the [GA4 channel definitions](https://support.google.com/analytics/answer/9756891) documentation and supplement with custom channel rules for any platform not recognized.
+
+### Creating custom channels that overlap
+
+If two custom channel rules can match the same session, the first rule wins. Order matters. Put more specific rules (e.g., specific campaigns) above more general rules (e.g., medium = cpc).
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Channel Grouping in BigQuery"
+    description="Implement and extend channel classification logic in SQL."
+    href="/ga4/bigquery/custom-channel-grouping/"
+  />
+  <LinkCard
+    title="Attribution Settings"
+    description="Configure attribution models that determine which channel gets credit for conversions."
+    href="/ga4/configuration/attribution-settings/"
+  />
+  <LinkCard
+    title="Sessions and Attribution"
+    description="How GA4 assigns source/medium to sessions."
+    href="/ga4/fundamentals/sessions-and-attribution/"
+  />
+</CardGrid>

@@ -1,6 +1,175 @@
 ---
 title: "Track Rage Clicks"
-description: "Detect frustrated user behavior with rapid repeated clicks."
+description: "Detect frustrated user behavior by identifying rapid repeated clicks on the same element — Custom HTML implementation, threshold configuration, and GA4 error events."
+sidebar:
+  badge:
+    text: Intermediate
+    variant: note
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Rage clicks — rapid, repeated clicks on the same element — signal user frustration: a button that appears clickable but is not responding, a link with a broken href, or a UI element that looks interactive but is not. Detecting them helps you find broken interactions before users complain.
+
+## What counts as a rage click
+
+A rage click is typically 3 or more clicks on the same element within 500-700ms. The exact threshold depends on your use case:
+
+- **3 clicks in 500ms**: Aggressive threshold, fewer false positives from double-clickers
+- **4 clicks in 700ms**: More forgiving, catches slower frustrated clicking
+- **Any rapid clicking on error/disabled elements**: Always a rage click candidate
+
+## Implementation
+
+<DataLayerExample event="rage_click" description="Detects 3+ rapid clicks on the same element within 500ms.">
+```javascript
+(function() {
+  var CLICK_THRESHOLD = 3;        // Minimum clicks to count as rage
+  var TIME_WINDOW = 500;          // Milliseconds
+  var clickBuffer = {};
+
+  document.addEventListener('click', function(event) {
+    var el = event.target;
+
+    // Walk up to find a meaningful element to track
+    // (click on icon inside button → track the button)
+    while (el && el !== document.body) {
+      if (
+        el.tagName === 'BUTTON' ||
+        el.tagName === 'A' ||
+        el.tagName === 'INPUT' ||
+        el.tagName === 'SELECT' ||
+        el.getAttribute('role') === 'button' ||
+        el.dataset.trackRage
+      ) break;
+      el = el.parentElement;
+    }
+
+    if (!el || el === document.body) return;
+
+    // Create a stable key for this element
+    var key = el.id ||
+      el.dataset.trackId ||
+      (el.tagName + '.' + el.className.replace(/\s+/g, '.')) ||
+      el.textContent.trim().substring(0, 30);
+
+    var now = Date.now();
+
+    if (!clickBuffer[key]) {
+      clickBuffer[key] = { count: 0, first: now };
+    }
+
+    // Reset if outside time window
+    if (now - clickBuffer[key].first > TIME_WINDOW) {
+      clickBuffer[key] = { count: 0, first: now };
+    }
+
+    clickBuffer[key].count++;
+
+    // Rage click detected
+    if (clickBuffer[key].count === CLICK_THRESHOLD) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'rage_click',
+        element_tag: el.tagName.toLowerCase(),
+        element_id: el.id || undefined,
+        element_text: (el.innerText || el.value || '').trim().substring(0, 100),
+        element_classes: el.className || undefined,
+        click_count: clickBuffer[key].count,
+        page_path: window.location.pathname,
+        // Is the element disabled or non-interactive?
+        element_disabled: el.disabled || el.getAttribute('aria-disabled') === 'true' || false,
+        element_visible: el.offsetParent !== null
+      });
+
+      // Reset to avoid firing repeatedly after threshold
+      clickBuffer[key].count = 0;
+    }
+  }, true);  // Use capture phase to catch all clicks
+})();
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add the code as a Custom HTML tag** in GTM
+   - Trigger: **DOM Ready** (All Pages)
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `rage_click`
+
+3. **Create Data Layer Variables**
+
+   - `DLV - element_tag` → `element_tag`
+   - `DLV - element_id` → `element_id`
+   - `DLV - element_text` → `element_text`
+   - `DLV - element_disabled` → `element_disabled`
+   - `DLV - click_count` → `click_count`
+
+4. **Create a GA4 Event Tag**
+
+   - Event name: `rage_click`
+   - Parameters:
+     - `element_tag` → `{{DLV - element_tag}}`
+     - `element_id` → `{{DLV - element_id}}`
+     - `element_text` → `{{DLV - element_text}}`
+     - `element_disabled` → `{{DLV - element_disabled}}`
+     - `click_count` → `{{DLV - click_count}}`
+   - Trigger: the Custom Event trigger
+
+5. **Register as a Key Event in GA4 (optional)**
+
+   If `element_disabled = true` (user is rage-clicking a disabled button), consider marking `rage_click` events with `element_disabled = true` as Key Events — these are your most urgent UX bugs.
+
+6. **Test in Preview Mode**
+
+   Visit a page and click rapidly on a button 3+ times within half a second. The `rage_click` event should appear in the Summary pane.
+</Steps>
+
+<TagConfig
+  name="GA4 - rage_click"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - rage_click"
+  variables={["DLV - element_id", "DLV - element_text", "DLV - element_disabled", "DLV - click_count"]}
+/>
+
+## Analysing rage click data in GA4
+
+Create an Exploration report:
+
+1. **Dimensions**: `element_text`, `element_id`, `page_path`
+2. **Metrics**: `Event count`
+3. **Filter**: `Event name = rage_click`
+4. **Sort by**: Event count descending
+
+The top results are your most frustrating UI elements. Investigate each one:
+- Is the button hidden behind a slow network request?
+- Is it disabled but not visually obvious?
+- Is it overlaid by an invisible element?
+- Is there a JavaScript error preventing the click from working?
+
+Cross-reference with your error tracking if you have it: elements that generate both rage clicks AND JavaScript errors are critical fixes.
+
+## Test it
+
+1. Open GTM Preview on any page
+2. Click rapidly on a button 4 times in less than 500ms
+3. A `rage_click` event should appear in the Summary pane
+4. Check `element_text` and `element_id` are correct
+5. Click a disabled button rapidly — verify `element_disabled` is `true`
+
+## Common gotchas
+
+**False positives from text selection.** Triple-clicking to select a word in a text field also fires 3 rapid clicks. Add a check: `if (window.getSelection().toString().length > 0) return;` to skip clicks that result in text selection.
+
+**Elements inside SPAs get recreated.** If a component re-renders between clicks (common in React), `clickBuffer` entries may become stale because the element reference changes. The `key` calculation using `tagName + className + text` is more stable than comparing element references directly.
+
+**Capture phase is important.** Using `true` as the third argument to `addEventListener` (capture phase) ensures clicks are detected even when the element's own handler calls `event.stopPropagation()`.
+
+<CardGrid>
+  <LinkCard title="Track Button Clicks" href="/recipes/track-button-clicks/" description="Standard button click tracking for non-frustrated interactions." />
+  <LinkCard title="PII Detection & Removal" href="/recipes/pii-detection-removal/" description="Ensure element_text does not contain user-entered data." />
+</CardGrid>

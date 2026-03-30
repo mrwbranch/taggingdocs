@@ -1,6 +1,283 @@
 ---
 title: "Consent for Non-Google Tags"
-description: "Managing consent for tags that don't support Consent Mode natively."
+description: "How to block Meta Pixel, TikTok, LinkedIn, and other tags that don't natively support Consent Mode — three approaches with code, and a reusable consent gate pattern."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Google's Consent Mode only controls Google's tags. Meta Pixel, TikTok Pixel, LinkedIn Insight Tag, Pinterest Tag, Criteo, and hundreds of other ad networks have no native awareness of Consent Mode signals. They fire whenever their trigger conditions are met, regardless of what the user consented to.
+
+This means your consent implementation is only half-complete if you have addressed only Google's tags. Every non-Google advertising tag in your container needs its own consent gate.
+
+<Aside type="caution">
+Running non-Google advertising pixels without consent on users who denied advertising consent is a GDPR violation regardless of how correctly your Consent Mode implementation is configured. Consent Mode compliance does not extend to third-party tags.
+</Aside>
+
+## The three approaches
+
+There are three practical ways to gate non-Google tags on consent. Each has different trade-offs in terms of complexity, reliability, and maintenance burden.
+
+### Approach 1: Trigger conditions with consent variable (recommended)
+
+Add the consent state as a condition on the trigger that fires your non-Google tags. The tag will not fire unless consent is granted.
+
+**Step 1**: Create a Custom JavaScript Variable that reads the current consent state:
+
+```javascript
+// Variable name: "JS - Ad Consent Granted"
+function() {
+  try {
+    var consentData = window.google_tag_data &&
+                      window.google_tag_data.ics &&
+                      window.google_tag_data.ics.entries;
+
+    if (!consentData) return false;
+
+    var adStorage = consentData.ad_storage;
+    var adUserData = consentData.ad_user_data;
+    var adPersonalization = consentData.ad_personalization;
+
+    // All three advertising types must be granted for ad tags
+    return (adStorage && adStorage.update === 'granted') &&
+           (adUserData && adUserData.update === 'granted') &&
+           (adPersonalization && adPersonalization.update === 'granted');
+  } catch(e) {
+    return false;
+  }
+}
+```
+
+**Step 2**: On each advertising tag's trigger (All Pages, Page View, or custom event), add a trigger condition:
+- Variable: `{{JS - Ad Consent Granted}}`
+- Operator: equals
+- Value: `true`
+
+The tag will only fire on events where advertising consent is confirmed as granted.
+
+**Analytics-only variant** (for analytics tags that are not advertising-related):
+
+```javascript
+// Variable name: "JS - Analytics Consent Granted"
+function() {
+  try {
+    var consentData = window.google_tag_data &&
+                      window.google_tag_data.ics &&
+                      window.google_tag_data.ics.entries;
+
+    if (!consentData) return false;
+
+    var analyticsStorage = consentData.analytics_storage;
+    return analyticsStorage && analyticsStorage.update === 'granted';
+  } catch(e) {
+    return false;
+  }
+}
+```
+
+### Approach 2: Tag sequencing with a consent-check setup tag
+
+Create a setup tag that explicitly checks consent and fails if consent is not granted. Any tag that uses this setup tag will not fire if the setup tag fails.
+
+**Consent gate setup tag** (Custom HTML):
+
+```html
+<script>
+(function() {
+  var requiredConsent = 'advertising'; // 'analytics' or 'advertising'
+
+  function getConsentState(type) {
+    try {
+      var data = window.google_tag_data &&
+                 window.google_tag_data.ics &&
+                 window.google_tag_data.ics.entries;
+      if (!data) return 'unknown';
+
+      if (type === 'advertising') {
+        var adStorage = data.ad_storage && data.ad_storage.update;
+        var adUserData = data.ad_user_data && data.ad_user_data.update;
+        return (adStorage === 'granted' && adUserData === 'granted')
+               ? 'granted' : 'denied';
+      }
+
+      if (type === 'analytics') {
+        return data.analytics_storage &&
+               data.analytics_storage.update === 'granted'
+               ? 'granted' : 'denied';
+      }
+
+      return 'unknown';
+    } catch(e) {
+      return 'unknown';
+    }
+  }
+
+  if (getConsentState(requiredConsent) !== 'granted') {
+    // Cause the setup tag to "fail" — GTM will block dependent tags
+    throw new Error('Consent not granted for: ' + requiredConsent);
+  }
+})();
+</script>
+```
+
+**Configure dependent tags**: On each advertising tag, go to **Advanced Settings → Tag Sequencing** → **Setup Tag**. Select your consent gate tag and check **Don't fire [tag name] if [setup tag] fails**.
+
+This approach is useful when you want to centrally manage the consent check rather than adding conditions to every individual trigger.
+
+### Approach 3: Dataayer-based consent trigger
+
+Use the consent event in your dataLayer to fire tags only when consent is explicitly granted. This approach requires the dataLayer consent pattern from [Consent State via DataLayer](/consent/consent-state-datalayer/).
+
+**Create two triggers per tag:**
+
+**Trigger A — Consent granted on this page load (new consent or returning visitor):**
+- Trigger Type: Custom Event
+- Event Name: `consent_update`
+- Trigger Conditions: `{{DLV - consent.advertising}}` equals `true`
+- Fire on: All custom events matching name
+
+**Trigger B — Page view when consent was already granted (returning visitor, consent restored):**
+- Trigger Type: Page View
+- Trigger Conditions: `{{DLV - consent.advertising}}` equals `true`
+
+Apply both triggers to your advertising tags. Trigger A fires the tag when the user accepts consent. Trigger B fires it on page load for returning visitors who already accepted.
+
+<Aside type="tip">
+The dual-trigger pattern is essential. Without Trigger B, returning visitors who accepted consent previously will not fire the tag because no `consent_update` event is fired — the CMP just restores the existing consent state without re-publishing it.
+</Aside>
+
+## Consent state variable: alternative approach using dataLayer
+
+If you are pushing consent state to the dataLayer (as described in [Consent State via DataLayer](/consent/consent-state-datalayer/)), you can use a simpler Data Layer Variable instead of the Custom JavaScript approach:
+
+1. Create a Data Layer Variable: `DLV - Consent Advertising`, reads `consent.advertising`
+2. Add as a trigger condition: `DLV - Consent Advertising` equals `true`
+
+This is simpler to configure but slightly less reliable if the dataLayer push hasn't fired yet when the trigger evaluates.
+
+## Building a reusable consent gate
+
+For containers with many non-Google tags, building a reusable consent gate reduces configuration overhead:
+
+**Create a custom "Consent Gate" variable** that returns the appropriate value based on the tag context:
+
+```javascript
+// Variable name: "JS - Consent Gate"
+// Input: variable reads consent.type from a constant or data layer
+function() {
+  var consentType = {{Constant - Required Consent Type}};
+  // Set "Constant - Required Consent Type" to "advertising" or "analytics"
+  // on each tag using Constant variables per tag
+
+  try {
+    var consentData = window.google_tag_data &&
+                      window.google_tag_data.ics &&
+                      window.google_tag_data.ics.entries;
+    if (!consentData) return false;
+
+    switch (consentType) {
+      case 'advertising':
+        return consentData.ad_storage &&
+               consentData.ad_storage.update === 'granted' &&
+               consentData.ad_user_data &&
+               consentData.ad_user_data.update === 'granted';
+      case 'analytics':
+        return consentData.analytics_storage &&
+               consentData.analytics_storage.update === 'granted';
+      case 'functional':
+        return consentData.functionality_storage &&
+               consentData.functionality_storage.update === 'granted';
+      default:
+        return false;
+    }
+  } catch(e) {
+    return false;
+  }
+}
+```
+
+## Tag-specific notes
+
+### Meta Pixel
+
+Meta Pixel has a native consent API: `fbq('consent', 'grant')` and `fbq('consent', 'revoke')`. Use this in combination with trigger-based gating:
+
+```javascript
+// In your consent update callback
+if (advertisingConsentGranted) {
+  fbq('consent', 'grant');
+} else {
+  fbq('consent', 'revoke');
+}
+```
+
+Meta's Community Template from the Gallery respects this pattern when properly configured.
+
+### TikTok Pixel
+
+TikTok Pixel does not have a native consent API as of this writing. Use trigger-based gating (Approach 1 or 2) to block the pixel entirely when advertising consent is denied.
+
+```html
+<!-- TikTok base code — gate entire tag on consent -->
+<script>
+  // Check consent first — don't even initialize TikTok without consent
+  if ({{JS - Ad Consent Granted}}) {
+    !function (w, d, t) {
+      // TikTok pixel initialization code
+    }(window, document, 'script');
+    ttq.load('YOUR_PIXEL_ID');
+    ttq.page();
+  }
+</script>
+```
+
+### LinkedIn Insight Tag
+
+LinkedIn's Insight Tag does not natively support Consent Mode. Gate it on advertising consent with Approach 1:
+
+1. Add `{{JS - Ad Consent Granted}} equals true` as a trigger condition to your LinkedIn Insight Tag trigger
+2. Also gate the tag initialization — LinkedIn's tag creates a global `_linkedin_data_partner_ids` object which persists in memory even if the tag doesn't fire on this page load
+
+### Third-party Community Templates
+
+Many third-party vendor templates from the Community Gallery have built-in consent support. Check the template's documentation for whether it reads Consent Mode signals natively. If it does, configure the required consent types in the template settings. If it doesn't, use one of the three approaches above.
+
+## Verifying non-Google tag gating
+
+After implementing consent gates, verify:
+
+<Steps>
+1. Open a fresh incognito browser (no existing consent)
+2. Do not interact with the consent banner
+3. Open DevTools → Network
+4. Check that no requests to Meta's pixel endpoint (`connect.facebook.net`), TikTok (`analytics.tiktok.com`), or LinkedIn (`px.ads.linkedin.com`) appear
+5. Now accept advertising consent
+6. Verify that pixel initialization requests appear after consent is granted
+</Steps>
+
+Also test the denial case:
+
+<Steps>
+1. Fresh incognito session
+2. Reject advertising consent (but accept analytics)
+3. Verify analytics tags fire but advertising tags do not
+4. Check Network tab: no requests to advertising pixel domains
+</Steps>
+
+## Common mistakes
+
+**Gating only the page view trigger, not the conversion trigger.** If Meta Pixel fires on page load and on purchase events, both triggers need the consent condition — not just the page view.
+
+**Using `equals 'true'` (string) instead of `equals true` (boolean).** Data Layer Variable types matter. If consent is pushed as a boolean `true` but your condition checks for the string `'true'`, the condition never matches.
+
+**Not gating the tag script injection.** Some advertising tags load a third-party script via `injectScript` even when the trigger doesn't fire — the script loads but no event is sent. Ensure the entire initialization code is inside the consent check, not just the event firing code.
+
+**Testing with an existing session.** If the browser has advertising consent from a previous session, all tags will appear to fire correctly even if your gates are broken for new visitors.
+
+---
+
+<CardGrid>
+  <LinkCard title="Consent State via DataLayer" href="/consent/consent-state-datalayer/" description="The dataLayer consent pattern that enables the dual-trigger approach." />
+  <LinkCard title="Testing Consent" href="/consent/testing-consent/" description="How to verify non-Google tags are correctly blocked without advertising consent." />
+  <LinkCard title="Consent Mode GTM Setup" href="/consent/consent-mode-gtm-setup/" description="Setting up consent requirements on Google tags as a complement to non-Google gating." />
+</CardGrid>

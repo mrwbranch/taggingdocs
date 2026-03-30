@@ -1,6 +1,303 @@
 ---
-title: "Meta Pixel Setup"
-description: "Complete Meta/Facebook Pixel implementation via GTM."
+title: "Meta Pixel Setup via GTM"
+description: "Complete implementation guide for the Meta (Facebook) Pixel through Google Tag Manager — Community Template, standard events, Advanced Matching, consent, and CAPI deduplication."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+The Meta Pixel is one of the most common third-party tags in any GTM container. Done correctly, it captures page views, standard events, and conversion data for Meta's advertising attribution. Done incorrectly, you end up with duplicate events, consent violations, and attribution data that cannot be reconciled with your server-side events.
+
+This guide covers the full implementation: Community Template setup, each standard event, Advanced Matching, consent integration, and how to structure client-side events so they can be deduplicated against the Conversions API.
+
+## Use the Community Template, not Custom HTML
+
+Meta provides an official GTM template in the Community Template Gallery. Use it.
+
+The template provides:
+- A visual configuration UI for all event types and parameters
+- Built-in `fbq` queue mechanism — the pixel code without the raw code paste
+- Consistent parameter mapping for all standard events
+- Version updates when Meta changes the pixel's requirements
+
+Only use a Custom HTML tag if the template cannot express your specific configuration. That is rare.
+
+## Setting up the base pixel
+
+The base pixel sends `PageView` events on every page and initializes the `fbq` object. This must be in place before any event-specific tags can fire.
+
+<Steps>
+1. In GTM, go to the **Templates** section and click **Search Gallery**.
+2. Search for "Facebook Pixel" or "Meta Pixel" and find the official Meta template. Click **Add to workspace**.
+3. Go to **Tags → New** and select the **Meta Pixel** template as the tag type.
+4. Enter your **Pixel ID**. Store it in a Constant Variable: `CONFIG - Meta Pixel ID`.
+5. Set **Event Type** to **PageView**.
+6. Set the trigger to **All Pages (Page View)**.
+7. Name it: `Meta Pixel - PageView`.
+8. Save.
+</Steps>
+
+<TagConfig
+  name="Meta Pixel - PageView"
+  type="Meta Pixel (Community Template)"
+  trigger="All Pages (Page View)"
+  variables={['CONFIG - Meta Pixel ID']}
+/>
+
+<Aside type="tip">
+Your Pixel ID is a 15-16 digit number found in the Meta Events Manager → Data Sources. Store it as a Constant Variable so you reference it consistently across all your Meta pixel tags.
+</Aside>
+
+## Standard events
+
+Meta defines standard events that feed into its attribution and optimization algorithms. These are the events Meta's system knows how to process for conversion optimization, audience building, and analytics.
+
+For each standard event, create a separate tag in GTM with the same Pixel ID, triggering on the appropriate custom event or page condition.
+
+### ViewContent
+
+Fires when a user views a significant piece of content — a product page, a service page, an article.
+
+```javascript
+// dataLayer push from your product page
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'view_item',  // Your GTM trigger listens for this
+  ecommerce: {
+    currency: 'USD',
+    value: 199.99,
+    items: [{
+      item_id: 'SKU-12345',
+      item_name: 'Leather Jacket',
+      item_category: 'Apparel',
+      price: 199.99
+    }]
+  }
+});
+```
+
+In the Meta Pixel tag for ViewContent, configure:
+
+| Parameter | Value | Variable |
+|-----------|-------|---------|
+| Event Type | ViewContent | — |
+| Content IDs | `['SKU-12345']` | `{{DLV - ecommerce.items.0.item_id}}` |
+| Content Name | Leather Jacket | `{{DLV - ecommerce.items.0.item_name}}` |
+| Content Type | product | (hardcoded) |
+| Value | 199.99 | `{{DLV - ecommerce.value}}` |
+| Currency | USD | `{{DLV - ecommerce.currency}}` |
+
+<TagConfig
+  name="Meta Pixel - ViewContent"
+  type="Meta Pixel (Community Template)"
+  trigger="CE - view_item"
+  variables={['CONFIG - Meta Pixel ID', 'DLV - ecommerce.items.0.item_id', 'DLV - ecommerce.value', 'DLV - ecommerce.currency']}
+/>
+
+### AddToCart
+
+```javascript
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 199.99,
+    items: [{
+      item_id: 'SKU-12345',
+      item_name: 'Leather Jacket',
+      price: 199.99,
+      quantity: 1
+    }]
+  }
+});
+```
+
+Configure the Meta Pixel `AddToCart` event with `content_ids`, `content_type: 'product'`, `value`, and `currency`.
+
+### Purchase
+
+The most important event for Meta attribution. Always include `value` and `currency`.
+
+```javascript
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'purchase',
+  // Include event_id for CAPI deduplication
+  event_id: 'evt-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9),
+  ecommerce: {
+    transaction_id: 'ORD-98765',
+    value: 299.00,
+    tax: 24.00,
+    shipping: 0,
+    currency: 'USD',
+    items: [...]
+  }
+});
+```
+
+### Lead
+
+For form submissions, quote requests, contact form completions:
+
+```javascript
+dataLayer.push({
+  event: 'form_submission',
+  form_type: 'lead_form',
+  event_id: 'lead-' + Date.now()
+});
+```
+
+Configure the Meta Pixel `Lead` event tag on trigger `CE - form_submission` with a condition that `{{DLV - form_type}}` equals `lead_form`.
+
+## Advanced Matching
+
+Advanced Matching hashes and sends user identifiers — email, phone, name — with your pixel events. This improves Meta's ability to match events to users, improving attribution accuracy.
+
+You must hash the data before sending. Meta accepts SHA-256 hashed values. The Meta Pixel template handles hashing automatically when you enable Advanced Matching — you provide the raw values and the template hashes them.
+
+**Important requirements:**
+- Only send data that the user has provided to you directly
+- Only send data when you have appropriate consent
+- Never send data for users who have not consented to advertising
+
+In the Meta Pixel template, enable Advanced Matching and map:
+
+| Meta Parameter | Your Variable |
+|---------------|--------------|
+| Email | `{{DLV - user_email}}` |
+| Phone | `{{DLV - user_phone}}` |
+| First Name | `{{DLV - user_first_name}}` |
+| Last Name | `{{DLV - user_last_name}}` |
+| City | `{{DLV - user_city}}` |
+| State | `{{DLV - user_state}}` |
+| Zip | `{{DLV - user_zip}}` |
+| Country | `{{DLV - user_country}}` |
+
+Only map fields you actually have. Do not map fields with empty or null values — Meta treats empty hashed strings differently than absent parameters.
+
+Push user data to the dataLayer when the user is authenticated:
+
+```javascript
+// On authenticated page load
+dataLayer.push({
+  user_email: currentUser.email,
+  user_phone: currentUser.phone,
+  user_first_name: currentUser.firstName,
+  user_last_name: currentUser.lastName
+  // Never push PII alongside event data — keep it in the user context push
+});
+```
+
+## Consent integration
+
+The Meta Pixel must only fire (or fire in full-data mode) when the user has consented to advertising cookies. GTM offers several mechanisms:
+
+### Exception trigger approach
+
+Create an exception trigger that fires when `{{CJS - ad_consent_granted}}` equals `false`. Add this exception to all Meta Pixel tags. When consent is not granted, the exception trigger fires and blocks the tag.
+
+### Consent Mode integration
+
+If you have implemented Google's Consent Mode and extended it with Meta Pixel support, use the pixel's `fbq('consent', 'revoke')` and `fbq('consent', 'grant')` calls:
+
+```html
+<script>
+(function() {
+  // This runs before the pixel initializes
+  if ({{CJS - ad_consent_granted}}) {
+    fbq('consent', 'grant');
+  } else {
+    fbq('consent', 'revoke');
+  }
+})();
+</script>
+```
+
+### Tag sequencing with consent check
+
+Use a consent-verification setup tag with the "don't fire if setup fails" option. This blocks the Meta Pixel tags when consent is not granted.
+
+The cleanest implementation is using exception triggers — they are visible in the trigger configuration and leave no ambiguity about why a tag did not fire.
+
+## Event ID for CAPI deduplication
+
+When you run both the client-side Meta Pixel and the server-side Conversions API (CAPI), you must deduplicate events. Without deduplication, Meta counts the same conversion twice — once from the pixel and once from CAPI.
+
+The deduplication mechanism is the `eventID` parameter. You assign the same unique ID to both the client-side pixel event and the corresponding CAPI event. Meta matches them and counts only one conversion.
+
+Generate the event ID in your application and push it to the dataLayer:
+
+```javascript
+dataLayer.push({
+  event: 'purchase',
+  event_id: '{{SERVER_GENERATED_EVENT_ID}}', // Use the same ID your server sends to CAPI
+  ecommerce: { ... }
+});
+```
+
+In the Meta Pixel template, map `Event ID` to `{{DLV - event_id}}`.
+
+Your server must send the same `event_id` to CAPI within the deduplication window (typically 48 hours, but use the same event ID generated at conversion time).
+
+<Aside type="caution">
+The `event_id` you generate client-side should ideally match the server-side order/lead ID, not a randomly generated timestamp. Using your transaction ID as the event ID makes server-side correlation straightforward. Just ensure it is unique per event, not per page load.
+</Aside>
+
+## Verifying pixel events
+
+Use the Meta Events Manager to verify your pixel is sending events correctly:
+
+1. Open **Meta Business Suite → Events Manager → Your Pixel**
+2. Click the **Test Events** tab
+3. Enter your website URL and click **Open Website**
+4. Browse your site and watch events appear in real-time
+
+The Events Manager shows the event name, parameters, and whether the data was matched to a user. A green checkmark next to Advanced Matching parameters indicates successful matching.
+
+For debugging in GTM, install the **Meta Pixel Helper** Chrome extension. It shows which pixels are on the page and what events have fired, making it easy to verify your GTM configuration before checking Events Manager.
+
+## Common mistakes
+
+### Firing the pixel without the PageView base tag first
+
+Some practitioners add event tags but miss the base PageView tag. The `fbq` object is initialized by the first Meta Pixel tag — if your base PageView tag is missing or fires after event tags on the same page, the pixel may not initialize correctly.
+
+Ensure the PageView tag fires on All Pages and has higher priority (or fires first via sequencing) relative to event-specific tags.
+
+### Sending duplicate events
+
+If you have both a Custom HTML tag with the Meta Pixel code pasted directly AND a template-based tag, you are initializing two pixel instances and double-counting everything. Use one approach — the template.
+
+### Not clearing ecommerce before each push
+
+The Meta Pixel reads ecommerce parameters from your dataLayer variables. If you forget `dataLayer.push({ ecommerce: null })` before pushing a new ecommerce event, stale data from a previous event may leak into the current one.
+
+### Sending PII without consent
+
+Advanced Matching fields (email, phone, name) are PII. Sending them without explicit consent is a GDPR, CCPA, and Meta Terms of Service violation. Gate Advanced Matching fields behind your consent check, and only populate those variables for users who have consented.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom HTML Tags"
+    description="For cases where the Meta Pixel template does not cover your configuration needs."
+    href="/client-side/tags/custom-html-tags/"
+  />
+  <LinkCard
+    title="Tag Sequencing"
+    description="How to ensure consent checks run before your Meta Pixel tags fire."
+    href="/client-side/tags/tag-sequencing/"
+  />
+  <LinkCard
+    title="Google Consent Mode"
+    description="Consent architecture that works alongside your Meta Pixel consent implementation."
+    href="/client-side/setup/google-consent-mode/"
+  />
+  <LinkCard
+    title="Ecommerce Tracking"
+    description="The full GA4 ecommerce dataLayer spec that also powers your Meta Pixel standard events."
+    href="/client-side/tracking/ecommerce-tracking/"
+  />
+</CardGrid>

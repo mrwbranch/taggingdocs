@@ -1,6 +1,179 @@
 ---
 title: "Common Errors"
-description: "The most frequent GTM mistakes and how to fix them."
+description: "The most frequent GTM problems with specific fixes — tags not firing, double events, missing data, consent blocks, and publishing failures."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Every GTM practitioner encounters the same problems repeatedly. This is a practical reference — each problem, its likely causes, and how to fix it. Use Ctrl/Cmd+F to find your specific issue.
+
+## Tags not firing
+
+**Symptom:** You expect a tag to fire, but it appears in "Tags Not Fired" in Preview mode.
+
+**Causes and fixes:**
+
+**Trigger condition not met:** Click the tag in Preview mode → check the Triggers tab → find the condition that shows red. Look at the actual variable value vs. the expected value. The most common mismatch: your trigger expects `form_submission` but the push sends `form_Submit` (capitalization).
+
+**Tag is paused:** In GTM, open the tag. A paused tag has a pause icon next to its name. Unpause it.
+
+**Blocking trigger (exception):** An exception trigger is preventing the tag from firing. In Preview mode, the Tags tab will mention "blocked by exception trigger." Find the exception trigger and check its conditions.
+
+**Consent mode blocking:** If `analytics_storage` or `ad_storage` is set to denied and the tag hasn't been marked as consent-exempt, it won't fire. Check the Consent section of the tag settings.
+
+**Tag fires on wrong event:** Your Custom Event trigger listens for `purchase` but the dataLayer push uses the event key `checkout_complete`. These are different events. Check your push event name against your trigger's event name.
+
+---
+
+## Double-firing tags
+
+**Symptom:** GA4 receives duplicate events. You see `event_count = 2` for what should be single events.
+
+**Causes and fixes:**
+
+**Two triggers attached to one tag:** Open the tag — check if there are two triggers at the bottom. A Page View trigger AND a custom event trigger could both be firing the same tag. Remove the redundant trigger.
+
+**Duplicate container snippet:** Run `Object.keys(window.google_tag_manager)` in the console. If you see the same GTM-XXXX ID listed twice, you have a duplicate container installation. Find and remove the duplicate snippet.
+
+**SPA virtual pageviews:** In single-page apps, the History Change trigger and a custom `page_view` event both fire on navigation — and you have two tags, one for each. Decide on one approach and remove the other.
+
+**GA4 enhanced measurement + GTM tag for the same event:** If GA4 enhanced measurement is tracking outbound clicks AND you have a GTM tag for the same event, both fire. Disable the relevant enhanced measurement feature or change your GTM event name to avoid conflict.
+
+---
+
+## Missing dataLayer data
+
+**Symptom:** Tags fire but variable values are empty or `undefined`.
+
+**Causes and fixes:**
+
+**Variable name mismatch:** Your push uses `user_id` but your GTM Data Layer Variable reads `userId`. Check that the variable name in GTM exactly matches the key name in your push (including underscores and capitalization).
+
+**Data Layer Version set to 1:** Open the Data Layer Variable in GTM. If it's set to "Data Layer Version 1," it won't correctly read nested paths. Change it to Version 2.
+
+**Push happens after the tag fires:** The trigger fires on Page View (early), but your `dataLayer.push()` with the relevant data runs later (after an API call, after DOM Ready). The tag fires before the data exists. Fix: move the push earlier, or change your trigger to a Custom Event that fires after the push.
+
+**Ecommerce data missing after clearing:** You pushed `{ ecommerce: null }` correctly, but you forgot to push the actual ecommerce event afterward. The variable reads `null`. Ensure your code always pushes the actual data immediately after the null clear.
+
+---
+
+## Cross-domain tracking not working
+
+**Symptom:** Users navigating from your site to a partner domain appear as new users on the partner domain.
+
+**Causes and fixes:**
+
+**`_gl` parameter stripped by redirect:** A redirect between your domain and the destination is stripping query parameters. Check the full URL chain — if there's a redirect service, link shortener, or redirect in your app, it may not preserve `_gl`.
+
+**Both domains not configured:** Cross-domain requires both Domain A listing Domain B AND Domain B listing Domain A in their respective Google Tags. Half-configured cross-domain doesn't work.
+
+**Actually a subdomain problem:** Confirm the two domains are actually different domains and not subdomains. `shop.example.com` and `account.example.com` don't need cross-domain configuration.
+
+**Referral exclusion missing in GA4:** Even if `_gl` is working, if you haven't added the partner domain to GA4's referral exclusion list, returning from the partner domain creates a new session.
+
+---
+
+## Consent mode blocking everything
+
+**Symptom:** All marketing tags stop firing. Analytics data drops significantly. Preview mode shows tags not firing.
+
+**Causes and fixes:**
+
+**Default consent set to denied, update never fires:** You're running Consent Mode Advanced with default: denied, but the CMP callback that calls `gtag('consent', 'update', {...})` isn't working. Test the CMP consent flow with Preview mode active. Look for the consent update event in the timeline.
+
+**CMP loads after GTM:** The consent default must be set before GTM loads. If your CMP script loads after the GTM snippet, GTM initializes without consent defaults and may use its own defaults. Move the consent default snippet before the GTM snippet.
+
+**Checking consent state:**
+```javascript
+// Verify current consent state in console
+window.dataLayer.filter(function(d) { return d[0] === 'consent'; })
+```
+
+---
+
+## Preview mode not loading
+
+**Symptom:** Tag Assistant can't connect. Preview mode shows "Waiting for Tag Assistant to connect."
+
+**Causes and fixes:**
+
+**Browser extension blocking the connection:** An ad blocker or privacy extension is blocking the Tag Assistant script. Try in an incognito window or a browser profile without extensions.
+
+**Container snippet not found on the page:** Tag Assistant can't connect if the GTM snippet isn't present. Verify the snippet is actually on the page being tested.
+
+**Wrong URL:** Make sure you're testing the exact URL where the container is installed. Subdomain or path differences can mean a different container environment.
+
+**CSP blocking Tag Assistant:** Content Security Policy may block the Tag Assistant connection script. Check the browser console for CSP violation messages.
+
+---
+
+## Container won't publish
+
+**Symptom:** The publish button is greyed out, or you get an error when attempting to publish.
+
+**Causes and fixes:**
+
+**Insufficient permissions:** Only users with Publish permission can publish containers. If you have Edit but not Publish, you can create a version but not publish it. An admin needs to publish or elevate your permissions.
+
+**Workspace conflict:** Another workspace has changes that conflict with yours. GTM will prompt you to merge. Resolve the conflicts before publishing.
+
+**Validation errors:** Some tag configurations have required fields. If a tag is misconfigured (e.g., a GA4 Event tag with no Measurement ID), GTM may block publishing. Check all tags for missing required fields.
+
+---
+
+## Ecommerce data missing from GA4
+
+**Symptom:** GA4 receives the ecommerce event but shows no product data, empty items arrays, or zero revenue.
+
+**Causes and fixes:**
+
+**Send Ecommerce Data checkbox not enabled:** This is the most common cause. Open your GA4 Event tag in GTM → More Settings → Ecommerce. Make sure "Send Ecommerce Data" is checked and Data Source is set to "Data Layer."
+
+**Ecommerce not cleared before push:** The previous event's `ecommerce` object is bleeding into the current event. Always push `{ ecommerce: null }` before every ecommerce push.
+
+**Wrong item structure:** Items must be in an array under `ecommerce.items`. Some implementations nest them at `ecommerce.products` (old Universal Analytics format). GA4 requires `items`.
+
+**Number fields sent as strings:** `price: "89.99"` instead of `price: 89.99`. GA4 may silently drop the value or treat it as zero.
+
+---
+
+## GA4 events not appearing in reports
+
+**Symptom:** Events show in DebugView but don't appear in standard GA4 reports after 24-48 hours.
+
+**Causes and fixes:**
+
+**Filters applied to the data stream:** GA4 data filters (Admin → Data Filters) may be filtering out your traffic. Check for active filters, especially internal traffic filters.
+
+**Event not registered as a custom event:** Custom events don't appear in standard reports until you register them as custom metrics or key events. Check Admin → Events.
+
+**Parameter limit exceeded:** GA4 allows up to 25 parameters per event. Events with more than 25 parameters may have parameters silently dropped.
+
+**Processing delay:** Standard reports can lag 24-48 hours. If the event appears in DebugView and Realtime but not in standard reports, wait. If it hasn't appeared after 48 hours, investigate further.
+
+---
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Why Isn't My Tag Firing?"
+    description="Interactive diagnostic flowchart — step through 12 possible causes systematically."
+    href="/client-side/debugging/why-tag-not-firing/"
+  />
+  <LinkCard
+    title="Preview Mode"
+    description="How to use GTM's debugger — most of the fixes above require Preview mode to diagnose."
+    href="/client-side/debugging/preview-mode/"
+  />
+  <LinkCard
+    title="DataLayer Debugging"
+    description="Deeper analysis when the data reaching GTM is the problem."
+    href="/client-side/debugging/datalayer-debugging/"
+  />
+  <LinkCard
+    title="Console Debugging"
+    description="Browser console commands for issues that Preview mode doesn't show."
+    href="/client-side/debugging/console-debugging/"
+  />
+</CardGrid>

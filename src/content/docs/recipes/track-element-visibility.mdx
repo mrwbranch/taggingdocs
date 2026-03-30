@@ -1,6 +1,203 @@
 ---
 title: "Track Element Visibility"
-description: "Track when specific elements become visible in the viewport."
+description: "Track when specific elements enter the viewport — product impressions, ad viewability, content sections — using GTM's Element Visibility trigger and Intersection Observer."
+sidebar:
+  badge:
+    text: Intermediate
+    variant: note
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Element visibility tracking answers "did the user actually see this?" rather than "did the page load?" It is the foundation of impression tracking, ad viewability measurement, and content performance analysis.
+
+## GTM's Element Visibility Trigger (simplest approach)
+
+GTM has a built-in Element Visibility trigger that watches for DOM elements entering the viewport using IntersectionObserver internally.
+
+<Steps>
+1. **Mark your elements for tracking**
+
+   Add an `id` or unique CSS class to any element you want to track:
+   ```html
+   <div id="pricing-section" class="track-visibility" data-content-name="Pricing CTA">
+     <!-- Your content -->
+   </div>
+   <div id="testimonials" class="track-visibility" data-content-name="Testimonials">
+     <!-- Your content -->
+   </div>
+   ```
+
+2. **Create an Element Visibility Trigger**
+
+   - Trigger type: **Element Visibility**
+   - Selection method: **CSS Selector** → `.track-visibility`
+   - When to fire this trigger: **Once per element** (prevents re-firing if element scrolls off and back)
+   - Minimum Percent Visible: `50` (IAB standard for ad viewability is 50% for 1 second)
+   - Observe DOM changes: **checked** (handles dynamically injected elements)
+
+3. **Create variables to identify which element fired**
+
+   GTM provides built-in variables for Element Visibility:
+   - Enable **Visible Element**: returns the DOM element itself
+
+   Create a Custom JavaScript Variable `VE - content_name`:
+   ```javascript
+   function() {
+     var el = {{Visible Element}};
+     return el ? (el.dataset.contentName || el.id || el.className) : undefined;
+   }
+   ```
+
+4. **Create a GA4 Event Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `element_visible`
+   - Parameters:
+     - `content_name` → `{{VE - content_name}}`
+     - `element_id` → `{{Element Visibility ID}}`
+     - `page_path` → `{{Page Path}}`
+   - Trigger: the Element Visibility trigger
+
+5. **Test in Preview Mode**
+
+   Visit the page and scroll down until the tracked element enters the viewport. The `element_visible` event should fire in the Summary pane when the element reaches 50% visibility.
+</Steps>
+
+<TagConfig
+  name="GA4 - element_visible"
+  type="Google Analytics: GA4 Event"
+  trigger="Element Visibility - .track-visibility"
+  variables={["VE - content_name", "Element Visibility ID", "Page Path"]}
+/>
+
+## Custom IntersectionObserver approach (more control)
+
+For batch impression tracking (product grids, ad slots, article lists), the custom approach is more efficient than firing individual GTM events per element.
+
+<DataLayerExample event="element_visible" description="Batch impression tracking with IntersectionObserver — tracks multiple elements efficiently.">
+```javascript
+(function() {
+  var impressionQueue = [];
+  var flushTimer = null;
+
+  function flushImpressions() {
+    if (impressionQueue.length === 0) return;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'element_visible',
+      visible_elements: impressionQueue.slice(),
+      visible_count: impressionQueue.length,
+      page_path: window.location.pathname
+    });
+
+    impressionQueue = [];
+    flushTimer = null;
+  }
+
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (!entry.isIntersecting) return;
+
+      var el = entry.target;
+      var contentData = {
+        content_name: el.dataset.contentName || el.id,
+        content_type: el.dataset.contentType || 'unknown',
+        content_id: el.dataset.contentId || null,
+        position: el.dataset.position || null
+      };
+
+      impressionQueue.push(contentData);
+
+      // Stop observing this element (only fire once)
+      observer.unobserve(el);
+
+      // Debounce flush to batch nearby impressions
+      clearTimeout(flushTimer);
+      flushTimer = setTimeout(flushImpressions, 200);
+    });
+  }, {
+    threshold: 0.5  // 50% visible
+  });
+
+  // Observe all tracked elements
+  document.querySelectorAll('[data-content-name]').forEach(function(el) {
+    observer.observe(el);
+  });
+
+  // Flush remaining impressions on page exit
+  window.addEventListener('beforeunload', flushImpressions);
+})();
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add `data-content-name` attributes** to elements you want to track:
+   ```html
+   <article data-content-name="How to Track PDFs" data-content-type="blog_post" data-content-id="post-123" data-position="1">
+   ```
+
+2. **Add the IntersectionObserver code** as a Custom HTML tag with a **Window Loaded** trigger
+
+3. **Create a Custom Event Trigger**: `element_visible`
+
+4. **Create a Data Layer Variable**: `DLV - visible_elements` → `visible_elements`
+
+5. **Create a GA4 Event Tag**:
+   - Event name: `element_visible`
+   - Parameter: `visible_elements` → `{{DLV - visible_elements}}`
+   - Note: This sends an array of objects. In GA4 BigQuery export, you can unnest the array for per-element analysis.
+</Steps>
+
+## IAB viewability standard
+
+For advertising and sponsored content, use the IAB MRC viewability standard:
+- At least **50% of the element's pixels** are visible
+- For at least **1 continuous second**
+
+Add a time threshold to the observer:
+
+```javascript
+var observer = new IntersectionObserver(function(entries) {
+  entries.forEach(function(entry) {
+    if (entry.isIntersecting) {
+      // Start 1-second timer
+      var timer = setTimeout(function() {
+        // IAB viewable: 50% visible for 1 second
+        pushViewableImpression(entry.target);
+        observer.unobserve(entry.target);
+      }, 1000);
+
+      // Cancel if element leaves viewport before 1 second
+      entry.target._viewTimer = timer;
+    } else {
+      // Element left viewport — cancel timer
+      clearTimeout(entry.target._viewTimer);
+    }
+  });
+}, { threshold: 0.5 });
+```
+
+## Test it
+
+1. Open GTM Preview and visit the page
+2. Scroll down until the tracked element enters the viewport
+3. The `element_visible` event should fire in the Summary pane
+4. Scroll back up and down again — it should NOT fire a second time (once per element)
+5. Verify the `content_name` value is correct
+
+## Common gotchas
+
+**Element Visibility trigger fires on page load for above-the-fold elements.** Elements that are already visible when the page loads will trigger the visibility event immediately. This is correct behaviour — the element is visible. If you only want to track below-the-fold impressions, add a `Scroll Depth Threshold` condition to the trigger.
+
+**Dynamic content is not observed.** IntersectionObserver observes elements that exist when `observe()` is called. If your product grid loads after the observer is set up, new elements will not be tracked. Enable **Observe DOM changes** in the GTM trigger, or use MutationObserver to watch for new elements and call `observer.observe()` on them.
+
+**beforeunload impressions may be lost.** The `beforeunload` flush calls `dataLayer.push()`, but if the page is navigating away, the GA4 tag may not have time to send the hit. Use `navigator.sendBeacon()` for the beforeunload flush.
+
+<CardGrid>
+  <LinkCard title="Track Infinite Scroll" href="/recipes/track-infinite-scroll/" description="Applying element visibility to dynamically loaded feed content." />
+  <LinkCard title="Track Scroll Milestones" href="/recipes/track-scroll-milestones/" description="Page-level scroll tracking as a complement to element visibility." />
+</CardGrid>

@@ -1,6 +1,289 @@
 ---
 title: "Meta Pixel (Client-Side)"
-description: "Complete Meta/Facebook Pixel setup via client-side GTM."
+description: "Complete Meta Pixel setup via GTM — Community Template installation, base code, all standard events with correct parameters, Advanced Matching, and consent integration."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The Meta Pixel is the client-side component of Meta's conversion tracking system. It fires from the browser, sends user behavior data to Meta's servers, and enables conversion optimization, remarketing, and attribution for Facebook and Instagram ads.
+
+This article covers the complete GTM setup using the Community Template approach — which is recommended over custom HTML because it uses Meta's officially maintained template with proper consent handling.
+
+## Before you start
+
+You need:
+- Meta Pixel ID from Meta Events Manager (a numeric ID like `1234567890123456`)
+- A Consent Management Platform integrated with GTM Consent Mode (required for GDPR compliance)
+- Access to Meta Events Manager to verify events
+
+## Installation via Community Template
+
+Use the Community Template Gallery approach. It is maintained by Meta, handles the `fbq` initialization correctly, and integrates with Consent Mode. Custom HTML is not recommended — it requires you to maintain the pixel code manually.
+
+<Steps>
+1. In GTM, create a new Tag
+2. Click the Tag Type field and choose "Discover more tag types in the Community Template Gallery"
+3. Search for "Facebook Pixel" — select the template published by **Facebook** (verify the publisher)
+4. Click Add to Workspace
+
+5. Create your first tag: **Meta Pixel — PageView**
+   - Tag Type: Facebook Pixel (from the template you just added)
+   - Pixel ID: your numeric Pixel ID
+   - Standard Event: PageView
+   - Firing Trigger: All Pages
+
+6. Save and publish
+</Steps>
+
+<Aside type="tip">
+The Community Template Gallery version automatically initializes the `fbq` function and handles the async script loading. You do not need to add the `fbq('init', ...)` or `fbq('track', 'PageView')` calls manually — the template handles both.
+</Aside>
+
+## Standard event configuration
+
+The Meta Pixel supports a set of standard events with defined parameter schemas. Use standard events wherever possible — they map to Meta's optimization signals and remarketing audiences.
+
+### ViewContent
+
+Fire when a user views a product page, article, or key content.
+
+```
+Tag Type: Facebook Pixel
+Standard Event: ViewContent
+Event Parameters:
+  content_type: product
+  content_ids: [{{DL - Product ID}}]
+  content_name: {{DL - Product Name}}
+  currency: {{DL - Currency}}
+  value: {{DL - Price}}
+```
+
+Trigger: Custom Event — `view_item`
+
+### AddToCart
+
+Fire when a user adds a product to their cart.
+
+```
+Tag Type: Facebook Pixel
+Standard Event: AddToCart
+Event Parameters:
+  content_type: product
+  content_ids: [{{DL - Product ID}}]
+  content_name: {{DL - Product Name}}
+  currency: {{DL - Currency}}
+  value: {{DL - Price}}
+  num_items: {{DL - Quantity}}
+```
+
+Trigger: Custom Event — `add_to_cart`
+
+### InitiateCheckout
+
+Fire when a user starts the checkout process.
+
+```
+Tag Type: Facebook Pixel
+Standard Event: InitiateCheckout
+Event Parameters:
+  content_type: product
+  content_ids: {{DL - All Cart Item IDs}}  (array of all item IDs in cart)
+  currency: {{DL - Currency}}
+  value: {{DL - Cart Value}}
+  num_items: {{DL - Cart Item Count}}
+```
+
+Trigger: Custom Event — `begin_checkout`
+
+### Purchase
+
+The most critical event. Parameters must be accurate for campaign optimization.
+
+```
+Tag Type: Facebook Pixel
+Standard Event: Purchase
+Event Parameters:
+  content_type: product
+  content_ids: {{DL - Purchase Item IDs}}  (array)
+  currency: {{DL - Currency}}
+  value: {{DL - Revenue}}  (number, not string)
+  num_items: {{DL - Item Count}}
+  order_id: {{DL - Transaction ID}}  (for deduplication reference)
+event_id: {{DL - Event ID}}  (REQUIRED if using CAPI — same ID sent server-side)
+```
+
+Trigger: Custom Event — `purchase`
+
+<Aside type="danger">
+The `event_id` parameter on Purchase is critical if you are also running Meta CAPI. Both the client-side pixel and the CAPI must send the same `event_id` for the same purchase event, or Meta will count it twice. Generate a UUID per event in your dataLayer push and use it here. See [Meta CAPI (Server-Side)](/integrations/meta-capi-server-side/) for the complete deduplication setup.
+</Aside>
+
+### Lead
+
+Fire when a user completes a lead generation form.
+
+```
+Tag Type: Facebook Pixel
+Standard Event: Lead
+Event Parameters:
+  content_name: {{Form Name or Type}}
+  value: {{Lead Value if known}}
+  currency: {{DL - Currency}}
+event_id: {{DL - Event ID}}
+```
+
+### CompleteRegistration
+
+Fire when a user completes an account registration.
+
+```
+Tag Type: Facebook Pixel
+Standard Event: CompleteRegistration
+Event Parameters:
+  content_name: Registration
+  status: true
+event_id: {{DL - Event ID}}
+```
+
+## Advanced Matching
+
+Advanced Matching sends hashed user data (email, phone, name, etc.) alongside pixel events. This improves match rates between pixel events and Meta user profiles, leading to better attribution and larger custom audiences.
+
+The data is SHA-256 hashed before being sent — Meta never receives plaintext PII.
+
+**Parameters:**
+- `em` — SHA-256 hashed email address
+- `ph` — SHA-256 hashed phone number (E.164 format: `+15551234567`)
+- `fn` — SHA-256 hashed first name (lowercase)
+- `ln` — SHA-256 hashed last name (lowercase)
+- `ct` — SHA-256 hashed city (lowercase, no spaces)
+- `st` — SHA-256 hashed state code (US: lowercase 2-letter code)
+- `zp` — SHA-256 hashed zip code
+- `country` — SHA-256 hashed country code (lowercase ISO 2-letter)
+
+**Implementation in GTM:**
+
+Create a Custom JavaScript Variable for each hashed value:
+
+```javascript
+// Variable: Meta - Hashed Email
+// Reads the email from the dataLayer and hashes it
+
+function() {
+  var email = {{DL - User Email}};
+  if (!email) return undefined;
+
+  // Normalize: trim whitespace and lowercase
+  email = email.trim().toLowerCase();
+
+  // SHA-256 via SubtleCrypto API
+  // This is async — for synchronous hashing in GTM, use a synchronous implementation
+  // or pre-hash server-side and push the hash to the dataLayer
+
+  // Pre-hashed approach (recommended): push the hash from your server
+  // and read it here directly
+  return {{DL - Hashed Email}};
+}
+```
+
+**The recommended approach for hashing:** Do not hash in the browser. Hash server-side before pushing to the dataLayer. Client-side hashing using `SubtleCrypto` is asynchronous, which creates timing issues in GTM. Your backend knows the user's email — hash it there and push the hash to the dataLayer.
+
+```javascript
+// Server-side (Node.js): hash before pushing to dataLayer
+const crypto = require('crypto');
+const hashedEmail = crypto
+  .createHash('sha256')
+  .update(userEmail.trim().toLowerCase())
+  .digest('hex');
+
+// Push to dataLayer
+res.locals.dataLayer = {
+  user: {
+    hashed_email: hashedEmail,
+    // ...
+  }
+};
+```
+
+**Configure in the Community Template:**
+
+In the Facebook Pixel tag, scroll to the "Advanced Matching" section. Map each Advanced Matching field to your hashed dataLayer variables.
+
+## Consent integration
+
+Meta Pixel should be gated on marketing/advertising consent. With GTM Consent Mode:
+
+**Approach 1: Consent-based tag trigger (simpler)**
+
+Add a consent check to the tag's trigger. Only fire when `ad_storage` consent is granted:
+
+1. In your Meta Pixel tag, go to the Advanced settings
+2. Add a Trigger condition: `{{Consent - Ad Storage}}` equals `granted`
+
+**Approach 2: Facebook's native consent handling (better for CAPI deduplication)**
+
+The Meta Pixel Community Template has built-in consent handling. In the template settings:
+
+- Enable "Advanced Consent Mode Features"
+- Map your consent state variable to the template's consent field
+
+This uses `fbq('consent', 'grant')` and `fbq('consent', 'revoke')` to enable/disable the pixel based on user consent, rather than preventing the pixel from loading entirely. This approach is preferable because it allows Meta to receive aggregate signals even without individual user consent (via Consent Mode's modeled data).
+
+## Verifying your implementation
+
+**Meta Events Manager — Test Events tool:**
+
+1. Go to Meta Events Manager → your Pixel → Test Events
+2. Enter your website URL and click "Open Website"
+3. Navigate your site and trigger events
+4. Events appear in the Test Events panel within seconds
+5. Verify: correct event names, correct parameter values, correct Pixel ID
+
+**Meta Pixel Helper Chrome extension:**
+
+Install the Meta Pixel Helper extension. It shows all pixel events that fired on the current page, with their parameters. Useful for quick checks without going to Events Manager.
+
+**Checking for duplicate events:**
+
+In Events Manager, look at your purchase event's "Duplicate percentage" metric. If it shows a high percentage, your `event_id` deduplication is not working correctly.
+
+## Common mistakes
+
+### Sending revenue as a string instead of a number
+
+```javascript
+// ❌ String value — Meta may not register it
+value: "29.99"
+
+// ✅ Number value
+value: 29.99
+```
+
+This causes Meta to not register the purchase value, leading to incorrect ROAS reporting.
+
+### Not clearing the event_id between events
+
+If you use the same `event_id` for multiple events (because you forgot to generate a new one per event), Meta deduplication will silently drop what it thinks are duplicate events. Generate a fresh UUID for each event push.
+
+### Firing PageView before consent is established
+
+The PageView event fires on All Pages. If it fires before your CMP has determined the user's consent state, you may fire a pixel event for a user who has opted out. Either fire PageView only after consent is established, or use the Consent Mode approach that manages pixel consent at the fbq level.
+
+### Using custom HTML instead of the Community Template
+
+Custom HTML pixel implementations require manual maintenance. When Meta updates the pixel code, you must manually update your Custom HTML tag. The Community Template receives updates through the Gallery mechanism.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="Server-side Conversions API to run alongside the pixel — with deduplication setup."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Consent Mode"
+    description="Properly gating Meta Pixel on user consent."
+    href="/consent/"
+  />
+</CardGrid>

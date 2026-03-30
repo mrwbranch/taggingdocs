@@ -1,6 +1,188 @@
 ---
 title: "Track Exit Intent"
-description: "Detect when a user is about to leave the page."
+description: "Detect when users are about to leave the page — mouse exit on desktop, tab switch on mobile — and send reliable exit events to GA4."
+sidebar:
+  badge:
+    text: Intermediate
+    variant: note
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Exit intent tracking lets you understand abandonment patterns: which pages lose users, at what point in their journey, and with what context. On desktop, the signal is the mouse moving above the viewport. On mobile, it is the user switching to another tab or app.
+
+## Desktop: mouse exit detection
+
+When the mouse leaves the top of the viewport (heading toward the browser chrome), the user is likely about to close the tab or navigate away. This is the classic exit intent signal.
+
+<DataLayerExample event="exit_intent" description="Fires once per page when the user's mouse leaves the top of the viewport.">
+```javascript
+(function() {
+  var hasExitFired = false;
+
+  document.addEventListener('mouseleave', function(event) {
+    // Only trigger when mouse exits through the top of the viewport
+    if (event.clientY > 0) return;
+
+    // Only fire once per page
+    if (hasExitFired) return;
+    hasExitFired = true;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'exit_intent',
+      exit_method: 'mouse_leave',
+      exit_page_path: window.location.pathname,
+      exit_page_title: document.title,
+      scroll_depth_at_exit: Math.round(
+        (window.pageYOffset / (document.documentElement.scrollHeight - window.innerHeight)) * 100
+      ),
+      time_on_page: Math.round((Date.now() - performance.timing.navigationStart) / 1000)
+    });
+  });
+})();
+```
+</DataLayerExample>
+
+## Mobile: Page Visibility API
+
+Mobile browsers do not have a cursor, so mouse exit does not apply. Instead, detect when the user switches apps or locks their screen using the Page Visibility API:
+
+```javascript
+(function() {
+  var hasExitFired = false;
+  var pageLoadTime = Date.now();
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState !== 'hidden') return;
+    if (hasExitFired) return;
+
+    // Only trigger as exit intent if user has been on page > 5 seconds
+    var timeOnPage = (Date.now() - pageLoadTime) / 1000;
+    if (timeOnPage < 5) return;
+
+    hasExitFired = true;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'exit_intent',
+      exit_method: 'tab_hidden',
+      exit_page_path: window.location.pathname,
+      time_on_page: Math.round(timeOnPage)
+    });
+  });
+})();
+```
+
+## Combined implementation
+
+<DataLayerExample event="exit_intent" description="Detects both desktop mouse exit and mobile tab-hide as exit intent signals.">
+```javascript
+(function() {
+  var hasExitFired = false;
+  var pageLoadTime = Date.now();
+
+  function pushExitIntent(method) {
+    if (hasExitFired) return;
+    hasExitFired = true;
+
+    var scrollHeight = document.documentElement.scrollHeight - window.innerHeight;
+    var scrollDepth = scrollHeight > 0
+      ? Math.round((window.pageYOffset / scrollHeight) * 100)
+      : 100;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'exit_intent',
+      exit_method: method,
+      exit_page_path: window.location.pathname,
+      exit_page_title: document.title,
+      scroll_depth_at_exit: scrollDepth,
+      time_on_page_seconds: Math.round((Date.now() - pageLoadTime) / 1000)
+    });
+  }
+
+  // Desktop: mouse leaves top of viewport
+  document.addEventListener('mouseleave', function(e) {
+    if (e.clientY <= 0) pushExitIntent('mouse_leave');
+  });
+
+  // Mobile / tab switch: page becomes hidden
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden') {
+      var timeOnPage = (Date.now() - pageLoadTime) / 1000;
+      if (timeOnPage > 5) pushExitIntent('tab_hidden');
+    }
+  });
+})();
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add the code as a Custom HTML tag** in GTM
+   - Trigger: **DOM Ready** (All Pages, or limit with Page Path condition)
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `exit_intent`
+
+3. **Create Data Layer Variables**
+
+   - `DLV - exit_method` → `exit_method`
+   - `DLV - scroll_depth_at_exit` → `scroll_depth_at_exit`
+   - `DLV - time_on_page_seconds` → `time_on_page_seconds`
+
+4. **Create a GA4 Event Tag**
+
+   - Event name: `exit_intent`
+   - Parameters:
+     - `exit_method` → `{{DLV - exit_method}}`
+     - `scroll_depth_at_exit` → `{{DLV - scroll_depth_at_exit}}`
+     - `time_on_page_seconds` → `{{DLV - time_on_page_seconds}}`
+     - `page_path` → `{{Page Path}}`
+   - Trigger: the Custom Event trigger
+
+5. **Test in Preview Mode**
+
+   Open GTM Preview, visit a page, then move your mouse to the top of the browser window (not into the address bar, just toward the top). The `exit_intent` event should appear in the Summary pane within a second.
+</Steps>
+
+<TagConfig
+  name="GA4 - exit_intent"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - exit_intent"
+  variables={["DLV - exit_method", "DLV - scroll_depth_at_exit", "DLV - time_on_page_seconds"]}
+/>
+
+## Using exit intent data
+
+In GA4, create an Exploration report to analyse:
+- Which pages have the highest exit intent rates (by `page_path`)
+- At what scroll depth users are abandoning (`scroll_depth_at_exit`)
+- Whether desktop vs. mobile shows different abandonment patterns (`exit_method`)
+
+A high `exit_intent` rate at low scroll depth suggests a content or relevance problem. A high `exit_intent` rate at 75%+ scroll depth suggests users read the content but did not find the CTA compelling.
+
+## Test it
+
+1. Open GTM Preview, navigate to a page
+2. Slowly move your mouse upward until it exits the top of the visible browser content area
+3. The `exit_intent` event should fire once
+4. Move the mouse back in and out again — it should NOT fire a second time
+5. Verify `scroll_depth_at_exit` reflects how far you had scrolled
+
+## Common gotchas
+
+**Event fires too easily.** Some users move their mouse to the browser chrome frequently (to switch tabs, use bookmarks). Consider adding a minimum time threshold (`time_on_page > 15`) before enabling exit intent detection to reduce noise.
+
+**Event fires multiple times.** The `hasExitFired` flag prevents this, but ensure the Custom HTML tag only fires once per page. Use a DOM Ready trigger, not a Page View trigger that might fire on SPA navigations.
+
+**Mobile detection is a superset of tab visibility.** If you also use the [Track Tab Visibility](/recipes/track-tab-visibility/) recipe, the `visibilitychange` handler in this recipe will overlap. Separate the two concerns or add a guard to check which recipe should fire based on time thresholds.
+
+<CardGrid>
+  <LinkCard title="Track Tab Visibility" href="/recipes/track-tab-visibility/" description="More detailed visibility tracking with timing data." />
+  <LinkCard title="Track Scroll Milestones" href="/recipes/track-scroll-milestones/" description="Context for interpreting scroll depth at exit." />
+</CardGrid>
