@@ -1,0 +1,14 @@
+---
+title: GA4 & GTM Regex Tester
+description: Test regex patterns against RE2 (GA4's regex engine) and GTM matching rules. Validates RE2 compatibility and includes common pattern templates.
+---
+
+import RegexTester from '../../../components/tools/RegexTester.tsx';
+
+Test and build regex patterns for GA4 and GTM. GA4 uses **RE2 syntax** (not PCRE), which means no lookaheads, lookbehinds, or backreferences. This tool validates against the correct engine so your patterns work in production.
+
+**GA4 mode**: Validates against RE2, partial match by default (like GA4 report filters).
+
+**GTM mode**: Applies full match behavior (GTM wraps in `^...$` for "matches RegEx").
+
+<RegexTester client:load />

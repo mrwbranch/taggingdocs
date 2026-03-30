@@ -1,0 +1,30 @@
+---
+title: Free GTM & GA4 Tools
+description: Interactive tools for Google Tag Manager and GA4 practitioners. Build dataLayer code, generate BigQuery SQL, test regex patterns — all free, all client-side.
+template: splash
+hero:
+  title: Free GTM & GA4 Tools
+  tagline: Interactive tools that run entirely in your browser. No signup, no backend, no tracking.
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="DataLayer Builder + Validator" icon="document">
+    Build correct `dataLayer.push()` code for any GA4 event, or validate existing code. Catches type errors, missing fields, and PII.
+
+    [Open tool →](/tools/datalayer-builder)
+  </Card>
+
+  <Card title="BigQuery Query Generator" icon="laptop">
+    Generate ready-to-use SQL queries for GA4 BigQuery export data. 15+ templates for traffic, ecommerce, funnels, and more.
+
+    [Open tool →](/tools/bigquery-generator)
+  </Card>
+
+  <Card title="GA4 & GTM Regex Tester" icon="magnifier">
+    Test regex patterns against RE2 (GA4's engine) and GTM matching rules. Includes common pattern templates.
+
+    [Open tool →](/tools/regex-tester)
+  </Card>
+</CardGrid>
