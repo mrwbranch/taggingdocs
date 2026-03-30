@@ -36,8 +36,18 @@ const GLOBAL_FIELDS = [
 const sectionStyle: React.CSSProperties = {
   padding: '1rem',
   borderRadius: '0.5rem',
-  border: '1px solid rgb(51 65 85 / 0.7)',
-  backgroundColor: 'rgb(30 41 59 / 0.3)',
+  borderTop: '1px solid rgb(51 65 85 / 0.5)',
+  backgroundColor: 'transparent',
+};
+
+const sectionLabelStyle: React.CSSProperties = {
+  fontSize: '0.6875rem',
+  fontWeight: 600,
+  textTransform: 'uppercase',
+  letterSpacing: '0.05em',
+  color: '#64748b',
+  display: 'block',
+  marginBottom: '0.75rem',
 };
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -80,7 +90,7 @@ export default function BigQueryGenerator() {
 
   return (
     <div
-      className="my-6 rounded-lg border overflow-hidden"
+      className="my-6 rounded-lg border overflow-hidden not-content"
       style={{
         borderColor: 'rgb(51 65 85 / 0.7)',
         backgroundColor: 'rgb(15 23 42 / 0.5)',
@@ -88,9 +98,9 @@ export default function BigQueryGenerator() {
     >
       {/* Header */}
       <div className="px-4 py-3" style={{ borderBottom: '1px solid rgb(51 65 85 / 0.7)' }}>
-        <h3 className="text-base font-semibold m-0" style={{ color: '#67e8f9' }}>
+        <span className="text-base font-semibold inline-block" style={{ color: '#22d3ee' }}>
           BigQuery Query Generator
-        </h3>
+        </span>
       </div>
 
       <div className="p-4 flex flex-col gap-6">
@@ -114,9 +124,7 @@ export default function BigQueryGenerator() {
 
         {/* Global Config */}
         <div style={sectionStyle}>
-          <p className="text-xs font-semibold uppercase tracking-wider mb-3 m-0" style={{ color: '#64748b' }}>
-            Global Configuration
-          </p>
+          <span style={sectionLabelStyle}>Global Configuration</span>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <TextField
               label="Dataset"
@@ -154,9 +162,7 @@ export default function BigQueryGenerator() {
         {/* Query-Specific Config */}
         {selectedTemplate.config.length > 0 && (
           <div style={sectionStyle}>
-            <p className="text-xs font-semibold uppercase tracking-wider mb-3 m-0" style={{ color: '#64748b' }}>
-              Query Options
-            </p>
+            <span style={sectionLabelStyle}>Query Options</span>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {selectedTemplate.config.map((field) => {
                 const storedKey = `qs_${field.name}`;
@@ -202,9 +208,7 @@ export default function BigQueryGenerator() {
         {/* Explanation */}
         {selectedTemplate.explanation && (
           <div style={sectionStyle}>
-            <p className="text-xs font-semibold uppercase tracking-wider mb-2 m-0" style={{ color: '#64748b' }}>
-              How this query works
-            </p>
+            <span style={sectionLabelStyle}>How this query works</span>
             <p className="text-sm m-0" style={{ color: '#94a3b8', lineHeight: '1.6' }}>
               {selectedTemplate.explanation}
             </p>

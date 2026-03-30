@@ -286,7 +286,7 @@ export default function RegexTester() {
 
   return (
     <div
-      className="my-6 rounded-lg border overflow-hidden"
+      className="my-6 rounded-lg border overflow-hidden not-content"
       style={{
         borderColor: 'rgb(51 65 85 / 0.7)',
         backgroundColor: 'rgb(15 23 42 / 0.5)',
@@ -320,7 +320,7 @@ export default function RegexTester() {
       <div className="p-4 flex flex-col gap-5">
         {/* Context toggle */}
         <div className="flex flex-col gap-2">
-          <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#94a3b8' }}>
+          <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#64748b', fontSize: '0.6875rem', fontWeight: 600, letterSpacing: '0.05em' }}>
             Context
           </span>
           <div className="flex gap-2">
@@ -334,13 +334,13 @@ export default function RegexTester() {
                 key={value}
                 type="button"
                 onClick={() => setContext(value)}
-                className="px-3 py-1.5 rounded-md text-sm font-medium transition-colors border"
+                className="flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors border"
                 style={
                   context === value
                     ? {
-                        borderColor: '#67e8f9',
-                        backgroundColor: 'rgb(103 232 249 / 0.1)',
-                        color: '#67e8f9',
+                        borderColor: '#06b6d4',
+                        backgroundColor: 'rgb(6 182 212 / 0.1)',
+                        color: '#22d3ee',
                       }
                     : {
                         borderColor: 'rgb(51 65 85 / 0.7)',
@@ -450,7 +450,7 @@ export default function RegexTester() {
 
         {/* Template buttons */}
         <div className="flex flex-col gap-2">
-          <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#94a3b8' }}>
+          <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#64748b', fontSize: '0.6875rem', fontWeight: 600, letterSpacing: '0.05em' }}>
             Common patterns
           </span>
           <div className="flex flex-wrap gap-2">
@@ -482,7 +482,7 @@ export default function RegexTester() {
 
         {/* Test strings */}
         <div className="flex flex-col gap-2">
-          <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#94a3b8' }}>
+          <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#64748b', fontSize: '0.6875rem', fontWeight: 600, letterSpacing: '0.05em' }}>
             Test strings
           </span>
           <div className="flex flex-col gap-2">
@@ -574,7 +574,7 @@ export default function RegexTester() {
               backgroundColor: 'rgb(74 222 128 / 0.04)',
             }}
           >
-            <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#4ade80' }}>
+            <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#4ade80', fontSize: '0.6875rem', fontWeight: 600, letterSpacing: '0.05em' }}>
               Match details
             </span>
             <div className="flex flex-col gap-1">

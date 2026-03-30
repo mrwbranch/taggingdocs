@@ -646,18 +646,25 @@ export default function DataLayerBuilder() {
   const sectionStyle = {
     padding: '1rem',
     borderRadius: '0.5rem',
-    border: '1px solid rgb(51 65 85 / 0.7)',
-    backgroundColor: 'rgb(30 41 59 / 0.3)',
+    borderTop: '1px solid rgb(51 65 85 / 0.5)',
+    backgroundColor: 'transparent',
   } as React.CSSProperties;
 
-  const headingColor = '#67e8f9';
+  const sectionLabelStyle: React.CSSProperties = {
+    fontSize: '0.6875rem',
+    fontWeight: 600,
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    color: '#64748b',
+    marginBottom: '0.75rem',
+  };
 
   return (
-    <div className="my-6 rounded-lg border overflow-hidden" style={containerStyle}>
+    <div className="my-6 rounded-lg border overflow-hidden not-content" style={containerStyle}>
       {/* Tab bar */}
       <div
         className="flex"
-        style={{ borderBottom: '1px solid rgb(51 65 85 / 0.7)', backgroundColor: 'rgb(30 41 59 / 0.3)' }}
+        style={{ borderBottom: '1px solid rgb(51 65 85 / 0.7)' }}
       >
         {(['build', 'validate'] as const).map((tab) => {
           const active = mode === tab;
@@ -665,10 +672,10 @@ export default function DataLayerBuilder() {
             <button
               key={tab}
               onClick={() => setValue('mode', tab)}
-              className="px-5 py-3 text-sm font-medium capitalize transition-colors"
+              className="flex-1 px-4 py-2.5 text-sm font-medium capitalize transition-colors border-b-2"
               style={{
-                color: active ? '#67e8f9' : '#94a3b8',
-                borderBottom: active ? '2px solid #67e8f9' : '2px solid transparent',
+                color: active ? '#22d3ee' : '#94a3b8',
+                borderBottomColor: active ? '#06b6d4' : 'transparent',
                 backgroundColor: 'transparent',
                 cursor: 'pointer',
               }}
@@ -684,9 +691,7 @@ export default function DataLayerBuilder() {
           <>
             {/* Event selection */}
             <div style={sectionStyle}>
-              <h3 className="text-sm font-semibold mb-3" style={{ color: headingColor }}>
-                Event Type
-              </h3>
+              <span style={sectionLabelStyle}>Event Type</span>
               <SelectField
                 label="Select Event"
                 value={selectedEvent}
@@ -703,9 +708,7 @@ export default function DataLayerBuilder() {
 
             {/* Options */}
             <div style={sectionStyle}>
-              <h3 className="text-sm font-semibold mb-3" style={{ color: headingColor }}>
-                Options
-              </h3>
+              <span style={sectionLabelStyle}>Options</span>
               <div className="flex flex-col gap-2">
                 {schema?.isEcommerce && (
                   <CheckboxField
@@ -727,9 +730,7 @@ export default function DataLayerBuilder() {
             {/* Custom event */}
             {isCustom && (
               <div style={sectionStyle}>
-                <h3 className="text-sm font-semibold mb-3" style={{ color: headingColor }}>
-                  Custom Event
-                </h3>
+                <span style={sectionLabelStyle}>Custom Event</span>
                 <div className="flex flex-col gap-3">
                   <TextField
                     label="Event Name"
@@ -801,9 +802,7 @@ export default function DataLayerBuilder() {
             {/* Event parameters */}
             {!isCustom && schema && schema.parameters.length > 0 && (
               <div style={sectionStyle}>
-                <h3 className="text-sm font-semibold mb-3" style={{ color: headingColor }}>
-                  Event Parameters
-                </h3>
+                <span style={sectionLabelStyle}>Event Parameters</span>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   {schema.parameters.map((param) => (
                     <TextField
@@ -825,9 +824,7 @@ export default function DataLayerBuilder() {
             {!isCustom && schema?.hasItems && (
               <div style={sectionStyle}>
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold" style={{ color: headingColor }}>
-                    Items
-                  </h3>
+                  <span style={sectionLabelStyle}>Items</span>
                   <button
                     onClick={handleAddItem}
                     className="px-3 py-1.5 rounded text-xs font-medium"
@@ -854,9 +851,7 @@ export default function DataLayerBuilder() {
 
             {/* Inline validation */}
             <div style={sectionStyle}>
-              <h3 className="text-sm font-semibold mb-1" style={{ color: headingColor }}>
-                Field Status
-              </h3>
+              <span style={sectionLabelStyle}>Field Status</span>
               <ValidationResult messages={buildValidationMessages()} />
             </div>
 
@@ -868,9 +863,7 @@ export default function DataLayerBuilder() {
         {mode === 'validate' && (
           <>
             <div style={sectionStyle}>
-              <h3 className="text-sm font-semibold mb-3" style={{ color: headingColor }}>
-                Paste dataLayer.push() Code
-              </h3>
+              <span style={sectionLabelStyle}>Paste dataLayer.push() Code</span>
               <textarea
                 value={validateInput}
                 onChange={(e) => setValue('validate_input', e.target.value)}
@@ -891,7 +884,7 @@ export default function DataLayerBuilder() {
                 <button
                   onClick={handleValidate}
                   className="px-4 py-2 rounded text-sm font-medium transition-colors"
-                  style={{ backgroundColor: 'rgb(8 145 178 / 0.2)', color: '#67e8f9', border: '1px solid rgb(8 145 178 / 0.4)' }}
+                  style={{ backgroundColor: '#06b6d4', color: '#0f172a', border: 'none', fontWeight: 600 }}
                 >
                   Validate
                 </button>
@@ -900,9 +893,7 @@ export default function DataLayerBuilder() {
 
             {validationMessages.length > 0 && (
               <div style={sectionStyle}>
-                <h3 className="text-sm font-semibold mb-1" style={{ color: headingColor }}>
-                  Validation Results
-                </h3>
+                <span style={sectionLabelStyle}>Validation Results</span>
                 <ValidationResult messages={validationMessages} />
               </div>
             )}
