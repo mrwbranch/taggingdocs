@@ -1,6 +1,199 @@
 ---
 title: "Uptime Monitoring"
-description: "Ensuring your server container stays available."
+description: "Ensuring your sGTM server container stays available — health check configuration, external uptime checks, alert routing, client-side fallback patterns, and SLA considerations."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+sGTM failures are silent. When your sGTM container goes down, no browser console error appears. Users see a normal website. The only signal is data disappearing from GA4, conversions dropping in Meta Events Manager, and eventually a concerned stakeholder asking why the numbers look off. By then, the outage may have been running for hours.
+
+Uptime monitoring is the infrastructure that detects failures before your stakeholders do.
+
+## The health check endpoint
+
+sGTM provides a built-in health check endpoint at `/healthz`. When the server is running, it returns HTTP 200 with a short JSON body. When the container is starting up or unavailable, the endpoint returns an appropriate error code.
+
+The `/healthz` endpoint checks that the sGTM container process is running and responsive. It does not check that your tags are firing correctly or that your outbound API calls are succeeding. Container health and tag health are separate concerns — see the [Monitoring & Logging](/server-side/advanced/monitoring-logging/) article for tag-level health monitoring.
+
+Verify your health check endpoint is responsive:
+
+```bash
+curl -v https://collect.yoursite.com/healthz
+```
+
+Expected response:
+
+```
+HTTP/2 200
+content-type: application/json
+
+{"success":true}
+```
+
+## GCP Uptime Checks
+
+GCP Cloud Monitoring provides Uptime Checks — a managed external monitoring service that pings your endpoint from multiple global locations every minute and alerts when it fails.
+
+<Steps>
+1. GCP Console → **Cloud Monitoring** → **Uptime Checks** → **Create Check**
+
+2. Configure the check:
+   - Protocol: **HTTPS**
+   - Resource type: **URL**
+   - Hostname: `collect.yoursite.com`
+   - Path: `/healthz`
+   - Check frequency: **1 minute**
+
+3. Configure response validation:
+   - Response timeout: **10 seconds**
+   - Expected status: **2xx**
+   - Optional: check for `"success":true` in the response body
+
+4. Select check locations: choose at least 3 geographically distributed locations. GCP checks from multiple regions — if 2 of 3 fail, the alert fires. This prevents false positives from single-region network blips.
+
+5. Create an alerting policy:
+   - Alert condition: uptime check fails for **2+ consecutive periods** (2 minutes)
+   - Notification channels: email, PagerDuty, Slack webhook
+</Steps>
+
+The 2-consecutive-period requirement prevents false alerts from transient failures that self-resolve within a minute. With 1-minute check frequency, you get alerted within 2–3 minutes of a real outage.
+
+GCP Uptime Checks cost approximately $0.30/month per check. Running one health check from 3 global locations costs less than $1/month.
+
+## Third-party monitoring services
+
+External monitoring services are valuable as a second layer independent of GCP infrastructure. If your GCP project has a widespread outage (rare but possible), your GCP Uptime Check cannot alert you — both the monitor and the monitored service are in the same failing infrastructure.
+
+**UptimeRobot** (free tier available):
+
+1. Create a free account at uptimerobot.com
+2. **Monitors** → **Add New Monitor**
+3. Monitor Type: HTTP(S)
+4. URL: `https://collect.yoursite.com/healthz`
+5. Monitoring Interval: 5 minutes
+6. Alert Contacts: email
+
+The free tier checks every 5 minutes, which is adequate for most deployments. The $7/month pro tier provides 1-minute intervals.
+
+**Pingdom**, **StatusCake**, and **Better Uptime** offer similar capabilities with varying pricing. The specific service matters less than having one.
+
+**Custom endpoint monitoring**: If you need to verify not just that the server is running but that specific request types succeed, use a monitoring service that supports custom HTTP requests:
+
+```bash
+# Test a minimal GA4 hit — verifies the GA4 client processes correctly
+curl -s -o /dev/null -w "%{http_code}" \
+  "https://collect.yoursite.com/g/collect?v=2&tid=G-XXXXXXXX&cid=monitor-test&en=page_view"
+# Expected: 200 or 204
+```
+
+Run this as a scheduled check from a monitoring service that supports scripted checks. This verifies the full processing pipeline, not just that the container responds.
+
+## Alert routing
+
+Who gets alerted, and how, matters as much as the monitoring itself.
+
+**Severity levels and routes:**
+
+| Condition | Severity | Notification |
+|---|---|---|
+| `/healthz` fails for 2 minutes | Critical | PagerDuty/on-call rotation + email |
+| Error rate > 5% for 5 minutes | High | Email + Slack |
+| P99 latency > 3s for 5 minutes | Medium | Email + Slack |
+| Request volume drops 50% vs. 7-day average | Medium | Email |
+| Cost spike > 130% of weekly average | Low | Email |
+
+**Avoid alert fatigue**: An alert that fires every week for normal traffic fluctuations trains your team to ignore it. Set thresholds based on observed normal patterns after running sGTM for 2–4 weeks. A "low request volume" alert should account for overnight traffic drops — don't alert when 3am traffic is 90% lower than noon traffic.
+
+**Notification channel setup in Cloud Monitoring:**
+
+```bash
+# Create a Slack webhook notification channel
+gcloud alpha monitoring channels create \
+  --display-name="sGTM Alerts - Slack" \
+  --type=slack \
+  --channel-labels=url=https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK
+
+# Create an email notification channel
+gcloud alpha monitoring channels create \
+  --display-name="sGTM Alerts - Oncall" \
+  --type=email \
+  --channel-labels=email_address=oncall@yourcompany.com
+```
+
+## Failover strategies
+
+Cloud Run provides a 99.95% SLA (~4 hours of downtime per year). In practice, planned maintenance and regional events can cause outages. Having a documented recovery procedure matters more than an automated failover in most cases.
+
+**Manual recovery procedures:**
+
+For most sGTM outages (container misconfiguration, bad template deployment, resource exhaustion), the recovery is:
+
+1. Open GCP Console → Cloud Run → your service
+2. Click **Edit & Deploy New Revision**
+3. Roll back to the previous revision
+4. Deployment takes 30–60 seconds
+
+For unexpected outages with no obvious cause:
+
+1. Check Cloud Run logs for error messages
+2. Check Cloud Run metrics for CPU/memory exhaustion
+3. If a specific revision caused the issue, roll back
+4. If the issue is regional, redeploy to a different region (see Scaling Strategies)
+
+**Client-side fallback behavior:**
+
+When sGTM is unreachable, client-side GA4 tags fail to send their Measurement Protocol hits. The failure is silent — no error visible to the user. Events are dropped.
+
+For GA4 analytics, there is no browser-side buffer — missed events do not replay when the server recovers. For conversion tracking, your client-side pixels (Meta Pixel, Google Ads global tag) continue firing independently of sGTM. Ad platform attribution is degraded but not completely lost.
+
+For organizations where even brief analytics gaps are unacceptable, a client-side fallback can be implemented: configure a backup GA4 direct hit that only fires when the sGTM endpoint fails. This is complex to implement in GTM and rarely justified. If you need this level of reliability, investigate a multi-region active-active sGTM deployment instead.
+
+## SLA considerations for your analytics pipeline
+
+Cloud Run's 99.95% SLA covers the compute infrastructure. Your actual analytics availability depends on:
+
+- Your DNS provider (affects whether `collect.yoursite.com` resolves)
+- Your SSL certificate validity
+- Cloud Run instance health
+- Your GTM container publication (a broken template can crash the container)
+
+Most analytics teams define their SLA more loosely: "our analytics pipeline should not be down for more than 30 minutes without human awareness." Uptime monitoring achieves this goal with 1–5 minute check intervals and immediate alert routing.
+
+For conversion-critical deployments (where sGTM downtime directly impacts reported revenue), set the bar higher: 2-minute detection time, under-10-minute MTTR (mean time to recovery), with runbooks for the most common failure modes documented and tested quarterly.
+
+## Common mistakes
+
+**Monitoring only the health check path, not tag functionality.** `/healthz` returning 200 means the container is running. It does not mean the Meta CAPI tag is successfully sending conversions. Add tag-level monitoring via Cloud Logging alerts on error-level tag log entries.
+
+**Setting a single notification contact.** If your only alert contact is a personal email and you are on vacation, the alert is missed. Use a team email distribution list or a dedicated on-call system.
+
+**Not testing your alerts.** Create an alert, then manually trigger the failure condition to confirm the notification arrives. A monitoring setup that has never been tested often has a misconfiguration that silently swallows alerts.
+
+**Setting check frequency too low.** A 30-minute check interval means you could have a 30-minute outage before your first alert. Use 1-minute intervals for production sGTM. The cost is negligible.
+
+**Using the `/healthz` check path for uptime monitors without configuring the client.** Some custom client templates intercept all requests including `/healthz` and process them through `runContainer`. If your custom client does not have a fast-path return for the health check path, your health check may fire tags and generate log entries on every check. Add an explicit health check bypass in your client templates.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Monitoring & Logging"
+    description="Tag-level health monitoring, Cloud Monitoring dashboards, and log-based alerting."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+  <LinkCard
+    title="Debugging sGTM"
+    description="Diagnosing the root cause of issues once your monitoring has alerted you."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+  <LinkCard
+    title="Scaling Strategies"
+    description="Preventing outages through proper capacity planning and autoscaling."
+    href="/server-side/operations/scaling-strategies/"
+  />
+  <LinkCard
+    title="Cloud Run Scaling"
+    description="The minimum instances and health check configuration in Cloud Run."
+    href="/server-side/setup/cloud-run-scaling/"
+  />
+</CardGrid>

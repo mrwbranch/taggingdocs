@@ -1,6 +1,348 @@
 ---
 title: "Conversion Adjustments"
-description: "Handling returns, cancellations, and value adjustments via sGTM."
+description: "Handling returns, cancellations, and value adjustments via sGTM — Google Ads RETRACT and RESTATE adjustment types, refund events for Meta CAPI, webhook-based order update ingestion, and adjustment data mapping."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+When a customer returns a product or cancels an order, the conversion you reported to Google Ads and Meta remains in their systems. Their bidding algorithms continue optimizing toward those "converted" users. If 15% of your orders are returned, you are paying for conversions that did not actually result in revenue — and your bidding is optimizing for the wrong outcome.
+
+Conversion adjustments send a signal back to the ad platform after the initial conversion was recorded, either cancelling it entirely or restating its value. This closes the measurement loop: bid toward orders that stick, not toward orders that bounce.
+
+## Google Ads Conversion Adjustments
+
+Google Ads supports two adjustment types:
+
+**RETRACT**: Cancels a conversion entirely. Use this for full returns, cancellations, and fraudulent transactions. The conversion disappears from reporting and bidding signals.
+
+**RESTATE**: Updates the conversion value without removing the conversion. Use this for partial returns, where a customer returns some items but keeps others. The conversion count stays the same; the value changes to the net retained amount.
+
+Both adjustment types require:
+- The original `order_id` (or `gclid` if you track by click ID)
+- The original conversion action resource name
+- The adjustment date/time
+
+### The adjustment workflow
+
+The most reliable architecture uses order management system webhooks:
+
+```
+Order Management System                sGTM                    Google Ads API
+───────────────────────────           ──────────────────       ───────────────
+Order returned / cancelled
+        │
+        │  POST /webhooks/order-update
+        │  {
+        │    order_id: "ORD-12345",
+        │    event: "refund",
+        │    refund_amount: 99.99,
+        │    items_returned: [...]
+        │  }
+        ├─────────────────────────────>│
+        │                              │  Custom client parses
+        │                              │  Identifies adjustment type
+        │                              │  Builds Event Model
+        │                              │
+        │                              │  POST conversion adjustments
+        │                              ├─────────────────────────────>
+        │  HTTP 200                    │
+        │<─────────────────────────────│
+```
+
+### Custom client for order update webhooks
+
+```javascript
+const claimRequest = require('claimRequest');
+const runContainer = require('runContainer');
+const getRequestPath = require('getRequestPath');
+const getRequestBody = require('getRequestBody');
+const returnResponse = require('returnResponse');
+const setResponseStatus = require('setResponseStatus');
+const JSON = require('JSON');
+
+const path = getRequestPath();
+
+if (path !== '/webhooks/order-update') {
+  return;
+}
+
+claimRequest();
+
+const rawBody = getRequestBody();
+let orderUpdate;
+try {
+  orderUpdate = JSON.parse(rawBody);
+} catch (e) {
+  setResponseStatus(400);
+  returnResponse();
+  return;
+}
+
+const event = orderUpdate.event;
+const orderId = orderUpdate.order_id;
+const refundAmount = orderUpdate.refund_amount;
+
+// Determine Google Ads adjustment type
+let adjustmentType;
+let adjustedValue;
+
+if (event === 'cancelled' || event === 'full_refund') {
+  adjustmentType = 'RETRACT';
+  adjustedValue = 0;
+} else if (event === 'partial_refund') {
+  adjustmentType = 'RESTATE';
+  adjustedValue = orderUpdate.retained_value; // original_value - refund_amount
+} else {
+  // Not an adjustment event — acknowledge and ignore
+  setResponseStatus(200);
+  returnResponse();
+  return;
+}
+
+const eventModel = {
+  event_name: 'conversion_adjustment',
+  adjustment_type: adjustmentType,
+  order_id: orderId,
+  adjusted_value: adjustedValue,
+  currency: orderUpdate.currency || 'USD',
+  adjustment_timestamp: orderUpdate.updated_at,
+};
+
+runContainer(eventModel, function() {
+  setResponseStatus(200);
+  returnResponse();
+});
+```
+
+### Google Ads Conversion Adjustment tag
+
+The Google Ads API's `ConversionAdjustment` endpoint accepts adjustments in this format:
+
+```javascript
+// Tag template: google_ads_conversion_adjustment
+const sendHttpRequest = require('sendHttpRequest');
+const JSON = require('JSON');
+const getEventData = require('getEventData');
+const getGoogleAuth = require('getGoogleAuth');
+const logToConsole = require('logToConsole');
+
+const adjustmentType = getEventData('adjustment_type');
+const orderId = getEventData('order_id');
+const adjustedValue = getEventData('adjusted_value');
+const currency = getEventData('currency');
+const adjustmentTimestamp = getEventData('adjustment_timestamp');
+
+if (!orderId || !adjustmentType) {
+  data.gtmOnFailure();
+  return;
+}
+
+// Format timestamp as RFC 3339
+const ts = adjustmentTimestamp
+  ? new Date(adjustmentTimestamp).toISOString()
+  : new Date().toISOString();
+
+const adjustment = {
+  conversionAction: 'customers/' + data.customerId + '/conversionActions/' + data.conversionActionId,
+  adjustmentType: adjustmentType, // 'RETRACT' or 'RESTATE'
+  orderId: orderId,
+  adjustmentDateTime: ts,
+};
+
+// For RESTATE, include the new value
+if (adjustmentType === 'RESTATE') {
+  adjustment.restatementValue = {
+    adjustedValue: parseFloat(adjustedValue),
+    currencyCode: currency,
+  };
+}
+
+const payload = {
+  conversions: [adjustment],
+  partialFailure: true,
+};
+
+// Get Google Ads API authentication
+const authToken = getGoogleAuth({
+  scopes: ['https://www.googleapis.com/auth/adwords'],
+});
+
+sendHttpRequest(
+  'https://googleads.googleapis.com/v14/customers/' + data.customerId + ':uploadConversionAdjustments',
+  {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + authToken.getToken(),
+      'developer-token': data.developerToken,
+      'Content-Type': 'application/json',
+      'login-customer-id': data.managerAccountId,
+    },
+    body: JSON.stringify(payload),
+    timeout: 10000,
+  },
+  function(statusCode, headers, body) {
+    if (statusCode >= 200 && statusCode < 300) {
+      logToConsole(JSON.stringify({
+        level: 'info',
+        tag: 'gads_adjustment',
+        adjustment_type: adjustmentType,
+        order_id: orderId,
+      }));
+      data.gtmOnSuccess();
+    } else {
+      logToConsole(JSON.stringify({
+        level: 'error',
+        tag: 'gads_adjustment',
+        status: statusCode,
+        body: body,
+      }));
+      data.gtmOnFailure();
+    }
+  }
+);
+```
+
+**Template fields:**
+- `customerId` — Google Ads customer ID (without dashes)
+- `conversionActionId` — the numeric ID of the conversion action to adjust
+- `developerToken` — your Google Ads API developer token
+- `managerAccountId` — your MCC account ID (required if using a manager account)
+
+<Aside type="note">
+The Google Ads API `ConversionAdjustment` requires that the original conversion was uploaded using the same `order_id`. If your original conversion was uploaded using `gclid` without an `order_id`, you will need to map the gclid from your order database before submitting the adjustment.
+</Aside>
+
+## Timing requirements
+
+Google Ads processes adjustments within 3–5 business days of submission. There are also constraints on when adjustments can be submitted:
+
+- **RETRACT**: Can be submitted up to the last day of the click's conversion window (typically 30–90 days after the click)
+- **RESTATE**: Can be submitted up to 54 days after the original conversion date
+
+Submit adjustments as soon as the return or cancellation is confirmed — do not batch them. For Shopify, this means connecting your refund webhook to sGTM immediately when the refund is processed.
+
+## Meta CAPI refunds
+
+Meta does not support a native conversion adjustment (RETRACT/RESTATE) equivalent. Instead, the convention is to send a `Refund` custom event with the refunded value:
+
+```javascript
+// Tag template: meta_capi_refund
+const sendHttpRequest = require('sendHttpRequest');
+const JSON = require('JSON');
+const getEventData = require('getEventData');
+const getTimestampMillis = require('getTimestampMillis');
+
+const pixelId = data.pixelId;
+const accessToken = data.accessToken;
+const orderId = getEventData('order_id');
+const refundAmount = getEventData('adjusted_value');
+const currency = getEventData('currency');
+
+const payload = {
+  data: [{
+    event_name: 'Purchase',  // Use 'Purchase' with negative value, or custom 'Refund' event
+    event_time: Math.floor(getTimestampMillis() / 1000),
+    action_source: 'website',
+    custom_data: {
+      order_id: orderId,
+      value: -Math.abs(parseFloat(refundAmount)), // Negative value for refund
+      currency: currency,
+    },
+  }],
+  access_token: accessToken,
+};
+
+sendHttpRequest(
+  'https://graph.facebook.com/v18.0/' + pixelId + '/events',
+  {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    timeout: 5000,
+  },
+  function(statusCode, headers, body) {
+    if (statusCode >= 200 && statusCode < 300) {
+      data.gtmOnSuccess();
+    } else {
+      data.gtmOnFailure();
+    }
+  }
+);
+```
+
+The convention of sending a negative `value` for refund events is not officially documented by Meta but is widely used for reporting purposes. It will not retroactively change the attributed revenue for ad campaigns, but it feeds into your pixel data for analysis.
+
+For official refund tracking that affects bidding, Meta recommends using offline events uploads via the Conversions API with the `refund` event type — though this has limited effect on active campaign bidding compared to Google Ads' formal adjustment API.
+
+## Data sources for adjustments
+
+**Shopify**: Configure a webhook subscription for `refunds/create` events. Each refund includes the `order_id`, `refund_line_items`, and the refund amount.
+
+**WooCommerce**: Use the `woocommerce_refund_created` action hook to send order update data to sGTM via an HTTP POST.
+
+**Salesforce Commerce Cloud**: Order management events can be pushed via Salesforce's Event Monitoring or custom Order hooks.
+
+**Custom order management systems**: Build a webhook publisher that fires on order state transitions (cancelled, refunded, partially_refunded) and posts to your sGTM order-update endpoint.
+
+**Manual / batch**: For low-volume businesses, Google Ads also supports uploading conversion adjustments via CSV in the Google Ads UI. This does not require sGTM but offers less automation.
+
+## Storing the gclid for adjustment lookup
+
+The adjustment endpoint can accept either `order_id` or `gclid`. If you track conversions by `gclid`, you need to store the gclid at conversion time so you can reference it in adjustments.
+
+On the purchase confirmation page, write the gclid to your database alongside the order:
+
+```javascript
+// Capture gclid from URL parameter on landing
+const urlParams = new URLSearchParams(window.location.search);
+const gclid = urlParams.get('gclid');
+if (gclid) {
+  sessionStorage.setItem('gclid', gclid);
+}
+
+// On purchase confirmation
+const storedGclid = sessionStorage.getItem('gclid');
+dataLayer.push({
+  event: 'purchase',
+  transaction_id: order.id,
+  gclid: storedGclid,
+  // ... other fields
+});
+```
+
+Pass `gclid` to your order creation API. Store it in your order record. When the refund webhook arrives, look up the original order's `gclid` and include it in the adjustment payload.
+
+## Common mistakes
+
+**Sending RETRACT for partial returns.** RETRACT removes the conversion entirely. If a customer returns two of five items, the correct adjustment type is RESTATE with the new value (original_value minus returned_items_value), not RETRACT.
+
+**Missing the adjustment window.** Google Ads adjustments have time limits. If your return window is 90 days but the Google Ads conversion window for that action is 30 days, adjustments submitted after day 30 are silently ignored. Align your return policy timeline with your conversion window configuration in Google Ads.
+
+**Not storing order_id at conversion time.** The adjustment endpoint requires the original `order_id` or `gclid`. If you did not pass `order_id` in the original conversion upload, you cannot submit adjustments by order ID. Audit your original conversion upload payload to confirm `order_id` is present.
+
+**Submitting adjustments before the original conversion is processed.** There is a propagation delay between when a conversion is uploaded and when it is available for adjustment — typically a few hours. If you submit an adjustment immediately after the original conversion, it may fail with a "conversion not found" error. Implement a retry mechanism with exponential backoff, or queue adjustments for submission 6 hours after the original conversion timestamp.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Google Ads Conversions"
+    description="Setting up the original Google Ads Enhanced Conversions that adjustments reference."
+    href="/server-side/tags/google-ads-conversions/"
+  />
+  <LinkCard
+    title="Webhook Integrations"
+    description="Building the custom client that receives refund webhooks from your order management system."
+    href="/server-side/advanced/webhook-integrations/"
+  />
+  <LinkCard
+    title="Facebook Conversions API"
+    description="Meta CAPI configuration and the refund event convention for Meta."
+    href="/server-side/tags/facebook-capi/"
+  />
+  <LinkCard
+    title="Custom HTTP Requests"
+    description="Using sendHttpRequest to call the Google Ads Conversion Adjustment API directly."
+    href="/server-side/tags/custom-http-requests/"
+  />
+</CardGrid>

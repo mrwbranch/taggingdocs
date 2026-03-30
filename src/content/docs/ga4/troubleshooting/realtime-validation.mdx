@@ -1,6 +1,150 @@
 ---
 title: "Realtime Validation"
-description: "Using GA4's Realtime report to verify data collection."
+description: "Use the Realtime report and DebugView together to validate GA4 implementation before launch — a practical pre-deployment checklist."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The Realtime report shows events from all users in the last 30 minutes, without debug mode. It is the right tool for verifying that production traffic is being collected correctly, monitoring a new deployment, and checking whether a specific event is firing for real users — not just in your testing environment.
+
+Combine the Realtime report with DebugView for complete validation: DebugView for your own events in detail, Realtime for production user events at scale.
+
+## The Realtime report
+
+Access at **Reports → Realtime**.
+
+The report shows:
+- Active users in the last 30 minutes
+- Events fired in the last 30 minutes with counts
+- Top event names
+- User count by traffic source, country, and device category
+
+### What Realtime is good for
+
+**Verifying a deployment is working**: After publishing a new GTM container or deploying a code change, the Realtime report shows within minutes whether events are arriving. If page_view count is near zero after a deployment, something went wrong.
+
+**Checking a specific event is firing**: After implementing a new conversion event, trigger it manually from your browser and watch for it in Realtime (it appears within 1-2 minutes, without debug mode).
+
+**Monitoring traffic source changes**: After launching a campaign, Realtime shows the incoming traffic source/medium almost immediately.
+
+**Spotting double-counting**: If you implemented a purchase event and see `purchase` count doubling when you complete one test transaction, the doubling shows up quickly in Realtime.
+
+### What Realtime is NOT good for
+
+Realtime does not show:
+- Data older than 30 minutes
+- Individual session details
+- Sampled analysis
+- Long-term trends
+
+## Pre-launch validation checklist using Realtime and DebugView
+
+Before marking an implementation complete:
+
+<Steps>
+1. **Basic tag firing**: Open your site, navigate to 3 pages. In the Realtime report, confirm active users = 1 (yourself) and page_view appears in the event counts.
+
+2. **Key events**: Trigger each event type in your implementation. After each action, check Realtime — the event should appear within 1-2 minutes without debug mode.
+
+3. **Event parameters**: Enable debug mode (GTM Preview or `?gtm_debug=true`) and repeat the same actions. In DebugView, verify parameters for each event are populated correctly.
+
+4. **Conversion events**: Complete a test conversion. Verify in Realtime that the conversion event count increments. Verify in DebugView that parameters (transaction_id, value, currency) are correct.
+
+5. **Traffic source attribution**: If testing a specific campaign, arrive via the campaign URL with UTM parameters. In Realtime, check that the traffic source section shows the correct source/medium.
+
+6. **Cross-domain tracking**: If your site spans multiple domains, navigate between them. In Realtime, confirm that session count does not increase on the transition (which would indicate cross-domain tracking failure).
+
+7. **Filter validation**: If you have internal traffic filters, check Realtime does not show your own session after enabling the filter. If it still shows your session, the IP filter is not matching correctly.
+</Steps>
+
+## Monitoring a live deployment
+
+When deploying changes to a live site, monitor Realtime during and after deployment:
+
+1. Before deployment: note the current events-per-minute rate for `page_view` and your key events
+2. Deploy the change
+3. Watch Realtime for the next 5-10 minutes
+4. Verify:
+   - page_view count is approximately the same as before (not zero, not double)
+   - Your new/changed events appear as expected
+   - Previously working events have not disappeared
+
+If page_view drops to near-zero after deployment, the GA4 tag is broken. Rollback immediately.
+
+## Realtime with comparisons
+
+In the Realtime report, you can apply comparisons to see two user groups side by side:
+
+1. Click **Add comparison** at the top of Realtime
+2. Add a condition (e.g., Device category = Mobile)
+3. The report splits into two columns: All users and Mobile users
+
+This is useful for verifying that mobile events are firing correctly alongside desktop events.
+
+## Realtime for Measurement Protocol validation
+
+Measurement Protocol events appear in Realtime within 1-2 minutes (without debug mode). After sending a server-side event, monitor Realtime to confirm it arrives:
+
+1. Send a Measurement Protocol event without `debug_mode`
+2. Check Realtime → Event count by event name
+3. Verify your event name appears and its count increments
+
+If the event does not appear in Realtime within 2 minutes, use the validation endpoint to check for payload errors, or add `debug_mode: true` and check DebugView for more detail.
+
+## Limitations
+
+### 30-minute window
+
+Events older than 30 minutes are not visible in Realtime. This means:
+- If you are validating a deployment that happened 2 hours ago, you will not see the test events in Realtime
+- Historical analysis requires standard reports or BigQuery
+
+### No parameter details
+
+Realtime shows event names and counts but not individual event parameters. For parameter validation, use DebugView.
+
+### Approximate counts
+
+The Realtime report uses approximate counting for speed. The counts may differ slightly from the exact counts in standard reports once data is fully processed.
+
+### No filter for internal traffic
+
+Even with a data filter active for internal traffic, the Realtime report may show your own sessions from office IPs. Data filters apply to standard reports and BigQuery but have limited effect on the Realtime report. Do not rely on the Realtime report to verify filter behavior.
+
+<Aside type="caution">
+The Realtime report is designed to be fast, not perfectly accurate. It is excellent for confirming that events are arriving and that your implementation is fundamentally working. For precise counts, use standard reports (24-48 hour delay) or BigQuery.
+</Aside>
+
+## Common mistakes
+
+### Relying on Realtime for conversion counting accuracy
+
+Conversions in Realtime may be slightly over or undercounted due to the approximate counting. For accurate conversion counts (especially for new campaign performance), wait for data to process in standard reports (usually 24-48 hours).
+
+### Not testing cross-browser and cross-device
+
+A deployment that works perfectly in Chrome on desktop may fail on Safari on iOS or on a slow mobile connection. After validating in your primary browser, test in at least Safari (iOS) and one Android device. These environments have different JavaScript capabilities and ad blocker prevalence.
+
+### Testing from the same session as a previous test
+
+If you partially complete a checkout, abandon it, and then try to complete a fresh checkout in the same session, GA4 may attach both to the same session with the same session ID. This can cause unexpected behavior in funnel reports. Use a new browser profile or private browsing window for each complete test run.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DebugView"
+    description="Event-level parameter validation during testing."
+    href="/ga4/troubleshooting/debugview/"
+  />
+  <LinkCard
+    title="Common Mistakes"
+    description="The implementation errors that show up most often — and how Realtime helps catch them."
+    href="/ga4/troubleshooting/common-mistakes/"
+  />
+  <LinkCard
+    title="Internal Traffic Filtering"
+    description="Exclude your own test traffic from production data."
+    href="/ga4/troubleshooting/internal-traffic-filtering/"
+  />
+</CardGrid>

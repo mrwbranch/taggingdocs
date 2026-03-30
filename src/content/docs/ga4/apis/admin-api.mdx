@@ -1,6 +1,741 @@
 ---
 title: "GA4 Admin API"
-description: "Managing GA4 properties, dimensions, and audiences via the Admin API."
+description: "Manage GA4 properties, data streams, custom dimensions, audiences, and access control programmatically using the Admin API — Python and Node.js examples."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The GA4 Admin API lets you manage GA4 property configuration programmatically. You can create and update properties, list and modify data streams, manage custom dimensions and metrics, handle user access, and automate routine configuration tasks. It is the right tool when you are managing GA4 at scale — multiple properties, automated provisioning, or keeping custom dimensions in sync with your data schema.
+
+The Admin API is distinct from the Data API. The Data API retrieves report data. The Admin API changes property configuration. They use different base URLs, different authentication scopes, and different client library imports.
+
+## Authentication and setup
+
+The Admin API requires a service account or OAuth 2.0 credentials. For management operations (creating resources, modifying permissions), the service account needs the **Editor** role on the property. Read-only operations (listing resources) require only the Viewer role.
+
+<Steps>
+1. Create a service account in [Google Cloud Console](https://console.cloud.google.com/) under **IAM & Admin → Service Accounts**.
+
+2. Download the JSON key file.
+
+3. In GA4, go to **Admin → Property Access Management → Add Users**. Add the service account email and assign the **Editor** role.
+
+4. Set `GOOGLE_APPLICATION_CREDENTIALS` environment variable:
+   ```bash
+   export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+   ```
+</Steps>
+
+### Install client libraries
+
+<Tabs>
+<TabItem label="Python">
+```bash
+pip install google-analytics-admin
+```
+</TabItem>
+<TabItem label="Node.js">
+```bash
+npm install @google-analytics/admin
+```
+</TabItem>
+</Tabs>
+
+<Aside type="caution">
+The Admin API can make irreversible changes. Deleting a property, removing a user, or activating a data filter cannot be undone. Always test Admin API scripts against a development property before running against production.
+</Aside>
+
+## Working with properties
+
+### List accessible properties
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha import AnalyticsAdminServiceClient
+from google.analytics.admin_v1alpha.types import ListAccountsRequest, ListPropertiesRequest
+
+def list_properties():
+    client = AnalyticsAdminServiceClient()
+
+    # First, list accounts
+    accounts = client.list_accounts(ListAccountsRequest())
+
+    for account in accounts:
+        print(f"Account: {account.name} ({account.display_name})")
+
+        # List properties for each account
+        request = ListPropertiesRequest(filter=f"parent:{account.name}")
+        properties = client.list_properties(request)
+
+        for prop in properties:
+            print(f"  Property: {prop.name} ({prop.display_name})")
+            print(f"    Currency: {prop.currency_code}")
+            print(f"    Timezone: {prop.time_zone}")
+            print(f"    Industry: {prop.industry_category}")
+
+if __name__ == "__main__":
+    list_properties()
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+const { AnalyticsAdminServiceClient } = require('@google-analytics/admin');
+
+async function listProperties() {
+  const adminClient = new AnalyticsAdminServiceClient();
+
+  // List accounts
+  const [accounts] = await adminClient.listAccounts();
+
+  for (const account of accounts) {
+    console.log(`Account: ${account.name} (${account.displayName})`);
+
+    // List properties for each account
+    const [properties] = await adminClient.listProperties({
+      filter: `parent:${account.name}`,
+    });
+
+    for (const prop of properties) {
+      console.log(`  Property: ${prop.name} (${prop.displayName})`);
+      console.log(`    Currency: ${prop.currencyCode}`);
+      console.log(`    Timezone: ${prop.timeZone}`);
+    }
+  }
+}
+
+listProperties().catch(console.error);
+```
+</TabItem>
+</Tabs>
+
+### Get property details
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import GetPropertyRequest
+
+PROPERTY_ID = "123456789"
+
+def get_property():
+    client = AnalyticsAdminServiceClient()
+    prop = client.get_property(
+        GetPropertyRequest(name=f"properties/{PROPERTY_ID}")
+    )
+    print(f"Name: {prop.display_name}")
+    print(f"Create time: {prop.create_time}")
+    print(f"Currency: {prop.currency_code}")
+    print(f"Timezone: {prop.time_zone}")
+    print(f"Industry: {prop.industry_category}")
+    print(f"Service level: {prop.service_level}")
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+const PROPERTY_ID = '123456789';
+
+async function getProperty() {
+  const adminClient = new AnalyticsAdminServiceClient();
+  const [prop] = await adminClient.getProperty({
+    name: `properties/${PROPERTY_ID}`,
+  });
+  console.log(`Name: ${prop.displayName}`);
+  console.log(`Currency: ${prop.currencyCode}`);
+  console.log(`Timezone: ${prop.timeZone}`);
+  console.log(`Service level: ${prop.serviceLevel}`);
+}
+```
+</TabItem>
+</Tabs>
+
+### Update property settings
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import UpdatePropertyRequest, Property
+from google.protobuf.field_mask_pb2 import FieldMask
+
+def update_property():
+    client = AnalyticsAdminServiceClient()
+
+    # Only update the fields specified in update_mask
+    request = UpdatePropertyRequest(
+        property=Property(
+            name=f"properties/{PROPERTY_ID}",
+            display_name="My Updated Property Name",
+            currency_code="EUR",
+            time_zone="Europe/London",
+        ),
+        update_mask=FieldMask(paths=["display_name", "currency_code", "time_zone"]),
+    )
+
+    updated = client.update_property(request)
+    print(f"Updated: {updated.display_name} ({updated.currency_code})")
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function updateProperty() {
+  const adminClient = new AnalyticsAdminServiceClient();
+
+  const [updated] = await adminClient.updateProperty({
+    property: {
+      name: `properties/${PROPERTY_ID}`,
+      displayName: 'My Updated Property Name',
+      currencyCode: 'EUR',
+      timeZone: 'Europe/London',
+    },
+    updateMask: { paths: ['display_name', 'currency_code', 'time_zone'] },
+  });
+
+  console.log(`Updated: ${updated.displayName} (${updated.currencyCode})`);
+}
+```
+</TabItem>
+</Tabs>
+
+## Data streams
+
+### List data streams
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import ListDataStreamsRequest
+
+def list_data_streams():
+    client = AnalyticsAdminServiceClient()
+    streams = client.list_data_streams(
+        ListDataStreamsRequest(parent=f"properties/{PROPERTY_ID}")
+    )
+    for stream in streams:
+        print(f"Stream: {stream.name}")
+        print(f"  Display name: {stream.display_name}")
+        print(f"  Type: {stream.type_}")
+        if stream.web_stream_data:
+            print(f"  Measurement ID: {stream.web_stream_data.measurement_id}")
+            print(f"  Default URI: {stream.web_stream_data.default_uri}")
+        elif stream.android_app_stream_data:
+            print(f"  Package name: {stream.android_app_stream_data.firebase_app_id}")
+        elif stream.ios_app_stream_data:
+            print(f"  Bundle ID: {stream.ios_app_stream_data.bundle_id}")
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function listDataStreams() {
+  const adminClient = new AnalyticsAdminServiceClient();
+  const [streams] = await adminClient.listDataStreams({
+    parent: `properties/${PROPERTY_ID}`,
+  });
+
+  for (const stream of streams) {
+    console.log(`Stream: ${stream.name}`);
+    console.log(`  Display name: ${stream.displayName}`);
+    console.log(`  Type: ${stream.type}`);
+    if (stream.webStreamData) {
+      console.log(`  Measurement ID: ${stream.webStreamData.measurementId}`);
+    }
+  }
+}
+```
+</TabItem>
+</Tabs>
+
+### Create a web data stream
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import (
+    CreateDataStreamRequest,
+    DataStream,
+)
+
+def create_web_stream():
+    client = AnalyticsAdminServiceClient()
+
+    stream = DataStream(
+        type_=DataStream.DataStreamType.WEB_DATA_STREAM,
+        display_name="My Website",
+        web_stream_data=DataStream.WebStreamData(
+            default_uri="https://www.example.com",
+        ),
+    )
+
+    created = client.create_data_stream(
+        CreateDataStreamRequest(
+            parent=f"properties/{PROPERTY_ID}",
+            data_stream=stream,
+        )
+    )
+
+    print(f"Created stream: {created.name}")
+    print(f"Measurement ID: {created.web_stream_data.measurement_id}")
+    # Store this measurement_id — you need it to configure the GA4 tag
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function createWebStream() {
+  const adminClient = new AnalyticsAdminServiceClient();
+
+  const [created] = await adminClient.createDataStream({
+    parent: `properties/${PROPERTY_ID}`,
+    dataStream: {
+      type: 'WEB_DATA_STREAM',
+      displayName: 'My Website',
+      webStreamData: {
+        defaultUri: 'https://www.example.com',
+      },
+    },
+  });
+
+  console.log(`Created stream: ${created.name}`);
+  console.log(`Measurement ID: ${created.webStreamData.measurementId}`);
+}
+```
+</TabItem>
+</Tabs>
+
+## Custom dimensions
+
+### List custom dimensions
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import ListCustomDimensionsRequest
+
+def list_custom_dimensions():
+    client = AnalyticsAdminServiceClient()
+    dimensions = client.list_custom_dimensions(
+        ListCustomDimensionsRequest(parent=f"properties/{PROPERTY_ID}")
+    )
+    for dim in dimensions:
+        print(f"{dim.parameter_name}: {dim.display_name} ({dim.scope})")
+        if dim.description:
+            print(f"  Description: {dim.description}")
+        print(f"  Archived: {dim.disallow_ads_personalization}")
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function listCustomDimensions() {
+  const adminClient = new AnalyticsAdminServiceClient();
+  const [dimensions] = await adminClient.listCustomDimensions({
+    parent: `properties/${PROPERTY_ID}`,
+  });
+
+  for (const dim of dimensions) {
+    console.log(`${dim.parameterName}: ${dim.displayName} (${dim.scope})`);
+  }
+}
+```
+</TabItem>
+</Tabs>
+
+### Create a custom dimension
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import (
+    CreateCustomDimensionRequest,
+    CustomDimension,
+)
+
+def create_custom_dimension(parameter_name, display_name, scope="EVENT", description=""):
+    """
+    scope: "EVENT" or "USER"
+    parameter_name: the event parameter name (e.g., "article_category")
+    """
+    client = AnalyticsAdminServiceClient()
+
+    scope_enum = (
+        CustomDimension.DimensionScope.EVENT
+        if scope == "EVENT"
+        else CustomDimension.DimensionScope.USER
+    )
+
+    dimension = CustomDimension(
+        parameter_name=parameter_name,
+        display_name=display_name,
+        description=description,
+        scope=scope_enum,
+    )
+
+    created = client.create_custom_dimension(
+        CreateCustomDimensionRequest(
+            parent=f"properties/{PROPERTY_ID}",
+            custom_dimension=dimension,
+        )
+    )
+
+    print(f"Created: {created.name}")
+    print(f"  Parameter: {created.parameter_name}")
+    print(f"  Display name: {created.display_name}")
+    print(f"  Scope: {created.scope}")
+    return created
+
+# Example usage
+create_custom_dimension(
+    parameter_name="article_category",
+    display_name="Article Category",
+    scope="EVENT",
+    description="Content category for blog posts and articles",
+)
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function createCustomDimension(parameterName, displayName, scope = 'EVENT', description = '') {
+  const adminClient = new AnalyticsAdminServiceClient();
+
+  const [created] = await adminClient.createCustomDimension({
+    parent: `properties/${PROPERTY_ID}`,
+    customDimension: {
+      parameterName,
+      displayName,
+      description,
+      scope,
+    },
+  });
+
+  console.log(`Created: ${created.name}`);
+  console.log(`  Parameter: ${created.parameterName}`);
+  return created;
+}
+
+// Example usage
+createCustomDimension(
+  'article_category',
+  'Article Category',
+  'EVENT',
+  'Content category for blog posts'
+).catch(console.error);
+```
+</TabItem>
+</Tabs>
+
+### Archive a custom dimension
+
+Archiving removes a dimension from reports and the Admin UI without deleting its historical data. You cannot delete custom dimensions — only archive them. Archived dimensions still count against your quota.
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import ArchiveCustomDimensionRequest
+
+def archive_custom_dimension(dimension_name):
+    """dimension_name: full resource name, e.g., 'properties/123456789/customDimensions/123'"""
+    client = AnalyticsAdminServiceClient()
+    client.archive_custom_dimension(
+        ArchiveCustomDimensionRequest(name=dimension_name)
+    )
+    print(f"Archived: {dimension_name}")
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function archiveCustomDimension(dimensionName) {
+  const adminClient = new AnalyticsAdminServiceClient();
+  await adminClient.archiveCustomDimension({ name: dimensionName });
+  console.log(`Archived: ${dimensionName}`);
+}
+```
+</TabItem>
+</Tabs>
+
+## Custom metrics
+
+### Create a custom metric
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import (
+    CreateCustomMetricRequest,
+    CustomMetric,
+)
+
+def create_custom_metric(parameter_name, display_name, unit="STANDARD", description=""):
+    """
+    unit options: STANDARD, CURRENCY, FEET, METERS, KILOMETERS, MILES,
+                  MILLISECONDS, SECONDS, MINUTES, HOURS
+    """
+    client = AnalyticsAdminServiceClient()
+
+    unit_enum = getattr(CustomMetric.MeasurementUnit, unit)
+
+    metric = CustomMetric(
+        parameter_name=parameter_name,
+        display_name=display_name,
+        description=description,
+        measurement_unit=unit_enum,
+        scope=CustomMetric.MetricScope.EVENT,
+    )
+
+    created = client.create_custom_metric(
+        CreateCustomMetricRequest(
+            parent=f"properties/{PROPERTY_ID}",
+            custom_metric=metric,
+        )
+    )
+
+    print(f"Created metric: {created.name}")
+    return created
+
+# Create a word count metric
+create_custom_metric(
+    parameter_name="word_count",
+    display_name="Word Count",
+    unit="STANDARD",
+    description="Number of words in the article",
+)
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function createCustomMetric(parameterName, displayName, unit = 'STANDARD', description = '') {
+  const adminClient = new AnalyticsAdminServiceClient();
+
+  const [created] = await adminClient.createCustomMetric({
+    parent: `properties/${PROPERTY_ID}`,
+    customMetric: {
+      parameterName,
+      displayName,
+      description,
+      measurementUnit: unit,
+      scope: 'EVENT',
+    },
+  });
+
+  console.log(`Created metric: ${created.name}`);
+  return created;
+}
+```
+</TabItem>
+</Tabs>
+
+## User access management
+
+### List users on a property
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import ListAccessBindingsRequest
+
+def list_property_users():
+    client = AnalyticsAdminServiceClient()
+    bindings = client.list_access_bindings(
+        ListAccessBindingsRequest(parent=f"properties/{PROPERTY_ID}")
+    )
+    for binding in bindings:
+        print(f"User: {binding.user}")
+        print(f"  Roles: {binding.roles}")
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function listPropertyUsers() {
+  const adminClient = new AnalyticsAdminServiceClient();
+  const [bindings] = await adminClient.listAccessBindings({
+    parent: `properties/${PROPERTY_ID}`,
+  });
+
+  for (const binding of bindings) {
+    console.log(`User: ${binding.user}`);
+    console.log(`  Roles: ${binding.roles}`);
+  }
+}
+```
+</TabItem>
+</Tabs>
+
+### Add a user to a property
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import (
+    CreateAccessBindingRequest,
+    AccessBinding,
+)
+
+def add_property_user(email, roles=None):
+    """
+    roles: list of role strings
+    Available roles: predefinedRoles/viewer, predefinedRoles/analyst,
+                     predefinedRoles/editor, predefinedRoles/admin,
+                     predefinedRoles/no-cost-data, predefinedRoles/no-revenue-data
+    """
+    if roles is None:
+        roles = ["predefinedRoles/viewer"]
+
+    client = AnalyticsAdminServiceClient()
+
+    binding = client.create_access_binding(
+        CreateAccessBindingRequest(
+            parent=f"properties/{PROPERTY_ID}",
+            access_binding=AccessBinding(
+                user=email,
+                roles=roles,
+            ),
+        )
+    )
+
+    print(f"Added {email} with roles {roles}")
+    print(f"Binding name: {binding.name}")
+    return binding
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function addPropertyUser(email, roles = ['predefinedRoles/viewer']) {
+  const adminClient = new AnalyticsAdminServiceClient();
+
+  const [binding] = await adminClient.createAccessBinding({
+    parent: `properties/${PROPERTY_ID}`,
+    accessBinding: {
+      user: email,
+      roles,
+    },
+  });
+
+  console.log(`Added ${email} with roles ${roles}`);
+  console.log(`Binding: ${binding.name}`);
+  return binding;
+}
+```
+</TabItem>
+</Tabs>
+
+### Remove a user from a property
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.admin_v1alpha.types import DeleteAccessBindingRequest
+
+def remove_property_user(binding_name):
+    """binding_name: full resource name from list_property_users()"""
+    client = AnalyticsAdminServiceClient()
+    client.delete_access_binding(
+        DeleteAccessBindingRequest(name=binding_name)
+    )
+    print(f"Removed binding: {binding_name}")
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function removePropertyUser(bindingName) {
+  const adminClient = new AnalyticsAdminServiceClient();
+  await adminClient.deleteAccessBinding({ name: bindingName });
+  console.log(`Removed binding: ${bindingName}`);
+}
+```
+</TabItem>
+</Tabs>
+
+## Bulk provisioning pattern
+
+When managing many properties — for example, creating the same custom dimensions on 20 properties — batch your operations with error handling and logging:
+
+```python
+import time
+from google.api_core.exceptions import ResourceExhausted, AlreadyExists
+
+STANDARD_DIMENSIONS = [
+    {"parameter_name": "content_type", "display_name": "Content Type", "scope": "EVENT"},
+    {"parameter_name": "user_plan", "display_name": "User Plan", "scope": "USER"},
+    {"parameter_name": "experiment_id", "display_name": "Experiment ID", "scope": "EVENT"},
+]
+
+def provision_dimensions_for_properties(property_ids):
+    client = AnalyticsAdminServiceClient()
+    results = {"success": [], "skipped": [], "errors": []}
+
+    for property_id in property_ids:
+        for dim_config in STANDARD_DIMENSIONS:
+            try:
+                scope_enum = (
+                    CustomDimension.DimensionScope.EVENT
+                    if dim_config["scope"] == "EVENT"
+                    else CustomDimension.DimensionScope.USER
+                )
+                client.create_custom_dimension(
+                    CreateCustomDimensionRequest(
+                        parent=f"properties/{property_id}",
+                        custom_dimension=CustomDimension(
+                            parameter_name=dim_config["parameter_name"],
+                            display_name=dim_config["display_name"],
+                            scope=scope_enum,
+                        ),
+                    )
+                )
+                results["success"].append(f"{property_id}/{dim_config['parameter_name']}")
+                time.sleep(0.1)  # Avoid quota exhaustion
+
+            except AlreadyExists:
+                results["skipped"].append(f"{property_id}/{dim_config['parameter_name']}")
+
+            except ResourceExhausted:
+                print("Quota exceeded, waiting 60s...")
+                time.sleep(60)
+                results["errors"].append(f"{property_id}/{dim_config['parameter_name']}")
+
+            except Exception as e:
+                print(f"Error on {property_id}/{dim_config['parameter_name']}: {e}")
+                results["errors"].append(f"{property_id}/{dim_config['parameter_name']}")
+
+    print(f"Success: {len(results['success'])}")
+    print(f"Skipped (already exists): {len(results['skipped'])}")
+    print(f"Errors: {len(results['errors'])}")
+    return results
+```
+
+## Common mistakes
+
+### Using Editor role for read-only scripts
+
+Most Admin API operations that only read data (listing properties, dimensions, streams) require only the Viewer role. Using a service account with Editor access for read-only scripts increases the blast radius if credentials are leaked. Use the minimum necessary role.
+
+### Not using field masks when updating
+
+When calling `update_property` or `update_custom_dimension`, always specify an `update_mask`. Without a field mask, the API uses a REPLACE semantics that can overwrite fields you did not intend to change. The update mask specifies exactly which fields to update.
+
+### Assuming synchronous propagation
+
+After creating a custom dimension via the Admin API, it is not immediately available in Data API responses or the GA4 UI. Allow a few minutes for provisioning to complete before querying the dimension in reports.
+
+### Hitting quota limits in bulk operations
+
+The Admin API has per-minute quotas. When provisioning across many properties, add delays between requests (`time.sleep(0.1)` between calls) and implement exponential backoff for `ResourceExhausted` errors.
+
+### Confusing account-level and property-level operations
+
+Some resources (users, data streams, custom dimensions) exist at the property level. Others (account summaries, account users) exist at the account level. The `parent` parameter must use the correct resource name: `accounts/ACCOUNT_ID` vs. `properties/PROPERTY_ID`.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Data API"
+    description="Query GA4 report data programmatically — runReport, batchRunReports, and realtime."
+    href="/ga4/apis/data-api/"
+  />
+  <LinkCard
+    title="User Deletion API"
+    description="Delete user data from GA4 for GDPR and CCPA compliance."
+    href="/ga4/apis/user-deletion-api/"
+  />
+  <LinkCard
+    title="Custom Dimensions"
+    description="Manual steps for creating custom dimensions in the GA4 UI."
+    href="/ga4/configuration/custom-dimensions/"
+  />
+</CardGrid>

@@ -1,6 +1,257 @@
 ---
 title: "Debugging sGTM"
-description: "Debugging techniques specific to server-side GTM."
+description: "Debugging techniques for server-side GTM — Preview mode, Preview Header technique for non-browser requests, Cloud Logging investigation, network tab analysis, and systematic diagnosis of common failures."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Debugging sGTM is harder than debugging client-side GTM. There is no browser DevTools panel to watch. Events happen on a server you cannot directly observe. Tags fail without visible errors. The debugging toolkit for sGTM is different from client-side debugging, but it is powerful once you know how to use it.
+
+## sGTM Preview mode
+
+sGTM Preview mode is the primary debugging tool. It provides a real-time view of every request processed by your server container — which client claimed it, what Event Model was built, which triggers fired, which tags executed, and what those tags sent outbound.
+
+<Steps>
+1. Open your sGTM container in the GTM workspace
+
+2. Click **Preview** — a debug panel opens at `tagassistant.google.com` and a debug session activates on your server
+
+3. With your client-side GTM also in Preview mode, load your site in a browser. Client-side GTM preview forwards events through the debug channel to sGTM.
+
+4. In the sGTM Preview panel, each request appears in the left sidebar. Click a request to see:
+   - **Summary**: Which client claimed the request, request path, response status
+   - **Event Data**: The complete Event Model built from the request
+   - **Variables**: All variable values at the time of execution
+   - **Tags**: Each tag that fired, with success/failure status and console output
+   - **Console**: Output from `logToConsole()` calls in your templates
+</Steps>
+
+The most useful views:
+
+**Tags view**: Shows every tag that ran, with a green checkmark (success) or red X (failure). If a tag shows `Not Fired`, check the trigger conditions — the trigger may not match the current event. If it shows `Failure`, check the Console view for error messages from that tag.
+
+**Event Data view**: The raw contents of the Event Model. This is what your tags read from when they call `getEventData()`. If a tag is not finding an expected value, check here to confirm the value actually arrived.
+
+**Variables view**: Shows the computed value of every variable in your container for this specific event. Use this to debug variable templates — if `{{Firestore - Email Hash}}` shows undefined, the Firestore lookup returned nothing.
+
+## The Preview Header technique
+
+sGTM Preview mode activates a debug session that your browser can join via a `gtm_debug` cookie or URL parameter. For requests that do not originate from a browser — webhooks, server-to-server calls, curl tests — you cannot use the normal Preview activation. Instead, use the Preview Header.
+
+<Steps>
+1. Activate sGTM Preview mode (as above). The debug URL contains a token: `https://collect.yoursite.com/?gtm_debug=eyJhbGciOiJFUzI1...`
+
+2. Copy the full token value (everything after `gtm_debug=`)
+
+3. Add the token as the `X-GTM-Server-Preview` request header on your non-browser request:
+
+   ```bash
+   # Test a Stripe webhook in the sGTM Preview session
+   curl -X POST https://collect.yoursite.com/webhooks/stripe \
+     -H "Content-Type: application/json" \
+     -H "Stripe-Signature: t=1711900000,v1=abc123..." \
+     -H "X-GTM-Server-Preview: eyJhbGciOiJFUzI1..." \
+     -d '{"type":"payment_intent.succeeded","data":{"object":{"id":"pi_123","amount":9999}}}'
+   ```
+
+4. The request appears in the sGTM Preview panel as if it were a browser hit. You see the full Event Model, tag execution, and console output.
+</Steps>
+
+The Preview Header technique works for any HTTP request to your sGTM endpoint. Use it to debug:
+- Custom client templates receiving webhook data
+- Measurement Protocol requests from your application backend
+- API calls during development before you have a working browser flow
+
+## Network tab analysis
+
+Before diving into sGTM Preview, verify the request is actually reaching your server. Browser DevTools → **Network** tab → filter by your sGTM hostname (`collect.yoursite.com`).
+
+Check for:
+
+**Request appears in network tab**: The hit left the browser. If you see a 200 response, sGTM received and processed it. If you see a network error or CORS error, the request never reached sGTM.
+
+**Request does NOT appear**: The client-side GTM tag did not fire. Debug the client-side GTM container first — confirm the GA4 tag trigger is firing and the Server Container URL is configured correctly.
+
+**CORS errors**: Your sGTM domain is not in the Allowed Origins configuration of the GA4 client. Add your main domain to the list.
+
+**400 or 500 responses**: sGTM received the request but returned an error. The response body often contains an error message. A 400 usually means malformed payload. A 500 means a template exception — check Cloud Logging.
+
+**Response headers include `Set-Cookie`**: Confirms server-side cookies are being set. Check that `Domain`, `Max-Age`, and `HttpOnly`/`Secure` attributes are correct.
+
+## Testing with curl
+
+Before using sGTM Preview, you can verify basic connectivity and client claiming behavior with curl:
+
+```bash
+# Test that your GA4 client claims and responds correctly
+curl -v "https://collect.yoursite.com/g/collect?v=2&tid=G-XXXXXXXX&cid=test123&en=page_view" \
+  -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+
+# Expected: HTTP 200 or 204, with Set-Cookie headers for _ga and FPID
+
+# Test your custom endpoint
+curl -X POST "https://collect.yoursite.com/webhooks/stripe" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"test"}' \
+  -v
+```
+
+For testing Measurement Protocol events directly:
+
+```bash
+# Send a minimal purchase event
+curl -X POST "https://collect.yoursite.com/mp/collect?measurement_id=G-XXXXXXXX&api_secret=YOUR_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "test123.1711900000",
+    "events": [{
+      "name": "purchase",
+      "params": {
+        "transaction_id": "TEST-001",
+        "value": 99.99,
+        "currency": "USD"
+      }
+    }]
+  }'
+```
+
+## Cloud Logging investigation
+
+For production debugging — when you cannot reproduce an issue in Preview — Cloud Logging is the primary tool.
+
+**Finding errors for a specific time range:**
+
+```bash
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND
+   resource.labels.service_name="sgtm-production" AND
+   severity>=ERROR AND
+   timestamp>="2025-03-29T10:00:00Z" AND
+   timestamp<="2025-03-29T12:00:00Z"' \
+  --limit 100 \
+  --format "table(timestamp,textPayload)"
+```
+
+**Finding errors for a specific event type:**
+
+```bash
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND
+   textPayload=~"\"event_name\":\"purchase\""' \
+  --limit 50 \
+  --freshness 24h
+```
+
+**Finding cold start events:**
+
+```bash
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND
+   textPayload=~"starting"' \
+  --limit 20 \
+  --freshness 24h
+```
+
+In the GCP Console, use Logs Explorer with the **Log Analytics** mode to run SQL queries across historical logs — more powerful than the gcloud CLI for complex investigations.
+
+## Diagnosing common failures
+
+### Client not claiming the request
+
+**Symptom**: Request reaches sGTM (visible in network tab), returns 200, but no data appears in GA4 or your other destinations.
+
+**Diagnosis**:
+1. In sGTM Preview, check which client appears in the Summary view. If "No client claimed this request", the issue is client configuration.
+2. Check the request path. The GA4 client claims requests to `/g/collect`. If your GTM Server Container URL is wrong (e.g., pointing to the wrong path), the request arrives at a path no client expects.
+3. Check the `tid` parameter. The GA4 client validates the Measurement ID. If the Measurement ID does not match a configured GA4 server tag, the client may process the request but no tags fire.
+
+**Resolution**: Verify your client-side GA4 configuration tag's **Server Container URL** matches your sGTM endpoint exactly. Check for trailing slashes, HTTP vs HTTPS mismatches.
+
+### Tag not firing
+
+**Symptom**: In sGTM Preview, the Event Model looks correct, but a specific tag shows "Not Fired".
+
+**Diagnosis**:
+1. In the **Tags** view, click the non-firing tag. Check the **Firing Triggers** section — the trigger conditions show which condition was not met.
+2. In the **Variables** view, check the value of the variable the trigger is evaluating. The expected value may not match the actual value due to type mismatch (string vs. number) or case sensitivity.
+
+**Common trigger mismatches**:
+- Trigger evaluates `event_name equals "Purchase"` but Event Model contains `event_name: "purchase"` (lowercase)
+- Trigger evaluates `value greater than 0` but `value` is undefined rather than 0
+
+### Tag fires but conversion does not appear in platform
+
+**Symptom**: In sGTM Preview, the Meta CAPI tag shows success (green checkmark), but the conversion does not appear in Meta Events Manager.
+
+**Diagnosis**:
+1. Check the **Console** view for the tag. Your tag template should log the API response. A `200` status with a response body containing `events_received: 1` confirms delivery.
+2. Check the event time. If the `event_time` parameter is far in the past (due to a bug in timestamp calculation), Meta may silently reject it (events older than 7 days are rejected).
+3. Check the `action_source` parameter. A value of `website` requires the hit to come from a browser context. If you are sending CRM events with `action_source: website`, they will be rejected.
+4. Check if the Pixel ID and Access Token are correct. Meta returns a 400 error with a descriptive body for authentication failures.
+
+### sGTM Preview shows correct execution but GA4 data is wrong
+
+**Symptom**: Preview shows the purchase tag fires, event_name=purchase, value=99.99 — but GA4 shows no revenue for these events.
+
+**Diagnosis**:
+1. In the **Tags** view, select your GA4 server tag. Check that the `value` parameter is in the **Event Parameters** section, not just as a top-level event property. GA4 event parameters and user properties are separate from default GA4 fields.
+2. Verify the parameter names match what GA4 expects. GA4 uses `value` (not `revenue`, `total`, or `amount`) as the ecommerce value parameter. Misnamed parameters send to GA4 successfully but do not populate the revenue metrics.
+3. Check your GA4 property settings for the custom parameter definition. GA4 requires you to register custom parameters as Custom Dimensions/Metrics in the property settings before they appear in reports.
+
+## Structured logging for faster debugging
+
+The debugging workflow above is faster when your tags emit structured, queryable logs. Tag templates that log in a consistent format enable precise Cloud Logging queries:
+
+```javascript
+logToConsole(JSON.stringify({
+  level: 'info',
+  tag: 'meta_capi',
+  event_name: getEventData('event_name'),
+  transaction_id: getEventData('transaction_id'),
+  api_status: statusCode,
+  pixel_id: data.pixelId,
+  ts: getTimestampMillis(),
+}));
+```
+
+With this structure, finding all failed purchase events in the last 24 hours is a single Cloud Logging query:
+
+```
+textPayload:~'"tag":"meta_capi"' AND
+textPayload:~'"level":"error"'
+```
+
+## Common mistakes
+
+**Debugging with Preview mode enabled in production.** Preview mode adds overhead to every request. Use it only temporarily during active debugging sessions, then deactivate it.
+
+**Not adding sufficient logging to templates.** Templates that log nothing are debugging black boxes. Every template should log at minimum: tag name, event name, and the response status from any outbound API call it makes.
+
+**Testing with an unrealistic User Agent.** The default curl User Agent is `curl/7.xx`. Some client templates and bot filtering rules exclude non-browser User Agents. Add a realistic browser UA to curl tests: `-H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"`.
+
+**Looking at the wrong Cloud Run service in logs.** If you have multiple Cloud Run services (staging, production, other applications), Cloud Logging shows all of them by default. Always filter by `resource.labels.service_name="your-sgtm-service-name"`.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Monitoring & Logging"
+    description="Setting up the structured logging and Cloud Monitoring dashboards that make production debugging possible."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+  <LinkCard
+    title="Custom Templates"
+    description="Adding logToConsole() calls to templates so they produce debuggable output."
+    href="/server-side/advanced/custom-templates/"
+  />
+  <LinkCard
+    title="Webhook Integrations"
+    description="Using the Preview Header technique to debug webhook-received events."
+    href="/server-side/advanced/webhook-integrations/"
+  />
+  <LinkCard
+    title="Client Claiming"
+    description="Diagnosing why a client is not claiming a specific request type."
+    href="/server-side/clients/client-claiming/"
+  />
+</CardGrid>

@@ -1,6 +1,254 @@
 ---
 title: "Scaling Strategies"
-description: "Handling traffic spikes and scaling your sGTM deployment."
+description: "Scaling server-side GTM for high-traffic sites — traffic pattern analysis, auto-scaling configuration, multi-region deployment, load testing, and graceful degradation."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Most sGTM deployments never face a scaling challenge. A single Cloud Run service in one region handles millions of requests per day without intervention. Scaling becomes relevant in specific scenarios: sustained traffic above 50M requests/month, flash sales or product launches with 10–50x traffic spikes, global sites with significant latency requirements, or high-value deployments where any dropped events represent direct revenue impact.
+
+This article covers the configuration decisions and architectural patterns that determine how your sGTM deployment handles load.
+
+## Understanding your traffic patterns
+
+Before tuning any scaling parameters, understand your actual traffic shape. Cloud Monitoring provides this data for existing deployments. For new deployments, estimate from your analytics.
+
+Key traffic characteristics that drive scaling decisions:
+
+**Peak-to-average ratio**: A site with 1M requests/day that receives 80% of traffic in a 4-hour window has a very different peak requirement than a site with steady 24-hour traffic. A 4:1 peak ratio means your instance count needs to handle 4x average load.
+
+**Spike duration**: Marketing email deployments create sharp, short spikes (30–60 minutes). Product launches create sustained elevated traffic (hours to days). Cloud Run's autoscaler handles short spikes differently from sustained load.
+
+**Request duration distribution**: If your average request takes 80ms but your P99 takes 800ms (due to occasional Firestore timeouts), you need more instances than the average suggests. Use P95 or P99 latency, not average, for capacity planning.
+
+**Geographic distribution**: If 40% of your traffic comes from Europe and your Cloud Run instance is in `us-central1`, that latency shows up in your P95 numbers. Regional distribution affects whether multi-region deployment is worth the operational overhead.
+
+## Cloud Run scaling parameters
+
+Cloud Run has four parameters that control scaling behavior:
+
+**Minimum instances**: How many instances to keep running at all times. Setting this above 0 eliminates cold starts. The practical recommendation is 1 for production, 0 for development. Setting minimum instances = 2 provides redundancy during rolling updates and one-instance failures.
+
+**Maximum instances**: The hard cap on instance count. This prevents runaway scaling from bot attacks, accidental loops, or traffic spikes that exceed your budget. Set this to a value that handles your expected peak × 1.5. A typical mid-sized site: `--max-instances 20`. A large site: `--max-instances 100`.
+
+**Concurrency**: Requests per instance processed simultaneously. Default is 80. For CPU-intensive sGTM workloads (heavy template logic, many Firestore reads), reduce to 40. For simple forwarding workloads, 80–200 is fine. Higher concurrency means fewer instances needed but higher CPU per instance.
+
+**CPU allocation**: `--cpu-throttling` (default) allocates CPU only during request processing. `--no-cpu-throttling` keeps CPU allocated always. Always-on CPU eliminates all cold start latency (not just container startup, but also any CPU warm-up delay) and enables background tasks, but costs more during idle.
+
+Setting these via gcloud:
+
+```bash
+gcloud run services update sgtm-production \
+  --region us-central1 \
+  --min-instances 2 \
+  --max-instances 50 \
+  --concurrency 60 \
+  --cpu-throttling \
+  --memory 512Mi \
+  --cpu 1
+```
+
+## Handling traffic spikes
+
+The most common scaling scenario: a major product launch, flash sale, or email campaign fires and traffic spikes to 10–50x normal levels within minutes.
+
+Cloud Run autoscales by adding new instances when existing instances approach their concurrency limits. The scaling trigger is: `actual_concurrency / (max_concurrency × 0.6)`. Cloud Run begins adding instances when actual concurrency reaches 60% of maximum.
+
+For a 50-concurrency limit, Cloud Run starts scaling at 30 concurrent requests per instance. With 4 instances and 30 concurrent requests each, you have 120 active requests — Cloud Run adds a 5th instance.
+
+**Cold start latency during scaling**: New instances take 2–8 seconds to start. During that startup, queued requests wait. For a 10x traffic spike, you might add 20 instances simultaneously — all with cold start delays. The burst creates a brief degraded period before the new instances are ready.
+
+**Mitigation strategies for spikes:**
+
+1. **Pre-warming**: Before a known high-traffic event, manually scale up:
+
+   ```bash
+   gcloud run services update sgtm-production \
+     --min-instances 20 \
+     --region us-central1
+   ```
+
+   Then return to normal minimums after the event.
+
+2. **Increase minimum instances during business hours**: Use Cloud Scheduler to run a Cloud Function that updates minimum instances before peak traffic:
+
+   ```bash
+   # Schedule for business hours
+   # Morning scale up: 6 AM
+   gcloud scheduler jobs create http scale-up-sgtm \
+     --schedule="0 6 * * 1-5" \
+     --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/PROJECT/services/sgtm-production" \
+     --message-body='{"spec":{"template":{"metadata":{"annotations":{"autoscaling.knative.dev/minScale":"5"}}}}}' \
+     --oauth-service-account-email=scheduler@PROJECT.iam.gserviceaccount.com
+
+   # Evening scale down: 10 PM
+   gcloud scheduler jobs create http scale-down-sgtm \
+     --schedule="0 22 * * 1-5" \
+     --uri="..." \
+     --message-body='{"spec":{"template":{"metadata":{"annotations":{"autoscaling.knative.dev/minScale":"1"}}}}}'
+   ```
+
+3. **Accept queuing**: Cloud Run will queue requests when instances are at capacity (up to 1,000 queued per instance). During scale-out, requests queue and process as new instances come online. The user experience is slightly slower event recording — acceptable for analytics, not acceptable for payment confirmation pages.
+
+## Multi-region deployment
+
+Cloud Run is regional. A single deployment in `us-central1` adds 100–200ms latency for users in Europe and Asia-Pacific. For most analytics use cases, this latency is acceptable — analytics events do not need to be real-time from the user's perspective.
+
+Multi-region deployment makes sense when:
+- More than 30% of your traffic originates outside your deployment region
+- Your latency requirements are strict (P99 < 200ms globally)
+- You need redundancy against regional GCP outages
+
+**Architecture for multi-region:**
+
+Deploy the same Cloud Run service to 2–3 regions. Use a global load balancer to route traffic to the nearest region.
+
+```bash
+# Deploy to multiple regions
+gcloud run services replace sgtm-service.yaml \
+  --region us-central1
+
+gcloud run services replace sgtm-service.yaml \
+  --region europe-west1
+
+gcloud run services replace sgtm-service.yaml \
+  --region asia-northeast1
+
+# Create a load balancer with global routing
+# (requires Cloud Load Balancing setup — see GCP documentation)
+```
+
+**Complexity warning**: Multi-region adds significant operational overhead:
+- Firestore reads: A user in Europe hitting the `europe-west1` sGTM instance reading from a `us-central1` Firestore database incurs cross-region latency and egress costs. Deploy Firestore in multi-region mode or use a regional database per sGTM region.
+- Deployment: Every template change must be deployed to all regions simultaneously. Use a CI/CD pipeline, not manual deployments.
+- Monitoring: You now have 3 Cloud Run services to monitor. Set up aggregated dashboards.
+
+For sites with global traffic but without strict latency requirements, a single `us-central1` deployment is simpler and adequate.
+
+## Load testing
+
+Before a major product launch, load test your sGTM deployment to verify it handles the expected peak.
+
+A simple load test using `ab` (Apache Benchmark):
+
+```bash
+# Simulate 1,000 requests with 50 concurrent
+ab -n 1000 -c 50 \
+   -H "Content-Type: application/json" \
+   -p purchase_event.json \
+   "https://collect.yoursite.com/g/collect?v=2&tid=G-XXXXXXXX"
+```
+
+More realistic load testing with `k6`:
+
+```javascript
+// k6 load test script
+import http from 'k6/http';
+import { sleep, check } from 'k6';
+
+export const options = {
+  stages: [
+    { duration: '2m', target: 50 },   // Ramp up
+    { duration: '5m', target: 200 },  // Sustained load
+    { duration: '2m', target: 500 },  // Spike
+    { duration: '3m', target: 50 },   // Recovery
+  ],
+  thresholds: {
+    http_req_duration: ['p(95)<500'],  // 95% of requests under 500ms
+    http_req_failed: ['rate<0.01'],    // Less than 1% errors
+  },
+};
+
+export default function () {
+  const payload = JSON.stringify({
+    event: 'purchase',
+    value: 99.99,
+    client_id: 'test_' + Math.random().toString(36).substr(2, 9),
+  });
+
+  const res = http.post(
+    'https://collect.yoursite.com/g/collect?v=2&tid=G-XXXXXXXX',
+    payload,
+    { headers: { 'Content-Type': 'application/json' } }
+  );
+
+  check(res, {
+    'status is 200': (r) => r.status === 200,
+    'response time < 500ms': (r) => r.timings.duration < 500,
+  });
+
+  sleep(0.1);
+}
+```
+
+Run load tests against a staging Cloud Run deployment (same configuration, separate service). Never load test production.
+
+## Graceful degradation
+
+When sGTM is overloaded or unavailable, what happens?
+
+**For analytics (GA4)**: Events that do not reach sGTM are lost. There is no client-side fallback that collects the same events. You have a data gap.
+
+**For conversions (Meta CAPI, Google Ads)**: Lost server-side events mean undercounted conversions. If you have both client-side pixels and server-side events, the client-side pixel continues to fire — so attribution is not fully lost, just degraded.
+
+**Implementing a client-side fallback**: When the GA4 tag in client-side GTM sends to sGTM and sGTM is unavailable, the GA4 tag fails silently. You can implement a fallback by configuring your client-side GA4 tag to send to both your sGTM endpoint and directly to Google's collection endpoint:
+
+```
+GA4 Configuration tag:
+  Server Container URL: https://collect.yoursite.com
+  Send page_view: yes (primary hit goes to sGTM)
+
+GA4 Event tag (fallback):
+  Measurement ID: G-XXXXXXXX
+  Transport URL: https://www.google-analytics.com (direct)
+  Trigger: exception event OR specific timeout condition
+```
+
+In practice, most teams accept the data gap during outages rather than implementing complex fallback logic. Cloud Run has 99.95% uptime SLA — outages are rare enough that fallback infrastructure is rarely justified.
+
+## CDN and sGTM: why it usually does not work
+
+A common question: can I put Cloudflare or a CDN in front of sGTM for additional protection or performance?
+
+The answer is almost always no, for analytics endpoints. CDNs cache responses. sGTM responses are unique per request (different events, different cookies being set in response headers). A CDN that caches a response from one user's hit and serves it to another user's hit sends the wrong cookies to the wrong person.
+
+CDN integration only works with specific configuration:
+- Cache bypass for all sGTM paths (`/g/collect`, `/mp/collect`, `/healthz`)
+- Pass-through mode that adds zero-copy forwarding without caching
+
+In this configuration, the CDN adds latency (an extra network hop) with no benefit. The exception is using a CDN for DDoS protection — but that is better handled with Cloud Armor at the Cloud Run level.
+
+## Common mistakes
+
+**Setting concurrency too high without load testing.** The default concurrency of 80 assumes sGTM requests are short and CPU-light. If your templates do multiple Firestore reads and make 3 outbound API calls, actual CPU per request is higher — 80 concurrent requests can saturate a single vCPU instance. Start with 20–40 concurrency and increase after verifying CPU stays below 70% under load.
+
+**Deploying multi-region without a CI/CD pipeline.** Every template change deployed manually to three regions creates drift. Region 1 has version 5, region 2 has version 4, region 3 has version 5 with a typo. Multi-region requires automated deployment or it will create reliability problems within weeks.
+
+**Not setting a maximum instance limit before a product launch.** A product launch with unexpectedly viral demand can scale Cloud Run to hundreds of instances in minutes. Without a maximum, the cost can exceed your monthly budget in a few hours. Always set `--max-instances` before high-traffic events.
+
+**Using a CDN with default caching in front of sGTM.** This will serve one user's Set-Cookie headers to different users. Always verify your CDN layer is in pass-through / cache-bypass mode for sGTM paths.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Cloud Run Scaling"
+    description="The specific scaling parameters (min instances, concurrency, CPU allocation) in detail."
+    href="/server-side/setup/cloud-run-scaling/"
+  />
+  <LinkCard
+    title="Cost Management"
+    description="How scaling decisions affect your monthly infrastructure bill."
+    href="/server-side/operations/cost-management/"
+  />
+  <LinkCard
+    title="Monitoring & Logging"
+    description="The metrics to watch when load testing and during live traffic spikes."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+  <LinkCard
+    title="Uptime Monitoring"
+    description="Detecting outages and implementing failover when scaling fails."
+    href="/server-side/operations/uptime-monitoring/"
+  />
+</CardGrid>

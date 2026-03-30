@@ -1,6 +1,294 @@
 ---
 title: "Same-Origin Proxy"
-description: "Running sGTM through the same origin via reverse proxy."
+description: "Routing sGTM traffic through your main domain via reverse proxy — Cloudflare Workers, nginx, CDN-level routing, and the Google Tag Gateway alternative."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Standard sGTM deployments route data collection traffic to a subdomain: `collect.yoursite.com` or `metrics.yoursite.com`. The subdomain approach is effective and straightforward. The same-origin proxy approach routes that same traffic through `yoursite.com/collect` — the same domain and origin as your main website.
+
+The difference matters for two reasons. First, some aggressive ad blockers block requests to known data collection subdomains even when the domain is first-party. Second, Safari's cookie restrictions apply differently to cross-subdomain requests in some contexts. A same-origin request to `/collect` is treated identically to a request to your main application — no subdomain classification, no possible cross-site treatment.
+
+This is an advanced configuration. The subdomain approach (first-party domain setup via CNAME) is sufficient for the vast majority of deployments. Consider the same-origin proxy only if you have measured significant blocking rates on your subdomain endpoint or have specific requirements around cookie behavior.
+
+## How it works
+
+A reverse proxy intercepts requests to specific paths on your main domain and forwards them to your sGTM Cloud Run service. The browser makes a request to `yoursite.com/collect/g/collect` — the proxy rewrites this internally to your sGTM backend — and the response returns to the browser as if it came from `yoursite.com`.
+
+```
+Browser                         Proxy Layer                    sGTM Cloud Run
+──────────                     ────────────                   ────────────────
+POST yoursite.com
+  /collect/g/collect
+        │
+        │  (appears as yoursite.com request)
+        │
+        ├───────────────────────>│
+        │                        │  Rewrite path:
+        │                        │  /collect/g/collect
+        │                        │  → /g/collect
+        │                        │
+        │                        │  Forward to sGTM backend
+        │                        ├──────────────────────────>│
+        │                        │                            │  Process event
+        │                        │                            │  Set cookies
+        │                        │<──────────────────────────│
+        │<───────────────────────│
+        │  (cookies set on
+        │   yoursite.com)
+```
+
+## Cloudflare Workers
+
+Cloudflare Workers provide the cleanest implementation for most sites that use Cloudflare as their DNS and CDN provider. The Worker runs at Cloudflare's edge, adding minimal latency.
+
+```javascript
+// Cloudflare Worker: sGTM Same-Origin Proxy
+// Deploy via Cloudflare Dashboard → Workers → Create Service
+
+const SGTM_BACKEND = 'https://collect.yoursite.com'; // your Cloud Run URL or custom domain
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // Only proxy sGTM paths
+    const sgtmPaths = ['/collect/', '/g/collect', '/mp/collect', '/gtm.js'];
+    const isSgtmPath = sgtmPaths.some(path => url.pathname.startsWith(path));
+
+    if (!isSgtmPath) {
+      // Pass all other requests through to your origin unchanged
+      return fetch(request);
+    }
+
+    // Build the backend URL
+    // Strip the /collect prefix if you've mounted the Worker at /collect
+    const backendUrl = new URL(url.pathname.replace('/collect', ''), SGTM_BACKEND);
+    backendUrl.search = url.search;
+
+    // Forward the request
+    const backendRequest = new Request(backendUrl.toString(), {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+    });
+
+    // Preserve the original X-Forwarded-For for IP pass-through
+    const clientIp = request.headers.get('CF-Connecting-IP');
+    if (clientIp) {
+      backendRequest.headers.set('X-Forwarded-For', clientIp);
+    }
+
+    const response = await fetch(backendRequest);
+
+    // Return the sGTM response — cookies set by sGTM now apply to yoursite.com
+    return response;
+  }
+};
+```
+
+**Route configuration in Cloudflare:**
+
+1. Workers & Pages → your Worker → Triggers → Routes
+2. Add route: `yoursite.com/collect/*` → your Worker
+3. The Worker intercepts requests to `yoursite.com/collect/*` and proxies to sGTM
+
+**Update your GTM tag configuration** to point to the same-origin path:
+
+In your client-side GA4 configuration tag, set **Server Container URL** to `https://yoursite.com/collect`.
+
+<Aside type="note">
+Cloudflare Workers execute before your origin server. If your origin is also on Cloudflare and uses Cloudflare-specific features, verify that the proxied sGTM requests do not interfere with your application's cache rules or firewall settings.
+</Aside>
+
+## nginx reverse proxy
+
+For self-hosted infrastructure running nginx, add a `location` block to your main site's server configuration:
+
+```nginx
+# nginx configuration for sGTM same-origin proxy
+server {
+    listen 443 ssl;
+    server_name yoursite.com;
+
+    # ... your existing SSL and main application configuration ...
+
+    # sGTM proxy location
+    location /collect/ {
+        # Remove the /collect prefix before forwarding
+        rewrite ^/collect/(.*)$ /$1 break;
+
+        # Forward to your sGTM Cloud Run instance
+        proxy_pass https://your-cloud-run-url.run.app;
+
+        # Required proxy headers
+        proxy_set_header Host collect.yoursite.com;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSL verification for backend
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+
+        # Timeouts appropriate for sGTM response times
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 10s;
+        proxy_read_timeout 10s;
+
+        # Pass cookies through unchanged
+        proxy_pass_header Set-Cookie;
+        proxy_cookie_path / /;
+        proxy_cookie_domain your-cloud-run-url.run.app yoursite.com;
+    }
+}
+```
+
+**Important**: The `proxy_cookie_domain` directive rewrites the cookie's `Domain` attribute from the Cloud Run domain to `yoursite.com`. Without this, cookies set by sGTM apply to the Cloud Run domain, not to your main site.
+
+Alternatively, configure sGTM to set cookies with `Domain=.yoursite.com` explicitly in the cookie attributes — then the domain rewrite at the proxy level is unnecessary.
+
+## CDN-level routing
+
+<Tabs>
+  <TabItem label="Vercel">
+    In `vercel.json`, add rewrites that forward sGTM paths to your Cloud Run backend:
+
+    ```json
+    {
+      "rewrites": [
+        {
+          "source": "/collect/:path*",
+          "destination": "https://collect.yoursite.com/:path*"
+        }
+      ]
+    }
+    ```
+
+    Vercel Edge Middleware gives more control for complex routing scenarios:
+
+    ```javascript
+    // middleware.js
+    import { NextResponse } from 'next/server';
+
+    export function middleware(request) {
+      const { pathname } = request.nextUrl;
+
+      if (pathname.startsWith('/collect/')) {
+        const backendUrl = new URL(
+          pathname.replace('/collect/', '/'),
+          'https://collect.yoursite.com'
+        );
+        backendUrl.search = request.nextUrl.search;
+        return NextResponse.rewrite(backendUrl);
+      }
+    }
+
+    export const config = {
+      matcher: ['/collect/:path*'],
+    };
+    ```
+  </TabItem>
+  <TabItem label="Fastly">
+    Fastly's VCL allows path-based backend routing:
+
+    ```vcl
+    sub vcl_recv {
+      if (req.url ~ "^/collect/") {
+        set req.url = regsub(req.url, "^/collect", "");
+        set req.backend = sgtm_backend;
+        return(pass);
+      }
+    }
+    ```
+
+    Configure `sgtm_backend` as a Fastly origin pointing to your Cloud Run URL or custom sGTM domain.
+  </TabItem>
+  <TabItem label="AWS CloudFront">
+    Add a CloudFront behavior for the `/collect/*` path prefix pointing to a custom origin of your sGTM URL:
+
+    1. CloudFront → your distribution → **Behaviors** → **Create behavior**
+    2. Path pattern: `/collect/*`
+    3. Origin: Create new origin with domain = `collect.yoursite.com`
+    4. Cache policy: `CachingDisabled` (sGTM responses should not be cached)
+    5. Origin request policy: `AllViewer` (forward all headers, cookies, query strings)
+
+    Use a CloudFront Function to rewrite the path:
+
+    ```javascript
+    function handler(event) {
+      var request = event.request;
+      // Strip /collect prefix
+      request.uri = request.uri.replace(/^\/collect/, '');
+      return request;
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## DNS routing vs. path routing: tradeoffs
+
+| Approach | Blocking Resistance | Cookie Domain | Complexity | Latency Added |
+|---|---|---|---|---|
+| Subdomain CNAME (`collect.yoursite.com`) | Good | `.yoursite.com` (with `Domain=.`) | Low | None |
+| Same-origin proxy (`yoursite.com/collect`) | Better | Automatic (same origin) | Medium–High | 5–20ms |
+| Subdomain + HttpOnly FPID | Good | `.yoursite.com` | Low-Medium | None |
+
+The subdomain approach with proper cookie configuration (leading dot domain, `Max-Age` set by server) achieves most of the same benefits as a same-origin proxy with far less operational complexity. The same-origin proxy is worth the additional complexity when:
+
+- You have measured 5%+ blocking rates on your subdomain endpoint
+- Your technical stack makes path-based routing straightforward (you already use Cloudflare Workers or a similar edge layer)
+- Your application already uses a path-based routing layer that can absorb the configuration
+
+## SSL handling
+
+The same-origin proxy inherits your main domain's SSL certificate. Your main domain's certificate already covers `yoursite.com` — the `/collect/` path is served under that certificate automatically. You do not need a separate certificate for sGTM traffic.
+
+Your sGTM backend (Cloud Run or custom domain) still needs its own SSL certificate for the connection between the proxy and the backend. For Cloud Run, Google manages this automatically. For custom domains, the certificate you configured during sGTM setup remains in use for the backend connection.
+
+## The Google Tag Gateway
+
+Google provides a managed same-origin routing solution called **Google Tag Gateway** (previously known as the sGTM server path option in some documentation). It routes `yoursite.com/gtag/` traffic to Google's servers — without requiring you to set up Cloud Run — specifically for Google tags (GA4, Google Ads).
+
+Google Tag Gateway limitations:
+- Only handles Google-owned tags (GA4, Google Ads, Floodlight)
+- Does not support custom templates or non-Google destinations
+- Does not provide the same data transformation capabilities as a full sGTM deployment
+- Managed by Google — you have less control over processing
+
+For full sGTM deployments (Meta CAPI, TikTok, custom enrichment, Firestore), Google Tag Gateway is not a substitute. It is useful specifically for sites that only need Google Ads and GA4 via a same-origin path and want to avoid running their own Cloud Run infrastructure.
+
+## Common mistakes
+
+**Not rewriting the path prefix.** If your proxy forwards `yoursite.com/collect/g/collect` to `sgtm.run.app/collect/g/collect` instead of `sgtm.run.app/g/collect`, sGTM receives a path it does not recognize and returns 404. The path rewrite (removing the `/collect` prefix) is mandatory.
+
+**Breaking cookie domain attribution.** When sGTM sets `Set-Cookie: _ga=...; Domain=.yoursite.com`, the proxy must pass this response header through unchanged. Some reverse proxy configurations strip `Set-Cookie` headers or rewrite the domain. Verify cookies are set correctly with browser DevTools after deploying.
+
+**Caching sGTM responses at the CDN layer.** sGTM responses are unique per request (different events, different cookies being set). Caching them at the CDN serves one user's response to another user. Set `Cache-Control: no-store` on sGTM paths or configure your CDN to bypass cache for the `/collect/` path.
+
+**Forgetting to update the GTM Server Container URL.** After setting up the proxy, update your client-side GA4 configuration tag's Server Container URL to `https://yoursite.com/collect`. The browser needs to send requests to the new path, not the old subdomain.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="First-Party Domain Config"
+    description="The subdomain-based alternative to same-origin proxying — simpler and sufficient for most deployments."
+    href="/server-side/setup/first-party-domain-config/"
+  />
+  <LinkCard
+    title="Custom Domain Setup"
+    description="DNS configuration for the sGTM subdomain approach."
+    href="/server-side/setup/custom-domain-setup/"
+  />
+  <LinkCard
+    title="Server-Side Cookies"
+    description="How cookie domain configuration interacts with proxy setup."
+    href="/server-side/advanced/server-side-cookies/"
+  />
+  <LinkCard
+    title="Hosting Comparison"
+    description="Comparing Cloud Run, Stape, AWS, and other hosting options for your sGTM backend."
+    href="/server-side/operations/hosting-comparison/"
+  />
+</CardGrid>

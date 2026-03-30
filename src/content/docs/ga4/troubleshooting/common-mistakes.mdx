@@ -1,6 +1,195 @@
 ---
 title: "Common Mistakes"
-description: "The most frequent GA4 configuration errors and how to fix them."
+description: "The GA4 implementation errors that show up in nearly every setup — what they are, why they happen, and how to fix them."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+These mistakes appear repeatedly across GA4 implementations. Some produce incorrect data silently; others produce obvious symptoms but unclear causes. Knowing them prevents hours of debugging.
+
+## 1. Data retention left at 2 months
+
+**What happens**: Events older than 2 months disappear from Explorations. You cannot compare this month to the same month last year in an Exploration. Custom segments, funnels, and cohort analysis are limited to 2 months of history.
+
+**Why it happens**: The 2-month default seems intentional but is almost certainly wrong for any real analytics use case.
+
+**Fix**: Admin → Data Settings → Data Retention → Set to 14 months. Do this the day you create the property. It cannot recover already-deleted data.
+
+## 2. No BigQuery export
+
+**What happens**: You cannot do unsampled analysis, access raw event data, or query historical data beyond GA4's retention window. Data that was never exported cannot be recovered.
+
+**Why it happens**: BigQuery requires a GCP project setup that many GA4 users do not have initially.
+
+**Fix**: Link BigQuery from day one. Even if you do not use it immediately, the export costs essentially nothing for most properties and the raw data cannot be reconstructed retroactively.
+
+## 3. Double-firing purchase events
+
+**What happens**: Revenue appears doubled in GA4 reports. Conversion count is 2x actual transactions.
+
+**Why it happens**: The purchase event fires on the thank-you page (client-side) AND from a payment webhook (server-side Measurement Protocol). Both fire for the same transaction.
+
+**Diagnose**:
+```sql
+SELECT
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id') AS transaction_id,
+  COUNT(*) AS count
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY transaction_id
+HAVING COUNT(*) > 1
+```
+
+**Fix**: Choose one source — client-side OR server-side, not both. For most e-commerce, server-side (Measurement Protocol triggered by payment confirmation) is more reliable.
+
+## 4. Missing cross-domain tracking
+
+**What happens**: Traffic from `shop.example.com` to `checkout.example.com` appears as direct. Attribution is broken — paid campaigns that convert show as direct conversions. Session counts are inflated.
+
+**Why it happens**: GA4 treats each domain as a separate origin by default. The `_ga` cookie does not transfer across domains without configuration.
+
+**Fix**: Admin → Data Streams → Configure tag settings → Configure your domains. Add all your domains to the list.
+
+## 5. Enhanced Measurement scroll tracking at 90% only
+
+**What happens**: You have scroll depth tracking showing only one value (90%). You cannot determine where users stop reading — only whether they reached the very bottom.
+
+**Why it happens**: Enhanced Measurement scroll fires at 90% only. This looks like comprehensive scroll tracking but is actually a single threshold.
+
+**Fix**: Implement a custom scroll depth trigger in GTM that fires at 25%, 50%, 75%, and 90%. GTM has a built-in Scroll Depth trigger that does this.
+
+## 6. Custom dimensions not registered before data collection
+
+**What happens**: Events fire with parameters, but those parameters are invisible in GA4 reports. Stakeholders cannot filter or segment by the values.
+
+**Why it happens**: GA4 does not backfill custom dimension data. Parameters are collected in BigQuery but not available in the GA4 UI until you register the dimension, and only from the registration date forward.
+
+**Fix**: Register all custom dimensions at the start of implementation, before going live. Review planned parameters against the 50 event-scoped dimension limit.
+
+## 7. Using gtm_debug in production
+
+**What happens**: All users' events appear in your DebugView. Developer Traffic filters may exclude real user data.
+
+**Why it happens**: A developer tests with `?gtm_debug=true` and a URL containing this parameter gets shared or linked to.
+
+**Fix**: DebugView is harmless for data quality (events are still processed normally), but Developer Traffic filters may exclude them. Remove `?gtm_debug=true` from production URLs.
+
+## 8. Wrong attribution model comparison
+
+**What happens**: "I set up data-driven attribution but my Traffic acquisition report looks the same."
+
+**Why it happens**: Traffic acquisition always uses last non-direct click regardless of attribution settings. Data-driven attribution affects the Advertising section and API only.
+
+**Fix**: There is nothing to fix — this is expected behavior. Check the Advertising section for data-driven numbers.
+
+## 9. Internal traffic not filtered before launch
+
+**What happens**: Team members browsing the site, QA testing, and developer debugging inflate session counts and skew engagement metrics during the testing phase. This data cannot be removed retroactively.
+
+**Why it happens**: Data filters are set up after launch when the contamination has already occurred.
+
+**Fix**: Create internal traffic definition and activate the data filter before publishing the tracking to production.
+
+## 10. SPA not firing page_view on route changes
+
+**What happens**: GA4 shows only one page_view per session in a React/Vue/Angular app. All navigation within the SPA is invisible. Engagement time and bounce rate calculations are wrong.
+
+**Why it happens**: SPAs use client-side routing — the URL changes but no HTTP request is made, so the GA4 tag does not re-fire.
+
+**Fix**: Listen to your router's navigation events and fire `page_view` on each route change, or use GTM's History Change trigger.
+
+## 11. Consent mode blocking without fallback
+
+**What happens**: In EU markets, GA4 shows 30-60% fewer sessions than other analytics tools. Conversion rates appear much higher than reality.
+
+**Why it happens**: Consent mode is implemented and users decline analytics cookies, but no GA4 modeling is active to estimate the missing data.
+
+**Fix**: Ensure Consent Mode v2 is implemented correctly. GA4's modeling for consent-denied users requires proper Consent Mode signals. Review your consent implementation against Google's [Consent Mode documentation](https://developers.google.com/tag-platform/security/guides/consent).
+
+## 12. Sending PII in event parameters
+
+**What happens**: Personally identifiable information (email, name, phone) is stored in GA4 and BigQuery, violating GA4's Terms of Service and creating GDPR/CCPA liability.
+
+**Why it happens**: Parameters are set on login events or user properties without considering what data is included.
+
+**Common culprits**:
+```javascript
+// ❌ Never do this
+gtag('event', 'login', {
+  email: user.email,          // PII
+  name: user.displayName      // PII
+});
+
+// ✅ Use pseudonymous identifiers only
+gtag('event', 'login', {
+  user_id: user.hashedUserId,  // pseudonymous
+  auth_method: 'email'
+});
+```
+
+**Fix**: Audit all event parameters and user properties for PII. Remove any identifiable data immediately and document a review process for future implementation.
+
+## 13. Audiences created too late
+
+**What happens**: You need to analyze "purchasers in Q1" as an audience, but you created the audience in Q2. The audience only contains Q2 purchasers.
+
+**Why it happens**: Audiences do not backfill. They start collecting users from the creation date.
+
+**Fix**: Create audiences for every important segment at implementation time. Common audiences to create immediately: All purchasers, Trial users, Free tier users, Engaged readers, Cart abandoners.
+
+## 14. Ecommerce items not in the items array
+
+**What happens**: The Items report is empty. Product-level revenue attribution is missing. GA4 ecommerce reports show transactions but no item details.
+
+**Why it happens**: Items are sent as flat event parameters (`product_name`, `product_price`) rather than in the `items` array.
+
+```javascript
+// ❌ Items as flat parameters — not visible in item reports
+gtag('event', 'purchase', {
+  transaction_id: 'T-001',
+  product_name: 'Widget Pro',  // wrong
+  product_price: 49.99         // wrong
+});
+
+// ✅ Items in the items array
+gtag('event', 'purchase', {
+  transaction_id: 'T-001',
+  value: 49.99,
+  currency: 'USD',
+  items: [{
+    item_id: 'SKU-001',
+    item_name: 'Widget Pro',
+    price: 49.99,
+    quantity: 1
+  }]
+});
+```
+
+## 15. Querying BigQuery without _TABLE_SUFFIX filter
+
+**What happens**: BigQuery queries are slow and expensive because they scan your entire event history.
+
+**Why it happens**: The wildcard `events_*` without date constraints scans all tables.
+
+**Fix**: Always include `WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'` in every query.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Property Setup"
+    description="The day-one checklist that prevents the setup mistakes."
+    href="/ga4/configuration/property-setup/"
+  />
+  <LinkCard
+    title="DebugView"
+    description="Catch implementation errors before they corrupt production data."
+    href="/ga4/troubleshooting/debugview/"
+  />
+  <LinkCard
+    title="Enhanced Measurement Pitfalls"
+    description="Detailed analysis of every Enhanced Measurement limitation."
+    href="/ga4/configuration/enhanced-measurement-pitfalls/"
+  />
+</CardGrid>

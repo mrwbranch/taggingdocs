@@ -1,6 +1,323 @@
 ---
 title: "Building a Custom CDP"
-description: "Using sGTM + Firestore as a lightweight customer data platform."
+description: "Using sGTM and Firestore as a lightweight customer data platform — user profile accumulation, segment computation, POAS enrichment, and sending enriched data to ad platforms."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+A Customer Data Platform (CDP) does three things: collects behavioral and identity data from multiple sources, builds unified user profiles, and makes those profiles available to marketing tools in real time. Commercial CDPs (Segment, mParticle, Lytics) charge $1,000–$10,000/month for this capability. With sGTM and Firestore, you can build a lighter version of this infrastructure for approximately $50–$200/month depending on traffic volume.
+
+This is not a full CDP. It does not handle all data sources, does not provide a visual dashboard, and does not replace a commercial platform for large-scale orchestration. What it does: accumulate behavioral data as users interact with your site, persist useful attributes between sessions, and make those attributes available to your ad platform tags in real time without a vendor in the middle.
+
+## The architecture
+
+The system has four components:
+
+**sGTM** is the processing engine. Every tagged event passes through it. Tags read from and write to Firestore. Tags forward enriched events to ad platforms.
+
+**Firestore** is the data store. It holds user profiles, event history (selectively), and computed segments. Each document is keyed by `client_id` (the GA4 user identifier). Reads are synchronous in sGTM via the Firestore Lookup variable. Writes happen via tag templates.
+
+**Ad platform tags** (Meta CAPI, Google Ads Enhanced Conversions, GA4) read enrichment variables that draw from Firestore. These tags fire the same as always — the enrichment is transparent to them.
+
+**Your application backend** can write directly to Firestore for attributes sGTM cannot observe: subscription tier, customer LTV from your billing system, offline purchase history, support ticket count.
+
+```
+User Action                    sGTM                        Firestore
+──────────────                ──────────────────           ────────────────────
+Page view          ────────>  Firestore lookup            user_profiles/{client_id}
+Purchase event     ────────>  Enrichment variables   ─->   user_id: "abc123"
+Login event        ────────>  Tags fire:                   email_hash: "sha256..."
+                              │  GA4 server tag           ltv_total: 447.00
+                              │  Meta CAPI tag            purchase_count: 3
+                              │  Firestore writer         segment: "high_value"
+                              │                           last_purchase: timestamp
+                              └──────────────────────────>
+```
+
+## User profile creation
+
+The Firestore Writer tag writes user attributes on each significant event. Use merge mode so existing fields survive subsequent writes.
+
+### On login events
+
+When a user authenticates, write their identity and any known attributes:
+
+```javascript
+// Firestore Writer tag configuration:
+// Collection: user_profiles
+// Document ID: {{Event Data - client_id}}
+// Merge: true (preserve existing data)
+
+// Fields to write:
+{
+  "user_id": "{{Event Data - user_id}}",
+  "email_hash": "{{Hashed Email}}",  // variable template that hashes user_email
+  "phone_hash": "{{Hashed Phone}}",
+  "last_login": "{{Server Timestamp}}",
+  "login_count": "FieldValue.increment(1)"  // Firestore increment
+}
+```
+
+For the `login_count` increment, the Firestore Writer community template supports `FieldValue.increment()` syntax. If your template does not, use a custom tag template with the Firestore REST API via `sendHttpRequest`.
+
+### On purchase events
+
+Accumulate purchase history:
+
+```javascript
+// Fields to write on purchase events:
+{
+  "purchase_count": "FieldValue.increment(1)",
+  "ltv_total": "FieldValue.increment({{Event Data - value}})",
+  "last_purchase_date": "{{Server Timestamp}}",
+  "last_purchase_value": "{{Event Data - value}}",
+  "last_order_id": "{{Event Data - transaction_id}}"
+}
+```
+
+After three purchases, a user's profile contains their total LTV and purchase frequency — exactly the signals needed to compute a value-based bidding segment.
+
+### From your application backend
+
+Attributes sGTM cannot observe (subscription tier, support ticket count, offline order history) must come from your application. Write these directly to Firestore using the Firebase Admin SDK:
+
+```javascript
+// In your application (Node.js example)
+const admin = require('firebase-admin');
+const db = admin.firestore();
+
+// When a user upgrades their subscription
+await db.collection('user_profiles').doc(clientId).set({
+  subscription_tier: 'pro',
+  subscription_start: admin.firestore.FieldValue.serverTimestamp(),
+  mrr: 49.00,
+}, { merge: true });
+```
+
+The key is having `clientId` — the GA4 client ID — in your application database. This requires writing it to your backend at the time of account creation or login, typically via a server-side call from the purchase confirmation page.
+
+## Segment computation
+
+Segments are labels you assign based on behavioral thresholds. The simplest approach: compute the segment label at write time and store it alongside the behavioral attributes.
+
+In a tag template that fires after every purchase:
+
+```javascript
+const Firestore = require('Firestore');
+const getEventData = require('getEventData');
+const logToConsole = require('logToConsole');
+const JSON = require('JSON');
+
+const clientId = getEventData('client_id');
+
+// Read current profile to get updated totals
+Firestore.read('user_profiles', clientId, {
+  projectId: data.gcpProjectId,
+}).then(function(profile) {
+  const ltv = (profile && profile.data && profile.data.ltv_total) || 0;
+  const purchases = (profile && profile.data && profile.data.purchase_count) || 0;
+
+  // Compute segment
+  let segment = 'standard';
+  if (ltv >= 1000 || purchases >= 10) {
+    segment = 'high_value';
+  } else if (ltv >= 300 || purchases >= 3) {
+    segment = 'mid_value';
+  }
+
+  // Write segment back
+  return Firestore.write('user_profiles', clientId, {
+    segment: segment,
+    segment_updated: Date.now(),
+  }, {
+    projectId: data.gcpProjectId,
+    merge: true,
+  });
+}).then(function() {
+  data.gtmOnSuccess();
+}).catch(function(err) {
+  logToConsole(JSON.stringify({
+    level: 'error',
+    tag: 'segment_computation',
+    error: err,
+  }));
+  data.gtmOnFailure();
+});
+```
+
+The segment now lives in the Firestore document. On subsequent events, a Firestore Lookup variable reads `segment` and makes it available to your tags — without recomputing.
+
+## Enriching events with profile data
+
+Create Firestore Lookup variables for each profile attribute your tags need:
+
+**Variable: Customer Segment**
+- Type: Firestore Lookup
+- Collection: `user_profiles`
+- Document ID: `{{Event Data - client_id}}`
+- Key Path: `segment`
+
+**Variable: Customer LTV**
+- Collection: `user_profiles`
+- Document ID: `{{Event Data - client_id}}`
+- Key Path: `ltv_total`
+
+**Variable: Email Hash from Profile**
+- Collection: `user_profiles`
+- Document ID: `{{Event Data - client_id}}`
+- Key Path: `email_hash`
+
+These variables resolve synchronously in sGTM before your tags fire. The GA4 tag receives `customer_segment: "high_value"` as a custom dimension. The Meta CAPI tag receives `email_hash` from the profile even on events where the user did not provide their email (because they logged in previously and it was stored then).
+
+## POAS: Profit on Ad Spend
+
+POAS (Profit on Ad Spend) is the most commercially valuable application of this pattern. Instead of reporting revenue to Google Ads, you report profit. This shifts bidding from "maximize revenue" to "maximize profit" — which is the metric that actually matters.
+
+The implementation requires your profit margin data in Firestore:
+
+```javascript
+// Stored in Firestore by your backend, keyed by SKU or product category
+// product_margins/{sku}
+{
+  "sku": "WIDGET-PRO",
+  "cost_of_goods": 12.50,
+  "margin_pct": 0.58
+}
+```
+
+A tag template that fires on purchase events reads the margin data and sends the adjusted value to Google Ads:
+
+```javascript
+const Firestore = require('Firestore');
+const getEventData = require('getEventData');
+const JSON = require('JSON');
+
+const items = getEventData('items');
+const clientId = getEventData('client_id');
+
+// Sum profit across all items in the order
+let totalProfit = 0;
+let itemsProcessed = 0;
+
+if (items && items.length > 0) {
+  items.forEach(function(item) {
+    Firestore.read('product_margins', item.item_id, {
+      projectId: data.gcpProjectId,
+    }).then(function(marginDoc) {
+      const margin = marginDoc && marginDoc.data && marginDoc.data.margin_pct || 0.4;
+      const itemRevenue = (item.price || 0) * (item.quantity || 1);
+      totalProfit += itemRevenue * margin;
+      itemsProcessed++;
+
+      if (itemsProcessed === items.length) {
+        // All margins resolved — send to Google Ads with profit value
+        sendConversionWithProfit(totalProfit);
+      }
+    });
+  });
+} else {
+  // No items — use default margin
+  const revenue = getEventData('value') || 0;
+  sendConversionWithProfit(revenue * 0.4);
+}
+
+function sendConversionWithProfit(profitValue) {
+  // Forward to Google Ads with profitValue instead of revenue
+  // (Uses sendHttpRequest to the Google Ads Conversion API)
+  data.gtmOnSuccess();
+}
+```
+
+<Aside type="note">
+The Firestore read per-SKU approach can be slow for orders with many line items. For high-SKU catalogs, consider caching margin data in `templateDataStorage` or storing it denormalized in the user profile as a lookup table.
+</Aside>
+
+## Sending enriched data to ad platforms
+
+The enrichment flow is transparent to the ad platform tags. Instead of reading event parameters directly, each tag reads variables that resolve from Firestore:
+
+**Meta CAPI tag configuration:**
+
+| Parameter | Value |
+|---|---|
+| Email | `{{Firestore - Email Hash}}` (from profile, not event) |
+| External ID | `{{Event Data - user_id}}` or `{{Firestore - User ID}}` |
+| Custom Audience Segment | `{{Firestore - Customer Segment}}` |
+| Value | `{{Firestore - Order Profit}}` (POAS) |
+
+**GA4 server tag configuration:**
+
+| Custom Dimension | Value |
+|---|---|
+| `customer_segment` | `{{Firestore - Customer Segment}}` |
+| `customer_ltv` | `{{Firestore - LTV Total}}` |
+| `purchase_count` | `{{Firestore - Purchase Count}}` |
+
+These custom dimensions appear in GA4 Explorations, can be used in audience definitions, and flow into Google Ads via linked account data.
+
+## Cost considerations
+
+Firestore pricing (as of 2025):
+- Reads: $0.06 per 100,000 document reads
+- Writes: $0.18 per 100,000 document writes
+- Deletes: $0.02 per 100,000
+
+At 1 million monthly events with one Firestore read per event: $0.60/month. At 100 million events: $60/month. Writes are 3x more expensive than reads — minimize write frequency by writing only on significant events (login, purchase, subscription change) rather than every pageview.
+
+The Firestore Lookup variable caches within a single request execution. It does not cache across requests. Each new request to sGTM that reads the same user's profile incurs a read charge.
+
+For very high traffic (>100M events/month), add a caching layer using `templateDataStorage` to store profiles for a short TTL (5–15 minutes), reducing Firestore reads for users who make multiple requests within the window.
+
+## What this is not
+
+This pattern gives you:
+- Real-time user profile enrichment for ad platform events
+- Persistent attributes across sessions
+- Simple behavioral segmentation
+- POAS computation at the event level
+
+It does not give you:
+- A visual dashboard for exploring user behavior
+- Multi-source data ingestion (offline channels, email, call center)
+- Audience builder UIs or campaign activation workflows
+- Identity resolution across devices without additional logic
+- Historical backfill of behavioral data
+
+For teams that need those capabilities, a commercial CDP or warehouse-native activation tool (Census, Hightouch) is the right choice. This pattern is for teams that need 80% of the value at 5% of the cost, and are comfortable maintaining Firestore data models and sGTM templates.
+
+## Common mistakes
+
+**Writing to Firestore on every pageview.** Writes are 3x the cost of reads. Writing user attributes on every page view for anonymous users burns write budget without meaningful benefit. Write on login, purchase, and other high-signal events. Read on every event.
+
+**Not setting TTLs on Firestore documents.** User profiles accumulate indefinitely unless you set a cleanup policy. Implement Firestore TTL fields and a scheduled Cloud Function that deletes documents inactive for more than your data retention period (typically 13 months).
+
+**Treating Firestore reads as free.** Firestore Lookup variables execute once per request per variable. A page with five requests to sGTM, each with two Firestore reads, means 10 Firestore read operations. At scale, this adds up. Profile your read count and cache aggressively.
+
+**Storing raw PII in Firestore documents.** Firestore documents are accessible to anyone with the correct GCP service account credentials. Store only hashed email, hashed phone, and pseudonymous identifiers. Never store plaintext email addresses, phone numbers, or postal addresses.
+
+**Ignoring GDPR deletion requirements.** User profiles in Firestore are personal data under GDPR. Your data subject request workflow must include deletion of Firestore documents when a user exercises their right to erasure. Document your data model so your legal/privacy team can audit what is stored.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Event Enrichment"
+    description="Using Firestore Lookup variables to add data to outgoing events in real time."
+    href="/server-side/advanced/event-enrichment/"
+  />
+  <LinkCard
+    title="User Stitching"
+    description="Connecting anonymous sessions to authenticated users — the identity layer this CDP builds on."
+    href="/server-side/advanced/user-stitching/"
+  />
+  <LinkCard
+    title="Firestore Writer"
+    description="The tag template that writes user profile data to Firestore."
+    href="/server-side/tags/firestore-writer/"
+  />
+  <LinkCard
+    title="Data Redaction & PII"
+    description="What to hash and what not to store when building user profiles."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+</CardGrid>

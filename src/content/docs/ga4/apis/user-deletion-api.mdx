@@ -1,6 +1,522 @@
 ---
 title: "User Deletion API"
-description: "GDPR-compliant automated user data deletion from GA4."
+description: "Delete GA4 user data for GDPR and CCPA compliance — the User Deletion API explained with Python and Node.js examples, limitations, and what actually gets deleted."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The User Deletion API lets you submit requests to delete all data associated with a specific user from GA4. Use it when a user exercises their right to erasure under GDPR, CCPA, or other privacy regulations, or when your own privacy policy commits to data deletion on request.
+
+Before using the API, understand what it actually deletes — and what it does not.
+
+## What the User Deletion API deletes
+
+When you submit a deletion request, GA4 will:
+
+- Remove the user's data from GA4 reports and explorations
+- Remove the user's data from BigQuery if BigQuery export is configured
+- Remove the data from GA4's underlying storage within the specified timeframe
+
+**What it does NOT delete**:
+- Data already exported outside GA4 (CSV exports, third-party tools, BI dashboards)
+- Data in BigQuery tables that were created before the deletion request was processed
+- Server logs, CRM records, or any other system that received GA4 data via integrations
+- Aggregated, anonymized, or sampled report data that cannot be attributed to an individual
+
+<Aside type="caution">
+The User Deletion API submits a request — it does not instantly delete data. Google processes deletion requests within 14 days. For regulatory compliance, document your deletion requests and their submission timestamps. Do not assume data is deleted immediately after the API call returns.
+</Aside>
+
+## Identifying users for deletion
+
+The User Deletion API identifies users by one of three identifiers:
+
+| Identifier | Description | When to use |
+|------------|-------------|-------------|
+| `CLIENT_ID` | The `_ga` cookie value (`user_pseudo_id` in BigQuery) | For anonymous web users |
+| `USER_ID` | Your application's user ID, if you set `user_id` in GA4 | For authenticated users |
+| `APP_INSTANCE_ID` | Firebase app instance ID (mobile apps) | For app users |
+
+For most web applications, you will use `CLIENT_ID`. For applications that set `user_id` (logged-in users), use `USER_ID` — this will also delete all activity that occurred while the user was not logged in if GA4 can associate it with the same user.
+
+### Finding the client ID
+
+The client ID is stored in the `_ga` cookie. It has the format `GA1.1.XXXXXXXXXX.XXXXXXXXXX`. The actual value (what you send to the deletion API) is the numeric portion: `XXXXXXXXXX.XXXXXXXXXX`.
+
+```javascript
+// Extract client_id from the _ga cookie
+function getGAClientId() {
+  const cookies = document.cookie.split(';');
+  for (const cookie of cookies) {
+    const [name, value] = cookie.trim().split('=');
+    if (name === '_ga') {
+      // _ga cookie format: GA1.1.XXXXXXXXXX.XXXXXXXXXX
+      // The client_id is the last two numeric parts
+      const parts = value.split('.');
+      return parts.slice(2).join('.');
+    }
+  }
+  return null;
+}
+
+// Or via gtag
+gtag('get', 'G-XXXXXXXXXX', 'client_id', (clientId) => {
+  console.log('Client ID:', clientId);
+});
+```
+
+In BigQuery, the `user_pseudo_id` column contains the client ID. You can query it to find the identifier associated with a specific user's activity:
+
+```sql
+SELECT
+  user_pseudo_id,
+  COUNT(*) AS event_count,
+  MIN(event_date) AS first_seen,
+  MAX(event_date) AS last_seen
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20241231'
+  AND user_id = 'your-user-id-here'  -- if you set user_id
+GROUP BY user_pseudo_id
+ORDER BY event_count DESC
+```
+
+## Authentication
+
+The User Deletion API requires OAuth 2.0 authentication — service account credentials with JSON key files work for this. The required scope is `https://www.googleapis.com/auth/analytics.user.deletion`.
+
+<Aside type="tip">
+If you are already using a service account for the Admin API or Data API, the same service account will work. Assign it the Editor role on the property, which includes deletion permissions.
+</Aside>
+
+## Submitting deletion requests
+
+### Using the REST API directly
+
+The User Deletion API is available via REST. The base URL is `https://www.googleapis.com/analytics/v3/userDeletion/userDeletionRequests:upsert`.
+
+<Tabs>
+<TabItem label="Python">
+```python
+import requests
+import json
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request
+
+SERVICE_ACCOUNT_FILE = "/path/to/service-account.json"
+PROPERTY_ID = "123456789"  # Numeric GA4 property ID
+SCOPES = ["https://www.googleapis.com/auth/analytics.user.deletion"]
+
+def delete_user_by_client_id(client_id: str) -> dict:
+    """
+    Submit a deletion request for a user identified by their GA4 client ID.
+    client_id: the numeric client ID, e.g., "1234567890.0987654321"
+    """
+    credentials = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    )
+    credentials.refresh(Request())
+
+    url = "https://www.googleapis.com/analytics/v3/userDeletion/userDeletionRequests:upsert"
+
+    payload = {
+        "kind": "analytics#userDeletionRequest",
+        "id": {
+            "type": "CLIENT_ID",
+            "userId": client_id,
+        },
+        "propertyId": PROPERTY_ID,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {credentials.token}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+    response.raise_for_status()
+
+    result = response.json()
+    print(f"Deletion request submitted:")
+    print(f"  User ID: {result['id']['userId']}")
+    print(f"  Deletion request time: {result.get('deletionRequestTime')}")
+    return result
+
+
+def delete_user_by_user_id(user_id: str) -> dict:
+    """Submit a deletion request for an authenticated user by their user_id."""
+    credentials = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    )
+    credentials.refresh(Request())
+
+    url = "https://www.googleapis.com/analytics/v3/userDeletion/userDeletionRequests:upsert"
+
+    payload = {
+        "kind": "analytics#userDeletionRequest",
+        "id": {
+            "type": "USER_ID",
+            "userId": user_id,
+        },
+        "propertyId": PROPERTY_ID,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {credentials.token}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+    response.raise_for_status()
+
+    return response.json()
+
+
+if __name__ == "__main__":
+    # Delete by client ID (anonymous user)
+    result = delete_user_by_client_id("1234567890.0987654321")
+    print(json.dumps(result, indent=2))
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+const { GoogleAuth } = require('google-auth-library');
+const axios = require('axios');
+
+const SERVICE_ACCOUNT_FILE = '/path/to/service-account.json';
+const PROPERTY_ID = '123456789';
+const SCOPES = ['https://www.googleapis.com/auth/analytics.user.deletion'];
+
+async function getAuthToken() {
+  const auth = new GoogleAuth({
+    keyFile: SERVICE_ACCOUNT_FILE,
+    scopes: SCOPES,
+  });
+  const client = await auth.getClient();
+  const token = await client.getAccessToken();
+  return token.token;
+}
+
+async function deleteUserByClientId(clientId) {
+  const token = await getAuthToken();
+
+  const response = await axios.post(
+    'https://www.googleapis.com/analytics/v3/userDeletion/userDeletionRequests:upsert',
+    {
+      kind: 'analytics#userDeletionRequest',
+      id: {
+        type: 'CLIENT_ID',
+        userId: clientId,
+      },
+      propertyId: PROPERTY_ID,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  console.log('Deletion request submitted:');
+  console.log(`  User ID: ${response.data.id.userId}`);
+  console.log(`  Deletion request time: ${response.data.deletionRequestTime}`);
+  return response.data;
+}
+
+async function deleteUserByUserId(userId) {
+  const token = await getAuthToken();
+
+  const response = await axios.post(
+    'https://www.googleapis.com/analytics/v3/userDeletion/userDeletionRequests:upsert',
+    {
+      kind: 'analytics#userDeletionRequest',
+      id: {
+        type: 'USER_ID',
+        userId,
+      },
+      propertyId: PROPERTY_ID,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  return response.data;
+}
+
+// Example usage
+deleteUserByClientId('1234567890.0987654321')
+  .then(result => console.log(JSON.stringify(result, null, 2)))
+  .catch(console.error);
+```
+</TabItem>
+</Tabs>
+
+## Building a deletion workflow
+
+In practice, user deletion requests come from customer support tickets, privacy portals, or automated GDPR/CCPA request systems. Build a workflow that:
+
+1. Receives the deletion request with the user identifier
+2. Looks up all identifiers associated with the user (both user_id and client_id if applicable)
+3. Submits deletion requests for each identifier
+4. Logs the request, its timestamp, and the API response for compliance records
+5. Notifies the user or support system of completion
+
+<Tabs>
+<TabItem label="Python">
+```python
+import logging
+import datetime
+from dataclasses import dataclass
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class DeletionRecord:
+    user_id: str
+    client_id: Optional[str]
+    request_time: datetime.datetime
+    deletion_request_times: list
+    status: str
+
+def process_gdpr_deletion_request(
+    user_id: str,
+    client_id: Optional[str] = None,
+    compliance_log_path: str = "deletion_log.jsonl"
+) -> DeletionRecord:
+    """
+    Process a GDPR right-to-erasure request for a GA4 user.
+    Logs all requests for compliance documentation.
+    """
+    import json
+
+    record = DeletionRecord(
+        user_id=user_id,
+        client_id=client_id,
+        request_time=datetime.datetime.utcnow(),
+        deletion_request_times=[],
+        status="pending",
+    )
+
+    try:
+        # Delete by user_id (authenticated activity)
+        if user_id:
+            result = delete_user_by_user_id(user_id)
+            record.deletion_request_times.append({
+                "type": "USER_ID",
+                "userId": user_id,
+                "deletionRequestTime": result.get("deletionRequestTime"),
+            })
+            logger.info(f"Submitted USER_ID deletion for {user_id}")
+
+        # Delete by client_id (anonymous/pre-login activity)
+        if client_id:
+            result = delete_user_by_client_id(client_id)
+            record.deletion_request_times.append({
+                "type": "CLIENT_ID",
+                "userId": client_id,
+                "deletionRequestTime": result.get("deletionRequestTime"),
+            })
+            logger.info(f"Submitted CLIENT_ID deletion for {client_id}")
+
+        record.status = "submitted"
+
+    except Exception as e:
+        logger.error(f"Deletion request failed for {user_id}: {e}")
+        record.status = f"error: {e}"
+
+    # Log for compliance records
+    with open(compliance_log_path, "a") as f:
+        f.write(json.dumps({
+            "user_id": record.user_id,
+            "client_id": record.client_id,
+            "request_time": record.request_time.isoformat(),
+            "deletion_requests": record.deletion_request_times,
+            "status": record.status,
+        }) + "\n")
+
+    return record
+
+
+# Process a deletion request
+record = process_gdpr_deletion_request(
+    user_id="user_12345",
+    client_id="1234567890.0987654321",
+)
+print(f"Status: {record.status}")
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+const fs = require('fs');
+const path = require('path');
+
+async function processGdprDeletionRequest(userId, clientId = null, logPath = 'deletion_log.jsonl') {
+  const record = {
+    userId,
+    clientId,
+    requestTime: new Date().toISOString(),
+    deletionRequests: [],
+    status: 'pending',
+  };
+
+  try {
+    // Delete by user_id (authenticated activity)
+    if (userId) {
+      const result = await deleteUserByUserId(userId);
+      record.deletionRequests.push({
+        type: 'USER_ID',
+        userId,
+        deletionRequestTime: result.deletionRequestTime,
+      });
+    }
+
+    // Delete by client_id (anonymous/pre-login activity)
+    if (clientId) {
+      const result = await deleteUserByClientId(clientId);
+      record.deletionRequests.push({
+        type: 'CLIENT_ID',
+        userId: clientId,
+        deletionRequestTime: result.deletionRequestTime,
+      });
+    }
+
+    record.status = 'submitted';
+  } catch (error) {
+    console.error(`Deletion failed for ${userId}:`, error.message);
+    record.status = `error: ${error.message}`;
+  }
+
+  // Log for compliance records
+  fs.appendFileSync(logPath, JSON.stringify(record) + '\n');
+
+  return record;
+}
+
+// Process a deletion request
+processGdprDeletionRequest('user_12345', '1234567890.0987654321')
+  .then(record => console.log('Status:', record.status))
+  .catch(console.error);
+```
+</TabItem>
+</Tabs>
+
+## Handling BigQuery data
+
+The User Deletion API removes data from GA4 reports, but if you have BigQuery export enabled, the data has already been written to BigQuery tables. The deletion API does not remove BigQuery data automatically.
+
+To comply with deletion requests in BigQuery, you need to delete or overwrite the affected rows manually.
+
+```sql
+-- Find all event records for a specific user_pseudo_id (client_id)
+-- Run this BEFORE deletion to document what existed
+SELECT
+  event_date,
+  COUNT(*) AS event_count
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20230101' AND '20241231'
+  AND user_pseudo_id = '1234567890.0987654321'
+GROUP BY event_date
+ORDER BY event_date;
+```
+
+BigQuery does not support row-level DELETE on tables in the standard export schema (they use date-sharded tables). To delete individual user records from BigQuery:
+
+1. **Create a filtered replacement table**: For each affected date partition, create a new table excluding the deleted user's rows.
+2. **Replace the original table**: Copy the filtered table back to the original partition.
+3. **Delete the filtered table**: Clean up the temporary table.
+
+```sql
+-- Step 1: Create filtered copy for a specific date
+CREATE OR REPLACE TABLE `project.analytics_PROPERTY_ID.events_20240115_filtered` AS
+SELECT *
+FROM `project.analytics_PROPERTY_ID.events_20240115`
+WHERE user_pseudo_id != '1234567890.0987654321';
+
+-- Step 2: Verify row counts
+SELECT COUNT(*) FROM `project.analytics_PROPERTY_ID.events_20240115`;
+SELECT COUNT(*) FROM `project.analytics_PROPERTY_ID.events_20240115_filtered`;
+
+-- Step 3: If counts look right, use BigQuery API or Console to:
+-- - Delete the original events_20240115 table
+-- - Rename events_20240115_filtered to events_20240115
+-- (This cannot be done in SQL; use the BigQuery Console or bq CLI)
+```
+
+```bash
+# Using bq CLI to replace the table
+bq rm -f project:dataset.events_20240115
+bq cp project:dataset.events_20240115_filtered project:dataset.events_20240115
+bq rm -f project:dataset.events_20240115_filtered
+```
+
+<Aside type="caution">
+Modifying BigQuery export tables is irreversible. Back up tables before deletion. Consider whether your data retention policy and legal obligations require this level of deletion from BigQuery, or whether deleting from GA4 reports satisfies your compliance requirements. Consult legal counsel for your specific regulatory context.
+</Aside>
+
+## Verifying deletion
+
+After submitting a deletion request, you cannot directly verify in the GA4 UI whether deletion is complete (Google does not provide a status endpoint). Instead:
+
+1. Note the `deletionRequestTime` returned by the API — this is the timestamp of the request
+2. Wait at least 14 days (Google's stated processing time)
+3. Query the Realtime or standard reports to verify the user is no longer visible
+
+For BigQuery, run the verification query above after the expected deletion date.
+
+## Rate limits and quotas
+
+The User Deletion API has conservative rate limits:
+
+| Quota | Limit |
+|-------|-------|
+| Requests per day | 500 |
+| Requests per 100 seconds | 10 |
+
+If you have more than 500 deletion requests per day, batch them over multiple days or contact Google for quota increases.
+
+## Common mistakes
+
+### Sending the full _ga cookie value instead of the client ID
+
+The `_ga` cookie value looks like `GA1.1.1234567890.0987654321`. The client ID to send to the deletion API is the numeric portion only: `1234567890.0987654321`. Strip the `GA1.1.` prefix before submitting.
+
+### Not logging deletion requests for compliance
+
+Many regulations require evidence that you took action on deletion requests. Keep a record of every deletion request submitted, including the user identifier, the timestamp, and the API response. The compliance log shown in the workflow example above is the minimum required documentation.
+
+### Assuming GA4 deletion covers BigQuery
+
+If you have BigQuery export enabled, GA4 deletion does not automatically remove BigQuery data. The two systems must be handled separately. Many teams overlook this and remain non-compliant in their data warehouse.
+
+### Using CLIENT_ID when the user has a USER_ID
+
+If a user was logged in when they interacted with your site and you set `user_id` in GA4, submit a deletion request using `USER_ID`. A `CLIENT_ID` deletion only removes data associated with that specific anonymous identifier — it may not cover pre-login sessions that GA4 associated with the user after login.
+
+### Submitting deletion requests before identifying all user identifiers
+
+A user may have multiple client IDs (different browsers, devices, cleared cookies). If possible, look up all known client IDs associated with a user ID before submitting deletion requests. Only deleting one client ID while others remain leaves the user's data partially intact.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Admin API"
+    description="Manage GA4 properties, dimensions, and user access programmatically."
+    href="/ga4/apis/admin-api/"
+  />
+  <LinkCard
+    title="Data API"
+    description="Query GA4 report data programmatically with runReport and batchRunReports."
+    href="/ga4/apis/data-api/"
+  />
+  <LinkCard
+    title="BigQuery Export Setup"
+    description="Understand what gets exported to BigQuery and how it relates to data deletion."
+    href="/ga4/bigquery/export-setup/"
+  />
+</CardGrid>

@@ -1,6 +1,190 @@
 ---
 title: "DebugView"
-description: "Using GA4's DebugView for real-time event validation."
+description: "Use GA4 DebugView to validate events in real time — how to enable debug mode, read the timeline, and catch implementation errors event by event."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+DebugView is GA4's real-time event monitor. When debug mode is active on a browser or device, every event fires instantly into DebugView — you can watch events appear in real time and inspect each one's parameters. It is the most effective tool for validating new tracking implementations.
+
+## Enabling debug mode
+
+### Method 1: GTM Preview mode (recommended)
+
+When you use GTM's Preview/Debug mode (by clicking Preview in the GTM workspace), it automatically enables debug mode for your browser session. All events fired during the preview session appear in DebugView.
+
+No additional configuration needed — just open your site in the GTM preview, navigate normally, and watch DebugView populate.
+
+### Method 2: URL parameter
+
+Add `?gtm_debug=true` to any page URL on your site. This activates debug mode for that browser session.
+
+```
+https://www.example.com/?gtm_debug=true
+https://www.example.com/checkout/?gtm_debug=true
+```
+
+The parameter persists for the session but does not carry across new tab opens.
+
+### Method 3: Google Tag Assistant browser extension
+
+Install the [Google Tag Assistant browser extension](https://tagassistant.google.com/). When the extension is active and the toggle is on, it sets debug mode for all GA4 tags on the page.
+
+### Method 4: gtag debug mode (for direct gtag.js implementations)
+
+Add `debug_mode: true` to your gtag config:
+
+```javascript
+gtag('config', 'G-XXXXXXXXXX', {
+  debug_mode: true
+});
+```
+
+Remove this before deploying to production.
+
+### Method 5: Measurement Protocol events
+
+Add `debug_mode: 1` as an event parameter in Measurement Protocol requests:
+
+```json
+{
+  "client_id": "test.client",
+  "events": [{
+    "name": "purchase",
+    "params": {
+      "debug_mode": 1,
+      "transaction_id": "T-TEST"
+    }
+  }]
+}
+```
+
+## Reading DebugView
+
+Access DebugView at **GA4 → Admin → DebugView**.
+
+The interface shows:
+- A timeline of events from the last few minutes
+- Event names as they arrive (within 1-5 seconds of firing)
+- Device information at the top
+- The last 30 minutes of debug activity
+
+### Clicking an event
+
+Click any event in the timeline to see:
+- Full list of event parameters (key, value, type)
+- Timestamp
+- Event sequence ID
+
+This is where you verify that parameters are populated correctly. If `transaction_id` is showing the wrong value, or `value` is 0 instead of the order amount, you will see it here.
+
+### The event timeline
+
+Events appear in chronological order. Automatic events (page_view, session_start, user_engagement) appear alongside your custom events. This lets you verify the sequence is correct — for example, that `begin_checkout` fires before `purchase`.
+
+<Aside type="tip">
+DebugView shows events from all users in debug mode for your property — not just your own browser session. If multiple developers are testing simultaneously, their events also appear. Look at the "Device" filter to isolate your own session if multiple debug sessions are active.
+</Aside>
+
+## What to verify in DebugView
+
+### Event fires at the right moment
+
+Navigate through your checkout flow. Each event should appear in the timeline at the correct step:
+- `view_item` fires when you view a product
+- `add_to_cart` fires when you click Add to Cart
+- `begin_checkout` fires when you start checkout
+- `purchase` fires on the thank-you page
+
+If `purchase` fires before you actually click Place Order, or if it fires twice, you have an implementation issue.
+
+### Parameters have correct values
+
+For each event, expand the parameters list and verify:
+- String values are human-readable, not internal codes
+- Numeric values (price, quantity, revenue) are correct
+- `transaction_id` is unique per purchase
+- `currency` is a valid ISO 4217 code (e.g., `USD`, not `dollars` or `$`)
+
+### Required parameters are present
+
+For ecommerce events, verify the `items` array is present and has at least one item. For the `purchase` event, verify `transaction_id`, `value`, and `currency` are present.
+
+### No unexpected parameters
+
+DebugView may reveal parameters you did not know were being sent — from Enhanced Measurement events or parameters set at the configuration level. Check for parameters that should not be there (PII, internal debugging flags).
+
+## DebugView for server-side events (Measurement Protocol)
+
+Measurement Protocol events appear in DebugView when you include `debug_mode: 1` as an event parameter. This is the only way to validate Measurement Protocol hits in real time.
+
+After sending a Measurement Protocol request with `debug_mode: 1`, check DebugView within 5-10 seconds. If the event does not appear:
+- Check the validation endpoint response for errors
+- Verify the `client_id` format is correct
+- Verify the Measurement ID and API secret are valid
+
+## Device filtering
+
+If multiple debug sessions are active simultaneously, use the device filter at the top of DebugView to isolate specific sessions. The device identifier shown is derived from the `user_pseudo_id` of the active session.
+
+## Limitations
+
+**DebugView is not a permanent log**: Events age out of DebugView after 30 minutes. If you need a permanent record of your debug session, use BigQuery (debug events appear there with `_TABLE_SUFFIX` for the current day).
+
+**Not all automatic events appear**: Some internal GA4 system events are not shown in DebugView, even when debug mode is active.
+
+**DebugView does not show conversion status**: An event appearing in DebugView does not mean it is marked as a conversion. Check Admin → Conversions for that.
+
+**Delay for standard reports**: Even with DebugView confirming events fire, they may not appear in standard GA4 reports for 24-48 hours. DebugView is for validation, not for counting.
+
+## Using DebugView as a pre-launch checklist
+
+Before launching a new implementation, systematically verify each event type:
+
+<Steps>
+1. **Page views**: Navigate through 3-5 pages and confirm `page_view` fires on each with correct `page_title` and `page_location`.
+
+2. **Ecommerce funnel**: Complete the full purchase flow and confirm each step fires (`view_item`, `add_to_cart`, `begin_checkout`, `purchase`) with correct parameters.
+
+3. **Custom events**: Trigger each custom event type and verify parameters.
+
+4. **Conversion events**: Confirm that conversion events appear and have the correct structure.
+
+5. **User ID** (if implemented): Log in and confirm the user ID appears in event parameters.
+
+6. **Consent mode** (if implemented): Test the full flow with consent declined and verify events are appropriately suppressed or fired in consent-denied mode.
+</Steps>
+
+## Common mistakes
+
+### Not noticing double-firing events
+
+If `purchase` appears twice in the DebugView timeline when you complete one checkout, you have double-counting. This is easy to miss in reports (counts look higher than expected) but obvious in DebugView's timeline view. Always check for duplicates during validation.
+
+### Forgetting to disable debug_mode in production
+
+If you add `debug_mode: true` directly in your gtag config for testing and forget to remove it before deployment, all users will have their events appear in DebugView. This is not harmful to data quality (debug events are still processed normally) but it is messy and may trigger Developer Traffic filters.
+
+### Using DebugView to count production events
+
+DebugView only shows debug-mode events. It does not show normal production events. It is a testing tool, not a monitoring tool. Do not check DebugView to see if your production site is receiving events — use the Realtime report for that.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Realtime Validation"
+    description="Use the Realtime report alongside DebugView for complete pre-launch validation."
+    href="/ga4/troubleshooting/realtime-validation/"
+  />
+  <LinkCard
+    title="Measurement Protocol Debugging"
+    description="Validate server-side Measurement Protocol events using debug mode."
+    href="/ga4/fundamentals/measurement-protocol-debugging/"
+  />
+  <LinkCard
+    title="Missing Data"
+    description="What to do when events appear in DebugView but not in reports."
+    href="/ga4/troubleshooting/missing-data/"
+  />
+</CardGrid>

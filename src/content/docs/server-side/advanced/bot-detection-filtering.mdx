@@ -1,6 +1,275 @@
 ---
 title: "Bot Detection & Filtering"
-description: "Filtering non-human traffic in server-side GTM."
+description: "Filtering non-human traffic in server-side GTM — User Agent analysis, IP-based filtering, bot scoring, internal traffic exclusion, and complementary filtering with GA4's built-in protection."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Bot traffic is underappreciated as a data quality problem. In a typical sGTM deployment receiving 1 million events per day, 5–15% of those events may originate from crawlers, scrapers, uptime monitors, load testing tools, competitor intelligence bots, and malicious actors. These events inflate pageview counts, depress conversion rates (bots rarely convert), contaminate audience segments, and waste ad spend when they trigger CAPI events.
+
+Server-side GTM is well-positioned to filter bots because it sits between the browser and your data destinations. The GA4 client processes every request — including bot requests — before your tags fire. A bot detection layer inserted at the client or triggered as a blocking tag can prevent bot events from reaching GA4, Meta CAPI, and Google Ads.
+
+## What GA4's built-in filtering does
+
+GA4 automatically filters known bots and spiders from the Interactive Advertising Bureau (IAB) list in its reports. This filtering happens inside Google's data processing pipeline, not in sGTM. The raw events still reach GA4's collection endpoint; the filtering affects only how those events appear in reports.
+
+This has two important limitations:
+
+1. **GA4 filtering does not affect sGTM tags.** Meta CAPI, Google Ads Enhanced Conversions, and custom destination tags fire based on the Event Model before GA4 decides whether to filter. Bot events reach your ad platforms regardless of GA4's built-in filtering.
+
+2. **GA4 filtering only covers known bots.** The IAB list includes major crawlers (Googlebot, Bingbot, AhrefsBot) but not custom scrapers, uptime monitors, or targeted bot traffic. Unknown bots pass through GA4's filter and appear in reports.
+
+Server-side bot filtering in sGTM is complementary to GA4's built-in filtering, not a replacement.
+
+## Signals for bot detection
+
+No single signal reliably identifies bots. A scoring approach combines multiple weak signals into a score that determines whether to suppress the event.
+
+### User Agent patterns
+
+The User Agent string is the most accessible signal. Well-behaved bots identify themselves with strings like `Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)`. Malicious bots often impersonate browsers.
+
+```javascript
+// Variable template: bot_ua_score
+// Returns 0 (human) to 100 (bot) based on User Agent analysis
+
+const getRequestHeader = require('getRequestHeader');
+
+const ua = getRequestHeader('user-agent') || '';
+const uaLower = ua.toLowerCase();
+
+// Known bot identifiers — always bots
+const definitelyBotPatterns = [
+  'googlebot', 'bingbot', 'slurp', 'duckduckbot', 'baiduspider',
+  'yandexbot', 'sogou', 'exabot', 'facebot', 'ia_archiver',
+  'msnbot', 'ahrefsbot', 'semrushbot', 'dotbot', 'rogerbot',
+  'seokicks', 'seznambot', 'nutch', 'curl/', 'wget/',
+  'python-requests', 'go-http-client', 'java/', 'okhttp',
+  'headlesschrome', 'phantomjs', 'selenium', 'webdriver',
+  'puppeteer', 'playwright', 'cypress',
+];
+
+for (let i = 0; i < definitelyBotPatterns.length; i++) {
+  if (uaLower.indexOf(definitelyBotPatterns[i]) !== -1) {
+    return 100;
+  }
+}
+
+// Suspicious patterns — likely bots
+const suspiciousPatterns = [
+  'bot', 'spider', 'crawler', 'scraper', 'monitor', 'checker',
+  'fetcher', 'reader', 'archive', 'scan', 'validator', 'test',
+];
+
+let suspiciousCount = 0;
+for (let i = 0; i < suspiciousPatterns.length; i++) {
+  if (uaLower.indexOf(suspiciousPatterns[i]) !== -1) {
+    suspiciousCount++;
+  }
+}
+
+if (suspiciousCount > 0) return 70;
+
+// Empty User Agent — very suspicious
+if (!ua || ua.length === 0) return 85;
+
+// Very short User Agent — unusual for real browsers
+if (ua.length < 40) return 50;
+
+return 0;
+```
+
+### Missing browser headers
+
+Real browsers consistently send certain headers that request libraries often omit:
+
+```javascript
+// Variable template: bot_header_score
+const getRequestHeader = require('getRequestHeader');
+
+let score = 0;
+
+// Real browsers always send Accept
+if (!getRequestHeader('accept')) score += 30;
+
+// Real browsers always send Accept-Language
+if (!getRequestHeader('accept-language')) score += 25;
+
+// Real browsers always send Accept-Encoding
+if (!getRequestHeader('accept-encoding')) score += 20;
+
+// Real browsers always send Sec-Fetch-Site (modern browsers)
+// Absence isn't definitive but adds evidence
+if (!getRequestHeader('sec-fetch-site')) score += 10;
+
+return Math.min(score, 100);
+```
+
+### IP-based signals
+
+Datacenter IP ranges do not belong to residential users. When a request arrives from an AWS, GCP, or Azure IP range, it is either a bot, a server-side request, or a VPN user. You can cross-reference against known datacenter CIDR ranges, but maintaining this list is operationally expensive.
+
+A practical alternative: use a lightweight IP intelligence service. MaxMind GeoIP2 provides IP type classification (residential, datacenter, VPN). For sGTM, call the MaxMind API via `sendHttpRequest` in an enrichment tag that runs before your filtering logic.
+
+For internal traffic filtering (office IP addresses, VPN), a simpler approach works:
+
+```javascript
+// Variable template: is_internal_traffic
+const getRequestHeader = require('getRequestHeader');
+
+// sGTM receives the real client IP via x-forwarded-for
+const xff = getRequestHeader('x-forwarded-for') || '';
+const clientIp = xff.split(',')[0].trim();
+
+// Your internal IP ranges (CIDR matching requires custom implementation)
+const internalPrefixes = [
+  '203.0.113.',   // example office IP block
+  '198.51.100.',  // example VPN block
+  '10.0.',        // RFC1918 internal
+];
+
+for (let i = 0; i < internalPrefixes.length; i++) {
+  if (clientIp.indexOf(internalPrefixes[i]) === 0) {
+    return true;
+  }
+}
+
+return false;
+```
+
+<Aside type="note">
+The `x-forwarded-for` header is set by Cloud Run's load balancer with the real client IP. If you run behind additional proxies or CDN layers, the IP structure may differ — verify your actual header values by logging them before relying on this signal.
+</Aside>
+
+## Building a composite bot score
+
+Combine individual signals into a single score:
+
+```javascript
+// Variable template: composite_bot_score
+// Returns 0-100, where higher = more likely bot
+
+const getEventData = require('getEventData');
+
+// These variables are evaluated first and their values referenced here
+const uaScore = data.uaBotScore || 0;        // {{Bot UA Score}} variable
+const headerScore = data.headerBotScore || 0; // {{Bot Header Score}} variable
+const isInternal = data.isInternalTraffic;    // {{Is Internal Traffic}} variable
+
+// Internal traffic score (exclude from ad conversion tags)
+if (isInternal) return 100;
+
+// Weight the signals
+const weightedScore = (uaScore * 0.6) + (headerScore * 0.4);
+
+return Math.round(weightedScore);
+```
+
+In practice, build a dedicated "Bot Filter" tag that fires with all events and reads the composite score:
+
+```javascript
+// Tag template: bot_filter
+// Fires on all events with high priority
+
+const getEventData = require('getEventData');
+const logToConsole = require('logToConsole');
+const JSON = require('JSON');
+const templateDataStorage = require('templateDataStorage');
+
+const botScore = data.compositeBotScore; // variable binding
+const threshold = data.filterThreshold || 60;
+
+if (botScore >= threshold) {
+  // Flag this request as bot traffic
+  templateDataStorage.setItemCopy('is_bot', true);
+  templateDataStorage.setItemCopy('bot_score', botScore);
+
+  logToConsole(JSON.stringify({
+    level: 'info',
+    type: 'bot_filtered',
+    score: botScore,
+    ua: getEventData('user_agent'),
+  }));
+}
+
+data.gtmOnSuccess();
+```
+
+Then in all your destination tags (GA4, Meta CAPI, Google Ads), add a blocking trigger:
+
+**Trigger: Not Bot Traffic**
+- Trigger type: Custom Event
+- This trigger fires on all events WHEN:
+  - `{{Template Data Storage - is_bot}}` does not equal `true`
+
+By adding this trigger to all conversion tags, only non-bot events reach your ad platforms.
+
+## Trigger sequencing
+
+For the bot filter to work, the Bot Filter tag must execute before your conversion tags. Use tag sequencing:
+
+In each conversion tag:
+1. Click **Advanced Settings** → **Tag Sequencing**
+2. Enable **Fire a tag before [this tag] fires**
+3. Select the Bot Filter tag
+4. Enable **Don't fire [this tag] if Bot Filter fails or is paused**
+
+This ensures the bot score is computed and stored in `templateDataStorage` before the conversion tag executes.
+
+## Filtering approaches by use case
+
+**For analytics (GA4)**: Use GA4's built-in bot filtering for known bots. Add server-side filtering only for bots that GA4's filter misses or for very noisy uptime monitors that inflate pageview counts. Removing all bot events from analytics can distort baselines — proceed carefully.
+
+**For ad platform conversions (Meta CAPI, Google Ads)**: Apply aggressive filtering. Bot events that reach ad platforms waste budget and distort audience signals. A false positive (filtering a human) is far less damaging than a false negative (reporting a bot conversion).
+
+**For internal traffic**: Create a separate filter based on IP ranges. Internal traffic should never reach ad platform conversion tags — it skews conversion rates and pollutes audiences.
+
+**For uptime monitor traffic**: Most uptime monitors use predictable User Agent strings (`Pingdom`, `UptimeRobot`, `Uptimia`). Add these to your bot UA list. The `/healthz` endpoint that uptime monitors hit should not run through the full container at all — configure it to return 200 immediately in a dedicated client template without running `runContainer`.
+
+## GA4 bot filtering vs. server-side filtering comparison
+
+| Filtering Layer | Where | Affects GA4 Reports | Affects Ad Platforms | Maintenance |
+|---|---|---|---|---|
+| GA4 built-in | GA4 processing | Yes | No | None |
+| sGTM UA filtering | sGTM template | Yes (if tag doesn't fire) | Yes (if tag doesn't fire) | Medium |
+| sGTM IP filtering | sGTM template | Yes | Yes | High (maintain IP lists) |
+| GA4 developer filter (Data Streams) | GA4 property | Yes | No | Low |
+
+Use GA4's developer filter for development/staging environments. Use GA4's built-in bot filtering for known crawlers. Add sGTM filtering specifically to protect ad platform data from uptime monitors, internal traffic, and headless browser scraping.
+
+## Common mistakes
+
+**Setting the bot score threshold too low.** A threshold of 40 will incorrectly classify curl-based integrations, mobile apps, and some legitimate monitoring tools. Start at 70, observe which events are filtered via Cloud Logging, and tune down only if clearly malicious traffic passes through.
+
+**Filtering bots from GA4 analytics without auditing the impact.** If your site has 20% bot traffic and you suddenly filter it all, your GA4 users/sessions metric drops 20% on day one. Attribution models reset. Stakeholders panic. Before deploying GA4 filtering, quantify the bot traffic volume first and communicate the change.
+
+**Not logging filtered events.** You need visibility into what was filtered to validate your rules are working correctly. Log every filtered event with the score and the User Agent that triggered the filter.
+
+**Filtering the health check endpoint.** The `/healthz` endpoint receives requests from Cloud Run's health check system, your own uptime monitor, and load balancers. These should not be processed by the container at all. Handle them in a dedicated client template that returns `200` immediately without calling `runContainer`.
+
+**Relying solely on User Agent matching.** Sophisticated scrapers set realistic browser User Agents. UA matching alone will not catch them. Combine with header analysis and, for high-value filtering (before sending expensive Conversion API calls), consider a CAPTCHA challenge or IP intelligence service.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Templates"
+    description="Building the variable and tag templates that implement bot scoring logic."
+    href="/server-side/advanced/custom-templates/"
+  />
+  <LinkCard
+    title="Monitoring & Logging"
+    description="Logging filtered events to Cloud Logging for visibility into bot traffic patterns."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+  <LinkCard
+    title="Cloud Run Scaling"
+    description="How bot traffic spikes affect Cloud Run instance counts and costs."
+    href="/server-side/setup/cloud-run-scaling/"
+  />
+  <LinkCard
+    title="Custom Clients"
+    description="Handling the health check endpoint to prevent it from triggering the container."
+    href="/server-side/clients/custom-clients/"
+  />
+</CardGrid>

@@ -1,6 +1,184 @@
 ---
 title: "Cost Management"
-description: "Understanding and optimizing server-side GTM infrastructure costs."
+description: "Understanding and controlling server-side GTM infrastructure costs — Cloud Run pricing, cost estimation by request volume, optimization strategies, and monthly budget examples."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+sGTM is not expensive at moderate scale, but it is not free. A production deployment with sensible defaults runs $20–$80/month for most mid-sized sites. High-traffic deployments can reach $500–$2,000/month. Understanding the cost drivers and optimization levers lets you right-size your deployment from the start rather than encountering surprises on your GCP billing statement.
+
+## The cost components
+
+sGTM on Cloud Run has four cost components:
+
+**Compute (Cloud Run CPU/memory)**: Charged when instances are active. With minimum instances > 0, compute costs are continuous regardless of traffic. With minimum instances = 0, you only pay during actual request processing — but cold starts affect data quality.
+
+**Network egress**: Data leaving GCP to external endpoints. Every outbound API call your tags make (to Meta CAPI, Google Ads, GA4 Measurement Protocol) incurs egress charges. Egress within GCP regions is free; egress to the internet costs $0.08/GB.
+
+**Cloud Logging**: Log storage. sGTM generates substantial log volume. By default, Cloud Logging stores 30 days of logs; charges apply above the free tier (50GB/month).
+
+**Secret Manager**: If you store API credentials in Secret Manager, each access costs $0.06 per 10,000 access operations.
+
+## Cloud Run pricing model
+
+Cloud Run pricing (as of 2025):
+
+| Resource | Price |
+|---|---|
+| CPU (per vCPU-second) | $0.000024 |
+| Memory (per GB-second) | $0.0000025 |
+| Requests (per million) | $0.40 |
+| Minimum instances (always-on CPU) | Billed continuously |
+
+**Effective cost per request** at different scales:
+
+For a typical sGTM request taking 100ms to process with 0.5 vCPU and 512MB memory allocation:
+
+- CPU cost per request: 0.1s × 0.5 × $0.000024 = $0.0000012
+- Memory cost per request: 0.1s × 0.5 × $0.0000025 = $0.000000125
+- Request cost per request: $0.0000004
+- **Total compute per request: ~$0.0000017**
+
+This is the variable cost. At 1 million requests/month, compute is about $1.70. The fixed cost (minimum instances) dominates at low traffic volumes.
+
+## Monthly cost examples
+
+All examples assume Cloud Run in `us-central1`, 1 minimum instance, 1 vCPU, 512MB memory, 100ms average request duration. The minimum instance runs continuously (730 hours/month).
+
+**Minimum instance fixed cost per month:**
+- CPU: 730 hours × 3600 seconds × 1 vCPU × $0.000024 = $63.07
+- Memory: 730 × 3600 × 0.5GB × $0.0000025 = $3.29
+- **Fixed monthly minimum: ~$66**
+
+This is the floor — you pay this regardless of traffic.
+
+| Monthly Requests | Compute (Variable) | Request Fee | Network Egress | Logging | Approx. Total |
+|---|---|---|---|---|---|
+| 100K | $0.17 | $0.04 | $1–$3 | ~$0 | ~$70 |
+| 1M | $1.70 | $0.40 | $5–$15 | ~$2 | ~$85 |
+| 10M | $17 | $4 | $20–$60 | ~$10 | ~$160 |
+| 100M | $170 | $40 | $100–$300 | ~$50 | ~$620 |
+
+At 100K requests/month, the minimum instance dominates. At 100M requests/month, variable costs start to matter.
+
+## Minimum instances: the critical cost decision
+
+Setting minimum instances to 0 eliminates the ~$66/month floor but introduces cold starts. The first request after a period of inactivity hits a cold container — startup time is 2–8 seconds. During that startup, the request either times out or queues.
+
+For a site with steady traffic throughout the day, cold starts are rare. For a site with a predictable peak (e.g., all traffic between 9am-6pm), cold starts hit every morning when the first request of the day arrives.
+
+The pragmatic recommendation:
+- **Minimum 1 instance**: Sites spending $1,000+/month on ads, where a single cold start's data loss costs more than $66
+- **Minimum 0 instances**: Low-traffic sites, development environments, or sites where 100% hit capture is not critical
+
+For sites with strong daily traffic cycles but quiet nights, set minimum instances = 1 with **CPU always allocated**. The instance stays warm. CPU billing during idle (no traffic) at 1 vCPU costs $0.000024/second — about $1.75/hour or $42/month for idle time. Add this to your request-time compute: total cost is in the $100-$150/month range for moderate traffic sites.
+
+## Reducing egress costs
+
+Network egress is the most controllable variable cost. Every tag that makes an outbound HTTP request incurs egress. A purchase event that fires GA4 + Meta CAPI + Google Ads + TikTok makes 4 outbound requests, each potentially 1-5KB of payload plus the response.
+
+**Reduce outbound call volume:**
+- Only fire CAPI tags when the event is relevant. A Meta CAPI tag that fires on every pageview at 1M events/month sends 1M API calls. If only 50K are purchase-related, add a trigger that restricts firing to high-value events.
+- Use GA4's Measurement Protocol sparingly for non-essential events. Events that only exist for analytics (not conversion attribution) can be sent client-side.
+
+**Reduce payload size:**
+- Strip unused parameters before forwarding. If your GA4 event payload includes 50 custom parameters but your GA4 tags only read 10, strip the rest before the GA4 server tag forwards them.
+- Do not forward full page_location (including long query strings) to every vendor. Truncate URLs.
+
+**Use regional cloud services:**
+- Deploy your sGTM Cloud Run in the same region as your Firestore database. Firestore reads within the same region are free (no egress). Cross-region Firestore reads incur both egress and latency costs.
+
+## Reducing logging costs
+
+Cloud Logging's free tier is 50GB/month per project. sGTM generates one request log per incoming request plus custom `logToConsole()` entries. At 1M requests/month with moderate custom logging, expect 5–15GB of logs — within the free tier.
+
+At 10M+ requests/month, logging can exceed the free tier. Strategies:
+
+**Log sampling**: Log detailed information only for a sample of requests:
+
+```javascript
+const getTimestampMillis = require('getTimestampMillis');
+const logToConsole = require('logToConsole');
+const JSON = require('JSON');
+
+// Log approximately 1% of requests at debug level
+const shouldLog = (getTimestampMillis() % 100) < 1;
+
+if (shouldLog) {
+  logToConsole(JSON.stringify({
+    level: 'debug',
+    sample_rate: 0.01,
+    // ... diagnostic data
+  }));
+}
+```
+
+**Exclude request logs**: In Cloud Logging, create an exclusion filter that drops standard request logs while keeping error logs:
+
+```
+resource.type="cloud_run_revision" AND
+httpRequest.status < 400
+```
+
+This keeps error logs and custom tag logs but drops the noise from successful request logs.
+
+**Log export and deletion**: Export logs to BigQuery for long-term analysis, then set a 7-day retention policy in Cloud Logging. BigQuery storage is cheaper than Cloud Logging storage at $0.02/GB vs. Cloud Logging's rates above the free tier.
+
+## Budget alerts
+
+Set a billing budget alert before you need it:
+
+GCP Console → **Billing** → **Budgets & Alerts** → **Create Budget**:
+- Scope: filter to your sGTM project
+- Budget amount: your expected monthly spend × 1.5 (buffer for traffic spikes)
+- Alert thresholds: 50%, 80%, 100%, 120%
+- Notification channels: email, or Pub/Sub for automated responses
+
+A 120% alert can trigger a Cloud Function that reduces maximum instances on Cloud Run — an automated cost cap for runaway traffic.
+
+## Stape vs. GCP vs. AWS cost comparison
+
+| Traffic | Stape | GCP (Cloud Run) | AWS (ECS Fargate) |
+|---|---|---|---|
+| <500K req/month | $20–$30/month | ~$70/month | ~$60/month |
+| 1M req/month | $35–$50/month | ~$85/month | ~$80/month |
+| 5M req/month | $70–$120/month | ~$120/month | ~$110/month |
+| 10M req/month | $120–$200/month | ~$160/month | ~$150/month |
+| 100M req/month | Contact sales | ~$620/month | ~$550/month |
+
+Stape is competitively priced at low-to-medium traffic and bundles support and convenience features. GCP Cloud Run becomes more economical at higher traffic volumes when you optimize minimum instances and logging.
+
+## Common mistakes
+
+**Running two sGTM environments (dev + prod) as full deployments.** A development Cloud Run instance with minimum instances = 1 costs $66/month. For a dev environment, set minimum instances = 0 and accept cold starts — dev environments don't need production-level availability.
+
+**Not setting a maximum instance limit.** Without a maximum, a traffic spike (or a bot attacking your endpoint) can scale Cloud Run to hundreds of instances and generate thousands of dollars of unexpected costs in hours. Set `--max-instances 20` as a hard cap; if traffic exceeds capacity, requests queue rather than creating unbounded cost.
+
+**Logging at DEBUG level in production.** Development-style verbose logging can multiply your log volume 5–10x. Use `level: 'info'` and `level: 'error'` in production; reserve debug logging for sampled requests or specific debugging sessions.
+
+**Forgetting outbound request costs when planning architecture.** An enrichment pattern that makes 3 Firestore reads and 4 API calls per event processes very differently from a simple forwarding setup. Model your expected outbound call volume when estimating costs.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Cloud Run Scaling"
+    description="The scaling configuration decisions that directly drive compute costs."
+    href="/server-side/setup/cloud-run-scaling/"
+  />
+  <LinkCard
+    title="Hosting Comparison"
+    description="Detailed cost comparison across GCP, AWS, Stape, and other hosting options."
+    href="/server-side/operations/hosting-comparison/"
+  />
+  <LinkCard
+    title="Monitoring & Logging"
+    description="Setting up budget alerts and Cloud Monitoring cost visibility."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+  <LinkCard
+    title="GCP Setup"
+    description="The initial Cloud Run configuration where cost-critical settings are established."
+    href="/server-side/setup/gcp-setup/"
+  />
+</CardGrid>

@@ -1,6 +1,705 @@
 ---
 title: "GA4 Data API"
-description: "Extracting GA4 reports programmatically with the Data API."
+description: "Query GA4 report data programmatically using the Data API — runReport, batchRunReports, pivot reports, realtime data, and production-ready Python and Node.js examples."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The GA4 Data API gives you programmatic access to the same data that populates GA4 reports, without the 24-48 hour processing delay of BigQuery exports for current-day data. Use it when you need to embed GA4 metrics in dashboards, automate report delivery, or integrate analytics data into your own applications.
+
+The Data API is not a replacement for BigQuery. It returns sampled, pre-aggregated data with dimension cardinality limits. For unsampled analysis and raw event access, BigQuery is the right tool. The Data API is the right tool when you need GA4's report-level numbers delivered to a system outside the GA4 UI.
+
+## Authentication and setup
+
+The Data API requires a service account or OAuth 2.0 credentials with the Viewer role on your GA4 property.
+
+### Create a service account
+
+<Steps>
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/) and select or create a project.
+
+2. Navigate to **IAM & Admin → Service Accounts → Create Service Account**.
+
+3. Give the service account a name (e.g., `ga4-data-api-reader`) and click **Create and Continue**.
+
+4. Skip the optional role assignment — you will assign the role in GA4, not in Cloud IAM.
+
+5. Click **Done**. On the service account details page, go to **Keys → Add Key → Create New Key → JSON**. Save the downloaded JSON file securely.
+
+6. In GA4, go to **Admin → Property Access Management → Add Users**. Enter the service account email address (it ends in `@your-project.iam.gserviceaccount.com`). Assign the **Viewer** role. Click **Add**.
+</Steps>
+
+### Install client libraries
+
+<Tabs>
+<TabItem label="Python">
+```bash
+pip install google-analytics-data
+```
+</TabItem>
+<TabItem label="Node.js">
+```bash
+npm install @google-analytics/data
+```
+</TabItem>
+</Tabs>
+
+Set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to the path of your service account JSON file:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+```
+
+## runReport — the core method
+
+`runReport` is the primary method for querying GA4 data. You define dimensions, metrics, date ranges, filters, and ordering — the API returns aggregated rows.
+
+### Basic report
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.data_v1beta import BetaAnalyticsDataClient
+from google.analytics.data_v1beta.types import (
+    DateRange,
+    Dimension,
+    Metric,
+    RunReportRequest,
+    OrderBy,
+)
+
+PROPERTY_ID = "123456789"  # Your GA4 property ID (numbers only)
+
+def run_basic_report():
+    client = BetaAnalyticsDataClient()
+
+    request = RunReportRequest(
+        property=f"properties/{PROPERTY_ID}",
+        dimensions=[
+            Dimension(name="date"),
+            Dimension(name="sessionDefaultChannelGrouping"),
+        ],
+        metrics=[
+            Metric(name="sessions"),
+            Metric(name="activeUsers"),
+            Metric(name="engagedSessions"),
+            Metric(name="conversions"),
+        ],
+        date_ranges=[DateRange(start_date="30daysAgo", end_date="yesterday")],
+        order_bys=[
+            OrderBy(dimension=OrderBy.DimensionOrderBy(dimension_name="date"))
+        ],
+    )
+
+    response = client.run_report(request)
+
+    # Print headers
+    headers = [d.name for d in response.dimension_headers] + \
+              [m.name for m in response.metric_headers]
+    print("\t".join(headers))
+
+    # Print rows
+    for row in response.rows:
+        dim_values = [d.value for d in row.dimension_values]
+        metric_values = [m.value for m in row.metric_values]
+        print("\t".join(dim_values + metric_values))
+
+    print(f"\nRow count: {response.row_count}")
+
+if __name__ == "__main__":
+    run_basic_report()
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+const { BetaAnalyticsDataClient } = require('@google-analytics/data');
+
+const PROPERTY_ID = '123456789'; // Your GA4 property ID (numbers only)
+
+async function runBasicReport() {
+  const analyticsDataClient = new BetaAnalyticsDataClient();
+
+  const [response] = await analyticsDataClient.runReport({
+    property: `properties/${PROPERTY_ID}`,
+    dimensions: [
+      { name: 'date' },
+      { name: 'sessionDefaultChannelGrouping' },
+    ],
+    metrics: [
+      { name: 'sessions' },
+      { name: 'activeUsers' },
+      { name: 'engagedSessions' },
+      { name: 'conversions' },
+    ],
+    dateRanges: [{ startDate: '30daysAgo', endDate: 'yesterday' }],
+    orderBys: [{ dimension: { dimensionName: 'date' } }],
+  });
+
+  // Print headers
+  const dimHeaders = response.dimensionHeaders.map(h => h.name);
+  const metricHeaders = response.metricHeaders.map(h => h.name);
+  console.log([...dimHeaders, ...metricHeaders].join('\t'));
+
+  // Print rows
+  for (const row of response.rows) {
+    const dims = row.dimensionValues.map(v => v.value);
+    const metrics = row.metricValues.map(v => v.value);
+    console.log([...dims, ...metrics].join('\t'));
+  }
+
+  console.log(`\nRow count: ${response.rowCount}`);
+}
+
+runBasicReport().catch(console.error);
+```
+</TabItem>
+</Tabs>
+
+### Filtering results
+
+Use `dimension_filter` and `metric_filter` to narrow the data. Filters use a `FilterExpression` that can contain `andGroup`, `orGroup`, and `notExpression` for compound logic.
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.data_v1beta.types import (
+    FilterExpression,
+    FilterExpressionList,
+    Filter,
+)
+
+def run_filtered_report():
+    client = BetaAnalyticsDataClient()
+
+    # Filter: only Organic Search channel, exclude (not set) country
+    request = RunReportRequest(
+        property=f"properties/{PROPERTY_ID}",
+        dimensions=[
+            Dimension(name="country"),
+            Dimension(name="deviceCategory"),
+        ],
+        metrics=[
+            Metric(name="sessions"),
+            Metric(name="bounceRate"),
+        ],
+        date_ranges=[DateRange(start_date="28daysAgo", end_date="yesterday")],
+        dimension_filter=FilterExpression(
+            and_group=FilterExpressionList(
+                expressions=[
+                    FilterExpression(
+                        filter=Filter(
+                            field_name="sessionDefaultChannelGrouping",
+                            string_filter=Filter.StringFilter(
+                                match_type=Filter.StringFilter.MatchType.EXACT,
+                                value="Organic Search",
+                            ),
+                        )
+                    ),
+                    FilterExpression(
+                        not_expression=FilterExpression(
+                            filter=Filter(
+                                field_name="country",
+                                string_filter=Filter.StringFilter(
+                                    match_type=Filter.StringFilter.MatchType.EXACT,
+                                    value="(not set)",
+                                ),
+                            )
+                        )
+                    ),
+                ]
+            )
+        ),
+    )
+
+    response = client.run_report(request)
+    for row in response.rows:
+        dims = [d.value for d in row.dimension_values]
+        metrics = [m.value for m in row.metric_values]
+        print(dims, metrics)
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function runFilteredReport() {
+  const analyticsDataClient = new BetaAnalyticsDataClient();
+
+  const [response] = await analyticsDataClient.runReport({
+    property: `properties/${PROPERTY_ID}`,
+    dimensions: [
+      { name: 'country' },
+      { name: 'deviceCategory' },
+    ],
+    metrics: [
+      { name: 'sessions' },
+      { name: 'bounceRate' },
+    ],
+    dateRanges: [{ startDate: '28daysAgo', endDate: 'yesterday' }],
+    dimensionFilter: {
+      andGroup: {
+        expressions: [
+          {
+            filter: {
+              fieldName: 'sessionDefaultChannelGrouping',
+              stringFilter: { matchType: 'EXACT', value: 'Organic Search' },
+            },
+          },
+          {
+            notExpression: {
+              filter: {
+                fieldName: 'country',
+                stringFilter: { matchType: 'EXACT', value: '(not set)' },
+              },
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  for (const row of response.rows) {
+    const dims = row.dimensionValues.map(v => v.value);
+    const metrics = row.metricValues.map(v => v.value);
+    console.log(dims, metrics);
+  }
+}
+```
+</TabItem>
+</Tabs>
+
+### Pagination
+
+The Data API returns a maximum of 10,000 rows per request. Use `offset` and `limit` to page through larger result sets.
+
+<Tabs>
+<TabItem label="Python">
+```python
+def run_paginated_report():
+    client = BetaAnalyticsDataClient()
+    all_rows = []
+    offset = 0
+    limit = 10000
+
+    while True:
+        request = RunReportRequest(
+            property=f"properties/{PROPERTY_ID}",
+            dimensions=[Dimension(name="pagePath")],
+            metrics=[Metric(name="screenPageViews")],
+            date_ranges=[DateRange(start_date="30daysAgo", end_date="yesterday")],
+            limit=limit,
+            offset=offset,
+        )
+        response = client.run_report(request)
+        all_rows.extend(response.rows)
+
+        if offset + limit >= response.row_count:
+            break
+        offset += limit
+
+    print(f"Total rows retrieved: {len(all_rows)}")
+    return all_rows
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function runPaginatedReport() {
+  const analyticsDataClient = new BetaAnalyticsDataClient();
+  const allRows = [];
+  let offset = 0;
+  const limit = 10000;
+
+  while (true) {
+    const [response] = await analyticsDataClient.runReport({
+      property: `properties/${PROPERTY_ID}`,
+      dimensions: [{ name: 'pagePath' }],
+      metrics: [{ name: 'screenPageViews' }],
+      dateRanges: [{ startDate: '30daysAgo', endDate: 'yesterday' }],
+      limit,
+      offset,
+    });
+
+    allRows.push(...response.rows);
+
+    if (offset + limit >= response.rowCount) break;
+    offset += limit;
+  }
+
+  console.log(`Total rows retrieved: ${allRows.length}`);
+  return allRows;
+}
+```
+</TabItem>
+</Tabs>
+
+## batchRunReports — multiple reports in one request
+
+`batchRunReports` executes up to 5 `RunReportRequest` objects in a single API call. Use it when you need multiple reports to avoid the latency and quota overhead of sequential calls.
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.data_v1beta.types import BatchRunReportsRequest
+
+def run_batch_reports():
+    client = BetaAnalyticsDataClient()
+
+    request = BatchRunReportsRequest(
+        property=f"properties/{PROPERTY_ID}",
+        requests=[
+            RunReportRequest(
+                dimensions=[Dimension(name="date")],
+                metrics=[Metric(name="sessions"), Metric(name="activeUsers")],
+                date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
+            ),
+            RunReportRequest(
+                dimensions=[Dimension(name="sessionDefaultChannelGrouping")],
+                metrics=[Metric(name="sessions"), Metric(name="conversions")],
+                date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
+            ),
+            RunReportRequest(
+                dimensions=[Dimension(name="deviceCategory")],
+                metrics=[Metric(name="sessions"), Metric(name="engagementRate")],
+                date_ranges=[DateRange(start_date="7daysAgo", end_date="yesterday")],
+            ),
+        ],
+    )
+
+    response = client.batch_run_reports(request)
+
+    for i, report in enumerate(response.reports):
+        print(f"\n--- Report {i + 1} ---")
+        for row in report.rows:
+            dims = [d.value for d in row.dimension_values]
+            metrics = [m.value for m in row.metric_values]
+            print(dims, metrics)
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function runBatchReports() {
+  const analyticsDataClient = new BetaAnalyticsDataClient();
+
+  const [response] = await analyticsDataClient.batchRunReports({
+    property: `properties/${PROPERTY_ID}`,
+    requests: [
+      {
+        dimensions: [{ name: 'date' }],
+        metrics: [{ name: 'sessions' }, { name: 'activeUsers' }],
+        dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+      },
+      {
+        dimensions: [{ name: 'sessionDefaultChannelGrouping' }],
+        metrics: [{ name: 'sessions' }, { name: 'conversions' }],
+        dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+      },
+      {
+        dimensions: [{ name: 'deviceCategory' }],
+        metrics: [{ name: 'sessions' }, { name: 'engagementRate' }],
+        dateRanges: [{ startDate: '7daysAgo', endDate: 'yesterday' }],
+      },
+    ],
+  });
+
+  response.reports.forEach((report, i) => {
+    console.log(`\n--- Report ${i + 1} ---`);
+    for (const row of report.rows) {
+      const dims = row.dimensionValues.map(v => v.value);
+      const metrics = row.metricValues.map(v => v.value);
+      console.log(dims, metrics);
+    }
+  });
+}
+```
+</TabItem>
+</Tabs>
+
+## runPivotReport — cross-tabulation
+
+Pivot reports produce crosstab output — for example, sessions by channel broken out by device category as columns.
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.data_v1beta.types import RunPivotReportRequest, Pivot
+
+def run_pivot_report():
+    client = BetaAnalyticsDataClient()
+
+    request = RunPivotReportRequest(
+        property=f"properties/{PROPERTY_ID}",
+        dimensions=[
+            Dimension(name="sessionDefaultChannelGrouping"),
+            Dimension(name="deviceCategory"),
+        ],
+        metrics=[
+            Metric(name="sessions"),
+            Metric(name="conversions"),
+        ],
+        date_ranges=[DateRange(start_date="28daysAgo", end_date="yesterday")],
+        pivots=[
+            # Rows: channel grouping, sorted by sessions descending
+            Pivot(
+                field_names=["sessionDefaultChannelGrouping"],
+                limit=10,
+                order_bys=[
+                    OrderBy(
+                        metric=OrderBy.MetricOrderBy(metric_name="sessions"),
+                        desc=True,
+                    )
+                ],
+            ),
+            # Columns: device category
+            Pivot(
+                field_names=["deviceCategory"],
+                limit=5,
+            ),
+        ],
+    )
+
+    response = client.run_pivot_report(request)
+
+    for header in response.pivot_headers:
+        for pdh in header.pivot_dimension_headers:
+            vals = [d.value for d in pdh.dimension_values]
+            print(f"Column header: {vals}")
+
+    for row in response.rows:
+        dims = [d.value for d in row.dimension_values]
+        metrics = [m.value for m in row.metric_values]
+        print(dims, metrics)
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function runPivotReport() {
+  const analyticsDataClient = new BetaAnalyticsDataClient();
+
+  const [response] = await analyticsDataClient.runPivotReport({
+    property: `properties/${PROPERTY_ID}`,
+    dimensions: [
+      { name: 'sessionDefaultChannelGrouping' },
+      { name: 'deviceCategory' },
+    ],
+    metrics: [{ name: 'sessions' }, { name: 'conversions' }],
+    dateRanges: [{ startDate: '28daysAgo', endDate: 'yesterday' }],
+    pivots: [
+      {
+        fieldNames: ['sessionDefaultChannelGrouping'],
+        limit: 10,
+        orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+      },
+      {
+        fieldNames: ['deviceCategory'],
+        limit: 5,
+      },
+    ],
+  });
+
+  for (const pivotHeader of response.pivotHeaders) {
+    for (const pdh of pivotHeader.pivotDimensionHeaders) {
+      const vals = pdh.dimensionValues.map(v => v.value);
+      console.log('Column header:', vals);
+    }
+  }
+
+  for (const row of response.rows) {
+    const dims = row.dimensionValues.map(v => v.value);
+    const metrics = row.metricValues.map(v => v.value);
+    console.log(dims, metrics);
+  }
+}
+```
+</TabItem>
+</Tabs>
+
+## runRealtimeReport — last 30 minutes
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.data_v1beta.types import RunRealtimeReportRequest
+
+def run_realtime_report():
+    client = BetaAnalyticsDataClient()
+
+    request = RunRealtimeReportRequest(
+        property=f"properties/{PROPERTY_ID}",
+        dimensions=[
+            Dimension(name="country"),
+            Dimension(name="deviceCategory"),
+            Dimension(name="unifiedScreenName"),
+        ],
+        metrics=[Metric(name="activeUsers")],
+    )
+
+    response = client.run_realtime_report(request)
+
+    total = sum(int(r.metric_values[0].value) for r in response.rows)
+    print(f"Active users right now: {total}\n")
+
+    for row in response.rows:
+        dims = " | ".join(d.value for d in row.dimension_values)
+        users = row.metric_values[0].value
+        print(f"{dims}: {users}")
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function runRealtimeReport() {
+  const analyticsDataClient = new BetaAnalyticsDataClient();
+
+  const [response] = await analyticsDataClient.runRealtimeReport({
+    property: `properties/${PROPERTY_ID}`,
+    dimensions: [
+      { name: 'country' },
+      { name: 'deviceCategory' },
+      { name: 'unifiedScreenName' },
+    ],
+    metrics: [{ name: 'activeUsers' }],
+  });
+
+  const total = response.rows.reduce(
+    (sum, row) => sum + parseInt(row.metricValues[0].value, 10),
+    0
+  );
+  console.log(`Active users right now: ${total}\n`);
+
+  for (const row of response.rows) {
+    const dims = row.dimensionValues.map(v => v.value).join(' | ');
+    console.log(`${dims}: ${row.metricValues[0].value}`);
+  }
+}
+```
+</TabItem>
+</Tabs>
+
+## Discovering available dimensions and metrics
+
+Use `getMetadata` to retrieve all dimensions and metrics available for your property, including custom dimensions:
+
+<Tabs>
+<TabItem label="Python">
+```python
+from google.analytics.data_v1beta.types import GetMetadataRequest
+
+def get_metadata():
+    client = BetaAnalyticsDataClient()
+    metadata = client.get_metadata(
+        GetMetadataRequest(name=f"properties/{PROPERTY_ID}/metadata")
+    )
+    print(f"Available dimensions: {len(metadata.dimensions)}")
+    print(f"Available metrics: {len(metadata.metrics)}")
+
+    for dim in metadata.dimensions:
+        if dim.category == "CUSTOM":
+            print(f"  Custom dim: {dim.api_name} ({dim.ui_name})")
+    for metric in metadata.metrics:
+        if metric.category == "CUSTOM":
+            print(f"  Custom metric: {metric.api_name} ({metric.ui_name})")
+```
+</TabItem>
+<TabItem label="Node.js">
+```javascript
+async function getMetadata() {
+  const analyticsDataClient = new BetaAnalyticsDataClient();
+  const [metadata] = await analyticsDataClient.getMetadata({
+    name: `properties/${PROPERTY_ID}/metadata`,
+  });
+
+  console.log(`Available dimensions: ${metadata.dimensions.length}`);
+  console.log(`Available metrics: ${metadata.metrics.length}`);
+
+  metadata.dimensions
+    .filter(d => d.category === 'CUSTOM')
+    .forEach(d => console.log(`  Custom dim: ${d.apiName} (${d.uiName})`));
+
+  metadata.metrics
+    .filter(m => m.category === 'CUSTOM')
+    .forEach(m => console.log(`  Custom metric: ${m.apiName} (${m.uiName})`));
+}
+```
+</TabItem>
+</Tabs>
+
+## Handling sampling
+
+The Data API may sample responses for large date ranges or complex queries. Check and log sampling metadata:
+
+```python
+response = client.run_report(request)
+
+for sample in response.metadata.sampling_metadatas:
+    rate = sample.samples_count / sample.sampling_space_size * 100
+    print(f"Sampling rate: {rate:.1f}% ({sample.samples_count} / {sample.sampling_space_size})")
+```
+
+If sampling rate is below 100%, consider narrowing the date range, reducing dimensions, or using BigQuery for unsampled results.
+
+## Rate limits and error handling
+
+| Quota | Limit |
+|-------|-------|
+| Requests per day | 200,000 |
+| Requests per hour | 40,000 |
+| Concurrent requests | 10 |
+| Rows per request | 10,000 |
+
+Handle `ResourceExhausted` errors with exponential backoff:
+
+```python
+import time
+from google.api_core.exceptions import ResourceExhausted
+
+def run_report_with_retry(request, max_retries=5):
+    client = BetaAnalyticsDataClient()
+    for attempt in range(max_retries):
+        try:
+            return client.run_report(request)
+        except ResourceExhausted:
+            if attempt == max_retries - 1:
+                raise
+            wait_time = 2 ** attempt
+            print(f"Quota exceeded. Retrying in {wait_time}s...")
+            time.sleep(wait_time)
+```
+
+## Common mistakes
+
+### Using the measurement ID as the property ID
+
+The property ID is numeric only (e.g., `123456789`). The measurement ID (`G-XXXXXXXXXX`) identifies a data stream, not a property. Find the property ID in **GA4 → Admin → Property Settings**.
+
+### Not checking for sampling
+
+Responses with large date ranges may be sampled. Code that reads `response.rows` without checking `response.metadata.sampling_metadatas` processes potentially incomplete data. Always log sampling information for reports where accuracy matters.
+
+### Confusing activeUsers, totalUsers, and newUsers
+
+`activeUsers` matches the "Users" metric in the GA4 UI — it counts users with at least one engaged session. `totalUsers` counts every user who triggered any event. `newUsers` counts first-time users. For most reports, use `activeUsers` to match the UI.
+
+### Incompatible dimension and metric combinations
+
+Not all combinations are valid. The API returns an error for incompatible pairings. Use the [GA4 Dimensions and Metrics Explorer](https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema) to verify combinations before building production reports.
+
+### Skipping date range specification
+
+If no `date_ranges` are provided, the request will fail. Always specify at least one date range. For comparisons, provide two date ranges — the response will include a `dateRange` field on each row identifying which range the row belongs to.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Admin API"
+    description="Manage GA4 properties, data streams, and custom dimensions programmatically."
+    href="/ga4/apis/admin-api/"
+  />
+  <LinkCard
+    title="BigQuery Common Queries"
+    description="Ready-to-use SQL for unsampled analysis as an alternative to the Data API."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Custom Dimensions"
+    description="Register event parameters as dimensions so they appear in Data API responses."
+    href="/ga4/configuration/custom-dimensions/"
+  />
+</CardGrid>

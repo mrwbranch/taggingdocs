@@ -1,6 +1,235 @@
 ---
 title: "Event Deduplication"
-description: "Preventing duplicate conversions across client-side and server-side."
+description: "Preventing duplicate conversions across client-side and server-side — event_id generation, Meta CAPI deduplication, TikTok Events API, Google Ads gclid handling, and debugging duplicate indicators."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+When you run both a client-side browser pixel and a server-side Conversions API for Meta or TikTok, every conversion fires twice: once from the browser, once from the server. Without deduplication, the platform counts both as separate conversions, and your reported conversion numbers double overnight.
+
+Deduplication is the mechanism that tells the ad platform: "these two events describe the same conversion — count it once." It is not optional for dual-signal (browser + server) setups. It is also not automatic — you must implement it correctly on both the client side and the server side, using a shared identifier.
+
+## The mechanism: shared event_id
+
+Every ad platform that supports both browser events and server-side events uses the same deduplication mechanism: a shared `event_id` that is identical on both the browser-fired event and the server-fired event.
+
+The browser pixel sends the event_id in its payload. The server-side CAPI call includes the same event_id. The platform compares incoming events: if two events have the same `event_name` and `event_id` within the deduplication window (typically 48 hours for Meta), only one is counted.
+
+The shared event_id must originate from your site's JavaScript and travel through your sGTM container unchanged. The most reliable pattern:
+
+1. Generate a UUID on the purchase confirmation page
+2. Push it to the dataLayer alongside the purchase event
+3. The client-side pixel reads it from the dataLayer and sends it to the browser pixel
+4. The same value flows through the GA4 Measurement Protocol to sGTM
+5. sGTM reads it from the Event Model and passes it to the server-side CAPI call
+
+## Generating event IDs in the dataLayer
+
+```javascript
+// Generate UUID v4 in the browser
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    var r = Math.random() * 16 | 0;
+    var v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+// On purchase confirmation page
+dataLayer.push({
+  event: 'purchase',
+  event_id: generateUUID(),     // THE deduplication key
+  transaction_id: order.id,     // Also useful as a fallback
+  ecommerce: {
+    transaction_id: order.id,
+    value: order.total,
+    currency: 'USD',
+    items: order.items,
+  }
+});
+```
+
+The `event_id` is separate from `transaction_id`. `transaction_id` identifies the order. `event_id` identifies this specific event firing — it can include a timestamp component to handle cases where the same order triggers multiple events (e.g., a partial payment followed by a full payment).
+
+A common pattern: `event_id = transaction_id + '_' + timestamp_ms`
+
+```javascript
+const event_id = order.id + '_' + Date.now();
+```
+
+This ensures that even if the same order fires purchase events twice (page reload on the thank-you page), each firing has a unique `event_id` — and the duplicate is suppressed by the platform.
+
+## Meta CAPI deduplication
+
+Meta's deduplication window is 48 hours. Any two events with the same `event_name` and `event_id` within 48 hours are deduplicated.
+
+**Client-side pixel (via GTM):**
+
+In your Meta Pixel tag in client-side GTM, map `event_id` to the Meta pixel parameter:
+
+```javascript
+// In the fbq() call
+fbq('track', 'Purchase', {
+  value: '{{DL - ecommerce.value}}',
+  currency: '{{DL - ecommerce.currency}}',
+}, {
+  eventID: '{{DL - event_id}}'  // Maps to deduplication key
+});
+```
+
+**Server-side CAPI tag:**
+
+In your Meta CAPI tag in sGTM, map the same value:
+
+| Tag Parameter | Value |
+|---|---|
+| Event ID | `{{Event Data - event_id}}` |
+| Event Name | `Purchase` |
+| Event Source URL | `{{Event Data - page_location}}` |
+| Action Source | `website` |
+
+The `event_id` flows from the dataLayer → GA4 client → Event Model → Meta CAPI tag.
+
+<Aside type="caution">
+The most common deduplication failure: the client-side pixel sends `eventID: "abc123"` but the server-side CAPI call sends `event_id: undefined` because the value was not mapped correctly through the GA4 Measurement Protocol. Verify the value appears in the Event Model using sGTM Preview before declaring deduplication operational.
+</Aside>
+
+### Verifying Meta deduplication
+
+Meta's Test Events tool shows you what events are being deduplicated:
+
+<Steps>
+1. Go to Meta Events Manager → **Test Events**
+
+2. Enter your test event code in the sGTM Meta CAPI tag
+
+3. Trigger a purchase on your site (with client-side GTM and sGTM both active)
+
+4. In Test Events, you should see **two** events arrive with the same `event_id`
+
+5. Meta will show a "Deduplicated" indicator next to the duplicate event
+
+6. If you see the indicator, deduplication is working. If you see two separate events without the indicator, the `event_id` values differ between browser and server.
+</Steps>
+
+### Checking for duplicates in Meta Events Manager
+
+Navigate to **Events Manager** → **Overview** → select your pixel → look at the **Server Events** tab. The `Match Key Breakdown` section shows what percentage of server events matched to a browser event via `event_id`. A healthy implementation shows 80–95% deduplication for purchase events. Lower percentages indicate that browser events are being sent without `event_id`, or the values differ.
+
+## TikTok Events API deduplication
+
+TikTok uses the same mechanism: `event_id` on both the browser pixel and the server-side Events API call. The deduplication window is 7 days.
+
+**Client-side TikTok Pixel:**
+
+```javascript
+ttq.track('CompletePayment', {
+  content_id: '{{product_id}}',
+  value: '{{order_value}}',
+  currency: 'USD',
+}, {
+  event_id: '{{DL - event_id}}'
+});
+```
+
+**Server-side Events API tag:**
+
+Map `{{Event Data - event_id}}` to the `event_id` parameter in your TikTok Events API tag.
+
+The same verification approach applies: use TikTok's Test Events in the TikTok Events Manager to confirm both events arrive with matching IDs and the deduplication indicator fires.
+
+## Google Ads deduplication
+
+Google Ads Enhanced Conversions do not use `event_id` for deduplication in the same way Meta does. Instead, Google deduplicates using:
+
+1. **Transaction ID**: For purchase conversions, the `transaction_id` parameter. If Google receives two conversion events with the same `transaction_id` for the same conversion action, it deduplicates them. This works across client-side and server-side only if both send the same `transaction_id`.
+
+2. **GCLID + conversion time**: Google links conversions to ad clicks via the `gclid` parameter. If a conversion is sent twice with the same `gclid` and occurs within a short time window, it may be deduplicated automatically.
+
+For practical deduplication with Google Ads:
+
+- Always pass `transaction_id` in your purchase events
+- Ensure both client-side Google Ads Conversion Tag and server-side sGTM tag send the same `transaction_id`
+- Enable **Click ID** deduplication in your Google Ads Conversion action settings
+
+The server-side approach also benefits from the natural deduplication inherent in running only server-side Google Ads (not both browser and server simultaneously). Many practitioners disable the client-side Google Ads Conversion tag and run exclusively through sGTM, eliminating the duplication problem entirely.
+
+## Handling the timing problem
+
+The most common deduplication failure is a timing mismatch: the browser pixel fires immediately when the purchase event enters the dataLayer, and the sGTM call fires a second later via the GA4 Measurement Protocol. If the `event_id` is generated at the time each fires (rather than once before both fire), the two values will differ.
+
+Correct approach:
+1. Generate `event_id` once, before both pixels fire
+2. Store it in the dataLayer push
+3. Both the browser pixel tag and the GA4 tag read from `{{DL - event_id}}`
+
+Incorrect approach:
+```javascript
+// DON'T generate event_id inside the tag templates
+// This fires at tag execution time, not at the event push time
+```
+
+If you generate the `event_id` inside a GTM variable (JavaScript variable type), it will generate a new UUID every time the variable is evaluated — which means the browser pixel and the sGTM call will have different IDs. Always generate in the dataLayer push, before any tags fire.
+
+## Reading event_id in sGTM
+
+In sGTM, `event_id` comes through the Event Model if the client-side GA4 tag includes it as a custom parameter. Verify this:
+
+<Steps>
+1. In your client-side GA4 configuration tag, add `event_id` as an **Additional Event Parameter** with value `{{DL - event_id}}`
+
+2. Alternatively, add it in each individual GA4 event tag where deduplication matters (purchase, lead, etc.)
+
+3. In sGTM Preview, check the Event Model for your purchase event. You should see `event_id` in the Event parameters section.
+
+4. If it is not there, the parameter is not being forwarded from client-side GTM to sGTM. Go back to step 1.
+</Steps>
+
+In your sGTM Meta CAPI tag, read it as `{{Event Data - event_id}}`. In your TikTok Events API tag, same variable.
+
+## Diagnosing duplicate conversions
+
+If you suspect deduplication is not working, check these indicators:
+
+**Conversion volume doubles immediately after enabling sGTM**: You added the server-side CAPI call but did not implement deduplication. All purchases are now counted twice.
+
+**Meta Events Manager shows `event_id` match rate under 50%**: Either the browser pixel is not sending `event_id`, or the server-side events have a different value.
+
+**TikTok events show no deduplication**: Check whether your browser pixel `event_id` parameter name matches exactly — TikTok is case-sensitive.
+
+**GA4 shows inflated conversion counts after adding GA4 server tag**: This is expected if both the browser-side GA4 tag and the GA4 server tag are both firing to the same GA4 property. Resolve by disabling the browser-side GA4 tag and routing all hits through sGTM.
+
+## Common mistakes
+
+**Not generating event_id before the dataLayer push.** The UUID must be in the dataLayer object. Any generation that happens after the event fires (inside a variable template or tag template) produces different values on each evaluation.
+
+**Using transaction_id as event_id.** A `transaction_id` identifies an order; it may not be unique per event firing. If a user reloads the purchase confirmation page, the same `transaction_id` fires again. Using `event_id = transaction_id + '_' + timestamp` prevents this.
+
+**Only implementing deduplication for purchase events.** Meta and TikTok deduplicate all event types, not just purchases. If you send both browser and server events for `ViewContent`, `AddToCart`, and `InitiateCheckout`, those need deduplication too. Implement `event_id` on all events where you run dual-signal.
+
+**Assuming platform deduplication is retroactive.** Deduplication only works within the platform's lookback window (48 hours for Meta, 7 days for TikTok). Events sent before you implemented event_id matching that are still within the window cannot be retroactively deduplicated.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Facebook Conversions API"
+    description="Meta CAPI setup, event mapping, and the deduplication configuration specific to Meta."
+    href="/server-side/tags/facebook-capi/"
+  />
+  <LinkCard
+    title="TikTok Events API"
+    description="TikTok server-side events, ttclid parameter, and deduplication with the browser pixel."
+    href="/server-side/tags/tiktok-events-api/"
+  />
+  <LinkCard
+    title="Google Ads Conversions"
+    description="Server-side Google Ads conversion tracking and transaction ID deduplication."
+    href="/server-side/tags/google-ads-conversions/"
+  />
+  <LinkCard
+    title="GA4 Web Client"
+    description="How custom parameters flow from the browser through the GA4 client to the Event Model."
+    href="/server-side/clients/ga4-web-client/"
+  />
+</CardGrid>
