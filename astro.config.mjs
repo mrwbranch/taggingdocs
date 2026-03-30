@@ -81,12 +81,38 @@ export default defineConfig({
             { label: 'Reporting', collapsed: true, autogenerate: { directory: 'ga4/reporting' } },
             { label: 'BigQuery', collapsed: true, autogenerate: { directory: 'ga4/bigquery' } },
             { label: 'Troubleshooting', collapsed: true, autogenerate: { directory: 'ga4/troubleshooting' } },
+            { label: 'APIs', collapsed: true, autogenerate: { directory: 'ga4/apis' } },
           ],
         },
         {
           label: 'Consent & Privacy',
           collapsed: true,
           autogenerate: { directory: 'consent' },
+        },
+        {
+          label: 'GTM Internals',
+          collapsed: true,
+          autogenerate: { directory: 'internals' },
+        },
+        {
+          label: 'Custom Templates',
+          collapsed: true,
+          autogenerate: { directory: 'templates' },
+        },
+        {
+          label: 'Security & Governance',
+          collapsed: true,
+          autogenerate: { directory: 'security' },
+        },
+        {
+          label: 'Browser & Privacy',
+          collapsed: true,
+          autogenerate: { directory: 'privacy' },
+        },
+        {
+          label: 'Ad Platforms',
+          collapsed: true,
+          autogenerate: { directory: 'integrations' },
         },
         {
           label: 'Recipes',
