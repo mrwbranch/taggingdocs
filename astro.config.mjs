@@ -28,6 +28,15 @@ export default defineConfig({
       },
       sidebar: [
         {
+          label: 'Tools',
+          items: [
+            { label: 'All Tools', link: '/tools/' },
+            { label: 'DataLayer Builder', link: '/tools/datalayer-builder/' },
+            { label: 'BigQuery Generator', link: '/tools/bigquery-generator/' },
+            { label: 'Regex Tester', link: '/tools/regex-tester/' },
+          ],
+        },
+        {
           label: 'Foundations',
           collapsed: true,
           autogenerate: { directory: 'foundations' },
