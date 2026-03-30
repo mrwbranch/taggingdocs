@@ -1,0 +1,37 @@
+---
+interface Props {
+  leftTitle: string;
+  rightTitle: string;
+  leftType?: 'good' | 'bad' | 'neutral';
+  rightType?: 'good' | 'bad' | 'neutral';
+}
+
+const { leftTitle, rightTitle, leftType = 'neutral', rightType = 'neutral' } = Astro.props;
+
+const colors = {
+  good: 'border-green-700/50 bg-green-950/20',
+  bad: 'border-red-700/50 bg-red-950/20',
+  neutral: 'border-slate-700 bg-slate-800/30',
+};
+
+const labelColors = {
+  good: 'text-green-400',
+  bad: 'text-red-400',
+  neutral: 'text-slate-300',
+};
+---
+
+<div class="not-content my-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+  <div class:list={['rounded-lg border p-4', colors[leftType]]}>
+    <h4 class:list={['text-sm font-semibold uppercase tracking-wider m-0 mb-3', labelColors[leftType]]}>{leftTitle}</h4>
+    <div class="comparison-content text-sm">
+      <slot name="left" />
+    </div>
+  </div>
+  <div class:list={['rounded-lg border p-4', colors[rightType]]}>
+    <h4 class:list={['text-sm font-semibold uppercase tracking-wider m-0 mb-3', labelColors[rightType]]}>{rightTitle}</h4>
+    <div class="comparison-content text-sm">
+      <slot name="right" />
+    </div>
+  </div>
+</div>

@@ -1,0 +1,705 @@
+---
+title: "DataLayer Deep Dive"
+description: "Complete technical understanding of the dataLayer — the message bus, push mechanism, merge behavior, and best practices."
+sidebar:
+  badge:
+    text: "Intermediate"
+    variant: "note"
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+import EventSchema from '../../../components/EventSchema.astro';
+
+The dataLayer is the most important concept in Google Tag Manager, and the most misunderstood. People use it every day without knowing what it actually is, how GTM processes it, or why their ecommerce data keeps disappearing between pushes.
+
+This article gives you the complete technical picture. By the end, you will understand the dataLayer well enough to debug any issue you encounter — and more importantly, to design implementations that do not produce issues in the first place.
+
+<Aside type="tip">
+If you have not yet read [How GTM Works](/foundations/how-gtm-works/), start there. This article builds on the container lifecycle and execution model covered in that guide.
+</Aside>
+
+## What the dataLayer actually is
+
+The `dataLayer` is a JavaScript array attached to the `window` object. That is it. There is no magic, no framework, no hidden API. It is `window.dataLayer = []` — a plain array that serves as a **message bus** between your website and Google Tag Manager.
+
+```javascript
+// This is all the dataLayer is at its core
+window.dataLayer = window.dataLayer || [];
+```
+
+The name "dataLayer" is a convention, not a requirement. You can rename it in the GTM snippet (the `l` parameter), though there is almost never a reason to. What matters is the pattern: your website pushes structured data objects into an array, and GTM reads them.
+
+Think of it as a one-way communication channel. Your website is the publisher. GTM is the subscriber. The dataLayer is the message queue sitting between them.
+
+<Aside type="note">
+The dataLayer is **not** a Google invention. The concept of a data layer — a structured abstraction between the presentation layer and analytics tools — predates GTM. Google just gave it a specific implementation. The W3C even published a [Customer Experience Digital Data Layer](https://www.w3.org/2013/12/ceddl-201312.pdf) specification in 2013. GTM's version is simpler and more pragmatic, but the philosophy is the same.
+</Aside>
+
+## Why push, not assignment
+
+New practitioners sometimes try to set dataLayer values directly:
+
+```javascript
+// ❌ Never do this
+window.dataLayer = [{ event: 'page_view', page_type: 'product' }];
+```
+
+This destroys every previous entry in the array. If any other script, GTM tag, or inline snippet already pushed data, it is gone. If GTM already loaded and replaced the `push` method with its custom handler, you just blew that away too — GTM is now deaf to all future pushes.
+
+The correct approach is always `push`:
+
+```javascript
+// ✅ Always use push
+window.dataLayer.push({ event: 'page_view', page_type: 'product' });
+```
+
+`push` appends to the array without touching existing entries. After GTM loads, it calls GTM's custom handler function, which processes the data immediately. This is the fundamental contract: **you push, GTM listens, nobody reassigns**.
+
+<Comparison leftTitle="Assignment (breaks everything)" rightTitle="Push (the correct way)" leftType="bad" rightType="good">
+  <Fragment slot="left">
+    ```javascript
+    // Overwrites entire array
+    window.dataLayer = [{ event: 'purchase' }];
+
+    // Consequences:
+    // - All previous data lost
+    // - GTM's custom push handler destroyed
+    // - GTM stops receiving future pushes
+    // - Silent failure — no error thrown
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```javascript
+    // Appends to existing array
+    window.dataLayer.push({ event: 'purchase' });
+
+    // What happens:
+    // - Previous data preserved
+    // - GTM handler processes immediately
+    // - All future pushes continue working
+    // - GTM evaluates triggers for this event
+    ```
+  </Fragment>
+</Comparison>
+
+## The dataLayer before GTM loads: the queue pattern
+
+Here is a scenario that confuses people: your inline script pushes an event to the dataLayer *before* the GTM container JavaScript has downloaded. Does the event get lost?
+
+No. This is the queue pattern, and it is the entire reason the dataLayer is an array.
+
+<Steps>
+1. **Your page starts loading.** The GTM snippet runs inline and initializes `window.dataLayer` as an empty array (or preserves an existing one).
+
+2. **Your code pushes data.** Before the container JS arrives, `dataLayer.push()` is just `Array.prototype.push`. Objects accumulate in the array like items in a queue.
+
+3. **The GTM container downloads and executes.** GTM's runtime initializes and immediately **replays the entire queue** — processing every object in the array, in order, as if they had been pushed in real time.
+
+4. **GTM replaces the push method.** From this point forward, `dataLayer.push()` calls GTM's custom handler directly. No more queuing.
+</Steps>
+
+This is why you can safely push events in inline `<script>` tags that appear before the GTM container loads. It is not a hack — it is the intended design. Google specifically built the dataLayer as a queue-then-replay system so that your code never needs to wait for GTM.
+
+```javascript
+<!-- This is perfectly safe, even in the <head> before GTM loads -->
+<script>
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'user_data_ready',
+    user_id: 'abc123',
+    user_type: 'premium'
+  });
+</script>
+```
+
+<Aside type="caution">
+Always include the `window.dataLayer = window.dataLayer || []` guard before your first push. If your script runs before the GTM snippet, `window.dataLayer` does not exist yet. Without the guard, you get a ReferenceError. With the guard, you create the array yourself, and the GTM snippet will preserve it when it runs.
+</Aside>
+
+## How GTM processes the dataLayer: the Abstract Data Model
+
+When GTM processes a `dataLayer.push()`, it does not just read the object and throw it away. It **merges** the pushed object into an internal state called the Abstract Data Model (sometimes called the "data model" or "internal state"). This is where the real complexity lives.
+
+The Abstract Data Model is a single JavaScript object that accumulates state across all pushes. Every push is recursively merged into this model. When a GTM variable reads from the dataLayer (using a Data Layer Variable), it reads from this merged model — not from the raw array.
+
+```javascript
+// Push 1
+dataLayer.push({ user_type: 'premium', country: 'SE' });
+
+// Push 2
+dataLayer.push({ page_type: 'product' });
+
+// Push 3
+dataLayer.push({ event: 'page_view' });
+```
+
+After these three pushes, GTM's internal data model looks like:
+
+```javascript
+{
+  user_type: 'premium',
+  country: 'SE',
+  page_type: 'product',
+  event: 'page_view'
+}
+```
+
+Every property from every push is available. When the `page_view` trigger fires, a Data Layer Variable for `user_type` resolves to `'premium'` even though it was pushed in a separate call. Properties **persist** until they are explicitly overwritten.
+
+## Object persistence: the "sticky" behavior
+
+This persistence is both the dataLayer's greatest strength and its most dangerous trap. Once a value is pushed to the dataLayer, it stays in the Abstract Data Model indefinitely — until another push overwrites that specific key.
+
+```javascript
+// Step 1: Push user data
+dataLayer.push({ user_type: 'premium' });
+
+// Step 2: Push a page view event
+dataLayer.push({ event: 'page_view', page_type: 'homepage' });
+
+// Step 3: Push another page view event (SPA navigation)
+dataLayer.push({ event: 'page_view', page_type: 'product' });
+```
+
+After step 3, `user_type` is still `'premium'` in the data model. It was never overwritten. A Data Layer Variable for `user_type` returns `'premium'` during the second `page_view` event — which may be exactly what you want, or a source of stale data leaking across events.
+
+```javascript
+// What the Abstract Data Model looks like after each push:
+
+// After push 1: { user_type: 'premium' }
+// After push 2: { user_type: 'premium', event: 'page_view', page_type: 'homepage' }
+// After push 3: { user_type: 'premium', event: 'page_view', page_type: 'product' }
+//                ↑ still here!                                ↑ overwritten
+```
+
+<Aside type="danger">
+On single-page applications, the dataLayer accumulates state across the entire session because the page never fully reloads. A `user_type` pushed on the first page view is still in the data model 50 virtual page views later. If your tracking depends on "fresh" data per page, you must explicitly clear or overwrite stale values.
+</Aside>
+
+## Nested objects and the merge behavior
+
+The Abstract Data Model uses **recursive merge** for nested objects. This means nested objects are merged property by property, not replaced wholesale. This is different from how plain JavaScript `Object.assign()` works.
+
+```javascript
+// Push 1: nested object
+dataLayer.push({
+  user: {
+    id: 'abc123',
+    type: 'premium',
+    preferences: { theme: 'dark', language: 'en' }
+  }
+});
+
+// Push 2: update one nested property
+dataLayer.push({
+  user: {
+    preferences: { language: 'sv' }
+  }
+});
+```
+
+After push 2, the data model's `user` object is:
+
+```javascript
+{
+  user: {
+    id: 'abc123',          // preserved from push 1
+    type: 'premium',       // preserved from push 1
+    preferences: {
+      theme: 'dark',       // preserved from push 1
+      language: 'sv'       // updated by push 2
+    }
+  }
+}
+```
+
+This recursive merge is powerful — you can update a single deeply nested property without re-pushing the entire object tree. But there is a massive gotcha.
+
+### The array gotcha
+
+Arrays inside objects are **not** merged. They are **replaced**. The recursive merge only applies to plain objects (`{}`). Arrays (`[]`) are treated as atomic values.
+
+```javascript
+// Push 1
+dataLayer.push({
+  ecommerce: {
+    currency: 'USD',
+    items: [
+      { item_name: 'Shirt', price: 29 },
+      { item_name: 'Pants', price: 49 }
+    ]
+  }
+});
+
+// Push 2: you think you're adding an item
+dataLayer.push({
+  ecommerce: {
+    items: [
+      { item_name: 'Socks', price: 9 }
+    ]
+  }
+});
+```
+
+After push 2, `ecommerce.items` contains **only** the Socks. The Shirt and Pants are gone. The `currency` property survives (because the `ecommerce` object is recursively merged), but the `items` array is replaced entirely.
+
+```javascript
+// Actual result after push 2:
+{
+  ecommerce: {
+    currency: 'USD',       // survived — objects merge recursively
+    items: [               // REPLACED — arrays don't merge
+      { item_name: 'Socks', price: 9 }
+    ]
+  }
+}
+```
+
+This is the single most common cause of broken ecommerce tracking. You cannot append to arrays through the dataLayer merge. You must push the complete array every time.
+
+## The `event` key: why it is special
+
+Every key you push to the dataLayer becomes part of the Abstract Data Model. But the `event` key has a unique role: **it is the only key that triggers GTM to evaluate triggers**.
+
+When GTM processes a push that contains an `event` key, it:
+
+1. Merges all properties into the data model (as usual)
+2. Looks at the `event` value
+3. Evaluates every Custom Event trigger in the container to see if any match
+4. Fires tags whose trigger conditions are satisfied
+
+A push without an `event` key updates the data model silently. No triggers fire. No tags execute. The data is available for future events, but nothing happens immediately.
+
+```javascript
+// This updates the data model but triggers NOTHING in GTM
+dataLayer.push({ user_type: 'premium', country: 'SE' });
+
+// This updates the data model AND triggers the 'page_view' event
+dataLayer.push({ event: 'page_view', page_type: 'product' });
+```
+
+<Aside type="tip">
+Use eventless pushes strategically. Push user data, page metadata, and other context *before* pushing the event that needs that data. This ensures all values are in the data model when the trigger fires and tags execute.
+</Aside>
+
+<EventSchema
+  event="custom_event"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'The event name. Must match a Custom Event trigger in GTM.' },
+    { name: '[any key]', type: 'any', required: false, description: 'Additional data merged into the Abstract Data Model. Available via Data Layer Variables.' }
+  ]}
+/>
+
+## Built-in events: gtm.js, gtm.dom, gtm.load
+
+GTM pushes three events to the dataLayer automatically during the page lifecycle. You never push these yourself — they are internal to GTM.
+
+| Event | Fires when | GTM trigger name |
+|-------|-----------|-----------------|
+| `gtm.js` | The GTM snippet executes inline | **Consent Initialization**, **Initialization**, **Page View** (earliest) |
+| `gtm.dom` | The DOM is fully parsed (`DOMContentLoaded`) | **DOM Ready** |
+| `gtm.load` | All page resources have loaded (`window.onload`) | **Window Loaded** |
+
+The timing of these events matters for tag execution:
+
+- **`gtm.js`** fires almost immediately — this is when Consent Initialization and Initialization triggers activate. Use this for consent management platforms, early data collection, and anything that must run before user interaction.
+- **`gtm.dom`** fires when the HTML is fully parsed but images and stylesheets may still be loading. Use this when your tag needs to read or modify DOM elements.
+- **`gtm.load`** fires last, after all resources (images, scripts, iframes) have loaded. Use this for tags that depend on the complete page state, or for lower-priority tags you want to defer.
+
+```javascript
+// What GTM pushes internally (you don't write this yourself):
+dataLayer.push({ 'gtm.start': new Date().getTime(), event: 'gtm.js' });
+// ... later, after DOMContentLoaded ...
+dataLayer.push({ event: 'gtm.dom' });
+// ... later, after window.onload ...
+dataLayer.push({ event: 'gtm.load' });
+```
+
+<Aside type="note">
+In the GTM trigger selector, these events appear as **Page View**, **DOM Ready**, and **Window Loaded** — not by their internal `gtm.*` names. The naming is one of GTM's many small UX inconsistencies.
+</Aside>
+
+## How to properly clear ecommerce data
+
+This is the section that will save you hours of debugging. The GA4 ecommerce data model uses a nested `ecommerce` object in the dataLayer. Because of the recursive merge behavior and the sticky data model, ecommerce data from a previous push **will bleed into your next push** unless you explicitly clear it.
+
+The pattern is simple: push `ecommerce: null` before every ecommerce event.
+
+```javascript
+// ✅ The correct ecommerce push pattern — ALWAYS clear first
+dataLayer.push({ ecommerce: null });  // Clear previous ecommerce data
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    value: 29.00,
+    items: [{
+      item_id: 'SKU-001',
+      item_name: 'Classic T-Shirt',
+      item_category: 'Apparel',
+      price: 29.00,
+      quantity: 1
+    }]
+  }
+});
+```
+
+Why `null` specifically? Because when GTM encounters `null` during the recursive merge, it replaces the entire key with `null`, effectively deleting the previous `ecommerce` object from the data model. The next push then sets a fresh `ecommerce` object with no remnants from before.
+
+<Comparison leftTitle="Without clearing (broken)" rightTitle="With clearing (correct)" leftType="bad" rightType="good">
+  <Fragment slot="left">
+    ```javascript
+    // Page 1: Product detail page
+    dataLayer.push({
+      event: 'view_item',
+      ecommerce: {
+        currency: 'USD',
+        value: 29.00,
+        items: [{ item_name: 'Shirt' }]
+      }
+    });
+
+    // Page 2: Category page (SPA navigation)
+    dataLayer.push({
+      event: 'view_item_list',
+      ecommerce: {
+        item_list_name: 'Summer Collection',
+        items: [{ item_name: 'Hat' }]
+      }
+    });
+
+    // ❌ Result: currency: 'USD' and value: 29.00
+    // leak into view_item_list from the
+    // previous push. Phantom data in your reports.
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```javascript
+    // Page 1: Product detail page
+    dataLayer.push({ ecommerce: null });
+    dataLayer.push({
+      event: 'view_item',
+      ecommerce: {
+        currency: 'USD',
+        value: 29.00,
+        items: [{ item_name: 'Shirt' }]
+      }
+    });
+
+    // Page 2: Category page (SPA navigation)
+    dataLayer.push({ ecommerce: null });
+    dataLayer.push({
+      event: 'view_item_list',
+      ecommerce: {
+        item_list_name: 'Summer Collection',
+        items: [{ item_name: 'Hat' }]
+      }
+    });
+
+    // ✅ Clean data. No leakage between events.
+    ```
+  </Fragment>
+</Comparison>
+
+<Aside type="danger">
+This is not optional. Google's own documentation says to clear ecommerce before every push, but many implementations skip it. The result is corrupted data that is extremely difficult to diagnose — revenue from one event leaking into another, items from a previous page appearing in the wrong list, currency codes persisting where they should not. Always clear. No exceptions.
+</Aside>
+
+## DataLayer vs. DOM scraping
+
+Some implementations skip the dataLayer entirely and read data directly from the DOM — scraping product names from `<h1>` tags, prices from `.price-amount` elements, or user status from CSS classes. This is almost always wrong.
+
+<Comparison leftTitle="DOM scraping (fragile)" rightTitle="DataLayer push (reliable)" leftType="bad" rightType="good">
+  <Fragment slot="left">
+    ```javascript
+    // GTM Custom JavaScript Variable
+    function() {
+      var el = document.querySelector('.product-title');
+      return el ? el.textContent.trim() : undefined;
+    }
+
+    // Problems:
+    // - Breaks if class name changes
+    // - Breaks if DOM structure changes
+    // - Breaks during page transitions
+    // - Returns wrong value if multiple matches
+    // - Race condition: DOM may not be ready
+    // - Couples analytics to visual layout
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```javascript
+    // Developer pushes structured data
+    dataLayer.push({
+      event: 'view_item',
+      ecommerce: {
+        items: [{
+          item_name: 'Classic T-Shirt',
+          item_id: 'SKU-001',
+          price: 29.00
+        }]
+      }
+    });
+
+    // Benefits:
+    // - Decoupled from DOM/CSS
+    // - Survives redesigns
+    // - Typed, structured data
+    // - Available before DOM render
+    // - Single source of truth
+    ```
+  </Fragment>
+</Comparison>
+
+DOM scraping creates an invisible dependency between your analytics implementation and your front-end markup. When the design team changes a class name, renames a component, or restructures the page layout, your tracking breaks silently. No error, no warning — just data that stops appearing in your reports.
+
+The dataLayer eliminates this problem entirely. It is a **contract** between your website and your analytics. The developer agrees to push specific data in a specific structure. The analytics team agrees to read from that structure. Neither side depends on the other's implementation details. A complete redesign can ship without touching a single line of tracking code.
+
+<Aside type="note">
+There are rare cases where DOM scraping is acceptable — reading a canonical URL from a meta tag, for example, or extracting a value that only exists in the rendered HTML. But these should be exceptions, not the default approach. If you find yourself writing more than one or two DOM-scraping variables, your dataLayer implementation is incomplete.
+</Aside>
+
+## Reading the dataLayer state
+
+Sometimes you need to inspect the current state of the dataLayer for debugging or in Custom JavaScript Variables. There are two ways to read it, and they give different results.
+
+### Reading the raw array
+
+```javascript
+// Returns the raw array of all pushed objects
+console.log(window.dataLayer);
+// → [{gtm.start: 1711800000000, event: 'gtm.js'}, {user_type: 'premium'}, ...]
+```
+
+This shows you every object that was pushed, in order. Useful for debugging the sequence of pushes, but it does not show you the merged state.
+
+### Reading the Abstract Data Model
+
+GTM provides no public API to read the merged data model directly. But you can access it through the internal `google_tag_manager` object:
+
+```javascript
+// Access the merged data model (for debugging only)
+var containerId = 'GTM-XXXXXX'; // your container ID
+var dataModel = google_tag_manager[containerId].dataLayer.get('user_type');
+console.log(dataModel);
+// → 'premium'
+```
+
+Or to get all merged state at a specific key:
+
+```javascript
+// Get a nested value
+var items = google_tag_manager['GTM-XXXXXX'].dataLayer.get('ecommerce.items');
+```
+
+<Aside type="caution">
+The `google_tag_manager` object is undocumented and internal. Do not use it in production code. It is fine for debugging in the console, but building tag logic around it is fragile — Google can change the internal structure at any time.
+</Aside>
+
+## A TypeScript interface for the dataLayer
+
+If your site uses TypeScript, you can type the dataLayer to catch errors at compile time. Here is a practical starting point:
+
+```typescript
+// types/datalayer.d.ts
+
+interface DataLayerEcommerceItem {
+  item_id: string;
+  item_name: string;
+  item_category?: string;
+  item_variant?: string;
+  item_brand?: string;
+  price?: number;
+  quantity?: number;
+  index?: number;
+}
+
+interface DataLayerEcommerce {
+  currency?: string;
+  value?: number;
+  items?: DataLayerEcommerceItem[];
+  item_list_name?: string;
+  transaction_id?: string;
+  shipping?: number;
+  tax?: number;
+}
+
+type DataLayerEvent =
+  | { event: 'page_view'; page_type?: string; page_title?: string }
+  | { event: 'view_item'; ecommerce: DataLayerEcommerce }
+  | { event: 'add_to_cart'; ecommerce: DataLayerEcommerce }
+  | { event: 'purchase'; ecommerce: DataLayerEcommerce }
+  | { event: 'view_item_list'; ecommerce: DataLayerEcommerce }
+  | { event: string; [key: string]: unknown }
+  | { ecommerce: null }  // clearing pattern
+  | Record<string, unknown>;  // eventless push
+
+declare global {
+  interface Window {
+    dataLayer: DataLayerEvent[];
+  }
+}
+
+export {};
+```
+
+```typescript
+// Usage — TypeScript catches errors at compile time
+window.dataLayer = window.dataLayer || [];
+
+// ✅ Type-safe push
+window.dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    currency: 'USD',
+    transaction_id: 'T-12345',
+    value: 78.00,
+    items: [{
+      item_id: 'SKU-001',
+      item_name: 'Classic T-Shirt',
+      price: 29.00,
+      quantity: 1
+    }]
+  }
+});
+```
+
+This does not change runtime behavior, but it gives your development team autocomplete, documentation, and compile-time validation for every dataLayer push. Typos in event names, missing required fields, and wrong data types get caught before code ships.
+
+## Performance implications of large pushes
+
+The dataLayer is processed synchronously on the main thread. Every `dataLayer.push()` triggers GTM to merge the object into the data model and evaluate all triggers. For most pushes, this is negligible — a few microseconds. But there are scenarios where it matters:
+
+- **Large ecommerce arrays.** A `purchase` event with 200 items means a large object to merge and serialize. If GTM tags then read and transform this data, you can see 50-100ms of main thread blocking.
+- **Rapid-fire pushes.** Pushing 50 events in a loop (for example, one per product in a list) creates 50 merge-and-evaluate cycles. Batch them into a single push when possible.
+- **Deeply nested objects.** The recursive merge algorithm walks every level of nesting. Pathologically deep objects (10+ levels) slow the merge.
+
+Practical guidance:
+
+```javascript
+// ❌ Don't push one event per item in a product list
+products.forEach(product => {
+  dataLayer.push({ event: 'view_item', ecommerce: { items: [product] } });
+});
+
+// ✅ Push one event with all items
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'view_item_list',
+  ecommerce: {
+    item_list_name: 'Search Results',
+    items: products.map((product, index) => ({
+      item_id: product.id,
+      item_name: product.name,
+      price: product.price,
+      index: index
+    }))
+  }
+});
+```
+
+For most websites, dataLayer performance is never a concern. But if you are pushing large payloads on every scroll event or rapidly firing events during animations, you will feel it.
+
+## Common mistakes
+
+These are the patterns we see break implementations over and over.
+
+### 1. Pushing without the event key and wondering why nothing fires
+
+```javascript
+// ❌ No event key — GTM stores this data but fires nothing
+dataLayer.push({ page_type: 'product', product_id: 'SKU-001' });
+```
+
+**Fix:** Include an `event` key whenever you want GTM to act on the push.
+
+### 2. Reassigning the dataLayer
+
+```javascript
+// ❌ Destroys GTM's custom push handler
+window.dataLayer = [{ event: 'reset' }];
+```
+
+**Fix:** Always use `push`. Never reassign.
+
+### 3. Not clearing ecommerce between pushes
+
+Already covered in detail above, but it bears repeating: every ecommerce push must be preceded by `dataLayer.push({ ecommerce: null })`. No exceptions.
+
+### 4. Assuming arrays merge (they do not)
+
+```javascript
+// ❌ Trying to "add" an item to an existing ecommerce.items array
+dataLayer.push({ ecommerce: { items: [{ item_name: 'New Item' }] } });
+// The old items array is completely replaced
+```
+
+**Fix:** Always push the complete array with all items included.
+
+### 5. Pushing sensitive data to the dataLayer
+
+The dataLayer is a plain JavaScript array on `window`. Anyone can open the browser console and read every object ever pushed. Do not push passwords, full credit card numbers, personal health information, or any data you would not want exposed in a browser extension or third-party tag.
+
+```javascript
+// ❌ Never push sensitive data
+dataLayer.push({ event: 'login', password: 'hunter2', ssn: '123-45-6789' });
+
+// ✅ Push only what analytics needs
+dataLayer.push({ event: 'login', method: 'email' });
+```
+
+### 6. Relying on DOM Ready timing for dataLayer pushes
+
+```javascript
+// ❌ Fragile — may fire before or after GTM processes the event
+document.addEventListener('DOMContentLoaded', function() {
+  dataLayer.push({ event: 'custom_dom_ready' });
+});
+```
+
+GTM has its own `gtm.dom` event for DOM Ready. Your custom `DOMContentLoaded` listener may fire at a slightly different time depending on script execution order. Use GTM's built-in DOM Ready trigger instead, or push your data early and use a custom event name.
+
+### 7. Using the dataLayer as a general-purpose data store
+
+The dataLayer is a message bus, not a database. Do not read back from it in your application code. Do not use it to pass data between components. Do not build business logic that depends on the dataLayer's current state. It exists for one purpose: sending structured data from your website to GTM.
+
+## The dataLayer is a contract
+
+Here is the opinion that should shape every implementation decision you make: **the dataLayer is an API between your website and your analytics layer**.
+
+Like any API, it should be:
+
+- **Documented.** Every event name, every property, every expected value should be written down in a tracking specification.
+- **Versioned.** When you add new events or change the structure, coordinate the change across both sides.
+- **Validated.** Your development team should test that dataLayer pushes happen with the correct structure, just like they test API responses.
+- **Stable.** Changing event names or property structures without updating GTM breaks tracking. Treat it like a breaking API change.
+
+When you treat the dataLayer as a contract, everything gets easier. Developers know exactly what to push and when. Analytics practitioners know exactly what data is available and in what structure. Nobody is scraping the DOM. Nobody is guessing at property names. The tracking spec becomes the single source of truth, and both sides code against it.
+
+This is the difference between implementations that break every sprint and implementations that survive years of redesigns.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="How GTM Works"
+    description="The container lifecycle, execution model, and fundamental mechanics that make everything else possible."
+    href="/foundations/how-gtm-works/"
+  />
+  <LinkCard
+    title="Tags, Triggers & Variables"
+    description="Build the correct mental model of GTM's three core abstractions and how they connect."
+    href="/foundations/tags-triggers-variables/"
+  />
+  <LinkCard
+    title="GTM for Developers"
+    description="What developers specifically need to know about GTM — the dataLayer contract, performance implications, and integration patterns."
+    href="/foundations/gtm-for-developers/"
+  />
+  <LinkCard
+    title="GTM Account Structure"
+    description="How to organize accounts, containers, and workspaces for teams of any size."
+    href="/foundations/gtm-account-structure/"
+  />
+</CardGrid>

@@ -1,0 +1,31 @@
+---
+interface Props {
+  url: string;
+  title: string;
+}
+
+const { url, title } = Astro.props;
+
+let embedUrl = url;
+if (url.includes('youtube.com/watch')) {
+  const videoId = new URL(url).searchParams.get('v');
+  embedUrl = `https://www.youtube-nocookie.com/embed/${videoId}`;
+} else if (url.includes('youtu.be/')) {
+  const videoId = url.split('youtu.be/')[1]?.split('?')[0];
+  embedUrl = `https://www.youtube-nocookie.com/embed/${videoId}`;
+}
+---
+
+<div class="not-content my-6">
+  <div class="relative w-full rounded-lg overflow-hidden" style="padding-bottom: 56.25%;">
+    <iframe
+      src={embedUrl}
+      title={title}
+      class="absolute top-0 left-0 w-full h-full"
+      frameborder="0"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+      allowfullscreen
+      loading="lazy"
+    ></iframe>
+  </div>
+</div>

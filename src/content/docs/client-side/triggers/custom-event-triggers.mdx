@@ -1,0 +1,358 @@
+---
+title: "Custom Event Triggers"
+description: "The most powerful trigger type in GTM — fire tags based on dataLayer.push() events for complete control over your tracking."
+sidebar:
+  badge:
+    text: "Intermediate"
+    variant: "note"
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+If you only learn one trigger type in Google Tag Manager, make it this one.
+
+Custom event triggers let you fire tags based on `dataLayer.push()` calls from your own code. Unlike built-in triggers that react to generic browser events (page loads, clicks, scroll), custom event triggers respond to **your** events — the ones you define, name, and control. They are the bridge between your application logic and your tracking layer.
+
+Every serious GTM implementation uses custom events as the primary trigger mechanism. Built-in click and form triggers are fine for simple sites, but the moment your tracking requirements go beyond "track this button click," you need custom events.
+
+## How custom events work
+
+The mechanism is simple. When you push an object to the dataLayer with an `event` key, GTM creates an internal event:
+
+```javascript
+dataLayer.push({
+  event: 'form_submission',
+  form_id: 'newsletter_signup',
+  form_location: 'footer'
+});
+```
+
+GTM sees `event: 'form_submission'` and evaluates every trigger in your container that is listening for that event name. If a trigger matches, the associated tags fire. The additional data you include in the push (`form_id`, `form_location`) becomes available through Data Layer Variables.
+
+That is the entire model. You push, GTM listens, tags fire. No DOM selectors to break, no CSS classes to match, no timing issues with elements loading. Your code decides when something happened, and GTM responds.
+
+<Aside type="tip">
+Custom events are not just for "custom" scenarios. The entire GA4 ecommerce specification — `add_to_cart`, `begin_checkout`, `purchase` — relies on custom events. When you push `{ event: 'purchase', ecommerce: { ... } }`, that is a custom event trigger doing the work.
+</Aside>
+
+## Creating a custom event trigger
+
+<Steps>
+1. **Open GTM and go to Triggers.** Click "New" to create a new trigger.
+
+2. **Select "Custom Event" as the trigger type.** It is under the "Other" category in the trigger type chooser.
+
+3. **Enter the event name.** Type the exact event name your code pushes — for example, `form_submission`. This is case-sensitive by default.
+
+4. **Choose matching method.** By default, GTM uses exact match. You can enable "Use regex matching" for pattern-based matching.
+
+5. **Add conditions (optional).** Click "Some Custom Events" instead of "All Custom Events" to add filtering conditions. For example: fire only when `form_id` equals `newsletter_signup`.
+
+6. **Name the trigger.** Use a consistent convention like `CE - form_submission` (CE for Custom Event). This makes triggers easy to identify when you have dozens of them.
+
+7. **Save and attach to a tag.** The trigger is ready. Attach it to any tag that should fire when this event occurs.
+</Steps>
+
+## Event name matching
+
+### Exact match (default)
+
+The simplest and most common option. The trigger fires only when the event name matches exactly:
+
+| Push | Trigger Event Name | Fires? |
+|------|-------------------|--------|
+| `event: 'form_submission'` | `form_submission` | Yes |
+| `event: 'Form_Submission'` | `form_submission` | No |
+| `event: 'form_submission_complete'` | `form_submission` | No |
+
+### Regex matching
+
+Enable "Use regex matching" to match patterns instead of exact strings. This is useful when you have a family of related events:
+
+```
+// Regex: ^video_.*
+// Matches: video_play, video_pause, video_complete, video_progress
+```
+
+| Push | Trigger Regex | Fires? |
+|------|--------------|--------|
+| `event: 'video_play'` | `^video_.*` | Yes |
+| `event: 'video_complete'` | `^video_.*` | Yes |
+| `event: 'my_video_play'` | `^video_.*` | No |
+
+<Aside type="caution">
+Regex matching is powerful but can over-match if you are not careful. The pattern `form` (without anchors) would match `form_submission`, `transform_data`, and `platform_form_error`. Always use `^` and `$` anchors when you want precise control: `^form_submission$` matches only that exact string.
+</Aside>
+
+### Starts with / Contains patterns
+
+GTM does not have native "starts with" or "contains" options for the event name field, but you can achieve them with regex:
+
+```
+// Starts with: ^checkout_
+// Matches: checkout_start, checkout_shipping, checkout_payment
+
+// Contains: .*error.*
+// Matches: form_error, api_error_response, error_boundary
+
+// Ends with: .*_complete$
+// Matches: video_complete, form_complete, checkout_complete
+```
+
+## Passing data alongside events
+
+The real power of custom events is that you can include arbitrary data in the same push. This data becomes available through Data Layer Variables:
+
+```javascript
+dataLayer.push({
+  event: 'login_success',
+  login_method: 'google_oauth',
+  user_tier: 'premium',
+  is_new_user: false
+});
+```
+
+To use this data in your tags:
+
+1. Create a **Data Layer Variable** for each parameter (e.g., variable named `DLV - login_method` with Data Layer Variable Name `login_method`)
+2. Reference those variables in your tag configuration (e.g., as event parameters in a GA4 Event tag)
+
+The data does not need to be flat. You can push nested objects and access them with dot notation in your Data Layer Variables:
+
+```javascript
+dataLayer.push({
+  event: 'search_performed',
+  search: {
+    term: 'leather jacket',
+    results_count: 47,
+    filters_applied: ['category:outerwear', 'price:50-200']
+  }
+});
+
+// Data Layer Variable Name: search.term → "leather jacket"
+// Data Layer Variable Name: search.results_count → 47
+```
+
+## Using conditions for precision
+
+Sometimes the same event name fires in different contexts, and you need different tags to respond. Use trigger conditions to filter:
+
+**Example:** You push `form_submission` for every form on the site, but you want separate tags for the newsletter form and the contact form.
+
+```javascript
+// Newsletter form
+dataLayer.push({
+  event: 'form_submission',
+  form_id: 'newsletter_signup',
+  form_location: 'footer'
+});
+
+// Contact form
+dataLayer.push({
+  event: 'form_submission',
+  form_id: 'contact_form',
+  form_location: 'contact_page'
+});
+```
+
+Create two triggers, both listening for `form_submission`, but with different conditions:
+
+- **Trigger 1** (`CE - form_submission - Newsletter`): Event = `form_submission` AND `DLV - form_id` equals `newsletter_signup`
+- **Trigger 2** (`CE - form_submission - Contact`): Event = `form_submission` AND `DLV - form_id` equals `contact_form`
+
+This is cleaner than creating separate event names for every form. One event name, filtered by data — that is the pattern.
+
+## Practical examples
+
+### Form submission tracking
+
+```javascript
+document.querySelector('#signup-form').addEventListener('submit', function (e) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_id: 'signup',
+    form_name: 'Account Registration',
+    form_location: 'hero_section'
+  });
+});
+```
+
+<TagConfig
+  name="GA4 - Event - Form Submission"
+  type="Google Analytics: GA4 Event"
+  trigger="CE - form_submission"
+  variables={['DLV - form_id', 'DLV - form_name', 'DLV - form_location']}
+/>
+
+### Video engagement tracking
+
+```javascript
+// When the user plays a video
+function onVideoPlay(videoElement) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'video_play',
+    video_title: videoElement.dataset.title,
+    video_id: videoElement.dataset.videoId,
+    video_duration: Math.round(videoElement.duration),
+    video_provider: 'self_hosted'
+  });
+}
+```
+
+<TagConfig
+  name="GA4 - Event - Video Play"
+  type="Google Analytics: GA4 Event"
+  trigger="CE - video_play"
+  variables={['DLV - video_title', 'DLV - video_id', 'DLV - video_duration', 'DLV - video_provider']}
+/>
+
+### Tab interaction tracking
+
+```javascript
+document.querySelectorAll('[role="tab"]').forEach(function (tab) {
+  tab.addEventListener('click', function () {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'tab_switch',
+      tab_label: this.textContent.trim(),
+      tab_panel: this.getAttribute('aria-controls'),
+      tab_group: this.closest('[role="tablist"]').dataset.group
+    });
+  });
+});
+```
+
+<TagConfig
+  name="GA4 - Event - Tab Switch"
+  type="Google Analytics: GA4 Event"
+  trigger="CE - tab_switch"
+  variables={['DLV - tab_label', 'DLV - tab_panel', 'DLV - tab_group']}
+/>
+
+## When to use custom events vs built-in triggers
+
+<Aside type="tip">
+Use built-in triggers for generic browser behaviors you want to track universally (all page views, all outbound link clicks). Use custom events for anything specific to your application logic — user actions, business events, state changes, or any scenario where you need to control exactly when and what data fires.
+</Aside>
+
+The decision is straightforward:
+
+| Scenario | Use this |
+|----------|----------|
+| Track every page view | Built-in Page View trigger |
+| Track clicks on a specific CTA | Custom event (pushed by your click handler) |
+| Track all outbound links | Built-in Click trigger with URL condition |
+| Track form submissions with validation state | Custom event (pushed after validation passes) |
+| Track add-to-cart | Custom event (`add_to_cart` per GA4 spec) |
+| Track scroll depth at 25/50/75/100% | Built-in Scroll Depth trigger |
+| Track reading progress on articles | Custom event (calculated by your JS) |
+| Track login/signup | Custom event |
+| Track search queries with result counts | Custom event |
+
+The pattern: if you need data beyond what the browser natively provides, or you need to control the timing precisely, use a custom event.
+
+Built-in triggers are convenient for getting started, but they have limitations. A click trigger can tell you the element that was clicked and its attributes. It cannot tell you the product name from your React state, the user's subscription tier, or whether the form passed validation. Custom events can include all of that.
+
+## Common mistakes
+
+### Typos in event names
+
+This is the number one cause of "my tag isn't firing." You push `form_submision` (one 's') but your trigger listens for `form_submission` (two 's's). GTM does not warn you. The event just never matches.
+
+**Fix:** Define event names as constants in your codebase. Never use string literals directly in `dataLayer.push()` calls scattered across your code:
+
+```javascript
+// constants/analytics-events.js
+export const EVENTS = {
+  FORM_SUBMISSION: 'form_submission',
+  VIDEO_PLAY: 'video_play',
+  LOGIN_SUCCESS: 'login_success',
+  TAB_SWITCH: 'tab_switch',
+};
+```
+
+### Forgetting the event key
+
+```javascript
+// ❌ This pushes data but does NOT create a GTM event
+dataLayer.push({
+  form_id: 'newsletter',
+  form_location: 'footer'
+});
+
+// ✅ This creates a GTM event AND includes data
+dataLayer.push({
+  event: 'form_submission',
+  form_id: 'newsletter',
+  form_location: 'footer'
+});
+```
+
+Without the `event` key, GTM merges the data into its internal model but does not evaluate any triggers. Your data is technically in the dataLayer, but no tag will fire. This is by design — sometimes you want to set data without triggering anything. But if you expected a tag to fire, this is the culprit.
+
+### Case sensitivity
+
+GTM event names are case-sensitive. `form_submission`, `Form_Submission`, and `FORM_SUBMISSION` are three different events. Pick a convention (we recommend `snake_case` to match GA4's naming) and enforce it everywhere.
+
+```javascript
+// ❌ Inconsistent — these are three different events in GTM
+dataLayer.push({ event: 'addToCart' });
+dataLayer.push({ event: 'Add_To_Cart' });
+dataLayer.push({ event: 'add_to_cart' });
+
+// ✅ Consistent snake_case — matches GA4 conventions
+dataLayer.push({ event: 'add_to_cart' });
+```
+
+### Over-granular events
+
+Creating a separate event for every micro-interaction leads to trigger sprawl and an unmanageable container:
+
+```javascript
+// ❌ Too granular — you'll have 200 triggers
+dataLayer.push({ event: 'hero_cta_click' });
+dataLayer.push({ event: 'sidebar_cta_click' });
+dataLayer.push({ event: 'footer_cta_click' });
+
+// ✅ One event, differentiated by data
+dataLayer.push({
+  event: 'cta_click',
+  cta_location: 'hero',
+  cta_text: 'Get Started'
+});
+```
+
+Use data parameters to differentiate contexts, not separate event names. This keeps your trigger count manageable and lets you filter in your analytics tool instead of at the collection layer.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DataLayer Variables"
+    description="How to create variables that read data from your dataLayer pushes — the companion to custom event triggers."
+    href="/client-side/variables/datalayer-variables/"
+  />
+  <LinkCard
+    title="GA4 Event Tag"
+    description="Configure the GA4 Event tag that your custom event triggers will fire."
+    href="/client-side/tags/ga4-event-tag/"
+  />
+  <LinkCard
+    title="Ecommerce Tracking"
+    description="How GA4 ecommerce events use custom event triggers for the entire purchase funnel."
+    href="/client-side/tracking/ecommerce-tracking/"
+  />
+  <LinkCard
+    title="Form Tracking"
+    description="Detailed guide to tracking form submissions — when to use built-in form triggers vs custom events."
+    href="/client-side/tracking/form-tracking/"
+  />
+  <LinkCard
+    title="Trigger Types Overview"
+    description="A complete map of every trigger type in GTM and when to use each one."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+</CardGrid>

@@ -1,0 +1,33 @@
+---
+interface Props {
+  name: string;
+  type: string;
+  trigger: string;
+  variables?: string[];
+}
+
+const { name, type, trigger, variables = [] } = Astro.props;
+---
+
+<div class="not-content my-6 rounded-lg border border-slate-700 bg-slate-800/50 p-4">
+  <div class="flex items-center gap-2 mb-3">
+    <span class="text-xs font-semibold uppercase tracking-wider text-cyan-400">Tag Configuration</span>
+  </div>
+  <h4 class="text-lg font-semibold text-white m-0 mb-3">{name}</h4>
+  <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm m-0">
+    <dt class="font-medium text-slate-400">Type</dt>
+    <dd class="text-slate-200 m-0">{type}</dd>
+    <dt class="font-medium text-slate-400">Trigger</dt>
+    <dd class="text-slate-200 m-0">{trigger}</dd>
+    {variables.length > 0 && (
+      <>
+        <dt class="font-medium text-slate-400">Variables</dt>
+        <dd class="text-slate-200 m-0">
+          {variables.map((v) => (
+            <code class="text-xs bg-slate-700 px-1.5 py-0.5 rounded mr-1">{v}</code>
+          ))}
+        </dd>
+      </>
+    )}
+  </dl>
+</div>

@@ -14,4 +14,71 @@ hero:
       icon: external
 ---
 
-Welcome to TaggingDocs. Full content coming soon.
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import QuickStartCards from '../../components/QuickStartCards.astro';
+
+## Where do you want to start?
+
+<QuickStartCards />
+
+## Explore the docs
+
+<CardGrid>
+  <LinkCard
+    title="Foundations"
+    description="Core concepts — how GTM works, the dataLayer, tags/triggers/variables, and when not to use GTM."
+    href="/foundations/"
+  />
+  <LinkCard
+    title="Client-Side GTM"
+    description="Everything in the browser — container setup, triggers, variables, tags, tracking implementations, and debugging."
+    href="/client-side/"
+  />
+  <LinkCard
+    title="Server-Side GTM"
+    description="Move tracking server-side — architecture, setup guides, custom clients, and cost management."
+    href="/server-side/"
+  />
+  <LinkCard
+    title="DataLayer"
+    description="The contract between your site and analytics — event specs, ecommerce events, platform guides, and validation."
+    href="/datalayer/"
+  />
+  <LinkCard
+    title="GA4"
+    description="Google Analytics 4 — data model, configuration, reporting, BigQuery, and troubleshooting."
+    href="/ga4/"
+  />
+  <LinkCard
+    title="Consent & Privacy"
+    description="Privacy-compliant tracking — Consent Mode v2, CMP integration, and server-side consent."
+    href="/consent/"
+  />
+  <LinkCard
+    title="Recipes"
+    description="Copy-paste solutions — button clicks, form submissions, video tracking, cross-domain, and more."
+    href="/recipes/"
+  />
+  <LinkCard
+    title="Resources"
+    description="Checklists, templates, migration guides, and community tools."
+    href="/resources/"
+  />
+</CardGrid>
+
+## What makes TaggingDocs different
+
+<CardGrid>
+  <Card title="Opinionated">
+    We recommend the best approach, not every approach. When there are five ways to do something, we tell you which one works and why.
+  </Card>
+  <Card title="Practical">
+    Every page helps you do something. Real code examples, real configurations, real-world gotchas. No theory without application.
+  </Card>
+  <Card title="Complete">
+    From first container install to server-side GTM at scale. Covers what Google's docs skip — the gaps, the edge cases, the "how do I actually do this?"
+  </Card>
+  <Card title="For practitioners">
+    Written by people who've debugged dataLayer issues at 2am. We know what trips people up because we've been there.
+  </Card>
+</CardGrid>

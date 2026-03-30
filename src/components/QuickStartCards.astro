@@ -1,0 +1,43 @@
+---
+const cards = [
+  {
+    title: 'Setting up GTM for the first time',
+    description: 'Install your container, understand the basics, and fire your first tag.',
+    href: '/foundations/how-gtm-works/',
+    icon: '🚀',
+  },
+  {
+    title: 'Implementing ecommerce tracking',
+    description: 'Complete dataLayer specification for GA4 ecommerce events.',
+    href: '/datalayer/ecommerce/ecommerce-overview/',
+    icon: '🛒',
+  },
+  {
+    title: 'Migrating to server-side GTM',
+    description: 'Architecture, setup guides, and cost management for sGTM.',
+    href: '/server-side/',
+    icon: '🖥️',
+  },
+  {
+    title: 'Building a dataLayer specification',
+    description: 'Naming conventions, event design, and validation strategies.',
+    href: '/datalayer/',
+    icon: '📋',
+  },
+];
+---
+
+<div class="not-content grid grid-cols-1 sm:grid-cols-2 gap-4 my-8">
+  {cards.map((card) => (
+    <a
+      href={card.href}
+      class="group block rounded-lg border border-slate-700 bg-slate-800/50 p-5 no-underline hover:border-cyan-600/50 hover:bg-slate-800 transition-colors"
+    >
+      <span class="text-2xl mb-2 block">{card.icon}</span>
+      <h3 class="text-base font-semibold text-white m-0 mb-1 group-hover:text-cyan-400 transition-colors">
+        {card.title}
+      </h3>
+      <p class="text-sm text-slate-400 m-0">{card.description}</p>
+    </a>
+  ))}
+</div>

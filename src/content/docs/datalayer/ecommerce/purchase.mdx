@@ -1,0 +1,609 @@
+---
+title: "purchase"
+description: "Complete dataLayer specification for the GA4 purchase event — the most important ecommerce event to get right."
+sidebar:
+  badge:
+    text: "Intermediate"
+    variant: "note"
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+import TagConfig from '../../../../components/TagConfig.astro';
+import Comparison from '../../../../components/Comparison.astro';
+
+The `purchase` event is the single most important event in your entire GA4 ecommerce implementation. Every other ecommerce event — `view_item`, `add_to_cart`, `begin_checkout` — exists to give context to this one. If your purchase event is broken, duplicated, or missing data, your revenue reporting is wrong, your ROAS calculations are fiction, and every optimization decision you make based on that data is compromised.
+
+This is the event you triple-check.
+
+<Aside type="tip">
+The purchase event should fire exactly **once per transaction**, on the order confirmation page. Not on the payment processing page. Not on a redirect. On the page the user sees after the order is confirmed. If you are unsure when that is, ask your backend team which page renders only after a successful payment webhook.
+</Aside>
+
+## The complete dataLayer push
+
+Here is a production-ready `purchase` push with all standard parameters. Every real implementation should look like this — not an abbreviated version with one item and half the fields missing.
+
+```javascript
+// Always clear previous ecommerce data first
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: 'TXN-2024-98765',
+    value: 142.97,
+    tax: 28.59,
+    shipping: 5.99,
+    currency: 'USD',
+    coupon: 'SUMMER15',
+    items: [
+      {
+        item_id: 'SKU-001-BLK',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_category3: 'Jackets',
+        item_category4: 'Leather',
+        item_variant: 'Black / Large',
+        price: 89.99,
+        quantity: 1,
+        index: 0,
+        affiliation: 'Online Store',
+        coupon: 'SUMMER15',
+        discount: 13.50
+      },
+      {
+        item_id: 'SKU-047-WHT',
+        item_name: 'Cotton Crew T-Shirt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Tops',
+        item_category3: 'T-Shirts',
+        item_category4: 'Crew Neck',
+        item_variant: 'White / Medium',
+        price: 24.99,
+        quantity: 2,
+        index: 1,
+        affiliation: 'Online Store',
+        coupon: '',
+        discount: 0
+      },
+      {
+        item_id: 'SKU-112-TAN',
+        item_name: 'Woven Leather Belt',
+        item_brand: 'Heritage Co.',
+        item_category: 'Accessories',
+        item_category2: 'Belts',
+        item_category3: 'Leather Belts',
+        item_category4: 'Casual',
+        item_variant: 'Tan / 34',
+        price: 34.50,
+        quantity: 1,
+        index: 2,
+        affiliation: 'Partner Marketplace',
+        coupon: '',
+        discount: 0
+      }
+    ]
+  }
+});
+```
+
+<Aside type="caution">
+The `value` parameter should be the **total revenue** the customer paid — after discounts and coupons, but **before tax and shipping** in most implementations. However, GA4 does not prescribe this strictly. The important thing is that your `value` calculation is consistent across all ecommerce events and matches what you consider "revenue" in your business. Document your convention and stick to it.
+</Aside>
+
+## Why the ecommerce null clear matters
+
+This line is not optional:
+
+```javascript
+dataLayer.push({ ecommerce: null });
+```
+
+GTM's dataLayer uses a **shallow merge** model. If a previous event — say `begin_checkout` — pushed an `ecommerce` object, its data persists in GTM's internal state. Without clearing, your purchase event might inherit stale data from the checkout step, or worse, the checkout event's items could bleed into the purchase.
+
+On single-page applications this is especially dangerous because the dataLayer never resets between "page" navigations. Always clear before every ecommerce push.
+
+<Comparison leftTitle="Without clearing" rightTitle="With clearing" leftType="bad" rightType="good">
+  <Fragment slot="left">
+    ```javascript
+    // ❌ Previous ecommerce data persists
+    dataLayer.push({
+      event: 'purchase',
+      ecommerce: {
+        transaction_id: 'TXN-123',
+        value: 99.99,
+        currency: 'USD',
+        items: [{ item_id: 'SKU-001' }]
+      }
+    });
+    // Risk: stale fields from begin_checkout
+    // may contaminate this event
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```javascript
+    // ✅ Clean slate before pushing
+    dataLayer.push({ ecommerce: null });
+    dataLayer.push({
+      event: 'purchase',
+      ecommerce: {
+        transaction_id: 'TXN-123',
+        value: 99.99,
+        currency: 'USD',
+        items: [{ item_id: 'SKU-001' }]
+      }
+    });
+    // Clean — only this event's data exists
+    ```
+  </Fragment>
+</Comparison>
+
+## Event schema
+
+<EventSchema
+  event="purchase"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "purchase"' },
+    { name: 'ecommerce.transaction_id', type: 'string', required: true, description: 'Unique identifier for the transaction. Used for deduplication in GA4.' },
+    { name: 'ecommerce.value', type: 'number', required: true, description: 'Total monetary value of the transaction. Must be a number, not a string.' },
+    { name: 'ecommerce.currency', type: 'string', required: true, description: 'ISO 4217 currency code (e.g. "USD", "EUR", "GBP"). Required for any event with a value parameter.' },
+    { name: 'ecommerce.tax', type: 'number', required: false, description: 'Total tax amount for the transaction.' },
+    { name: 'ecommerce.shipping', type: 'number', required: false, description: 'Total shipping cost for the transaction.' },
+    { name: 'ecommerce.coupon', type: 'string', required: false, description: 'Order-level coupon code. Item-level coupons go in the items array.' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'Array of purchased items. Must contain at least one item.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'SKU or unique product identifier.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name. Either item_id or item_name is required — include both.' },
+    { name: 'items[].item_brand', type: 'string', required: false, description: 'Brand or manufacturer name.' },
+    { name: 'items[].item_category', type: 'string', required: false, description: 'Primary product category. Up to 5 levels (item_category through item_category5).' },
+    { name: 'items[].item_variant', type: 'string', required: false, description: 'Variant such as color, size, or style.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Unit price of the item. Must be a number, not a formatted string.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Number of units purchased. Defaults to 1 if omitted.' },
+    { name: 'items[].index', type: 'number', required: false, description: 'Position of the item in a list (0-based).' },
+    { name: 'items[].affiliation', type: 'string', required: false, description: 'Store or seller affiliation. Useful for marketplaces.' },
+    { name: 'items[].coupon', type: 'string', required: false, description: 'Item-level coupon code applied to this specific product.' },
+    { name: 'items[].discount', type: 'number', required: false, description: 'Monetary discount applied to the item.' },
+  ]}
+/>
+
+<Aside type="note">
+GA4 technically only requires `item_id` **or** `item_name` per item. In practice, always send both. Reports that group by `item_name` are useless without `item_id` for debugging, and vice versa.
+</Aside>
+
+## GTM configuration
+
+### Tag setup
+
+<TagConfig
+  name="GA4 - Event - Purchase"
+  type="Google Analytics: GA4 Event"
+  trigger="CE - purchase"
+  variables={[
+    'DLV - ecommerce.transaction_id',
+    'DLV - ecommerce.value',
+    'DLV - ecommerce.currency',
+    'DLV - ecommerce.tax',
+    'DLV - ecommerce.shipping',
+    'DLV - ecommerce.coupon',
+    'DLV - ecommerce.items'
+  ]}
+/>
+
+### Step-by-step GTM setup
+
+<Steps>
+1. **Create a Custom Event trigger.** Go to Triggers > New > Custom Event. Set the event name to `purchase`. Name it `CE - purchase`.
+
+2. **Create dataLayer variables.** You need a Data Layer Variable for each ecommerce parameter. Go to Variables > New > Data Layer Variable. Create variables for:
+   - `ecommerce.transaction_id` (name it `DLV - ecommerce.transaction_id`)
+   - `ecommerce.value` (name it `DLV - ecommerce.value`)
+   - `ecommerce.currency` (name it `DLV - ecommerce.currency`)
+   - `ecommerce.tax` (name it `DLV - ecommerce.tax`)
+   - `ecommerce.shipping` (name it `DLV - ecommerce.shipping`)
+   - `ecommerce.coupon` (name it `DLV - ecommerce.coupon`)
+   - `ecommerce.items` (name it `DLV - ecommerce.items`)
+
+3. **Create the GA4 Event tag.** Go to Tags > New > Google Analytics: GA4 Event.
+   - **Measurement ID**: Use your GA4 measurement ID constant variable (or your GA4 Configuration tag if using the older setup).
+   - **Event Name**: `purchase`
+   - **Event Parameters**: Map each parameter name to its corresponding Data Layer Variable. Add `transaction_id`, `value`, `currency`, `tax`, `shipping`, `coupon`, and `items`.
+
+4. **Enable ecommerce data.** In the tag settings under "More Settings", check **Send Ecommerce data** and select **Data Layer** as the source. This tells GTM to automatically read the `ecommerce.items` array from the dataLayer and send it as the items parameter.
+
+5. **Set the trigger.** Attach the `CE - purchase` trigger to the tag.
+
+6. **Test in Preview mode.** Navigate to a test order confirmation page, verify the event fires, and check that all parameters appear in the GA4 DebugView.
+</Steps>
+
+<Aside type="tip">
+When using the "Send Ecommerce data" checkbox on the GA4 Event tag, GTM automatically maps `ecommerce.items` to the `items` parameter. You do not need to manually add `items` as an event parameter when this checkbox is enabled. Adding it manually alongside the checkbox can cause duplicate or malformed item data.
+</Aside>
+
+## TypeScript type definition
+
+Use this type in your frontend code to enforce correct purchase event structure at compile time:
+
+```typescript
+interface EcommerceItem {
+  item_id: string;
+  item_name: string;
+  item_brand?: string;
+  item_category?: string;
+  item_category2?: string;
+  item_category3?: string;
+  item_category4?: string;
+  item_category5?: string;
+  item_variant?: string;
+  price: number;
+  quantity: number;
+  index?: number;
+  affiliation?: string;
+  coupon?: string;
+  discount?: number;
+  item_list_id?: string;
+  item_list_name?: string;
+}
+
+interface PurchaseEvent {
+  event: 'purchase';
+  ecommerce: {
+    transaction_id: string;
+    value: number;
+    currency: string;
+    tax?: number;
+    shipping?: number;
+    coupon?: string;
+    items: EcommerceItem[];
+  };
+}
+
+function pushPurchaseEvent(data: PurchaseEvent): void {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push(data);
+}
+```
+
+## Platform examples
+
+<Tabs>
+  <TabItem label="Vanilla JS">
+    ```javascript
+    // order-confirmation.js
+    // Assumes orderData is available from your backend (e.g., injected as JSON)
+    function trackPurchase(orderData) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ ecommerce: null });
+
+      window.dataLayer.push({
+        event: 'purchase',
+        ecommerce: {
+          transaction_id: orderData.orderId,
+          value: orderData.totalRevenue,
+          tax: orderData.taxAmount,
+          shipping: orderData.shippingCost,
+          currency: orderData.currency,
+          coupon: orderData.couponCode || '',
+          items: orderData.lineItems.map((item, index) => ({
+            item_id: item.sku,
+            item_name: item.name,
+            item_brand: item.brand,
+            item_category: item.category,
+            item_variant: item.variant,
+            price: item.unitPrice,
+            quantity: item.quantity,
+            index: index,
+            affiliation: item.seller || 'Online Store',
+            coupon: item.itemCoupon || '',
+            discount: item.discountAmount || 0
+          }))
+        }
+      });
+    }
+
+    // Call once on order confirmation page load
+    document.addEventListener('DOMContentLoaded', function () {
+      if (window.__ORDER_DATA__) {
+        trackPurchase(window.__ORDER_DATA__);
+      }
+    });
+    ```
+  </TabItem>
+  <TabItem label="React">
+    ```tsx
+    // OrderConfirmation.tsx
+    import { useEffect, useRef } from 'react';
+    import type { OrderData } from '@/types/order';
+
+    interface Props {
+      order: OrderData;
+    }
+
+    export function OrderConfirmation({ order }: Props) {
+      const hasFired = useRef(false);
+
+      useEffect(() => {
+        // Prevent duplicate purchase events on re-renders
+        if (hasFired.current) return;
+        hasFired.current = true;
+
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({ ecommerce: null });
+        window.dataLayer.push({
+          event: 'purchase',
+          ecommerce: {
+            transaction_id: order.id,
+            value: order.total,
+            tax: order.tax,
+            shipping: order.shipping,
+            currency: order.currency,
+            coupon: order.coupon ?? '',
+            items: order.items.map((item, index) => ({
+              item_id: item.sku,
+              item_name: item.name,
+              item_brand: item.brand,
+              item_category: item.category,
+              item_variant: item.variant,
+              price: item.price,
+              quantity: item.quantity,
+              index,
+              affiliation: item.affiliation ?? 'Online Store',
+              coupon: item.coupon ?? '',
+              discount: item.discount ?? 0,
+            })),
+          },
+        });
+      }, [order]);
+
+      return (
+        <div>
+          <h1>Thank you for your order!</h1>
+          <p>Order #{order.id} confirmed.</p>
+        </div>
+      );
+    }
+    ```
+  </TabItem>
+  <TabItem label="Next.js">
+    ```tsx
+    // app/order/confirmation/page.tsx
+    import { redirect } from 'next/navigation';
+    import { getOrder } from '@/lib/orders';
+    import { PurchaseTracker } from './PurchaseTracker';
+
+    export default async function OrderConfirmationPage({
+      searchParams,
+    }: {
+      searchParams: { orderId?: string };
+    }) {
+      const orderId = searchParams.orderId;
+      if (!orderId) redirect('/');
+
+      const order = await getOrder(orderId);
+      if (!order) redirect('/');
+
+      return (
+        <main>
+          <h1>Order Confirmed</h1>
+          <p>Order #{order.id} — Total: {order.currency} {order.total}</p>
+
+          {/* Client component handles the dataLayer push */}
+          <PurchaseTracker order={order} />
+        </main>
+      );
+    }
+
+    // PurchaseTracker.tsx — client component
+    'use client';
+
+    import { useEffect, useRef } from 'react';
+    import type { Order } from '@/types/order';
+
+    export function PurchaseTracker({ order }: { order: Order }) {
+      const tracked = useRef(false);
+
+      useEffect(() => {
+        if (tracked.current) return;
+        tracked.current = true;
+
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({ ecommerce: null });
+        window.dataLayer.push({
+          event: 'purchase',
+          ecommerce: {
+            transaction_id: order.id,
+            value: order.total,
+            tax: order.tax,
+            shipping: order.shipping,
+            currency: order.currency,
+            coupon: order.coupon ?? '',
+            items: order.items.map((item, idx) => ({
+              item_id: item.sku,
+              item_name: item.name,
+              item_brand: item.brand,
+              item_category: item.category,
+              item_variant: item.variant,
+              price: item.price,
+              quantity: item.quantity,
+              index: idx,
+              affiliation: item.affiliation ?? 'Online Store',
+              coupon: item.coupon ?? '',
+              discount: item.discount ?? 0,
+            })),
+          },
+        });
+      }, [order]);
+
+      return null;
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Preventing duplicate purchase events
+
+Duplicate purchases are one of the most common ecommerce tracking problems. A user refreshes the confirmation page, or the component re-renders, and suddenly you have two `purchase` events for the same order. Your revenue doubles overnight and someone in finance starts asking questions.
+
+### The deduplication pattern
+
+The most reliable approach is server-rendered: only output the dataLayer push once, using a flag that the backend controls.
+
+```javascript
+// Backend injects this flag — only true on the FIRST render of this order
+if (window.__PURCHASE_TRACKED__ !== true) {
+  window.__PURCHASE_TRACKED__ = true;
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push({
+    event: 'purchase',
+    ecommerce: {
+      transaction_id: 'TXN-2024-98765',
+      // ... full event data
+    }
+  });
+}
+```
+
+For SPAs, use `sessionStorage` keyed by transaction ID:
+
+```javascript
+function trackPurchaseOnce(purchaseData) {
+  const key = `purchase_tracked_${purchaseData.ecommerce.transaction_id}`;
+
+  if (sessionStorage.getItem(key)) {
+    console.warn('Purchase already tracked:', purchaseData.ecommerce.transaction_id);
+    return;
+  }
+
+  sessionStorage.setItem(key, 'true');
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push(purchaseData);
+}
+```
+
+<Aside type="note">
+GA4 has built-in deduplication based on `transaction_id` — if it receives two purchase events with the same `transaction_id` within 24 hours, it will deduplicate them in reports. But do not rely on this as your only defense. Client-side deduplication prevents unnecessary network requests and keeps your real-time reports accurate. Belt and suspenders.
+</Aside>
+
+## Validation checklist
+
+Before you ship your purchase tracking to production, verify every item on this list:
+
+<Steps>
+1. **`transaction_id` is unique per order.** Check that the same ID never appears twice for different orders. Use your order system's actual ID — do not generate one client-side.
+
+2. **`value` is a number, not a string.** `value: 142.97` is correct. `value: '142.97'` is wrong. `value: '$142.97'` is very wrong. GA4 will silently ignore non-numeric values.
+
+3. **`currency` is present and valid.** Must be an ISO 4217 code (`USD`, `EUR`, `GBP`). Without currency, GA4 cannot calculate revenue. This is the most commonly missing parameter.
+
+4. **`items` array is populated.** An empty items array means GA4 records revenue but cannot attribute it to any products. Your ecommerce reports will show totals with no item breakdown.
+
+5. **Each item has `item_id` and `item_name`.** Both are technically optional (you need at least one), but in practice you need both for useful reports.
+
+6. **Prices are unit prices, not line totals.** `price: 24.99` with `quantity: 2` is correct. `price: 49.98` with `quantity: 2` is wrong — GA4 will calculate line total as 99.96.
+
+7. **The event fires exactly once per transaction.** Test page refreshes, browser back-button, and SPA re-renders.
+
+8. **Ecommerce null clear is present.** Confirm `dataLayer.push({ ecommerce: null })` appears before the purchase push.
+
+9. **Data appears in GA4 DebugView.** Open GA4 > Admin > DebugView. Enable debug mode via GTM Preview or the GA Debugger extension. Verify all parameters appear correctly.
+
+10. **Revenue matches your backend.** Compare GA4 reported revenue against your actual order system for a sample of test transactions.
+</Steps>
+
+## Common mistakes
+
+### Missing currency
+
+```javascript
+// ❌ No currency — GA4 ignores the value entirely
+dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: 'TXN-001',
+    value: 99.99,
+    items: [{ item_id: 'SKU-001', item_name: 'Widget', price: 99.99, quantity: 1 }]
+  }
+});
+```
+
+Without `currency`, GA4 cannot attribute monetary value. Your ecommerce reports will show the event happened, but revenue will be zero. Always include `currency` on every event that has a `value` parameter.
+
+### Forgetting to clear ecommerce
+
+On SPAs especially, failing to push `{ ecommerce: null }` before the purchase push means stale data from previous ecommerce events (like `begin_checkout` or `add_to_cart`) can merge into your purchase event. This leads to phantom items, wrong quantities, or corrupted item arrays.
+
+### Value as a formatted string
+
+```javascript
+// ❌ All of these are wrong
+value: '$142.97'     // Currency symbol
+value: '142.97'      // String instead of number
+value: '1,429.70'    // Comma formatting
+value: '142,97'      // European decimal format
+
+// ✅ Correct — plain number, no formatting
+value: 142.97
+```
+
+GA4 expects a raw number. Any string formatting, currency symbols, or thousand separators will cause the value to be silently dropped or misinterpreted.
+
+### Duplicate purchase events
+
+As covered above, page refreshes and SPA re-renders are the usual culprits. Implement client-side deduplication using `sessionStorage` or a `useRef` guard, and always include `transaction_id` so GA4's server-side deduplication can catch anything you miss.
+
+### Missing or generic transaction_id
+
+```javascript
+// ❌ Terrible — same ID for every order
+transaction_id: 'purchase'
+
+// ❌ Bad — generated client-side, not tied to actual order
+transaction_id: Date.now().toString()
+
+// ✅ Good — actual order ID from your backend
+transaction_id: 'ORD-2024-00847'
+```
+
+The `transaction_id` is your primary key for deduplication and for reconciling GA4 data against your order system. It must be the real order ID from your backend — not a timestamp, not a random string, and definitely not a static value.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="add_to_cart"
+    description="DataLayer specification for the add_to_cart event — tracking when users add products to their shopping cart."
+    href="/datalayer/ecommerce/add-to-cart/"
+  />
+  <LinkCard
+    title="begin_checkout"
+    description="DataLayer specification for the begin_checkout event — capturing when users start the checkout process."
+    href="/datalayer/ecommerce/begin-checkout/"
+  />
+  <LinkCard
+    title="refund"
+    description="DataLayer specification for the refund event — tracking full and partial refunds against original transactions."
+    href="/datalayer/ecommerce/refund/"
+  />
+  <LinkCard
+    title="view_item"
+    description="DataLayer specification for the view_item event — tracking product detail page views."
+    href="/datalayer/ecommerce/view-item/"
+  />
+  <LinkCard
+    title="Ecommerce Overview"
+    description="The full GA4 ecommerce event lifecycle and how all the events connect."
+    href="/datalayer/ecommerce/ecommerce-overview/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="How to create the GTM trigger that fires your purchase tag."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+</CardGrid>
