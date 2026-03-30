@@ -1,6 +1,232 @@
 ---
 title: "Built-in Variables"
-description: "Reference for all GTM built-in variables and when to enable each."
+description: "Complete reference for every GTM built-in variable — which ones to enable, what they return, and when to use each."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+GTM ships with a set of pre-built variables that automatically capture common browser values — page URLs, click targets, form data, video progress, and more. You do not write any code to use them. You enable the ones you need, and they become available in trigger conditions and tag configurations.
+
+The catch: most built-in variables are disabled by default to keep your container lean. You have to turn them on before they work. This guide covers every built-in variable category, what each one returns, and which ones you should enable on every new container.
+
+## How to enable built-in variables
+
+<Steps>
+1. In your GTM container, click **Variables** in the left navigation.
+2. In the "Built-In Variables" section at the top, click **Configure**.
+3. A panel slides in showing every available built-in variable organized by category.
+4. Check the box next to any variable to enable it.
+5. Click the X to close. Enabled variables are now available in triggers and tags.
+</Steps>
+
+<Aside type="tip">
+Enable all variables in the Click and Form categories the moment you create a new container — even if you do not plan to use them immediately. They cost nothing to have enabled, and they are invaluable for debugging. You will need `Click Element` to inspect what was clicked in Preview mode.
+</Aside>
+
+## Page variables
+
+These variables capture information about the current page URL. They are enabled by default in new containers.
+
+| Variable | What it returns | Example |
+|----------|----------------|---------|
+| **Page URL** | Full URL including protocol, hostname, path, query, and fragment | `https://example.com/products?color=blue#reviews` |
+| **Page Hostname** | Just the domain (no protocol, no path) | `example.com` |
+| **Page Path** | The path component only | `/products` |
+| **Page Referrer** | The URL of the previous page (empty on direct visits) | `https://google.com/search?q=...` |
+
+**Page Path** is the most-used variable in the set. You will use it constantly in trigger conditions: "fire this tag only when `Page Path` contains `/checkout`."
+
+**Page Hostname** is essential for multi-domain setups where you need to filter by domain, and for cross-domain tracking conditions.
+
+**Page Referrer** behaves exactly like `document.referrer` in JavaScript — it is empty on direct visits, on the first page after clicking a link from a different origin (same-origin referrers show the referring page path), and on pages loaded from bookmarks.
+
+## Utility variables
+
+| Variable | What it returns |
+|----------|----------------|
+| **Event** | The name of the current GTM event (e.g., `gtm.click`, `purchase`, your custom event name) |
+| **Container ID** | Your GTM container ID in `GTM-XXXXXXX` format |
+| **Container Version** | The version number of the published container |
+| **Random Number** | A random integer — useful for cache busting and sampling |
+| **HTML ID** | An alias for Container ID, legacy name |
+| **Debug Mode** | Returns `true` when the container is running in Preview mode, `false` otherwise |
+
+**Event** is critical for trigger conditions. It returns the event name exactly as it was pushed to the dataLayer, or the name of built-in GTM events like `gtm.js` (page load), `gtm.dom` (DOM ready), `gtm.load` (window load), `gtm.click`, `gtm.linkClick`, `gtm.formSubmit`.
+
+**Debug Mode** is useful for conditional logic in Custom JavaScript variables — return test values when in debug mode, real values in production.
+
+## Click variables
+
+These variables capture information about whatever element was clicked when a click trigger fires.
+
+| Variable | What it returns | Example |
+|----------|----------------|---------|
+| **Click Element** | The DOM element that was clicked (as a JavaScript object) | `<button class="add-to-cart" data-product-id="123">` |
+| **Click Classes** | Space-separated string of CSS classes on the clicked element | `add-to-cart btn btn-primary` |
+| **Click ID** | The `id` attribute of the clicked element | `submit-button` |
+| **Click Target** | The `target` attribute (e.g., `_blank` for new-tab links) | `_blank` |
+| **Click URL** | The `href` attribute if clicked element is or contains a link | `https://example.com/product` |
+| **Click Text** | The visible text content of the clicked element | `Add to Cart` |
+
+<Aside type="caution">
+**Click variables only populate when a click trigger fires.** If you try to use `{{Click Text}}` in a tag that fires on Page View, you will get an empty string or `undefined`. These variables are populated fresh on each click event — they do not persist between events.
+</Aside>
+
+**Click Element** is the most powerful of these. It gives you the raw DOM node, which you can then use in Custom JavaScript variables to walk up the DOM tree, read `data-*` attributes, or check parent elements. For example, if the user clicks a product image inside a card that has the product ID as a `data-*` attribute on the card's outer `<div>`, you can use `{{Click Element}}.closest('[data-product-id]').dataset.productId`.
+
+**Click Classes** is often used in trigger conditions to match clicks on specific styled elements. This works, but it is fragile — CSS classes change when developers redesign the UI. Prefer `data-*` attribute selectors when possible.
+
+### Enabling click variables
+
+Enable all six click variables. In trigger conditions, you will use them constantly for testing in Preview mode even when your production triggers use dataLayer variables.
+
+## Form variables
+
+These populate when GTM's built-in Form Submission trigger fires.
+
+| Variable | What it returns |
+|----------|----------------|
+| **Form Element** | The `<form>` DOM element that was submitted |
+| **Form Classes** | CSS classes on the form element |
+| **Form ID** | The `id` attribute of the form |
+| **Form Target** | The `target` attribute of the form |
+| **Form URL** | The `action` attribute of the form |
+| **Form Text** | The text content of the form (rarely useful) |
+
+<Aside type="caution">
+**The built-in Form Submission trigger is unreliable on modern sites.** It uses JavaScript's `submit` event, which does not fire on AJAX form submissions, React-controlled forms, or forms that intercept the default submission. For anything beyond a basic HTML form with full-page reload, use a `dataLayer.push()` with a custom event instead.
+
+That said, Form variables are still worth enabling for debugging — they let you inspect form properties in Preview mode even when you are debugging problems.
+</Aside>
+
+## Error variables
+
+These populate when an uncaught JavaScript error occurs on the page. They fire on the `gtm.pageError` event.
+
+| Variable | What it returns |
+|----------|----------------|
+| **Error Message** | The error message string |
+| **Error URL** | The URL of the script where the error occurred |
+| **Error Line** | The line number of the error |
+
+To use error variables, you need a trigger listening for the `gtm.pageError` event (create a Custom Event trigger with event name `gtm.pageError`, or use the JavaScript Error built-in trigger type). Then create a GA4 Event tag that fires on that trigger using these variables as parameters.
+
+This is a quick way to set up client-side error tracking without writing any code. It only captures uncaught errors — try/catch blocks and handled rejections will not be reported.
+
+## History variables
+
+These fire when the browser's history API changes — which is how single-page applications (SPAs) handle navigation.
+
+| Variable | What it returns |
+|----------|----------------|
+| **New History Fragment** | The hash fragment after the URL change |
+| **Old History Fragment** | The hash fragment before the URL change |
+| **New History State** | The `state` object passed to `pushState()` or `replaceState()` |
+| **Old History State** | The previous `state` object |
+| **History Source** | Either `pushState`, `replaceState`, or `popstate` |
+
+History variables are used with the History Change trigger to track virtual pageviews in SPAs. **History Source** is particularly useful — `popstate` fires when the user hits back/forward, while `pushState` fires on new navigation. You often want to treat these differently.
+
+<Aside type="tip">
+In React Router and similar frameworks, every client-side navigation triggers a `pushState` call. Your History Change trigger can filter to only `pushState` events to avoid double-counting forward/back navigation if your SPA also manually fires a `dataLayer.push({ event: 'page_view' })` on back-navigation.
+</Aside>
+
+## Video variables
+
+These populate when YouTube video interactions occur, provided you have the YouTube Video trigger enabled and `enableJsApi=1` is on your embedded YouTube players.
+
+| Variable | What it returns |
+|----------|----------------|
+| **Video Provider** | Always `YouTube` for built-in video triggers |
+| **Video Status** | The playback state: `started`, `paused`, `ended`, `progress` |
+| **Video URL** | The full YouTube video URL |
+| **Video Title** | The video title from YouTube's API |
+| **Video Duration** | Total duration in seconds |
+| **Video Current Time** | Current playback position in seconds |
+| **Video Percent** | Current playback position as a percentage (0–100) |
+| **Video Visible** | Whether the video was visible in the viewport when the event fired |
+
+Configure the YouTube Video trigger to fire at specific progress thresholds (25%, 50%, 75%, 100%) and `Video Percent` will contain the threshold that was crossed, not the exact position. Use `Video Current Time` if you need precision.
+
+## Scroll variables
+
+These populate when a Scroll Depth trigger fires.
+
+| Variable | What it returns |
+|----------|----------------|
+| **Scroll Depth Threshold** | The percentage or pixel depth that triggered the event |
+| **Scroll Depth Units** | Either `Pixels` or `Percent` depending on your trigger configuration |
+| **Scroll Direction** | Either `vertical` or `horizontal` |
+
+The Scroll Depth trigger has a threshold configuration where you specify values like `25,50,75,100`. When the user scrolls past 25%, the trigger fires and `Scroll Depth Threshold` returns `25`. This makes it easy to create a single GA4 Event tag for all scroll depths with `{{Scroll Depth Threshold}}` as the `percent_scrolled` parameter value.
+
+## Visibility variables
+
+These populate when an Element Visibility trigger fires.
+
+| Variable | What it returns |
+|----------|----------------|
+| **Percent Visible** | How much of the element is visible (0–100) |
+| **On-Screen Duration** | How long the element has been visible in milliseconds |
+
+Use these to track when specific elements come into view — hero banners, product recommendations, call-to-action sections, or above-the-fold/below-the-fold distinctions. `On-Screen Duration` requires configuring a minimum visible duration in your Element Visibility trigger.
+
+## Which variables to enable on every new container
+
+Here is the baseline configuration every container should have from day one:
+
+**Always enable:**
+- All Page variables (usually already enabled)
+- All Click variables (6 variables)
+- All Form variables (6 variables)
+- Event (utility)
+- Debug Mode (utility)
+- Container ID (utility)
+
+**Enable when you need them:**
+- Error variables — when setting up error tracking
+- History variables — when working on SPAs
+- Video variables — when tracking YouTube embeds
+- Scroll variables — when adding scroll depth tracking
+- Visibility variables — when tracking element impressions
+
+**The practical rule:** If you are not sure, enable it. Unused built-in variables do not meaningfully impact container size or performance. The cost of needing a variable in Preview mode and not having it enabled is wasted debugging time.
+
+## Common mistakes
+
+### Confusing Page URL with Page Path
+
+`Page URL` returns the full URL: `https://example.com/products?sort=price`. If you write a trigger condition "Page URL contains `/products`", it will match — but so will `Page URL contains `products` matching `https://products-store.example.com/`. Use `Page Path` for path-based conditions — it is more precise.
+
+### Using Click Text when Click Element is more reliable
+
+`Click Text` captures the visible text content of the clicked element. This sounds useful, but it breaks in two common scenarios: (1) icon buttons with no text, and (2) buttons where the text might be translated or changed for A/B tests. Use `Click Element` and read a `data-*` attribute from the DOM instead.
+
+### Expecting Form variables to work with React forms
+
+React-controlled forms do not fire the browser's native `submit` event in the way GTM expects. The Form Submission trigger and its associated variables will not work. Push a custom event to the dataLayer in your React submit handler instead.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DataLayer Variables"
+    description="The variable type you will use more than any other — reading data pushed to the dataLayer."
+    href="/client-side/variables/datalayer-variables/"
+  />
+  <LinkCard
+    title="DOM Element Variables"
+    description="Reading data directly from the page DOM when the dataLayer is not an option."
+    href="/client-side/variables/dom-element-variables/"
+  />
+  <LinkCard
+    title="User-Defined Variables Overview"
+    description="Quick reference guide to every variable type available in GTM."
+    href="/client-side/variables/user-defined-variables/"
+  />
+  <LinkCard
+    title="Click Triggers"
+    description="How to use Click variables in trigger conditions to target specific elements."
+    href="/client-side/triggers/click-triggers/"
+  />
+</CardGrid>

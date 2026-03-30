@@ -3,4 +3,79 @@ title: "Foundations"
 description: "Core concepts every GTM practitioner needs to understand before configuring a single tag."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
+
+Before you configure a single tag, understand these concepts. They will save you hundreds of hours of debugging.
+
+Most GTM problems are not configuration problems — they are mental model problems. Someone creates a trigger that fires on "All Pages" when it should fire on specific pages. Someone pushes an event to the dataLayer before GTM loads and wonders why the tag did not fire. Someone has 200 nearly-identical tags when 5 would do. None of these are GTM bugs. They are gaps in the underlying model.
+
+The Foundations section builds the correct model, from the browser mechanics to the organizational patterns.
+
+<Aside type="tip">
+New to GTM? Start with [How GTM Works](/foundations/how-gtm-works/) for the execution model, then [Tags, Triggers & Variables](/foundations/tags-triggers-variables/) for the configuration model. Those two articles cover 80% of what you need to start working effectively.
+</Aside>
+
+## Start here
+
+<CardGrid>
+  <LinkCard
+    title="How GTM Works"
+    description="What the GTM container does at a technical level — the execution engine, container lifecycle, and dataLayer mechanics."
+    href="/foundations/how-gtm-works/"
+  />
+  <LinkCard
+    title="Tags, Triggers & Variables"
+    description="The core GTM abstraction. Build the right mental model and everything else becomes much simpler."
+    href="/foundations/tags-triggers-variables/"
+  />
+  <LinkCard
+    title="The DataLayer Deep Dive"
+    description="The dataLayer is a contract between your site and your analytics. Treat it like one. Complete technical guide."
+    href="/foundations/datalayer-deep-dive/"
+  />
+</CardGrid>
+
+## Choose your entry point
+
+<CardGrid>
+  <LinkCard
+    title="GTM for Developers"
+    description="Your job is the dataLayer, not the tags. Frameworks, TypeScript types, testing, and the handoff model."
+    href="/foundations/gtm-for-developers/"
+  />
+  <LinkCard
+    title="GTM for Marketers"
+    description="What you can do without developer help, the publish workflow, and habits that keep the container maintainable."
+    href="/foundations/gtm-for-marketers/"
+  />
+</CardGrid>
+
+## Architecture and organization
+
+<CardGrid>
+  <LinkCard
+    title="GTM Account Structure"
+    description="Accounts, containers, workspaces, environments, and permissions — how to organize GTM for teams of any size."
+    href="/foundations/gtm-account-structure/"
+  />
+  <LinkCard
+    title="When Not to Use GTM"
+    description="Honest assessment of the cases where GTM is the wrong tool — and what to use instead."
+    href="/foundations/when-not-to-use-gtm/"
+  />
+</CardGrid>
+
+## Advanced foundations
+
+<CardGrid>
+  <LinkCard
+    title="Browser APIs for Tracking"
+    description="Page Visibility, sendBeacon, IntersectionObserver, PerformanceObserver — browser APIs that unlock advanced measurement."
+    href="/foundations/browser-apis-for-tracking/"
+  />
+  <LinkCard
+    title="Glossary"
+    description="Quick-reference definitions for every major GTM and GA4 term, with links to deep-dive articles."
+    href="/foundations/glossary/"
+  />
+</CardGrid>

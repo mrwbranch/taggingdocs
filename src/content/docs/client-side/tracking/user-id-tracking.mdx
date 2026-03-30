@@ -1,6 +1,197 @@
 ---
 title: "User ID Tracking"
-description: "Implementing cross-device user identification."
+description: "Implement GA4 User-ID for cross-device tracking — when to set it, what to use as the ID, and how it improves your reporting."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+User-ID is the most impactful single improvement you can make to GA4 accuracy for sites with authenticated users. Without it, the same person on mobile and desktop looks like two different users. With it, GA4 can stitch those sessions together, giving you accurate cross-device paths, retention calculations, and funnel analysis.
+
+## What User-ID does in GA4
+
+GA4 uses a hierarchy of identifiers to recognize returning users: User-ID takes precedence over Google signals (which uses logged-in Google accounts), which takes precedence over device-level identifiers (client_id).
+
+When you provide a consistent User-ID for a logged-in user:
+- Sessions from different devices and browsers are attributed to one user
+- The Retention Overview report improves significantly
+- Cross-device paths appear in the User Explorer
+- Funnel analysis works correctly even when users switch devices mid-funnel
+
+This only works if you send the same User-ID for the same person across all sessions. It also requires enough of your users to be logged in — if only 5% of users authenticate, the impact is limited.
+
+## Choosing the right User-ID
+
+**Use your internal user identifier** — the numeric or alphanumeric ID from your database. This is the cleanest approach: stable, opaque, and already PII-free.
+
+**Never use email as User-ID.** Email is PII. Sending it directly to GA4 violates Google's terms of service and almost certainly violates GDPR and similar privacy regulations. If you only have an email address, hash it first.
+
+**If you must hash an email:**
+```javascript
+// SHA-256 hashing — do this server-side when possible
+async function hashEmail(email) {
+  const normalized = email.trim().toLowerCase();
+  const encoder = new TextEncoder();
+  const data = encoder.encode(normalized);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+```
+
+If your backend can hash the email and render the hash into the page, that's better than hashing client-side. Server-side hashing means the raw email never touches the browser's GTM context.
+
+<Aside type="caution">
+MD5 and SHA-1 hashing are not sufficient for PII. Use SHA-256 minimum. But the cleanest solution remains using your internal user ID — no hashing required.
+</Aside>
+
+## Setting User-ID via the dataLayer
+
+Push the user identity to the dataLayer as early as possible — ideally as part of your page-level data initialization, when the user is known to be authenticated:
+
+```javascript
+// Server-rendered into the page HTML, before the GTM snippet
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  user_id: '{{ server_user_id }}',  // Your internal user ID, rendered server-side
+  user_type: 'authenticated',
+  user_plan: 'premium',             // Additional user properties
+  user_signup_date: '2023-06-15'
+});
+```
+
+Or push it after authentication completes:
+
+```javascript
+// After successful login
+async function onLoginSuccess(userData) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    user_id: userData.id,
+    user_type: 'authenticated',
+    user_plan: userData.subscriptionTier
+  });
+}
+```
+
+## Configuring the Google Tag in GTM
+
+User-ID is set at the Google Tag level, not the GA4 Event tag level:
+
+<Steps>
+1. Open your **Google Tag** (formerly GA4 Configuration Tag).
+
+2. Under **Configuration Settings → Fields to Set**, add:
+   - Field Name: `user_id`
+   - Value: `{{DLV - user_id}}` (your Data Layer Variable reading the `user_id` key)
+
+3. Save and publish.
+</Steps>
+
+GA4 will now send `user_id` with every event where the dataLayer contains that value.
+
+<Aside type="tip">
+The `user_id` field set in the Google Tag applies to all subsequent GA4 events in the same session. You don't need to set it in individual event tags. Just ensure the Google Tag fires after the user_id is pushed to the dataLayer.
+</Aside>
+
+## Setting User-ID on every authenticated page (not just the login event)
+
+A common mistake is only pushing `user_id` on the login success event. This means returning users who land directly on an authenticated page (skipping the login step) are unidentified until they do something that triggers the login event.
+
+The correct approach: if the user is authenticated, render `user_id` into the page-level dataLayer on every page load. Most server-side frameworks make this trivial:
+
+```javascript
+// In your server-rendered layout (Next.js, Rails, Django, etc.)
+// Runs on every authenticated page
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  user_id: session.userId,         // Always set if logged in
+  user_type: 'authenticated'
+});
+```
+
+For React SPAs where authentication state is client-side only, push `user_id` when the auth state resolves:
+
+```javascript
+// React example with context
+function AuthProvider({ children }) {
+  const { user, isLoaded } = useAuth();
+
+  useEffect(() => {
+    if (isLoaded && user) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        user_id: user.id,
+        user_type: 'authenticated'
+      });
+    }
+  }, [user, isLoaded]);
+
+  return children;
+}
+```
+
+## Clearing User-ID on logout
+
+When a user logs out, clear the `user_id` so subsequent events aren't attributed to the previous user:
+
+```javascript
+function onLogout() {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    user_id: undefined,
+    user_type: 'anonymous'
+  });
+  // Proceed with logout logic
+}
+```
+
+Pushing `undefined` for a key removes it from GTM's internal data model. Subsequent events won't include `user_id` in their GA4 payload.
+
+## Verifying the implementation
+
+1. **GA4 DebugView** — Log in as an authenticated user. Open GA4 → Configure → DebugView. Trigger a page view. You should see `user_id` in the event parameters panel.
+
+2. **GTM Preview → Variables tab** — After the page view event in Preview mode, click on the event and check the Variables tab. The `DLV - user_id` variable should show your internal user ID.
+
+3. **Network tab** — Filter for GA4 collection requests (`/collect?`). Find the `uid` parameter in the request URL — that's your User-ID being sent.
+
+## Privacy considerations
+
+- Never send raw email addresses, phone numbers, or other PII as `user_id`
+- Document in your privacy policy that you use User-ID for cross-device measurement
+- Under GDPR, if a user requests deletion of their data from GA4, you'll need their User-ID to do so — keep a mapping between your internal IDs and GA4's representation
+- If a user withdraws consent for analytics, clear `user_id` from the dataLayer and ensure subsequent events don't carry it
+
+## Common mistakes
+
+### Only setting user_id on the login event
+
+Returning users who land on an authenticated page directly — a bookmark, an email link — won't have their User-ID set until they trigger the login event flow. Always push `user_id` from the page-level dataLayer initialization if the session is authenticated.
+
+### Using email as the user_id field value
+
+This violates Google's terms and privacy regulations. Always use an opaque internal identifier.
+
+### Not verifying User-ID in GA4's identity space settings
+
+In GA4 → Admin → Reporting Identity, make sure you've selected "Blended" or "Observed" mode. Without this, User-ID data is collected but GA4's reports use device-based identity by default. The setting doesn't affect collection — it affects attribution in reports.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DataLayer Deep Dive"
+    description="How the dataLayer merge model works — important for understanding why user_id persists across events."
+    href="/foundations/datalayer-deep-dive/"
+  />
+  <LinkCard
+    title="GA4 Configuration Tag"
+    description="Where to configure user_id in the Google Tag — the Fields to Set section."
+    href="/client-side/tags/ga4-configuration-tag/"
+  />
+  <LinkCard
+    title="Cross-Domain Tracking"
+    description="When users move between your domains — User-ID and cross-domain work together."
+    href="/client-side/tracking/cross-domain-tracking/"
+  />
+</CardGrid>

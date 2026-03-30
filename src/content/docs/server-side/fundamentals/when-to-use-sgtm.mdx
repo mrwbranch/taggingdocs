@@ -1,6 +1,201 @@
 ---
 title: "When to Use sGTM"
-description: "Decision framework for when server-side GTM is worth the investment."
+description: "A practical decision framework for adopting server-side GTM — traffic thresholds, ad spend, team capability, and ROI calculation."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Server-side GTM is an investment, not a default. Before you provision a Cloud Run instance and start reconfiguring tags, run through this framework. Some organizations clearly need it. Others will spend significant time and money to gain marginal benefits. Knowing which category you fall into saves a lot of effort.
+
+## The four questions that determine fit
+
+### 1. Where is your data loss coming from?
+
+The most compelling case for sGTM is measurable, impactful data loss that server-side collection would recover. Two sources drive most of it:
+
+**Ad blockers.** If your audience is technically sophisticated — developers, designers, security professionals, IT workers — ad blocker penetration can exceed 40%. For media or consumer sites, it is typically 15–25%. If you have not measured your specific rate, run GA4 vs. server logs comparison for a week. The gap is your data loss floor.
+
+**Safari ITP.** Client-side cookies set by JavaScript are capped at 7 days by Safari's Intelligent Tracking Prevention. For sites where iOS and Mac Safari together represent 30%+ of sessions (typical for many consumer-facing businesses), this means a meaningful fraction of returning visitors appear as new users. Your attribution windows are truncated, your user-level analytics are wrong, and your ad platform optimization signals degrade over the multi-week attribution periods that matter most.
+
+If neither of these affects your site materially — low ad blocker prevalence, minimal Safari traffic, predominantly logged-in users with server-side identity — the data quality case for sGTM is weaker.
+
+### 2. How much advertising budget runs on impacted attribution?
+
+Data quality problems matter most when they affect budget decisions. If you spend $50,000/month on Google Ads and Meta campaigns that optimize on in-browser conversion signals, and those signals are losing 20% of conversions to ad blockers and ITP, you are almost certainly overpaying for some channels and underfunding others.
+
+Conversions API (Meta CAPI, TikTok Events API, Google Ads enhanced conversions) dramatically improves conversion signal quality. These are server-to-server APIs. sGTM is the most practical way to implement them without custom back-end development.
+
+A rough rule of thumb: if your monthly digital ad spend exceeds $10,000 and you run Conversion API integrations or plan to, the data quality improvement from server-side likely pays for the infrastructure cost many times over. Below $5,000/month ad spend, the ROI calculation is less clear.
+
+### 3. Do you have privacy or data control requirements?
+
+In regulated industries — financial services, healthcare, legal, education — the question is not just about data quality. It is about data control. GDPR requires you to demonstrate what personal data you share with third-party processors and that those processors have appropriate safeguards. Client-side tracking sends user data directly from the user's browser to third-party vendors. You have no inspection or control point.
+
+Server-side GTM gives you that control point. Your server receives the data, you can strip PII before it reaches vendors, and you can document exactly what goes where. For DPO-level accountability, the ability to say "we control what leaves our infrastructure" has real compliance value.
+
+If your organization is subject to GDPR, CCPA, LGPD, or similar regulations and your legal team has asked hard questions about third-party data sharing, server-side collection deserves serious consideration regardless of ad spend or traffic volume.
+
+### 4. Does your team have the capability to operate it?
+
+sGTM requires skills that analytics teams often do not have: cloud infrastructure configuration, DNS management, SSL certificate handling, container monitoring, and production debugging via log tools rather than browser consoles.
+
+If your team includes a developer or DevOps engineer who is comfortable with GCP or AWS, this is manageable. If your analytics organization is entirely non-technical users working only in the GTM UI, sGTM without developer support will eventually become an unmaintained liability.
+
+Be honest about this. A misconfigured sGTM server that silently drops data or forwards PII it should be stripping is worse than no sGTM server at all.
+
+## Decision framework by organization type
+
+### Ecommerce (high ad spend)
+
+**Strong case for sGTM** if you meet two or more:
+- Monthly ad spend over $10,000
+- Conversion API integrations planned or in place (Meta CAPI, Google Ads enhanced conversions)
+- Safari represents over 20% of sessions
+- Ad blocker rate over 15% (measure this)
+- Abandoned cart or multi-touch attribution modeling in use
+
+**Weaker case** if:
+- Under $5,000/month ad spend
+- Simple last-click attribution, no CAPI integrations
+- Primarily app-based business where web tracking is secondary
+
+### B2B / Lead generation
+
+**Strong case** if:
+- High customer lifetime value where losing a single tracked conversion meaningfully distorts LTV-based bidding
+- Complex multi-touch attribution across a long sales cycle
+- Account-based marketing where matching company identity to web behavior requires enrichment
+
+**Weaker case** if:
+- Short, simple conversion funnel (ad click → form fill → done)
+- Low volume, high-value contacts where manual verification catches errors
+- Your MQL to SQL process happens entirely in a CRM with no web attribution dependency
+
+### Content / Media
+
+**Strong case** if:
+- Significant programmatic advertising revenue where audience data quality affects CPM
+- First-party data strategy where user behavior feeds segmentation
+- High ad blocker rate (tech content sites often see 35–50%)
+
+**Weaker case** if:
+- Subscription-based with primarily logged-in, consented users
+- No significant advertising on either side (no marketing spend, no ad revenue)
+
+### Small sites and personal projects
+
+**Do not use sGTM** if:
+- Fewer than 100,000 monthly sessions
+- Single analytics platform (GA4 only, no vendor pixels)
+- No ad spend
+- Team of one with no DevOps experience
+
+The overhead is not worth it. Client-side GTM handles this perfectly.
+
+## ROI calculation
+
+Here is a realistic way to estimate the return on server-side investment:
+
+**Step 1: Estimate current data loss**
+
+```
+Monthly conversions tracked: [N]
+Estimated ad blocker rate:   [%]  → Lost conversions = N × rate
+ITP impact on Safari attribution: harder to estimate, ~5–15% of Safari sessions
+Total estimated data loss:   [%]
+```
+
+**Step 2: Estimate value of recovered data**
+
+```
+Average conversion value: [$]
+Recovered conversions/month: N × data_loss_rate
+Estimated value of recovery: recovered_conversions × avg_value × attribution_improvement_factor
+```
+
+The attribution improvement factor is hard to quantify precisely, but better conversion signals typically improve automated bidding performance by 10–30% over time.
+
+**Step 3: Compare against cost**
+
+| Traffic Level | Estimated Monthly Cost (GCP) | Stape Alternative |
+|---|---|---|
+| < 1M requests/month | $15–40 | $20 (starter) |
+| 1M–5M requests/month | $40–120 | $39–99 |
+| 5M–20M requests/month | $120–400 | $99–299 |
+| 20M+ requests/month | $400–1,500 | Custom |
+
+If the estimated value of recovered attribution data exceeds hosting costs by more than 3–5×, the ROI case is strong. If it is closer to break-even, the privacy and compliance benefits may still justify it.
+
+## Starting small: the phased approach
+
+You do not have to move everything to server-side at once. The recommended sequence:
+
+<Steps>
+1. **Deploy the infrastructure.** Set up Cloud Run (or Stape), configure your custom domain, verify the server responds.
+
+2. **Migrate GA4 first.** Update your client-side GA4 tag's `server_container_url` to point at your sGTM endpoint. Add the GA4 server tag in sGTM. Run both in parallel briefly to confirm parity.
+
+3. **Add one Conversion API.** Meta CAPI or Google Ads enhanced conversions — whichever platform gets the most spend. Implement event deduplication with the browser pixel.
+
+4. **Validate data quality.** Compare server-side conversion counts against client-side counts. Investigate significant discrepancies before expanding.
+
+5. **Expand to additional platforms.** TikTok, Pinterest, other Conversion APIs as needed.
+
+6. **Add enrichment.** Once the pipeline is stable, add data enrichment (Firestore lookups, server-side user data) to improve match quality and attribution.
+</Steps>
+
+Starting with GA4 gives you a low-risk proving ground. If the server-side infrastructure has a problem, it affects your analytics — not your ad platform conversion signals. Iron out operational issues before the business-critical tags depend on the server.
+
+## Warning signs you need sGTM now
+
+These patterns indicate sGTM has moved from "useful investment" to "urgent fix":
+
+- Your GA4 conversion rate is materially lower than your backend order rate (after accounting for returns and test orders). The gap is lost tracking.
+- Meta or TikTok reporting shows attribution gaps compared to GA4 or your CRM — Event Match Quality scores below 6/10.
+- Safari users show a dramatically higher "new user" rate than Chrome or Android users — ITP is resetting their identifiers.
+- You have received compliance questions from legal or your DPO about what user data reaches Meta, Google, or TikTok.
+- Your developer team has been asked to add individual Conversion API integrations in your back-end — sGTM handles all of them in one place.
+
+<Aside type="caution">
+Do not let urgency rush the setup. A misconfigured sGTM server that forwards PII it should be stripping, or drops conversions silently due to a misconfigured client, creates problems worse than the ones you are trying to solve. Budget time to set it up correctly.
+</Aside>
+
+## Common mistakes
+
+**Adopting sGTM for the wrong reason.** "It blocks ad blockers" is a misleading framing. Ad blockers that target tracking patterns can still block first-party collection if they detect the patterns. The real reasons are data enrichment, cookie persistence, and data control — not circumventing user privacy tools.
+
+**Going all-in before validating the pipeline.** Organizations that migrate 10 tags at once, then find discrepancies, have no idea which tag or which step in the pipeline introduced the problem. Start with one data stream, validate it, then expand.
+
+**Ignoring the consent layer.** Moving tracking server-side does not change your consent obligations. Consent granted or denied in the browser must still flow to your server and be respected. Do not let server-side become a backdoor around consent.
+
+**Underestimating ongoing maintenance.** The setup is a one-time cost. Monitoring, debugging, template updates, scaling adjustments, and container governance are ongoing. Plan for this work or the implementation will degrade.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Why Server-Side?"
+    description="The detailed case for sGTM — privacy, performance, and data quality benefits with honest cost assessment."
+    href="/server-side/fundamentals/why-server-side/"
+  />
+  <LinkCard
+    title="GCP Setup"
+    description="Step-by-step deployment guide for getting your first sGTM server running on Cloud Run."
+    href="/server-side/setup/gcp-setup/"
+  />
+  <LinkCard
+    title="Stape Setup"
+    description="The fastest path to production sGTM — managed hosting without managing cloud infrastructure."
+    href="/server-side/setup/stape-setup/"
+  />
+  <LinkCard
+    title="Cost Management"
+    description="Cloud Run pricing, cost estimation, and optimization strategies for production deployments."
+    href="/server-side/operations/cost-management/"
+  />
+  <LinkCard
+    title="Hosting Comparison"
+    description="GCP vs. AWS vs. Stape vs. self-hosted — a full cost and capability comparison."
+    href="/server-side/operations/hosting-comparison/"
+  />
+</CardGrid>

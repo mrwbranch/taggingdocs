@@ -3,4 +3,195 @@ title: "GTM for Marketers"
 description: "Entry point for non-technical users who work in GTM — what you can do without developer help."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+GTM gives marketers and analysts significant power to implement tracking without filing developer tickets for every change. But that power has real boundaries. Understanding where those boundaries are — and building good habits from day one — will save you from the most common and costly mistakes.
+
+## What you can do without a developer
+
+A lot, actually. Once a developer has installed the GTM container snippet on the site, you can:
+
+- Add GA4 event tags for button clicks, form submissions, page views, and scroll depth
+- Set up Google Ads conversion tracking and remarketing tags
+- Add marketing pixels: Meta Pixel, LinkedIn Insight Tag, TikTok Pixel, Pinterest Tag
+- Create triggers based on page URL, clicks on specific elements, form submissions
+- Configure audiences for remarketing based on pages visited or events fired
+- Set up Consent Mode to block tags until users consent
+- Test everything in Preview mode before publishing
+- Roll back to any previous version if something breaks
+
+This is genuinely powerful. If your site has GTM installed and the dataLayer is reasonably well-implemented, you can run your entire tag portfolio without touching source code.
+
+## What requires developer involvement
+
+Some things require code changes to the website itself, which means a developer:
+
+**Custom events you do not yet have.** If you want to track something that is not already being pushed to the dataLayer — a specific button that is not covered by a generic click trigger, a custom step in a checkout flow, an API response — you need a developer to add that dataLayer push.
+
+**Dynamic data from the application.** Prices, product names, user segments, order IDs — any data that lives in the application's state and is not visible in the DOM needs to be explicitly pushed to the dataLayer by a developer.
+
+**Site speed optimizations.** If you need to delay GTM loading, implement more aggressive caching, or change how the container snippet is loaded, that is developer work.
+
+**Debugging that requires server access.** If tags are not firing and the problem is not visible in Preview mode or the browser console, the developer may need to check server-side rendering, CSP headers, or server-side consent logic.
+
+<Aside type="tip">
+When you need a developer to add a dataLayer event, be specific in your request. Tell them: the event name you want, when it should fire, and what data you need included. "I need a `form_submit` event that fires when the contact form is submitted, with the form name and page URL as properties" is a request a developer can implement directly. "I need to track form submissions" is not.
+</Aside>
+
+## The GTM interface: key concepts
+
+### Containers and accounts
+
+A GTM **account** typically corresponds to a company or brand. Inside each account, you have one or more **containers** — each container is for a specific site or app.
+
+When you open GTM at tagmanager.google.com, you see a list of your accounts and their containers. Click into a container to start working.
+
+### The workspace
+
+A **workspace** is a draft environment for changes. Everything you do in GTM — creating tags, editing triggers, adding variables — happens inside a workspace. Changes in a workspace are not live on the site until you publish.
+
+You can have multiple workspaces open simultaneously (for example, one for a new campaign and one for a bug fix). This is useful for parallel work, but requires coordination to avoid conflicts when both workspaces touch the same tags.
+
+By default, you have a "Default Workspace." For any significant change, create a new named workspace.
+
+### Versions
+
+When you publish, GTM creates a **version** — a snapshot of your entire container at that moment. Versions are numbered and stored permanently. If a publish breaks something, you can roll back to any previous version in seconds.
+
+This is your safety net. Use it. Always publish with a meaningful description so you know what each version contains.
+
+## The publish workflow
+
+This is the single most important habit to build. Do not skip steps.
+
+<Steps>
+1. **Make your changes in a workspace.** Create tags, triggers, and variables. Save each one.
+
+2. **Enter Preview mode.** Click the "Preview" button in the top right. This opens Tag Assistant and connects it to your site. Your changes are now active only in your browser session — not on the live site.
+
+3. **Test every scenario you changed.** Trigger each event you expect your tags to fire on. Verify in the Tag Assistant panel that the tags fire as expected, with the correct data. Check the trigger summary to confirm the right trigger fired.
+
+4. **Check for unintended tag fires.** While testing, watch for tags that fire unexpectedly. If a tag fires on pages or events it should not, that is a trigger configuration problem to fix before publishing.
+
+5. **Exit Preview mode and submit the workspace.** Click "Submit" (not just "Save"). Add a version description that will make sense to you in six months: "Added Meta Pixel — fires on all pages, fires purchase event on order confirmation."
+
+6. **Monitor after publishing.** Check GA4 DebugView and your analytics in real time. If something looks wrong, roll back immediately — do not try to fix-and-republish under pressure.
+</Steps>
+
+<Aside type="caution">
+Always preview before publishing. Always. Even for "small" changes. A trigger condition typo can cause a conversion tag to fire on every page load, inflating conversion data that takes weeks to clean up.
+</Aside>
+
+## Naming conventions: set them up on day one
+
+A GTM container without a naming convention becomes unmaintainable. After 50 tags, you will not be able to tell what anything does.
+
+Establish a convention before you create your first tag, and document it somewhere the whole team can see. A simple format that works well:
+
+```
+[Type] - [Platform] - [Event or Location]
+```
+
+Examples:
+- `Tag - GA4 - Page View`
+- `Tag - GA4 - Purchase`
+- `Tag - Meta - Page View`
+- `Tag - Meta - Purchase`
+- `Tag - Google Ads - Lead Conversion`
+- `Trigger - Click - Add to Cart Button`
+- `Trigger - Custom Event - Purchase`
+- `Trigger - Page View - Checkout Pages`
+- `Variable - DL - Transaction ID`
+- `Variable - DL - Product Name`
+
+The specifics matter less than consistency. Choose a format and stick to it across the entire team.
+
+Use GTM's **Folders** to group related tags. Common folder structures:
+- By platform: "GA4", "Meta", "Google Ads"
+- By feature: "Ecommerce", "Lead Generation", "Content Engagement"
+- By status: "Active", "Paused", "Testing"
+
+## Common self-service tasks
+
+### Adding a GA4 event for a button click
+
+<Steps>
+1. Create a trigger: Type → All Elements. Set "Some Clicks" and add a condition. If the button has a stable ID, use Click ID equals `your-button-id`. If not, use Click Text equals `Button Label` or Click Classes contains `your-class`.
+
+2. Create a tag: Type → Google Analytics → GA4 Event. Set the Measurement ID (or reference your GA4 Measurement ID variable). Set the event name (e.g., `cta_click`). Add event parameters — at minimum, include `page_location` and a label for the button.
+
+3. Attach the trigger to the tag.
+
+4. Preview and test. Verify the tag fires only when you click the right button.
+</Steps>
+
+### Adding a marketing pixel
+
+<Steps>
+1. Get the pixel base code from the platform (Meta Events Manager, LinkedIn Campaign Manager, etc.).
+
+2. Create a Custom HTML tag. Paste the base code.
+
+3. Set the trigger to "All Pages" for the base pixel.
+
+4. For conversion events, create a separate Custom HTML tag with the event-specific code, triggered by the relevant Custom Event trigger.
+
+5. Preview and verify the pixel fires using the platform's pixel helper browser extension.
+</Steps>
+
+### Setting up a conversion in Google Ads
+
+<Steps>
+1. In Google Ads, create a conversion action and get the conversion ID and label.
+
+2. In GTM, create a Google Ads Conversion Tracking tag. Enter the conversion ID and label.
+
+3. Create a trigger that fires on the conversion event — typically a thank-you page or a custom dataLayer event like `purchase` or `lead_submitted`.
+
+4. Preview and test using the Google Ads Tag Assistant.
+</Steps>
+
+## Verifying your tags are working
+
+**GTM Preview mode** is your primary tool. It shows every event, every trigger evaluation, every tag that fired. Learn to read the trigger summary — it shows you exactly why a trigger did or did not fire.
+
+**GA4 DebugView** (found at Analytics → Admin → DebugView) shows GA4 events in near real time. Filter by your own device to see only your events. Verify that events arrive with the right parameters.
+
+**Platform pixel helpers.** Meta Pixel Helper (Chrome extension), LinkedIn Insight Tag Helper, and similar tools show you whether a pixel fired on any given page. Use them when adding new pixels.
+
+**Browser console.** If you suspect a tag is throwing a JavaScript error, the browser's DevTools Console will show it. GTM often fails silently — an error in a Custom HTML tag stops that tag's execution without any visible indication in the UI.
+
+## Common mistakes to avoid
+
+**Publishing without previewing.** There is no undo after a publish, only a rollback. Always preview.
+
+**Using "All Elements" click triggers without conditions.** A click trigger with no conditions fires on every click on the page. Always add at least one condition to narrow the scope.
+
+**Not accounting for dynamic content.** If the element you want to track is loaded after the initial page render (a product loaded via AJAX, a modal that appears on interaction), a standard click trigger may not see it. Ask a developer for a custom dataLayer push instead.
+
+**Duplicate tags after migration.** If you are migrating from hardcoded tags to GTM, make sure the hardcoded tags are removed from the site at the same time GTM publishes. Running both simultaneously causes duplicate tracking.
+
+**Editing the live container without a workspace.** Any change you make directly in the main workspace is added to the pending changes and goes live on your next publish. Use named workspaces for anything that is not ready to ship immediately.
+
+<CardGrid>
+  <LinkCard
+    title="Tags, Triggers & Variables"
+    description="The mental model that explains how GTM configuration works."
+    href="/foundations/tags-triggers-variables/"
+  />
+  <LinkCard
+    title="Preview Mode"
+    description="Deep dive into using Preview mode and Tag Assistant to test your implementation."
+    href="/client-side/debugging/preview-mode/"
+  />
+  <LinkCard
+    title="Naming Conventions"
+    description="Practical naming convention systems that scale with your container."
+    href="/client-side/management/naming-conventions/"
+  />
+  <LinkCard
+    title="GTM Account Structure"
+    description="How to organize accounts, containers, and workspaces for your team."
+    href="/foundations/gtm-account-structure/"
+  />
+</CardGrid>

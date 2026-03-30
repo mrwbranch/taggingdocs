@@ -1,6 +1,224 @@
 ---
 title: "view_item_list"
-description: "DataLayer specification for product list and category page impressions."
+description: "Complete dataLayer specification for the GA4 view_item_list event — product list impressions on category pages, search results, and recommendation widgets."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The `view_item_list` event fires when a user sees a list of products. This is your product impression data — every time a product is visible to a user in a list context, you're gathering data about which products get seen, which lists perform well, and how position affects downstream behavior.
+
+This is the first event in the ecommerce funnel. The `item_list_id` and `item_list_name` you set here should carry through to `select_item` when the user clicks a product, creating a traceable path from list impression to product view to purchase.
+
+## When to fire
+
+Fire `view_item_list` when:
+- A category or subcategory page renders with products visible
+- Search results load
+- A recommendation widget or "related products" section is visible on the page
+- A promotional product grid is visible (e.g., "New Arrivals", "Sale Items")
+
+Do **not** fire it on every scroll — once per list render is correct. If pagination loads more products, fire again for the new page of results.
+
+## Complete dataLayer push
+
+```javascript
+// Always clear previous ecommerce data first
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'view_item_list',
+  ecommerce: {
+    item_list_id: 'mens_outerwear',
+    item_list_name: "Men's Outerwear",
+    items: [
+      {
+        item_id: 'SKU-001-BLK',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_category3: 'Jackets',
+        item_variant: 'Black',
+        price: 89.99,
+        quantity: 1,
+        index: 0,
+        item_list_id: 'mens_outerwear',
+        item_list_name: "Men's Outerwear"
+      },
+      {
+        item_id: 'SKU-023-NAV',
+        item_name: 'Wool Peacoat',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_category3: 'Coats',
+        item_variant: 'Navy',
+        price: 149.99,
+        quantity: 1,
+        index: 1,
+        item_list_id: 'mens_outerwear',
+        item_list_name: "Men's Outerwear"
+      },
+      {
+        item_id: 'SKU-041-GRN',
+        item_name: 'Field Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_category3: 'Jackets',
+        item_variant: 'Olive Green',
+        price: 119.99,
+        quantity: 1,
+        index: 2,
+        item_list_id: 'mens_outerwear',
+        item_list_name: "Men's Outerwear"
+      }
+    ]
+  }
+});
+```
+
+<Aside type="note">
+Include `item_list_id` and `item_list_name` both at the ecommerce level and inside each item object. The ecommerce-level fields identify the list context for the event. The item-level fields carry that context forward when the item is later selected and added to cart — GA4 uses them to build list performance reports.
+</Aside>
+
+## Event schema
+
+<EventSchema
+  event="view_item_list"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "view_item_list"' },
+    { name: 'ecommerce.item_list_id', type: 'string', required: false, description: 'Machine-readable list identifier. Use snake_case. e.g., mens_outerwear, search_results.' },
+    { name: 'ecommerce.item_list_name', type: 'string', required: false, description: 'Human-readable list name. e.g., "Men\'s Outerwear", "Search Results".' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'Array of product objects for all visible products in the list.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'SKU or unique product identifier.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name.' },
+    { name: 'items[].item_brand', type: 'string', required: false, description: 'Brand or manufacturer.' },
+    { name: 'items[].item_category', type: 'string', required: false, description: 'Primary product category.' },
+    { name: 'items[].item_variant', type: 'string', required: false, description: 'Default variant shown in the list.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Current listed price. Number, not a string.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Always 1 for list impression events.' },
+    { name: 'items[].index', type: 'number', required: false, description: 'Position in the list, 0-based. Critical for position analysis.' },
+    { name: 'items[].item_list_id', type: 'string', required: false, description: 'Same as ecommerce.item_list_id — repeat at item level to carry context forward.' },
+    { name: 'items[].item_list_name', type: 'string', required: false, description: 'Same as ecommerce.item_list_name — repeat at item level.' },
+  ]}
+/>
+
+## Handling large lists
+
+### Don't include out-of-viewport products
+
+Only include products that are actually visible to the user when the event fires. If you have a 60-item category page with all products rendered in the DOM but only 12 visible above the fold, include only the visible products in the initial `view_item_list` push.
+
+For lazy-loaded or infinite scroll lists, fire `view_item_list` again when new products enter the viewport. Increment the `index` values to reflect true position in the complete list.
+
+```javascript
+// Initial viewport — products at index 0–11
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'view_item_list',
+  ecommerce: {
+    item_list_id: 'search_results',
+    item_list_name: 'Search Results',
+    items: visibleProducts.map((product, i) => ({
+      ...product,
+      index: i  // 0 through 11
+    }))
+  }
+});
+
+// After scroll — next 12 products enter viewport
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'view_item_list',
+  ecommerce: {
+    item_list_id: 'search_results',
+    item_list_name: 'Search Results',
+    items: nextBatchProducts.map((product, i) => ({
+      ...product,
+      index: 12 + i  // 12 through 23
+    }))
+  }
+});
+```
+
+### Multiple lists on the same page
+
+Pages often have multiple product lists: main search results, a "sponsored" widget, a "recently viewed" section. Fire a separate `view_item_list` for each distinct list, with unique `item_list_id` values.
+
+```javascript
+// Main results
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'view_item_list',
+  ecommerce: {
+    item_list_id: 'search_results',
+    item_list_name: 'Search Results',
+    items: [...]
+  }
+});
+
+// Related products widget fires separately
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'view_item_list',
+  ecommerce: {
+    item_list_id: 'related_products',
+    item_list_name: 'Related Products',
+    items: [...]
+  }
+});
+```
+
+## GTM configuration
+
+### Step-by-step setup
+
+<Steps>
+1. **Create a Custom Event trigger.** Triggers > New > Custom Event. Event name: `view_item_list`. Name it `CE - view_item_list`.
+
+2. **Create Data Layer Variables.** You need variables for `ecommerce.items`, `ecommerce.item_list_id`, and `ecommerce.item_list_name`. For the items array, the variable path is `ecommerce.items`.
+
+3. **Create the GA4 Event tag.** Tags > New > Google Analytics: GA4 Event.
+   - Event Name: `view_item_list`
+   - Enable the **Send Ecommerce data** checkbox — this automatically maps the items array
+   - Optional: add `item_list_id` and `item_list_name` as additional event parameters if you want to filter on them in GA4
+
+4. **Attach the trigger** `CE - view_item_list` to the tag.
+
+5. **Test in GTM Preview.** Navigate to a category page. Confirm the event fires once with the correct items. Check that `index` values start at 0.
+</Steps>
+
+## Common mistakes
+
+**Including all products regardless of visibility.** If you push 60 products in `view_item_list` when only 12 are visible, your list performance data is inflated. Users "viewed" products that were never actually in their viewport.
+
+**Not including `index`.** Position data is one of the most valuable outputs of list tracking. Which position in search results drives the most clicks? Without `index`, you cannot answer this. Always include it.
+
+**Forgetting the ecommerce null clear.** Before every ecommerce push — including this one. Previous ecommerce events' data will merge with this push if you skip the clear.
+
+**Inconsistent `item_list_id` across events.** The list identifier you use on `view_item_list` must match what you use on `select_item` for that product. If they don't match, GA4 cannot build cohesive list performance reports.
+
+<CardGrid>
+  <LinkCard
+    title="select_item"
+    description="When the user clicks a product in this list — linking list context to the product detail page."
+    href="/datalayer/ecommerce/select-item/"
+  />
+  <LinkCard
+    title="view_item"
+    description="Product detail page view — the full item specification."
+    href="/datalayer/ecommerce/view-item/"
+  />
+  <LinkCard
+    title="Ecommerce Overview"
+    description="The full GA4 ecommerce funnel and the items array structure."
+    href="/datalayer/ecommerce/ecommerce-overview/"
+  />
+  <LinkCard
+    title="view_promotion"
+    description="For banner and internal promotion impressions — the complement to view_item_list."
+    href="/datalayer/ecommerce/view-promotion/"
+  />
+</CardGrid>

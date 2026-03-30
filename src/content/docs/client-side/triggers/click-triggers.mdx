@@ -3,4 +3,239 @@ title: "Click Triggers"
 description: "Tracking clicks on links, buttons, and any clickable element."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Click triggers are one of the most-used trigger types in GTM — and one of the most commonly misconfigured. The two varieties — All Clicks and Just Links — seem straightforward but have behavioral nuances that bite you when you least expect it. This article covers both trigger types, their variables, and the CSS selector patterns that make them actually useful.
+
+## All Clicks vs. Just Links
+
+GTM offers two click trigger subtypes. The distinction matters.
+
+**All Clicks** (`gtm.click`) fires on every click event that bubbles up to the document level. It is completely indiscriminate — a click on a button, a div, an image, a paragraph, or anything else will fire this trigger. The Click variables tell you which element was clicked.
+
+**Just Links** (`gtm.linkClick`) fires only when the click target is an `<a>` element or a descendant of one. It provides the same Click variables but also adds link-specific behavior: a "Check Validation" option that verifies the link is a valid URL, and a "Wait for Tags" option that briefly delays navigation to allow tags to fire before the browser navigates away.
+
+Use Just Links for anchor-based navigation tracking (outbound links, download tracking, email/phone links). Use All Clicks for everything else — buttons, interactive UI elements, custom components.
+
+## How GTM detects clicks
+
+GTM uses **event delegation**: a single event listener attached to `document` captures all click events that bubble up. When a click occurs, GTM inspects the event target and its closest ancestor `<a>` element (for Just Links) to determine what was clicked.
+
+This has an important implication: GTM sees the actual element that received the click, not necessarily the element you intended to track. If a user clicks the icon *inside* a button, GTM's `Click Element` will be the icon (`<svg>` or `<img>`), not the button (`<button>`). This is the number one source of click trigger confusion.
+
+```html
+<!-- User clicks the icon inside the button -->
+<button data-track="cta-purchase">
+  <svg class="icon">...</svg>  <!-- ← GTM sees THIS as Click Element -->
+  Buy Now
+</button>
+```
+
+The fix is to target the parent element in your trigger conditions using the descendant wildcard pattern, covered below.
+
+## Click variables
+
+Enable these built-in variables in GTM under **Variables → Built-In Variables → Clicks**. Enable all of them from day one — they are useful for debugging even if you are not currently using them in triggers.
+
+| Variable | Value | Example |
+|----------|-------|---------|
+| `Click Element` | The DOM element that received the click | `<button class="btn-primary">` |
+| `Click Classes` | Space-separated class names of the clicked element | `btn btn-primary cta` |
+| `Click ID` | The `id` attribute of the clicked element | `purchase-button` |
+| `Click Target` | The `target` attribute | `_blank` |
+| `Click URL` | The `href` attribute (for links) | `https://checkout.example.com` |
+| `Click Text` | The visible text content of the clicked element | `Buy Now` |
+
+<Aside type="caution">
+`Click Text` reads the entire `textContent` of the element, including nested element text. If you click a button that contains `<span>Save</span><small> 20%</small>`, Click Text returns `Save 20%`, not just `Save`. Be aware of this when using Click Text in conditions.
+</Aside>
+
+## Targeting specific elements with CSS selectors
+
+The "matches CSS selector" condition is the most precise way to target click triggers. It lets you use standard CSS selectors to identify the element — the same selectors you use in stylesheets and `document.querySelector()` calls.
+
+### Targeting by element and attribute
+
+```css
+/* Any button with a specific data attribute */
+button[data-track="cta-purchase"]
+
+/* Anchor links to PDF files */
+a[href$=".pdf"]
+
+/* External links (not starting with your domain) */
+a[href^="http"]:not([href*="yourdomain.com"])
+
+/* Links to specific domains */
+a[href*="amazon.com"]
+
+/* Phone links */
+a[href^="tel:"]
+
+/* Email links */
+a[href^="mailto:"]
+```
+
+### The descendant wildcard — the pattern that fixes child element clicks
+
+Because GTM sees the innermost clicked element (not the container), your CSS selector condition might fail when users click icons or text inside your target element. The fix: include both the element and its descendants:
+
+```css
+/* This matches the button AND anything clicked inside it */
+button[data-track], button[data-track] *
+```
+
+The `button[data-track] *` part means "any element that is a descendant of a button with data-track." When a user clicks the `<svg>` inside the button, the `Click Element` is the `<svg>`, which matches `button[data-track] *`.
+
+<Aside type="tip">
+This "element, element *" pattern is the single most important CSS selector technique for click triggers. Apply it to every click trigger condition where the target element might contain child elements.
+</Aside>
+
+### Testing selectors before configuring triggers
+
+Always test your CSS selector in the browser console before building a trigger around it:
+
+```javascript
+// Open DevTools console and run:
+document.querySelectorAll('button[data-track], button[data-track] *')
+// Should return all buttons with data-track and their children
+```
+
+If the selector returns the elements you expect, it will work in your GTM trigger condition. If it returns zero elements, something is wrong with the selector.
+
+## Configuring the Just Links trigger
+
+The Just Links trigger has two options that do not exist on All Clicks:
+
+### Check Validation
+
+When enabled, GTM verifies that the clicked link is a valid URL before firing tags. Links with `href="#"`, `href="javascript:void(0)"`, or fragment-only identifiers fail validation and do not fire the trigger. This prevents false positives from decorative anchor elements and in-page navigation links.
+
+Recommendation: leave Check Validation on unless you specifically need to track links with non-URL href values.
+
+### Wait for Tags
+
+When enabled, GTM briefly delays the browser's navigation after a link click to allow tags time to fire. Without this, the browser might navigate away before your tag's network request completes — particularly for outbound links where the current page unloads.
+
+The default maximum wait is 2000ms, but GTM typically releases navigation as soon as tags finish firing — the maximum is only reached if tags are slow.
+
+Recommendation: enable Wait for Tags for any link trigger where the link navigates to a different domain. Do not enable it for internal navigation — it adds unnecessary delay and is not needed for same-domain links where GA4 is present on both pages.
+
+<TagConfig
+  name="GA4 - Event - Outbound Link Click"
+  type="Google Analytics: GA4 Event"
+  trigger="JL - Outbound Links"
+  variables={['Click URL', 'Click Text']}
+/>
+
+## Practical click trigger examples
+
+### Track all CTA button clicks
+
+```
+Trigger type: All Clicks
+Fires on: Some Clicks
+Condition: Click Element matches CSS selector
+Selector: [data-cta], [data-cta] *
+```
+
+This assumes your development team adds `data-cta` attributes to all primary call-to-action buttons. This is the correct pattern: developers annotate elements with semantic data attributes, GTM reads those attributes. It is more stable than tracking by class name (classes change during redesigns) and more specific than tracking by element type (buttons appear everywhere).
+
+### Track PDF downloads
+
+```
+Trigger type: Just Links
+Fires on: Some Link Clicks
+Condition: Click URL ends with .pdf
+Wait for Tags: enabled
+```
+
+### Track outbound link clicks
+
+```
+Trigger type: Just Links
+Fires on: Some Link Clicks
+Condition: Click URL does not contain yourdomain.com
+Check Validation: enabled
+Wait for Tags: enabled
+```
+
+### Track tab navigation — use a dataLayer event instead
+
+```javascript
+// Better approach: push to dataLayer instead of using click triggers
+document.querySelectorAll('[role="tab"]').forEach(function(tab) {
+  tab.addEventListener('click', function() {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'tab_click',
+      tab_label: this.textContent.trim(),
+      tab_id: this.id
+    });
+  });
+});
+```
+
+Use a Custom Event trigger on `tab_click` instead. For interactive UI components with state, dataLayer events are more reliable and data-rich than click triggers.
+
+## Debugging clicks in Preview mode
+
+GTM Preview mode shows every click event with its associated variable values. This is the fastest way to verify what GTM is actually seeing when a user clicks something.
+
+<Steps>
+1. Enter GTM Preview mode and navigate to your page
+2. Click the element you want to track
+3. In the Preview pane, click the `gtm.click` event in the event list
+4. Expand "Variables" in the detail view
+5. Check what values GTM captured for Click Element, Click Classes, Click ID, etc.
+</Steps>
+
+The most useful thing to check: does `Click Element` show the element you expected, or a child element inside it? If it shows a child, you need the `element, element *` selector pattern or a more specific CSS selector.
+
+## Common mistakes
+
+### Targeting by class name instead of data attributes
+
+Class names are visual styling concerns and change with redesigns. `btn-primary` becomes `button--primary` during a CSS refactor, and your click trigger silently stops working. Data attributes are semantic and stable — `data-cta="purchase"` is a deliberate annotation that communicates intent. Work with your development team to establish `data-track` or `data-gtm` attributes for elements you need to track.
+
+### Not enabling "matches CSS selector" as the operator
+
+GTM's default condition operator for Click Classes is "contains." Using `Click Classes contains btn` will match any button with "btn" anywhere in its class string — `btn`, `btn-primary`, `btn-secondary`, `newsletter-btn`. This is usually too broad. Switch to "matches CSS selector" for precise targeting.
+
+### Not including the descendant wildcard
+
+Tested your trigger in Preview, it fires when you click the button text but not when you click the icon inside? Missing the descendant wildcard. Add `, button[your-selector] *` to your CSS selector condition.
+
+### Using All Clicks when Just Links is appropriate
+
+If you are tracking link clicks, always use Just Links. It scopes the trigger to anchor elements and provides the "Wait for Tags" option, which is essential for outbound links. All Clicks on every click is noisy and slower to evaluate.
+
+### Over-relying on click triggers for application interactions
+
+For anything more sophisticated than "user clicked this button," consider dataLayer events instead. Click triggers cannot tell you whether the click led to a successful state change (did the form submit? Did the cart update?). A dataLayer event pushed after the action is confirmed is always more accurate.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The alternative to click triggers for application-level interactions where you need more data."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Form Triggers"
+    description="Form submission tracking — including why the built-in form trigger often fails and what to use instead."
+    href="/client-side/triggers/form-triggers/"
+  />
+  <LinkCard
+    title="Trigger Types Overview"
+    description="The complete reference for all GTM trigger types."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+  <LinkCard
+    title="Element Visibility Trigger"
+    description="When you care not about clicks but about whether elements are seen — use this instead."
+    href="/client-side/triggers/element-visibility-trigger/"
+  />
+</CardGrid>

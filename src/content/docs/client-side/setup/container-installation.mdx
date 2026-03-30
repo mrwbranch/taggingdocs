@@ -3,4 +3,379 @@ title: "Container Installation"
 description: "The definitive guide to installing GTM correctly on any platform."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Installing the GTM container is the first thing you do, and it's also the thing most frequently done wrong. A misplaced snippet, a modified script tag, or a duplicate container can cause hours of debugging later. This guide covers the correct installation method for every common platform and explains why placement matters.
+
+## The two-part snippet
+
+Google Tag Manager gives you two code blocks when you create a container. Both are required, and both serve distinct purposes.
+
+The first block goes in the `<head>`:
+
+```html
+<!-- Google Tag Manager -->
+<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+})(window,document,'script','dataLayer','GTM-XXXX');</script>
+<!-- End Google Tag Manager -->
+```
+
+The second block goes immediately after the opening `<body>` tag:
+
+```html
+<!-- Google Tag Manager (noscript) -->
+<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-XXXX"
+height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+<!-- End Google Tag Manager (noscript) -->
+```
+
+### Why two blocks?
+
+The `<head>` script does the actual work. It creates the `dataLayer` array (if it doesn't already exist), fires the `gtm.js` initialization event, then asynchronously loads your container JavaScript from Google's servers. Placing it in the `<head>` ensures GTM loads as early as possible — before the user sees any content, meaning tags that need to fire on page load are not delayed.
+
+The `<noscript>` block is a fallback for browsers with JavaScript disabled. In practice, this accounts for a tiny fraction of modern traffic, but it satisfies some compliance requirements and should be included. It does nothing useful in JavaScript-enabled browsers.
+
+<Aside type="tip">
+The `<head>` snippet should be placed as high in the `<head>` as possible — right after any `<meta charset>` and `<meta name="viewport">` tags, but before any other scripts. Every millisecond GTM loads earlier is a millisecond more for your tags to run.
+</Aside>
+
+## Initializing the dataLayer before GTM
+
+One critical thing the GTM snippet documentation does not emphasize enough: if you need to push data to the `dataLayer` before GTM loads — which you should, for consent defaults and initial page data — you must declare the array first:
+
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  // Push initial data BEFORE the GTM snippet
+  dataLayer.push({
+    page_type: 'product',
+    user_logged_in: false
+  });
+</script>
+<!-- GTM snippet goes here -->
+<script>(function(w,d,s,l,i)...</script>
+```
+
+The `window.dataLayer = window.dataLayer || []` pattern ensures the array exists. The GTM snippet also initializes this array if it doesn't exist, but by then it might be too late for any pre-GTM pushes you needed. This pattern is especially important for Consent Mode defaults (covered in detail in the [Google Consent Mode](/client-side/setup/google-consent-mode/) article).
+
+## Platform installation guides
+
+<Tabs>
+<TabItem label="Static HTML">
+
+Add the `<head>` snippet inside your `<head>` element, and the `<noscript>` snippet immediately after `<body>`:
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Site</title>
+
+  <!-- Consent defaults (if using Consent Mode) -->
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('consent', 'default', {
+      'ad_storage': 'denied',
+      'analytics_storage': 'denied',
+      'wait_for_update': 500
+    });
+  </script>
+
+  <!-- Google Tag Manager -->
+  <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+  new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+  j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+  'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+  })(window,document,'script','dataLayer','GTM-XXXX');</script>
+  <!-- End Google Tag Manager -->
+</head>
+<body>
+  <!-- Google Tag Manager (noscript) -->
+  <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-XXXX"
+  height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+  <!-- End Google Tag Manager (noscript) -->
+
+  <!-- Your page content -->
+</body>
+</html>
+```
+
+</TabItem>
+<TabItem label="WordPress">
+
+You do not need a plugin to install GTM on WordPress. Adding a plugin for a two-code-block installation is unnecessary complexity. Use the `functions.php` approach instead.
+
+Add to your theme's `functions.php` (or better, a site-specific plugin):
+
+```php
+<?php
+// Add GTM head snippet
+function add_gtm_head() {
+    ?>
+    <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+    new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+    j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+    'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+    })(window,document,'script','dataLayer','GTM-XXXX');</script>
+    <?php
+}
+add_action('wp_head', 'add_gtm_head', 1);
+
+// Add GTM body snippet
+function add_gtm_body() {
+    ?>
+    <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-XXXX"
+    height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+    <?php
+}
+add_action('wp_body_open', 'add_gtm_body', 1);
+```
+
+The `priority: 1` argument ensures the hook fires before other scripts. The `wp_body_open` action was introduced in WordPress 5.2 — if you are on an older version, you will need a theme that manually calls `wp_body_open()` after `<body>`.
+
+<Aside type="caution">
+If you use a GTM plugin, check whether it's adding the snippet correctly. Some plugins place the `<head>` snippet in the wrong location, or use `wp_footer` instead of `wp_head` for the script. Verify placement with browser developer tools.
+</Aside>
+
+</TabItem>
+<TabItem label="Shopify">
+
+In Shopify, the GTM snippets go in your `theme.liquid` file (or `layout/theme.liquid` in newer themes).
+
+<Steps>
+1. Go to **Online Store → Themes → Edit code**
+2. Open `layout/theme.liquid`
+3. Paste the `<head>` snippet just before the closing `</head>` tag
+4. Paste the `<noscript>` snippet immediately after `<body>`
+5. Save the file
+</Steps>
+
+```liquid
+{% comment %} Google Tag Manager {% endcomment %}
+<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+})(window,document,'script','dataLayer','GTM-XXXX');</script>
+{% comment %} End Google Tag Manager {% endcomment %}
+</head>
+
+<body>
+{% comment %} Google Tag Manager (noscript) {% endcomment %}
+<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-XXXX"
+height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+{% comment %} End Google Tag Manager (noscript) {% endcomment %}
+```
+
+For Shopify, you will also want to push ecommerce data to the `dataLayer` from within your Liquid templates — for example, pushing product data on product pages, and order data on the thank-you page. This is separate from the container installation but essential for ecommerce tracking.
+
+</TabItem>
+<TabItem label="Next.js">
+
+Next.js App Router (recommended approach using the `<Script>` component):
+
+```tsx
+// app/layout.tsx
+import Script from 'next/script';
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <head>
+        {/* Consent defaults must come BEFORE GTM */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              window.dataLayer = window.dataLayer || [];
+              function gtag(){dataLayer.push(arguments);}
+              gtag('consent', 'default', {
+                'ad_storage': 'denied',
+                'analytics_storage': 'denied',
+                'wait_for_update': 500
+              });
+            `,
+          }}
+        />
+      </head>
+      <body>
+        {/* GTM noscript fallback */}
+        <noscript>
+          <iframe
+            src="https://www.googletagmanager.com/ns.html?id=GTM-XXXX"
+            height="0"
+            width="0"
+            style={{ display: 'none', visibility: 'hidden' }}
+          />
+        </noscript>
+
+        {children}
+
+        {/* GTM script — afterInteractive ensures it loads after hydration */}
+        <Script
+          id="gtm-script"
+          strategy="afterInteractive"
+          dangerouslySetInnerHTML={{
+            __html: `
+              (function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+              new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+              j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+              'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+              })(window,document,'script','dataLayer','GTM-XXXX');
+            `,
+          }}
+        />
+      </body>
+    </html>
+  );
+}
+```
+
+<Aside type="caution">
+The `afterInteractive` strategy loads GTM after the page becomes interactive, which is a small delay but acceptable for most use cases. If you need GA4 pageviews to fire on the initial load, this is fine — GTM will replay any dataLayer events that fired before it initialized. If you are using Consent Mode, the consent defaults above must be in a `beforeInteractive` script so they are available immediately.
+</Aside>
+
+For the Pages Router:
+
+```tsx
+// pages/_document.tsx
+import { Html, Head, Main, NextScript } from 'next/document';
+import Script from 'next/script';
+
+export default function Document() {
+  return (
+    <Html lang="en">
+      <Head />
+      <body>
+        <noscript>
+          <iframe
+            src="https://www.googletagmanager.com/ns.html?id=GTM-XXXX"
+            height="0"
+            width="0"
+            style={{ display: 'none', visibility: 'hidden' }}
+          />
+        </noscript>
+        <Main />
+        <NextScript />
+      </body>
+    </Html>
+  );
+}
+
+// pages/_app.tsx — load the GTM script here
+import Script from 'next/script';
+import type { AppProps } from 'next/app';
+
+export default function App({ Component, pageProps }: AppProps) {
+  return (
+    <>
+      <Script
+        id="gtm-script"
+        strategy="afterInteractive"
+        dangerouslySetInnerHTML={{
+          __html: `(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+          new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+          j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+          'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+          })(window,document,'script','dataLayer','GTM-XXXX');`,
+        }}
+      />
+      <Component {...pageProps} />
+    </>
+  );
+}
+```
+
+</TabItem>
+</Tabs>
+
+## Verifying installation
+
+Before you declare installation complete, verify that GTM is actually loading and running correctly. There are three ways to do this.
+
+### Browser console check
+
+Open DevTools and run this in the console:
+
+```javascript
+// Check 1: Is the dataLayer array present?
+console.log(window.dataLayer);
+// Expected: Array with at least one object containing gtm.start
+
+// Check 2: Has GTM initialized?
+console.log(window.google_tag_manager);
+// Expected: Object with your container ID as a key
+
+// Check 3: Which events have fired?
+window.dataLayer.forEach((item, i) => {
+  if (item.event) console.log(i, item.event);
+});
+// Expected: 'gtm.js', then 'gtm.dom', then 'gtm.load'
+```
+
+If `window.google_tag_manager` is undefined, GTM has not loaded. Check for network errors in the Network tab.
+
+### Network tab
+
+In DevTools Network tab, filter by "gtm.js". You should see a request to `www.googletagmanager.com/gtm.js?id=GTM-XXXX` with a 200 status code. If you see a 404, your container ID is wrong. If you see nothing at all, the snippet is not installed.
+
+### Google Tag Assistant
+
+Install the [Google Tag Assistant](https://tagassistant.google.com/) browser extension. Navigate to your site, click the extension icon, and it will show you which Google tags are active and whether they are configured correctly. It is the fastest way to spot common installation problems.
+
+## Common mistakes
+
+### Wrong snippet placement
+
+The most common mistake is placing the `<head>` snippet at the bottom of `<head>` or in `<body>`, and placing the noscript block somewhere other than immediately after `<body>`. GTM's own guidance is clear: head snippet as early as possible in `<head>`, noscript immediately after `<body>`.
+
+### Modifying the snippet
+
+Do not add `defer`, `async`, or any other attributes to the script tag created by the GTM snippet. The snippet already manages its own async loading. Adding `defer` to the outer `<script>` wrapper will delay the entire initialization. Adding `async` to an already-async pattern has no effect. Either way, you are changing behavior GTM expects to control.
+
+### Duplicate containers
+
+If you see GTM loading twice in the Network tab, you have a duplicate installation. This can happen when a plugin adds GTM and you also have it hardcoded, or when you switch themes and the old theme still has the snippet. Duplicate containers cause double-counted pageviews and event data. Audit all locations where GTM could be installed.
+
+### Forgetting the container ID
+
+Copying the snippet from a GTM tutorial and forgetting to replace `GTM-XXXX` with your actual container ID is embarrassingly common. The container will "load" (no JS errors) but send data nowhere. Your container ID is visible in GTM's admin area and looks like `GTM-XXXXXXX`.
+
+### Hardcoding gtag.js alongside GTM
+
+If your site has the GTM snippet installed, do not also install the standalone gtag.js snippet. GTM loads its own Google Tag internally. Having both creates duplicate instances that can conflict, double-count conversions, and cause consent mode to behave unpredictably.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="SPA Setup"
+    description="If you are installing GTM in a React, Next.js, or Vue application, you also need to handle virtual pageviews."
+    href="/client-side/setup/spa-setup/"
+  />
+  <LinkCard
+    title="Google Consent Mode"
+    description="The consent defaults snippet that must be placed before GTM for privacy compliance."
+    href="/client-side/setup/google-consent-mode/"
+  />
+  <LinkCard
+    title="Container Loading Strategies"
+    description="Advanced patterns for lazy-loading GTM and minimizing its performance impact."
+    href="/client-side/setup/container-loading-strategies/"
+  />
+  <LinkCard
+    title="How GTM Works"
+    description="Understand the execution model before you configure your first tag."
+    href="/foundations/how-gtm-works/"
+  />
+</CardGrid>

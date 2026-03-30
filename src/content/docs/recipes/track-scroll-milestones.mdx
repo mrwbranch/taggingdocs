@@ -1,6 +1,177 @@
 ---
 title: "Track Scroll Milestones"
-description: "Scroll depth tracking at 25/50/75/100% milestones."
+description: "Implement scroll depth tracking at 25%, 50%, 75%, and 90% in GA4 via GTM — built-in trigger, custom JavaScript, and page filtering."
+sidebar:
+  badge:
+    text: Beginner
+    variant: success
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Scroll depth tells you how far users actually read your content. Combined with time on page, it is one of the most useful engagement signals available without any custom development. GTM has a built-in Scroll Depth trigger that handles the heavy lifting.
+
+## GTM Built-in Scroll Depth Trigger
+
+<Steps>
+1. **Enable Scroll Variables**
+
+   In GTM → **Variables → Configure**, enable:
+   - Scroll Depth Threshold
+   - Scroll Depth Units
+   - Scroll Direction
+
+2. **Create a Scroll Depth Trigger**
+
+   - Trigger type: **Scroll Depth**
+   - Vertical Scroll Depths: check **Percentages** and enter `25, 50, 75, 90`
+   - This fires: **Some Pages** if you want to limit to content pages, or **All Pages**
+
+   To limit to blog posts and articles only:
+   - Fire on: **Some Pages**
+   - Condition: `Page Path` **matches RegEx** `^/blog/|^/articles/`
+
+3. **Create a GA4 Event Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `scroll_milestone`
+   - Parameters:
+     - `scroll_depth` → `{{Scroll Depth Threshold}}`
+     - `scroll_units` → `{{Scroll Depth Units}}`
+     - `page_path` → `{{Page Path}}`
+     - `page_title` → `{{Page Title}}`
+   - Trigger: the Scroll Depth trigger above
+
+4. **Test in Preview Mode**
+
+   Open GTM Preview, visit a long content page, and scroll down slowly. At each 25% milestone, the `gtm.scrollDepth` event should appear in the Summary pane, followed by your GA4 tag firing.
+</Steps>
+
+<TagConfig
+  name="GA4 - scroll_milestone"
+  type="Google Analytics: GA4 Event"
+  trigger="Scroll Depth - 25, 50, 75, 90%"
+  variables={["Scroll Depth Threshold", "Scroll Depth Units", "Page Path", "Page Title"]}
+/>
+
+<Aside type="tip">
+GA4's Enhanced Measurement also tracks scroll depth (it fires when 90% scroll is reached). If you implement this recipe, you will see duplicate `scroll` events in GA4 for the 90% milestone. Disable Enhanced Measurement's scroll tracking in **GA4 → Admin → Data Streams → Enhanced Measurement → Scrolls**.
+</Aside>
+
+## Custom JavaScript approach (more control)
+
+The built-in trigger is great for simple cases. If you need more control — tracking by pixel offset, excluding short pages, or capturing reading time at each milestone — use a Custom HTML tag instead.
+
+<DataLayerExample event="scroll_milestone" description="Custom scroll depth tracker with page length filtering and deduplication.">
+```javascript
+(function() {
+  var milestones = [25, 50, 75, 90];
+  var fired = {};
+  var isTracking = false;
+
+  // Only track on pages longer than 1500px
+  if (document.documentElement.scrollHeight < 1500) return;
+
+  function getScrollPercent() {
+    var scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+    var docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    return docHeight > 0 ? Math.round((scrollTop / docHeight) * 100) : 0;
+  }
+
+  function handleScroll() {
+    var percent = getScrollPercent();
+    milestones.forEach(function(milestone) {
+      if (percent >= milestone && !fired[milestone]) {
+        fired[milestone] = true;
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({
+          event: 'scroll_milestone',
+          scroll_depth: milestone,
+          scroll_units: 'percent',
+          page_path: window.location.pathname,
+          page_title: document.title,
+          page_length: document.documentElement.scrollHeight
+        });
+      }
+    });
+  }
+
+  // Throttle scroll handler
+  var ticking = false;
+  window.addEventListener('scroll', function() {
+    if (!ticking) {
+      requestAnimationFrame(function() {
+        handleScroll();
+        ticking = false;
+      });
+      ticking = true;
+    }
+  }, { passive: true });
+
+  // Check on load (for short sessions where user doesn't scroll)
+  handleScroll();
+})();
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add the code as a Custom HTML tag** in GTM
+2. Set the trigger to **DOM Ready** (so the page height is measurable)
+3. Optionally filter to specific pages using a Page Path condition
+4. **Create a Custom Event Trigger**:
+   - Trigger type: **Custom Event**
+   - Event name: `scroll_milestone`
+5. **Create a GA4 Event Tag** with the same parameters as shown above
+6. **Test in Preview Mode**: scroll down a long page and verify each milestone fires exactly once
+</Steps>
+
+## Tracking scroll depth in SPAs
+
+In single-page apps, the GTM Scroll Depth trigger resets on page navigation automatically when a new `page_view` event fires. The custom JavaScript approach requires a manual reset on route change:
+
+```javascript
+// Reset scroll tracking on SPA navigation
+window.addEventListener('popstate', function() {
+  fired = {};  // Reset the milestones object
+});
+```
+
+Or push a reset from your router's navigation hook before the virtual pageview push.
+
+## Connecting scroll depth to other events
+
+One powerful pattern is capturing the scroll depth at the time a form submission or CTA click happens — not just as a standalone event:
+
+```javascript
+// On form submit, include current scroll depth
+window.dataLayer.push({
+  event: 'form_submission',
+  form_name: 'newsletter',
+  scroll_depth_at_submission: getScrollPercent()
+});
+```
+
+This lets you answer "Do users who read 75% of the article convert at a higher rate?"
+
+## Test it
+
+1. Open GTM Preview, navigate to a long content page (1500px+ height)
+2. Scroll slowly to 25%, 50%, 75%, and 90%
+3. Each milestone should appear as a separate `scroll_milestone` event in the Summary pane
+4. Verify Tags Fired shows your GA4 tag for each
+5. In GA4 DebugView, verify `scroll_depth` parameter shows the correct percentage
+
+## Common gotchas
+
+**Scroll fires twice.** If you have both the built-in trigger and a custom JS implementation, you will get duplicates. Pick one approach.
+
+**100% scroll never fires.** This is by design — most of the time, users cannot scroll to the very bottom of the page because the viewport height prevents it. Use 90% as your "read to completion" proxy.
+
+**Short pages inflate engagement.** A 300px page will trigger all milestones in a split second. Filter to pages above a minimum height using a Page Path condition or the `scrollHeight` check in the custom approach.
+
+<CardGrid>
+  <LinkCard title="Track Video Engagement" href="/recipes/track-video-engagement/" description="The same milestone approach applied to video progress." />
+  <LinkCard title="Track Infinite Scroll" href="/recipes/track-infinite-scroll/" description="Tracking content consumption in feed-style layouts." />
+</CardGrid>

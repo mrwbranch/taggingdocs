@@ -1,6 +1,207 @@
 ---
-title: "Consent Mode v2"
-description: "Understanding Google's Consent Mode v2 and its impact on tracking."
+title: "Google Consent Mode v2 Explained"
+description: "What the seven consent types actually do, how cookieless pings work, behavioral modeling, and why Consent Mode v2 is now mandatory for EU Google Ads campaigns."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Google Consent Mode v2 is not a banner solution. It is a **signal-passing protocol** between your Consent Management Platform and Google's measurement tags. When a user makes a consent choice, your CMP communicates that choice to Google's tags via Consent Mode, and those tags adjust their behavior — collecting more or less data depending on what the user allowed.
+
+Understanding exactly what gets sent and blocked for each consent type is what separates implementations that actually protect user privacy from implementations that just look compliant.
+
+<Aside type="caution">
+As of March 2024, Google requires Consent Mode v2 for any advertiser targeting users in the European Economic Area with Google Ads. Without it, audience lists stop working and conversion modeling becomes unavailable. This is not optional for advertisers running EU campaigns.
+</Aside>
+
+## The seven consent types
+
+Consent Mode v2 introduced two new consent types on top of the original four. Here is what each one actually controls:
+
+### `analytics_storage`
+
+Controls whether GA4 can read and write cookies used for analytics purposes. When denied:
+- No `_ga` or `_ga_XXXX` cookies are written
+- GA4 sends a cookieless hit with minimal data — no client ID, limited session data
+- In Advanced Consent Mode, this hit is used for behavioral modeling
+- In Basic Consent Mode, no hit is sent at all
+
+### `ad_storage`
+
+Controls whether Google Ads tags can read and write cookies for advertising purposes. When denied:
+- No `_gcl_au`, `_gads`, or conversion cookies are written
+- Ads tags still fire in Advanced mode but without identifiers
+- Conversion modeling uses aggregated signals instead of individual user data
+
+### `ad_user_data` (new in v2)
+
+Controls whether user-provided data — email addresses, phone numbers — can be sent to Google for advertising purposes. This specifically governs **Enhanced Conversions** and user data uploads. When denied:
+- Hashed user data is not transmitted even if your tag is configured to send it
+- Enhanced Conversions will not function correctly without this consent granted
+
+### `ad_personalization` (new in v2)
+
+Controls whether data can be used for personalized advertising. When denied:
+- Remarketing audiences are not built
+- User data is used for conversion measurement only, not audience targeting
+- This maps roughly to "opt out of personalized ads" in regulatory language
+
+### `functionality_storage`
+
+Controls cookies that enable website functionality — login persistence, language preferences, shopping cart state. Not typically needed for standard analytics setups unless your measurement relies on functional cookies.
+
+### `personalization_storage`
+
+Controls cookies used for content personalization such as recommendations and saved preferences. Distinct from `ad_personalization` — this covers non-advertising personalization on the site itself.
+
+### `security_storage`
+
+Controls cookies required for security purposes — CSRF tokens, fraud detection. Google recommends always granting this. Most implementations set it to `granted` unconditionally regardless of other consent choices.
+
+## How Consent Mode actually works
+
+### The default → update flow
+
+Consent Mode operates in two phases:
+
+**Phase 1 — Default state**: Before any user interaction, you set a default consent state. For users in the EU, the correct default is `denied` for all advertising and analytics types. This must happen before GTM loads.
+
+**Phase 2 — Update state**: When the user makes a choice in your CMP banner, the CMP calls the consent update function with the user's actual choices. Google's tags then either fire normally or continue in restricted mode.
+
+```javascript
+// Phase 1: Default state — set BEFORE the GTM snippet in your <head>
+window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+
+gtag('consent', 'default', {
+  'ad_storage': 'denied',
+  'analytics_storage': 'denied',
+  'ad_user_data': 'denied',
+  'ad_personalization': 'denied',
+  'functionality_storage': 'denied',
+  'personalization_storage': 'denied',
+  'security_storage': 'granted',
+  'wait_for_update': 500  // milliseconds to wait for CMP response
+});
+
+// Phase 2: Update state — called by your CMP after user choice
+// This code lives inside your CMP's consent callback function
+gtag('consent', 'update', {
+  'ad_storage': userGaveAdvertisingConsent ? 'granted' : 'denied',
+  'analytics_storage': userGaveAnalyticsConsent ? 'granted' : 'denied',
+  'ad_user_data': userGaveAdvertisingConsent ? 'granted' : 'denied',
+  'ad_personalization': userGaveAdvertisingConsent ? 'granted' : 'denied'
+});
+```
+
+### The `wait_for_update` parameter
+
+`wait_for_update` (in milliseconds) tells Google's tags to pause before firing while waiting for the CMP to provide consent signals. If the CMP responds within the timeout, tags respond to the actual consent state. If the CMP doesn't respond in time, tags fire using the default state.
+
+Set this higher than your CMP's typical load time, but not so high that it meaningfully delays tag execution on every pageview. **500ms is a reasonable starting point**. Test on a throttled 3G connection to verify your CMP consistently responds within this window.
+
+<Aside type="tip">
+`wait_for_update` only matters when the default state is `denied`. If the default is `granted`, tags fire immediately without waiting regardless of this setting.
+</Aside>
+
+## Behavioral modeling
+
+When users deny analytics consent in Advanced Consent Mode, GA4 still receives cookieless pings. These pings contain:
+- Approximate geographic region at country level
+- Browser and device type
+- Aggregate session signals, but no unique user identifiers
+
+GA4 uses these pings together with machine learning to **model** what your denied-consent users are likely doing. This modeled data appears in your reports to fill in the gap.
+
+Behavioral modeling has prerequisites:
+- At least 1,000 daily users with consent granted (the training sample)
+- At least 7 days of data collection before modeling activates
+- A reasonable ratio of granted-to-denied users — if 99% of users deny consent, there is insufficient signal to model the remaining 1%
+
+Modeled data is directionally accurate for aggregate trends. It is not suitable for precise conversion counting or individual attribution. Report it as estimated, not measured.
+
+## Regional consent configuration
+
+Configure different default consent states for different regions to avoid applying EU restrictions globally:
+
+```javascript
+// Global default: granted for non-EU users
+gtag('consent', 'default', {
+  'ad_storage': 'granted',
+  'analytics_storage': 'granted',
+  'ad_user_data': 'granted',
+  'ad_personalization': 'granted'
+});
+
+// EEA override: denied until CMP callback fires
+gtag('consent', 'default', {
+  'ad_storage': 'denied',
+  'analytics_storage': 'denied',
+  'ad_user_data': 'denied',
+  'ad_personalization': 'denied',
+  'wait_for_update': 500,
+  'region': [
+    'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR',
+    'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL',
+    'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE', 'NO', 'IS', 'LI', 'GB'
+  ]
+});
+```
+
+The `region` parameter uses ISO 3166-1 alpha-2 country codes. More specific regions override less specific ones. Note that IP-based region detection can be inaccurate with VPNs and corporate proxies — err toward wider coverage if any EEA audience is possible.
+
+## Consent Mode v1 vs. v2
+
+<Comparison leftTitle="Consent Mode v1" rightTitle="Consent Mode v2" leftType="neutral" rightType="good">
+  <div slot="left">
+
+**4 consent types**: `ad_storage`, `analytics_storage`, `functionality_storage`, `personalization_storage`
+
+No explicit controls for user data transmission or ad personalization separately.
+
+Sufficient for basic analytics consent but insufficient for EU Google Ads requirements from 2024 onward.
+
+  </div>
+  <div slot="right">
+
+**7 consent types**: adds `ad_user_data`, `ad_personalization`, `security_storage`
+
+`ad_user_data` controls Enhanced Conversions user data separately from ad cookie storage.
+
+`ad_personalization` explicitly controls remarketing audience building.
+
+Required for EEA Google Ads campaigns. Provides clearer GDPR category mapping.
+
+  </div>
+</Comparison>
+
+If you are still on v1, migrate. Add the two new types to your `gtag('consent', 'default')` calls and update your CMP integration to send all seven types on the update callback.
+
+## EU regulatory context
+
+Consent Mode exists because of GDPR and the ePrivacy Directive. The core requirement: you cannot process personal data for advertising or analytics without a lawful basis. For most tracking scenarios, that lawful basis is **explicit user consent**.
+
+Google's position: Consent Mode lets you continue using Google's measurement infrastructure while respecting user consent choices. Without Consent Mode, you face a binary choice — block all Google tags entirely (losing all data) or run them without consent (GDPR violation).
+
+Running Consent Mode correctly does not guarantee compliance on its own. Compliance depends on your CMP configuration, consent language, privacy policy, and the legal jurisdiction of your users. But it is the minimum technical implementation required for EU operations with Google's measurement tools.
+
+## Common mistakes
+
+**Setting default consent state inside GTM.** If you configure the default via a GTM tag, there is a window between GTM loading and that tag firing during which other tags may have already read consent state. Set the default in inline `<script>` **before** the GTM snippet.
+
+**Using `gtag('consent', 'default')` after the GTM snippet.** Same problem. Default state must be established before GTM begins processing its tag queue.
+
+**Not including all seven types explicitly.** If you only set `ad_storage` and `analytics_storage` but omit `ad_user_data` and `ad_personalization`, these v2 types may default to `granted` in some implementations. Be explicit about all seven.
+
+**Testing only with consent granted.** The denied state is where bugs hide. Always test the complete denied flow — verify no tracking cookies appear, no full GA4 hits fire, and the CMP update correctly transitions to granted state.
+
+**Setting `wait_for_update` to 0 or leaving it out.** This effectively disables the waiting mechanism. Tags fire immediately with the default denied state before your CMP has a chance to respond. Set it to at least 300ms.
+
+---
+
+<CardGrid>
+  <LinkCard title="Consent Mode GTM Setup" href="/consent/consent-mode-gtm-setup/" description="Step-by-step configuration in GTM including trigger setup and tag consent settings." />
+  <LinkCard title="Advanced Consent Mode" href="/consent/advanced-consent-mode/" description="How cookieless pings work and when to use Advanced vs. Basic mode." />
+  <LinkCard title="CMP Integration" href="/consent/cmp-integration/" description="Connecting your consent banner platform to GTM's Consent Mode." />
+  <LinkCard title="Testing Consent" href="/consent/testing-consent/" description="Verifying your consent implementation works correctly end-to-end." />
+</CardGrid>

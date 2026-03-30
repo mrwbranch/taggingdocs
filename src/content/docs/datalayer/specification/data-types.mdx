@@ -1,6 +1,315 @@
 ---
 title: "Data Types"
-description: "String, number, boolean, array, and object usage in the dataLayer."
+description: "Standards for string, number, boolean, array, and object values in the dataLayer — including the most common mistakes with prices, currencies, and nulls."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The wrong data type silently corrupts your analytics. GA4 receives `price: "49.99"` (a string) and cannot sum it into revenue totals. It receives `quantity: "2"` and cannot compute item-level metrics. These aren't validation errors that get flagged — they're silent failures that make your ecommerce reports wrong without any obvious warning sign.
+
+This page defines the correct data types for every common dataLayer parameter.
+
+## Strings
+
+Use strings for:
+- Names, labels, and descriptive text
+- Category paths
+- Identifiers (IDs, SKUs, order numbers) — **even if they look like numbers**
+- Categorical flags with fixed values (`'credit_card'`, `'standard'`, `'gold'`)
+- Currency codes
+- ISO date strings
+
+```javascript
+// ✅ Correct string usage
+item_id: 'SKU-001'
+item_name: 'Classic Leather Jacket'
+item_category: 'Apparel'
+item_variant: 'Black / Large'
+currency: 'USD'
+transaction_id: 'ORD-2024-98765'
+payment_type: 'credit_card'
+shipping_tier: 'express'
+event_date: '2024-03-15'
+
+// ❌ Numbers that should be strings (they're identifiers, not quantities)
+item_id: 12345       // Will be fine in dataLayer, but inconsistent
+user_id: 98765       // Use '98765' — user IDs are labels, not amounts
+order_number: 1001   // Use '1001'
+```
+
+### String length limits
+
+GA4 truncates string parameter values at 100 characters. User property values are truncated at 36 characters. Design your string values to be categorical and short — not full sentences or descriptions.
+
+### Currency codes
+
+Currency must always be a three-letter ISO 4217 code in uppercase.
+
+```javascript
+// ✅ Correct
+currency: 'USD'
+currency: 'EUR'
+currency: 'GBP'
+currency: 'SEK'
+
+// ❌ Wrong
+currency: 'usd'          // lowercase
+currency: '$'            // symbol
+currency: 'US Dollar'    // full name
+currency: 'Dollar'       // partial name
+```
+
+## Numbers
+
+Use numbers for:
+- Prices and monetary values
+- Quantities
+- Scores and ratings
+- Percentages and ratios
+- Durations in seconds
+- Counts
+
+```javascript
+// ✅ Correct number usage
+price: 49.99
+quantity: 2
+value: 99.98
+tax: 9.99
+shipping: 5.00
+discount: 7.50
+rating: 4.5
+reading_time_seconds: 240
+scroll_depth_percent: 75
+```
+
+### The critical price mistake
+
+Prices as strings are the most common dataLayer error. GA4 silently ignores string values where it expects a number, which means your revenue metrics will be zero or incorrect.
+
+```javascript
+// ❌ All of these are wrong for price/value fields
+price: '49.99'       // String — GA4 ignores it
+price: '$49.99'      // String with currency symbol
+price: '49,99'       // European decimal format (comma)
+price: '1,234.56'    // Comma-formatted number
+price: 49.9900       // Fine technically, but trailing zeros are noise
+price: null          // Null — should be 0 or omitted
+
+// ✅ Correct
+price: 49.99
+value: 1234.56
+tax: 0.00
+```
+
+If your backend returns prices as strings (e.g., from a JSON API that formats currency), convert them before pushing:
+
+```javascript
+// Convert string price to number
+price: parseFloat(product.price),
+
+// Or using Number()
+value: Number(order.total),
+```
+
+### Prices are unit prices, not line totals
+
+For the `items` array, `price` is the unit price per item — not the total for that line. GA4 calculates the line total as `price × quantity`.
+
+```javascript
+// ✅ Correct — unit price
+{
+  item_id: 'SKU-001',
+  item_name: 'T-Shirt',
+  price: 24.99,    // Unit price
+  quantity: 3      // GA4 calculates line total as 74.97
+}
+
+// ❌ Wrong — passing line total as price
+{
+  item_id: 'SKU-001',
+  item_name: 'T-Shirt',
+  price: 74.97,    // Line total — GA4 will calculate 224.91 for quantity: 3
+  quantity: 3
+}
+```
+
+### Rounding
+
+Round monetary values to two decimal places before pushing. JavaScript floating-point arithmetic can produce values like `0.30000000000000004` when you calculate `0.1 + 0.2`. Use a rounding helper:
+
+```javascript
+function roundPrice(value) {
+  return Math.round(value * 100) / 100;
+}
+
+// Or
+price: parseFloat(product.price.toFixed(2))
+```
+
+## Booleans
+
+Use booleans for binary flags — things that are either true or false, on or off.
+
+```javascript
+// ✅ Correct boolean usage
+is_logged_in: true
+is_sale_item: false
+has_active_subscription: true
+is_new_customer: false
+has_applied_coupon: true
+```
+
+### Booleans vs. boolean-as-string
+
+GA4 can receive boolean values, but they're often treated as strings in reports. For filtering in GA4's Explore UI, boolean parameters show up as `true` or `false` strings. That's fine — the important thing is consistency. Don't mix `true` (boolean) and `'true'` (string) for the same parameter across different events.
+
+```javascript
+// ❌ Inconsistent — sometimes boolean, sometimes string
+is_logged_in: true     // on login event
+is_logged_in: 'true'   // on purchase event (string this time)
+is_logged_in: 1        // on some other event (number this time)
+
+// ✅ Consistent
+is_logged_in: true     // always a boolean
+```
+
+## Arrays
+
+Use arrays for collections — the most important being the `items` array in ecommerce events.
+
+```javascript
+// ✅ Array of item objects
+items: [
+  {
+    item_id: 'SKU-001',
+    item_name: 'Classic Leather Jacket',
+    price: 89.99,
+    quantity: 1
+  },
+  {
+    item_id: 'SKU-047',
+    item_name: 'Cotton Crew T-Shirt',
+    price: 24.99,
+    quantity: 2
+  }
+]
+```
+
+### GTM and arrays
+
+When GTM processes a dataLayer push, arrays are handled differently from objects. Objects are recursively merged into GTM's internal data model. Arrays **replace** the previous array value entirely — they are not merged.
+
+This is critical for ecommerce: always clear ecommerce data (`dataLayer.push({ ecommerce: null })`) before pushing a new ecommerce event. Otherwise the items array from a previous event can persist in GTM's model.
+
+<Aside type="caution">
+Never rely on GTM to merge arrays. If you push `items: [item1]` and then later push `items: [item2]`, GTM's model will contain only `[item2]`. But if you push `ecommerce: { items: [item1] }` and then push `ecommerce: { currency: 'USD' }`, GTM's model will contain `{ items: [item1], currency: 'USD' }` — because objects merge. This asymmetry is the source of a lot of bugs. Clear ecommerce before every push.
+</Aside>
+
+## Objects
+
+Use objects for nested data structures — primarily the `ecommerce` object in GA4 ecommerce events.
+
+```javascript
+// ✅ Nested object structure
+dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: 'ORD-2024-98765',
+    value: 142.97,
+    currency: 'USD',
+    items: [...]
+  }
+});
+```
+
+Keep nesting to two levels where possible. Deeply nested objects (three or more levels) become hard to reference in GTM Data Layer Variables using dot notation, and the paths become error-prone.
+
+```javascript
+// ✅ Two levels — easy to reference as ecommerce.transaction_id
+dataLayer.push({
+  ecommerce: {
+    transaction_id: '...'
+  }
+});
+
+// ❌ Three levels — now you need ecommerce.order.details.transaction_id
+dataLayer.push({
+  ecommerce: {
+    order: {
+      details: {
+        transaction_id: '...'
+      }
+    }
+  }
+});
+```
+
+## Null and undefined
+
+**Omit parameters you don't have values for** rather than passing `null` or `undefined`. An absent parameter is treated as "not provided" in GA4. A `null` value is treated as the value `null`, which may interfere with aggregation.
+
+The exception is the ecommerce clearing pattern: `dataLayer.push({ ecommerce: null })`. This is a deliberate instruction to GTM to clear ecommerce from its internal data model. It's not a data value — it's a lifecycle management step.
+
+```javascript
+// ✅ Omit parameters you don't have
+{
+  item_id: 'SKU-001',
+  item_name: 'Classic Jacket',
+  price: 89.99,
+  quantity: 1
+  // No item_brand — just omit it
+}
+
+// ❌ Passing null for missing parameters
+{
+  item_id: 'SKU-001',
+  item_name: 'Classic Jacket',
+  item_brand: null,    // Don't do this
+  price: 89.99,
+  quantity: 1
+}
+
+// ✅ Exception — the ecommerce clear (this is intentional)
+dataLayer.push({ ecommerce: null });
+```
+
+## Date and time values
+
+When you need to pass timestamps or dates, use ISO 8601 format strings.
+
+```javascript
+// ✅ ISO 8601 date string
+event_date: '2024-03-15'
+order_created_at: '2024-03-15T14:30:00Z'
+subscription_expires: '2025-03-15'
+
+// ❌ Ambiguous formats
+event_date: '03/15/2024'     // US format — unclear internationally
+event_date: '15.03.2024'     // European format
+event_date: 1710512400000    // Unix timestamp — use string instead
+```
+
+For analytics purposes, date strings are almost always better than Unix timestamps. They're readable in reports, filterable in GA4 Explorations, and don't require conversion.
+
+<CardGrid>
+  <LinkCard
+    title="Naming Conventions"
+    description="Complete naming rules for events and parameters — snake_case, prefixes, consistency."
+    href="/datalayer/specification/naming-conventions/"
+  />
+  <LinkCard
+    title="Parameter Naming Rules"
+    description="GA4 parameter limits, reserved names, and strategies for a reusable parameter library."
+    href="/datalayer/specification/parameter-naming-rules/"
+  />
+  <LinkCard
+    title="TypeScript Schemas"
+    description="Enforce data types at compile time with TypeScript interfaces for your dataLayer."
+    href="/datalayer/validation/typescript-schemas/"
+  />
+  <LinkCard
+    title="Runtime Validation"
+    description="Catch type errors at runtime with Zod schemas and the dataLayer interceptor pattern."
+    href="/datalayer/validation/runtime-validation/"
+  />
+</CardGrid>

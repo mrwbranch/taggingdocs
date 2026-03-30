@@ -1,6 +1,207 @@
 ---
 title: "Track Form Submissions"
-description: "Reliable form submission tracking recipe."
+description: "Track lead gen form submissions reliably — native forms, AJAX forms, and multi-step wizards — using GTM and the dataLayer."
+sidebar:
+  badge:
+    text: Beginner
+    variant: success
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Form submissions are often the most important conversion event on a site, and they are also one of the most unreliable things to track via GTM's built-in form trigger. This recipe covers native HTML forms, AJAX-submitted forms, and multi-step form wizards — and recommends the dataLayer approach for everything but the simplest case.
+
+## Why GTM's built-in Form Submission trigger is unreliable
+
+GTM's native Form Submission trigger works by listening for the browser's `submit` event. This sounds fine but creates several problems in practice:
+
+- **AJAX forms never submit traditionally.** They intercept the submit event, make an API call, and show a success message — all without a real form submission. GTM fires its trigger at the moment of interception, before you know if the submission succeeded.
+- **SPA forms may not use `<form>` elements at all.** React and Vue forms often handle submission state entirely in JavaScript with no native form element.
+- **Tag fires before the user actually converts.** If your form validation fails server-side, GTM already counted the conversion.
+
+The dataLayer approach solves all of these: you push the event only after the server confirms a successful submission.
+
+## Native HTML forms
+
+For a simple server-rendered form (where the page reloads on success), the recommended pattern is to push to the dataLayer on the thank-you page or success page, not on the form page.
+
+**On your thank-you page**, add this inline before the GTM snippet:
+
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_name: 'contact_form',
+    form_id: 'contact',
+    lead_type: 'contact'
+  });
+</script>
+```
+
+This approach is 100% reliable: if the user reaches the thank-you page, the form submitted successfully.
+
+<Aside type="tip">
+If you cannot add inline scripts on the thank-you page, use GTM's Page Path trigger with the condition `Page Path equals /thank-you/` as a fallback. It is less precise but better than the Form Submission trigger.
+</Aside>
+
+## AJAX forms (the correct approach)
+
+Most modern lead gen forms submit via AJAX. The submission handler looks something like this. Add the dataLayer push inside your success callback:
+
+<DataLayerExample event="form_submission" description="Push this only after the server confirms the submission succeeded.">
+```javascript
+async function handleFormSubmit(event) {
+  event.preventDefault();
+
+  const formData = new FormData(event.target);
+
+  try {
+    const response = await fetch('/api/contact', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!response.ok) throw new Error('Submission failed');
+
+    const data = await response.json();
+
+    // Only push AFTER confirmed success
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submission',
+      form_name: 'contact_form',
+      form_id: event.target.id || 'contact',
+      form_destination: '/api/contact',
+      lead_id: data.leadId || undefined
+    });
+
+    showSuccessMessage();
+
+  } catch (error) {
+    // Do NOT push to dataLayer on error
+    showErrorMessage();
+  }
+}
+
+document.getElementById('contact-form').addEventListener('submit', handleFormSubmit);
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add the dataLayer push** to your form's success callback as shown above.
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `form_submission`
+
+3. **Create Data Layer Variables**
+
+   For each parameter you push, create a Data Layer Variable:
+   - Name: `DLV - form_name` → Data Layer Variable name: `form_name`
+   - Name: `DLV - form_id` → Data Layer Variable name: `form_id`
+   - Name: `DLV - lead_id` → Data Layer Variable name: `lead_id`
+
+4. **Create a GA4 Event Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `generate_lead`
+   - Parameters:
+     - `form_name` → `{{DLV - form_name}}`
+     - `form_id` → `{{DLV - form_id}}`
+     - `lead_id` → `{{DLV - lead_id}}`
+   - Trigger: the Custom Event trigger
+
+5. **Test in Preview Mode**
+
+   Submit the form successfully. The `form_submission` event should appear in the GTM Summary pane. Check the Variables tab for correct parameter values, then check Tags Fired.
+</Steps>
+
+<TagConfig
+  name="GA4 - generate_lead"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - form_submission"
+  variables={["DLV - form_name", "DLV - form_id", "DLV - lead_id"]}
+/>
+
+## Multi-step forms
+
+Multi-step forms require tracking both the overall completion and progress through steps. Push a `form_step` event on each step advance, and `form_submission` only on final completion.
+
+```javascript
+// Track each step
+function trackFormStep(stepNumber, stepName) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_step',
+    form_name: 'quote_request',
+    step_number: stepNumber,
+    step_name: stepName
+  });
+}
+
+// Call on each step advance
+trackFormStep(1, 'contact_info');
+trackFormStep(2, 'project_details');
+trackFormStep(3, 'budget');
+
+// On final submission success
+window.dataLayer.push({
+  event: 'form_submission',
+  form_name: 'quote_request',
+  total_steps: 3
+});
+```
+
+Create a separate Custom Event trigger for `form_step` and a GA4 tag with `step_number` and `step_name` parameters. This lets you build a funnel analysis in GA4 to see where users drop off.
+
+## HubSpot, Marketo, and third-party forms
+
+Third-party form providers often embed forms in iframes or inject their own DOM. They usually provide JavaScript callbacks you can hook into:
+
+```javascript
+// HubSpot form callback
+window.addEventListener('message', function(event) {
+  if (event.data.type === 'hsFormCallback' && event.data.eventName === 'onFormSubmit') {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submission',
+      form_name: 'hubspot_contact',
+      form_id: event.data.id
+    });
+  }
+});
+```
+
+For Marketo, use the `MktoForms2.whenSubmitted()` callback. For Typeform, use their Embed SDK's `onSubmit` handler.
+
+## Test it
+
+1. Enable GTM Preview mode
+2. Fill out the form and submit it successfully
+3. The `form_submission` event should appear in the Summary pane
+4. Click it and verify parameter values in the Variables tab
+5. Verify Tags Fired shows your GA4 tag
+6. Check GA4 DebugView — the `generate_lead` event should appear within 15 seconds
+7. Test the failure path: submit an invalid form and confirm NO dataLayer event fires
+
+<Aside type="caution">
+Always test the failure path. GTM Preview will not show you what does not fire — you need to actively verify that failed submissions do not create false conversions.
+</Aside>
+
+## Common gotchas
+
+**Double firing on multi-step forms.** If your multi-step form re-renders components on each step, event listeners may be attached multiple times. Use `{ once: true }` on your event listener or track listener attachment state with a boolean flag.
+
+**Form embedded in iframe.** If the form is in a cross-origin iframe, you cannot access it directly. Use the iframe's `postMessage` callback. See the [iFrame Tracking recipe](/recipes/iframe-tracking/).
+
+**SPA route change shows success message without submission.** In SPAs, navigating back to a form might re-trigger a success state from cache. Guard your dataLayer push with a flag in sessionStorage.
+
+<CardGrid>
+  <LinkCard title="Track Button Clicks" href="/recipes/track-button-clicks/" description="The same three-approach pattern applied to button interactions." />
+  <LinkCard title="iFrame Tracking" href="/recipes/iframe-tracking/" description="Track events inside embedded forms and iframes." />
+  <LinkCard title="Duplicate Transaction Prevention" href="/recipes/duplicate-transaction-prevention/" description="Guard against double-counting conversions." />
+</CardGrid>

@@ -1,6 +1,308 @@
 ---
 title: "JavaScript Variables"
-description: "Custom JavaScript variables for computed values and complex logic."
+description: "Custom JavaScript variables — how they work, when to use them, and how to write them safely for production GTM containers."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Custom JavaScript Variables are the escape hatch in GTM's variable system. When no built-in variable type gives you what you need, you write a JavaScript function that returns the value. Need to combine two variables? Transform a string? Read a cookie? Check a global window property? Custom JavaScript Variables handle all of it.
+
+They are powerful enough to do almost anything. That power is also the problem — poorly written Custom JavaScript Variables are one of the most common sources of silent errors, performance issues, and unmaintainable containers. Use them thoughtfully, keep them small, and always wrap them in error handling.
+
+## How Custom JavaScript Variables work
+
+A Custom JavaScript Variable is a function you write that returns a value. When GTM needs the variable's value, it calls your function and uses the return value.
+
+```javascript
+function() {
+  return 'some value';
+}
+```
+
+That is the minimum structure. The function has no name (it is an anonymous function), takes no arguments, and must `return` a value. If your function does not explicitly return a value, the variable returns `undefined`.
+
+The function runs inside GTM's sandbox, but it has access to:
+- `window` and `document` — the full browser environment
+- Other GTM variables via the `{{Variable Name}}` double-brace syntax
+- `dataLayer` directly (though prefer Data Layer Variables for structured access)
+
+### Accessing other GTM variables
+
+You reference other GTM variables inside Custom JavaScript Variables using double-brace syntax, exactly like you would in a tag configuration:
+
+```javascript
+function() {
+  var productId = {{DLV - product_id}};
+  var pageType = {{Page Path}};
+  return productId + '-' + pageType;
+}
+```
+
+GTM resolves `{{DLV - product_id}}` and `{{Page Path}}` before executing your function, replacing them with their current values. The resolved values are injected as literal JavaScript — be aware of type coercion. A variable returning a number `199.99` is injected as the literal `199.99`, not as a string.
+
+<Aside type="caution">
+Double-brace variable references are text substitution, not function calls. If `{{DLV - product_name}}` returns the string `"Leather Jacket"`, the substituted code becomes `var name = Leather Jacket;` — which is a syntax error. Always quote string variables: `var name = "{{DLV - product_name}}";` or use `{{DLV - product_name}}` only where a string is valid without quotes (like returning it directly).
+
+In practice, it is safest to reference GTM variables through `window.google_tag_manager` or use Data Layer Variables for strings that might contain special characters. For most cases, direct substitution is fine — just be aware.
+</Aside>
+
+## Creating a Custom JavaScript Variable
+
+<Steps>
+1. Go to **Variables** in GTM and click **New** under User-Defined Variables.
+2. Select **Custom JavaScript** as the variable type.
+3. Write your function in the code editor. It must be a single function that returns a value.
+4. Name the variable with a prefix convention: `CJS - descriptive-name` (CJS for Custom JavaScript).
+5. Save. The variable is now available in trigger conditions and tag configurations.
+</Steps>
+
+## Common use cases
+
+### Value transformation
+
+Format a raw value from the dataLayer for use in tags:
+
+```javascript
+// Format price to 2 decimal places
+function() {
+  var price = {{DLV - product_price}};
+  if (price === undefined || price === null) return null;
+  return parseFloat(price).toFixed(2);
+}
+```
+
+```javascript
+// Convert boolean to 'yes'/'no' string
+function() {
+  var isLoggedIn = {{DLV - user_logged_in}};
+  return isLoggedIn ? 'logged_in' : 'guest';
+}
+```
+
+### Combining multiple values
+
+```javascript
+// Build a full product category path
+function() {
+  var cat1 = {{DLV - item_category}};
+  var cat2 = {{DLV - item_category2}};
+  var cat3 = {{DLV - item_category3}};
+  var parts = [cat1, cat2, cat3].filter(function(c) {
+    return c && c !== '(not set)';
+  });
+  return parts.join(' > ') || '(not set)';
+}
+```
+
+### Conditional value based on URL
+
+```javascript
+// Return different values based on the current page path
+function() {
+  var path = window.location.pathname;
+  if (path.indexOf('/checkout') === 0) return 'checkout';
+  if (path.indexOf('/products') === 0) return 'product';
+  if (path === '/' || path === '') return 'home';
+  return 'other';
+}
+```
+
+### Reading cookies
+
+```javascript
+// Read a specific cookie value
+function() {
+  var name = 'campaign_source';
+  var value = '; ' + document.cookie;
+  var parts = value.split('; ' + name + '=');
+  if (parts.length === 2) {
+    return parts.pop().split(';').shift();
+  }
+  return null;
+}
+```
+
+### Extracting UTM parameters from URL
+
+```javascript
+// Get a specific UTM parameter
+function() {
+  try {
+    var params = new URLSearchParams(window.location.search);
+    return params.get('utm_source') || '(direct)';
+  } catch(e) {
+    // URLSearchParams not available in very old browsers
+    var match = window.location.search.match(/[?&]utm_source=([^&]+)/);
+    return match ? decodeURIComponent(match[1]) : '(direct)';
+  }
+}
+```
+
+### Reading global JavaScript variables
+
+Some platforms store data in global window objects (e.g., `window.sharedData`, `window.__INITIAL_STATE__`):
+
+```javascript
+// Read from a global object safely
+function() {
+  try {
+    if (window.digitalData && window.digitalData.product) {
+      return window.digitalData.product.id;
+    }
+    return null;
+  } catch(e) {
+    return null;
+  }
+}
+```
+
+### Checking for a class on the body element
+
+```javascript
+// Detect page features set on <body>
+function() {
+  var body = document.body;
+  if (!body) return null;
+  if (body.classList.contains('user-authenticated')) return true;
+  return false;
+}
+```
+
+## Error handling — always use try/catch
+
+If your Custom JavaScript Variable throws an uncaught error, GTM suppresses it silently and returns `undefined`. The tag that depended on that variable still fires — but with `undefined` as the value. This pollutes your data and is nearly impossible to debug without knowing to look for it.
+
+Wrap everything in try/catch:
+
+```javascript
+function() {
+  try {
+    var items = {{DLV - ecommerce.items}};
+    if (!Array.isArray(items) || items.length === 0) return 0;
+    return items.reduce(function(sum, item) {
+      return sum + (item.quantity || 1);
+    }, 0);
+  } catch(e) {
+    return 0;
+  }
+}
+```
+
+The catch block should return a sensible default that your tags can handle gracefully — `null`, `0`, `false`, or `'(not set)'` depending on the expected type.
+
+## Performance
+
+Custom JavaScript Variables execute every time a trigger condition is evaluated that references them — which could be many times per page. GTM evaluates triggers on every event, and if your trigger condition references a Custom JavaScript Variable, that function runs.
+
+Keep your Custom JavaScript Variables fast:
+
+- **Avoid heavy DOM traversal**: `document.querySelectorAll('*')` on a large page is expensive
+- **Cache results**: If you compute something expensive, store it in a window variable so subsequent calls return immediately
+- **Exit early**: Return as soon as you have the answer; do not continue processing
+- **No network requests**: Never make XHR or fetch calls inside a variable — they are synchronous blockers
+
+```javascript
+// Caching pattern for expensive computations
+function() {
+  if (window._gtm_cached_page_type) {
+    return window._gtm_cached_page_type;
+  }
+  // Expensive computation
+  var result = /* ... complex DOM analysis ... */;
+  window._gtm_cached_page_type = result;
+  return result;
+}
+```
+
+## The 10-line rule
+
+If your Custom JavaScript Variable is more than 10 lines of non-trivial logic, reconsider the design. Complex variables are hard to debug, hard to test, and hard to hand off to other people.
+
+Before writing a long Custom JavaScript Variable, ask:
+- **Could this be a dataLayer push?** Push the computed value from your application code, then read it with a simple Data Layer Variable.
+- **Could this be multiple smaller variables?** Break complex logic into a chain of simpler variables.
+- **Could this be a Custom HTML tag that pushes to the dataLayer?** For setup logic that runs once, a setup tag that pushes the computed value is cleaner than a variable that recomputes it every time.
+
+## What you cannot do
+
+Custom JavaScript Variables run in the browser context but there are practical restrictions:
+
+- **No async/await**: Variables must return a value synchronously. You cannot `await` a promise inside a variable. If you need async data, fetch it in a Custom HTML tag and push the result to the dataLayer.
+- **No complex state management**: Variables are stateless from GTM's perspective. They return a value — they do not fire tags or modify other variables.
+- **No `return` outside the function**: All code must be inside the single anonymous function.
+
+## The JavaScript Variable type (vs. Custom JavaScript Variable)
+
+There is a different, simpler variable type called **JavaScript Variable** (not "Custom JavaScript") that reads a global JavaScript variable or object property. It is not a function — it just navigates a dot-notation path on the `window` object.
+
+For example, `window.pageData.productId` would be configured as Variable Name `pageData.productId`. This is simpler and more performant than a Custom JavaScript Variable when you only need to read an existing global value.
+
+Use **JavaScript Variable** when you just need to read something off `window`. Use **Custom JavaScript Variable** when you need logic, transformation, or access to GTM variables.
+
+## Common mistakes
+
+### Returning without the `return` keyword
+
+```javascript
+// Bad — always returns undefined
+function() {
+  var value = {{DLV - product_id}};
+  value.toUpperCase(); // transforms but doesn't return anything
+}
+
+// Good
+function() {
+  var value = {{DLV - product_id}};
+  return value.toUpperCase();
+}
+```
+
+### Forgetting that variables resolve before your function runs
+
+```javascript
+// If {{DLV - product_price}} returns undefined, this becomes:
+// var price = undefined;
+// typeof undefined === 'number' is false, so parseFloat works fine here
+// but null check might not catch it
+function() {
+  var price = {{DLV - product_price}};
+  if (price === null) return '0.00'; // Does not catch undefined!
+  return parseFloat(price).toFixed(2);
+}
+
+// Better:
+function() {
+  var price = {{DLV - product_price}};
+  if (!price && price !== 0) return '0.00';
+  return parseFloat(price).toFixed(2);
+}
+```
+
+### Modifying global state unintentionally
+
+Setting properties on `window` inside variables is sometimes useful for caching, but be careful — you might overwrite something another script relies on. Use a clearly namespaced property: `window._gtm_vars = window._gtm_vars || {}; window._gtm_vars.myValue = result;`
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Data Layer Variables"
+    description="The simpler, cleaner alternative when your data is already in the dataLayer."
+    href="/client-side/variables/datalayer-variables/"
+  />
+  <LinkCard
+    title="Lookup Tables"
+    description="For simple value mapping, Lookup Tables are less error-prone than Custom JavaScript."
+    href="/client-side/variables/lookup-tables/"
+  />
+  <LinkCard
+    title="Custom HTML Tags"
+    description="For complex logic that pushes results back to the dataLayer, use Custom HTML tags instead."
+    href="/client-side/tags/custom-html-tags/"
+  />
+  <LinkCard
+    title="DOM Element Variables"
+    description="A simpler option for reading specific values directly from the DOM."
+    href="/client-side/variables/dom-element-variables/"
+  />
+</CardGrid>

@@ -3,4 +3,198 @@ title: "When Not to Use GTM"
 description: "Honest assessment of when Google Tag Manager is the wrong tool for the job."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+GTM is a genuinely excellent tool. But it gets deployed reflexively — "we need tracking, so we use GTM" — in situations where it adds complexity without adding value, or where it actively makes things worse. This article is the honest assessment most documentation skips: when should you not use GTM?
+
+The short answer: when the organizational benefit does not justify the technical cost. Let us break that down into specific scenarios.
+
+## The GTM tax
+
+Before we get to the scenarios, you need to understand what you are paying every time you use GTM.
+
+**Network request.** GTM requires a request to `googletagmanager.com/gtm.js`. Even with HTTP/2, this is a third-party domain that adds connection overhead — DNS lookup, TLS handshake, TCP connection — on first visit.
+
+**Container size.** Your compiled container JavaScript can range from a few KB for a lean setup to 500KB+ for a bloated one. That container must download and parse before any GTM tag fires.
+
+**Execution overhead.** GTM's runtime engine runs in the browser on every page load. It evaluates triggers, resolves variables, and manages the event queue. On modern hardware this is negligible. On low-end Android devices on 3G connections, it is not.
+
+**Asynchronous delay.** GTM is async by design. Tags fire after GTM downloads, parses, and replays the dataLayer queue. For most use cases this is fine. For cases where you need synchronous execution before the page renders, it is disqualifying.
+
+**Third-party dependency.** GTM is Google infrastructure. If `googletagmanager.com` has an outage (rare but documented), your tags stop firing. You have no control over this.
+
+None of these are reasons to never use GTM. They are costs. The question is always whether the benefits outweigh them.
+
+## Scenario 1: You only have one or two tags
+
+If you have a GA4 measurement snippet and nothing else, or GA4 plus one conversion pixel — hardcode it.
+
+GTM's value is organizational: it lets non-developers add tags without developer deployments. If you have two tags and they never change, there is nothing to manage. The overhead of maintaining a GTM account, training someone on the interface, and paying the performance cost is not justified.
+
+```html
+<!-- This is fine. You don't need GTM for this. -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-XXXXXXXXXX');
+</script>
+```
+
+The rule of thumb: if you have fewer than three tags and a developer on the team, hardcoded tracking is probably simpler and more maintainable.
+
+<Aside type="tip">
+The real value of GTM is organizational: marketing independence from developer deployments. If marketing can already deploy changes themselves, or if there are no third-party tags to manage, GTM's value decreases significantly.
+</Aside>
+
+## Scenario 2: Performance is a hard constraint
+
+Some applications have no tolerance for third-party JavaScript. E-commerce sites where every 100ms of load time affects conversion rate. Finance applications where speed is a differentiator. Single-page applications where first paint time is a primary KPI.
+
+In these cases, GTM's async overhead might be acceptable — but the tags inside GTM often are not. A tag manager is only as fast as its slowest tag. A 300ms Meta Pixel load, a heavy analytics SDK, an A/B testing script that holds up rendering — these costs exist whether you use GTM or hardcode the tags.
+
+The honest question is not "does GTM hurt performance?" but "does the set of tags I need hurt performance?" GTM itself is manageable. The problem is that GTM makes it easy to accumulate tags without a performance budget discipline. Nobody sees the container size growing; they just add another tag.
+
+If performance is a hard constraint:
+- Use server-side GTM (sGTM) to move tag execution off the browser entirely
+- Limit the container to only tags that genuinely need to be client-side
+- Set and enforce a container size budget
+
+We cover container loading performance in depth in the [Container Loading Strategies](/client-side/setup/container-loading-strategies/) article.
+
+## Scenario 3: You need synchronous execution
+
+GTM is asynchronous. The container loads after the page starts rendering. This is by design and is a good default for the vast majority of use cases.
+
+But some things require synchronous execution before the page renders:
+
+- **Anti-flicker snippets** for A/B testing tools (Optimize, VWO, Optimizely)
+- **Consent Management Platforms** that must block analytics before consent is granted
+- **Server-side session stitching** where a user identifier must be available before the first hit fires
+
+GTM cannot reliably handle these. Anti-flicker snippets, for example, are tiny synchronous `<script>` tags that hide the page body until the experiment variant loads. Putting them inside GTM defeats the purpose — GTM loads asynchronously, so the anti-flicker runs after the body is already visible.
+
+The pattern for this situation: hardcode the synchronous snippet, use GTM for everything that can be async.
+
+```html
+<!-- Synchronous: hardcoded before the GTM snippet -->
+<script>
+  // Anti-flicker: hide the page until the experiment loads
+  document.documentElement.style.opacity = '0';
+</script>
+
+<!-- Then GTM (async) -->
+<script>(function(w,d,s,l,i){...})(window,document,'script','dataLayer','GTM-XXXXXX');</script>
+```
+
+## Scenario 4: Privacy-first or zero-client-side architecture
+
+Some architectures explicitly want no client-side third-party code. This is becoming more common in:
+
+- GDPR-constrained enterprises with aggressive consent requirements
+- Privacy-first SaaS products where tracking code is a trust issue
+- Healthcare and finance applications where regulatory requirements limit what can run client-side
+- Sites where consent rates are very low and client-side collection is unreliable
+
+In these cases, the architecture is: server-side event collection, no client-side GTM, analytics via server-to-server API. The browser sends events to your own endpoint; your server forwards to GA4 Measurement Protocol, Meta Conversions API, etc.
+
+GTM has a server-side deployment (sGTM) that fits this architecture better than client-side GTM. But if the goal is truly zero client-side third-party code, even sGTM requires a small client-side tag for first-party cookie management.
+
+## Scenario 5: React/SPA applications with a dedicated tracking library
+
+Heavy React, Vue, or Angular applications often have a better option: a tracking library that integrates with the framework's routing and state management.
+
+Libraries like Segment (analytics.js), RudderStack, or even a custom thin wrapper around the GA4 SDK can:
+
+- Listen to route changes via the router's built-in events (no History Change trigger hacks needed)
+- Access application state directly (no DOM scraping or dataLayer pushes)
+- Integrate with TypeScript for type-safe tracking contracts
+- Be tested with unit tests (try writing a unit test for a GTM Custom HTML tag)
+
+GTM can work in SPAs — we cover the patterns in [SPA Setup](/client-side/setup/spa-setup/) — but it requires significant coordination between the developer-controlled dataLayer and GTM configuration. If you are building a TypeScript React application from scratch and you have developer bandwidth, a proper tracking library may be worth the investment.
+
+The tradeoff: tracking libraries require developer involvement for every change. GTM provides marketer independence. Choose based on your team's structure.
+
+## Scenario 6: The team has no GTM expertise
+
+An empty GTM container is nearly harmless. A GTM container maintained by someone without training is a liability.
+
+Common damage patterns:
+- Triggers firing on All Pages when they should fire on specific pages (inflated event counts)
+- Tags firing multiple times per pageview (duplicate conversions)
+- PII pushed to third-party tools via Custom HTML tags
+- An unreviewed Custom HTML tag that breaks site functionality after a publish
+
+If the team using GTM does not have the training to use it safely, the right answer is usually: hardcode the tracking, hire a specialist to set up GTM properly, or both.
+
+This is not a knock on GTM. It is an honest acknowledgment that GTM gives non-developers significant power over what code runs on your site. Power without understanding is a risk.
+
+## Scenario 7: Server-to-server integrations that do not need the browser
+
+Some integrations have nothing to do with the browser:
+
+- CRM sync on form submission (push lead data to Salesforce)
+- Order confirmation events sent to Meta Conversions API from your backend
+- GA4 Measurement Protocol hits for backend events (refunds, subscription cancellations)
+
+These should happen server-side regardless of whether you use GTM elsewhere. Running them through client-side GTM introduces a dependency on the browser — the user must have JavaScript enabled, the GTM container must load, the user must not navigate away before the tag fires. Server-side is more reliable for backend events.
+
+sGTM handles server-side routing well and is worth considering when you have a mix of client-side and server-side needs.
+
+## When GTM makes strong sense
+
+To balance this article: GTM is the right tool in many situations, and in some it is genuinely hard to replace.
+
+**Multi-tag environments.** If you are running GA4, Meta Pixel, Google Ads, LinkedIn Insight Tag, Hotjar, and a few custom events, GTM is the right abstraction. Managing all of these as hardcoded scripts is a maintenance nightmare.
+
+**Marketing independence.** If your marketing team needs to launch campaigns with tracking pixels without filing developer tickets, GTM is the answer. The organizational value here is real.
+
+**Consent Mode orchestration.** GTM has first-class Consent Mode support. Blocking and unblocking tags based on consent state is much easier through GTM than through custom code.
+
+**Teams with GTM expertise.** If you have people who know what they are doing, GTM's flexibility and power are genuine advantages. The risks above apply primarily when expertise is lacking.
+
+**sGTM shifts the calculation.** Server-side GTM addresses many of the concerns above — performance, privacy, reliability. If performance is your concern, sGTM rather than no GTM might be the right answer.
+
+## The decision framework
+
+Ask these questions before defaulting to GTM:
+
+<Steps>
+1. **How many tags do you have?** Fewer than three → hardcode. Three or more → GTM starts making sense.
+
+2. **Do you need marketing independence from developer cycles?** Yes → GTM. No → evaluate further.
+
+3. **Do any tags require synchronous execution?** Yes → hardcode those tags, use GTM for the rest.
+
+4. **Is performance a hard constraint?** Yes → evaluate sGTM, not client-side GTM.
+
+5. **Is your architecture privacy-first or server-side-first?** Yes → Measurement Protocol + Conversions API, possibly with sGTM.
+
+6. **Does the team have GTM expertise?** No → either invest in training or hardcode until you do.
+
+7. **Is this a TypeScript SPA with developer bandwidth?** Yes → evaluate a dedicated tracking library.
+</Steps>
+
+<Aside type="note">
+The answer to most of these questions is "use GTM." But "use GTM because everyone uses GTM" is not good engineering. Know why you are using it.
+</Aside>
+
+<CardGrid>
+  <LinkCard
+    title="How GTM Works"
+    description="Understand the execution model before deciding if it's the right tool."
+    href="/foundations/how-gtm-works/"
+  />
+  <LinkCard
+    title="Container Loading Strategies"
+    description="How to mitigate GTM's performance impact when you do use it."
+    href="/client-side/setup/container-loading-strategies/"
+  />
+  <LinkCard
+    title="GTM for Developers"
+    description="The developer's role in a GTM implementation — dataLayer architecture and handoff model."
+    href="/foundations/gtm-for-developers/"
+  />
+</CardGrid>

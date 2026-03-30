@@ -3,4 +3,467 @@ title: "GTM for Developers"
 description: "Entry point for developers implementing dataLayer and supporting GTM — your job is the data, not the tags."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+If you are a developer being asked to "implement GTM," the most important thing to understand first is what your actual job is. Your job is **not** to configure tags. Your job is to expose clean, structured data through the dataLayer so that the analytics or marketing team can configure tags themselves. Get this handoff model right and you will spend far less time in GTM.
+
+## The handoff model
+
+GTM exists to create a clean separation of responsibilities:
+
+- **Developers** own the dataLayer — the structured event data that describes what is happening on the site
+- **Analysts and marketers** own GTM — the tag configuration that decides what to do with that data
+
+Think of the dataLayer as an API contract. You design it, implement it, document it, and version it. The analytics team builds on top of it. When the contract is clear and well-maintained, both sides can work independently. When it is implicit and undocumented, every change requires both teams to coordinate.
+
+<Aside type="tip">
+The single most impactful thing you can do for your analytics implementation is write a specification document for your dataLayer before writing a line of code. Define every event name, every property, and every expected value. The analytics team will love you for it.
+</Aside>
+
+## What to push, and what not to push
+
+### Push structured event data
+
+The dataLayer is most useful when you push meaningful business events with the data needed to understand them:
+
+```javascript
+// Good: structured business event with relevant context
+window.dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: 'T-12345',
+    value: 49.99,
+    currency: 'USD',
+    items: [
+      {
+        item_id: 'SKU-001',
+        item_name: 'Blue Widget',
+        quantity: 1,
+        price: 49.99,
+      }
+    ]
+  }
+});
+```
+
+### Do not push PII
+
+This is a hard rule. Never push personally identifiable information to the dataLayer:
+
+- Email addresses
+- Full names
+- Phone numbers
+- Home addresses
+- Social security numbers
+- Credit card numbers
+- Authentication tokens
+
+The dataLayer is readable by anyone with browser access. More importantly, it flows into third-party tools — GA4, Meta Pixel, ad networks — that you have no control over. PII in the dataLayer is a GDPR violation waiting to happen.
+
+If you need to track users, push a hashed or anonymised identifier:
+
+```javascript
+// Do not push raw email
+window.dataLayer.push({ user_email: 'alice@example.com' }); // Wrong
+
+// Push a hashed identifier instead
+window.dataLayer.push({
+  user_id: 'sha256:a4d7e2...', // SHA-256 of email, if legally permissible
+  user_status: 'logged_in',
+  user_segment: 'premium'
+});
+```
+
+### Push state, not UI events
+
+Prefer describing business state over describing UI interactions. UI structure changes; business events are stable.
+
+<Comparison leftTitle="UI event (fragile)" leftType="bad" rightTitle="Business event (stable)" rightType="good">
+  <div slot="left">
+
+```javascript
+// Breaks when the button moves,
+// changes text, or gets refactored
+window.dataLayer.push({
+  event: 'button_click',
+  button_id: 'add-to-cart-btn-hero',
+  button_text: 'Add to Cart'
+});
+```
+
+  </div>
+  <div slot="right">
+
+```javascript
+// Stable regardless of UI changes
+window.dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 29.99,
+    items: [{
+      item_id: 'SKU-042',
+      item_name: 'Red Widget',
+      quantity: 1,
+      price: 29.99
+    }]
+  }
+});
+```
+
+  </div>
+</Comparison>
+
+## Framework implementations
+
+### Vanilla JavaScript
+
+The simplest case. Initialize the dataLayer before the GTM snippet, then push events where they are triggered:
+
+```javascript
+// Initialize BEFORE the GTM snippet (ideally in a module that loads first)
+window.dataLayer = window.dataLayer || [];
+
+// Push page-level data before GTM loads — GTM will replay this
+window.dataLayer.push({
+  pageType: 'product',
+  productId: 'SKU-001',
+  productCategory: 'widgets',
+});
+
+// Push events in response to user actions or app state changes
+document.getElementById('add-to-cart').addEventListener('click', () => {
+  window.dataLayer.push({
+    event: 'add_to_cart',
+    ecommerce: {
+      currency: 'USD',
+      value: product.price,
+      items: [{ item_id: product.id, item_name: product.name, quantity: 1, price: product.price }]
+    }
+  });
+});
+```
+
+### React
+
+Create a custom hook that wraps dataLayer pushes. This keeps tracking calls consistent and makes them easy to mock in tests.
+
+```typescript
+// hooks/useDataLayer.ts
+type DataLayerEvent = {
+  event: string;
+  [key: string]: unknown;
+};
+
+export function useDataLayer() {
+  const push = (data: DataLayerEvent) => {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(data);
+  };
+
+  return { push };
+}
+```
+
+```typescript
+// components/AddToCartButton.tsx
+import { useDataLayer } from '../hooks/useDataLayer';
+
+function AddToCartButton({ product }: { product: Product }) {
+  const { push } = useDataLayer();
+
+  const handleClick = () => {
+    push({
+      event: 'add_to_cart',
+      ecommerce: {
+        currency: 'USD',
+        value: product.price,
+        items: [{
+          item_id: product.id,
+          item_name: product.name,
+          quantity: 1,
+          price: product.price,
+        }]
+      }
+    });
+  };
+
+  return <button onClick={handleClick}>Add to Cart</button>;
+}
+```
+
+### Next.js App Router
+
+Next.js requires special handling for two reasons: the GTM snippet must be loaded via `next/script`, and route changes in the App Router do not trigger full page loads.
+
+```typescript
+// app/layout.tsx
+import Script from 'next/script';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html>
+      <head>
+        <Script id="gtm-init" strategy="beforeInteractive">
+          {`
+            window.dataLayer = window.dataLayer || [];
+          `}
+        </Script>
+        <Script
+          id="gtm"
+          strategy="afterInteractive"
+          src={`https://www.googletagmanager.com/gtm.js?id=${process.env.NEXT_PUBLIC_GTM_ID}`}
+          onLoad={() => {
+            window.dataLayer.push({ 'gtm.start': new Date().getTime(), event: 'gtm.js' });
+          }}
+        />
+      </head>
+      <body>
+        <noscript>
+          <iframe
+            src={`https://www.googletagmanager.com/ns.html?id=${process.env.NEXT_PUBLIC_GTM_ID}`}
+            height="0" width="0"
+            style={{ display: 'none', visibility: 'hidden' }}
+          />
+        </noscript>
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+For virtual pageviews on route changes, use the `usePathname` hook:
+
+```typescript
+// components/PageViewTracker.tsx
+'use client';
+
+import { useEffect } from 'react';
+import { usePathname, useSearchParams } from 'next/navigation';
+
+export function PageViewTracker() {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    // Wait for Next.js to update document.title
+    const url = pathname + (searchParams.toString() ? `?${searchParams}` : '');
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'page_view',
+      page_location: window.location.href,
+      page_path: url,
+      page_title: document.title,
+    });
+  }, [pathname, searchParams]);
+
+  return null;
+}
+```
+
+### Vue composable
+
+```typescript
+// composables/useTracking.ts
+export function useTracking() {
+  const push = (data: Record<string, unknown>) => {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(data);
+  };
+
+  const trackEvent = (eventName: string, params: Record<string, unknown> = {}) => {
+    push({ event: eventName, ...params });
+  };
+
+  return { push, trackEvent };
+}
+```
+
+For Vue Router pageview tracking:
+
+```typescript
+// router/index.ts
+import { createRouter } from 'vue-router';
+
+const router = createRouter({ ... });
+
+router.afterEach((to) => {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'page_view',
+    page_path: to.fullPath,
+    page_title: to.meta.title || document.title,
+  });
+});
+```
+
+## TypeScript types for the dataLayer
+
+Define your dataLayer event types explicitly. This creates a contract that both the engineering team and the analytics team can reference.
+
+```typescript
+// types/datalayer.ts
+
+interface EcommerceItem {
+  item_id: string;
+  item_name: string;
+  item_category?: string;
+  quantity: number;
+  price: number;
+  discount?: number;
+}
+
+interface PurchaseEvent {
+  event: 'purchase';
+  ecommerce: {
+    transaction_id: string;
+    value: number;
+    currency: string;
+    tax?: number;
+    shipping?: number;
+    items: EcommerceItem[];
+  };
+}
+
+interface AddToCartEvent {
+  event: 'add_to_cart';
+  ecommerce: {
+    currency: string;
+    value: number;
+    items: EcommerceItem[];
+  };
+}
+
+interface PageViewEvent {
+  event: 'page_view';
+  page_path: string;
+  page_title: string;
+  page_location: string;
+}
+
+type DataLayerEvent = PurchaseEvent | AddToCartEvent | PageViewEvent;
+
+// Extend the window type
+declare global {
+  interface Window {
+    dataLayer: DataLayerEvent[];
+  }
+}
+```
+
+With this setup, `window.dataLayer.push({ event: 'purchase', ecommerce: { ... } })` will give you TypeScript autocomplete and type checking.
+
+## The SPA pageview problem
+
+In a traditional multi-page site, every page load triggers GTM's `gtm.dom` and `gtm.load` events, and page-level data is fresh. In a SPA, there is one page load and then DOM manipulation.
+
+The problem this creates:
+
+1. Page-level dataLayer data from the previous route persists in GTM's internal model
+2. Page View triggers (DOM Ready, Window Loaded) do not fire again
+3. Any tags that rely on page URL or title may be reading stale values
+
+The solution: push an explicit pageview event after each route change, and clear any page-level data that should not persist.
+
+```javascript
+// On every route change in your SPA:
+window.dataLayer.push({
+  // Clear previous page's product data
+  ecommerce: null,
+  // Explicitly set new page data
+  event: 'page_view',
+  page_path: newPath,
+  page_title: newTitle,
+  page_type: newPageType,
+});
+```
+
+We cover the full SPA tracking pattern in [SPA Setup](/client-side/setup/spa-setup/).
+
+## Testing your dataLayer implementation
+
+### Browser console
+
+The simplest test: open DevTools and inspect `window.dataLayer` after triggering an event.
+
+```javascript
+// In the browser console
+window.dataLayer; // See the full array
+window.dataLayer[window.dataLayer.length - 1]; // See the most recent push
+```
+
+### GTM Preview mode
+
+With GTM connected in Preview mode (Tag Assistant), every dataLayer push appears in the event stream on the left. You can click any event to see the exact state of the dataLayer at that moment. This is the fastest way to validate that your pushes are reaching GTM correctly.
+
+### Unit tests
+
+Test that your components push the right data to the dataLayer when events occur:
+
+```typescript
+// __tests__/AddToCartButton.test.tsx
+import { render, fireEvent } from '@testing-library/react';
+import { AddToCartButton } from '../components/AddToCartButton';
+
+describe('AddToCartButton', () => {
+  beforeEach(() => {
+    window.dataLayer = [];
+  });
+
+  it('pushes add_to_cart event on click', () => {
+    const product = { id: 'SKU-001', name: 'Blue Widget', price: 29.99 };
+    const { getByText } = render(<AddToCartButton product={product} />);
+
+    fireEvent.click(getByText('Add to Cart'));
+
+    expect(window.dataLayer).toContainEqual({
+      event: 'add_to_cart',
+      ecommerce: {
+        currency: 'USD',
+        value: 29.99,
+        items: [{
+          item_id: 'SKU-001',
+          item_name: 'Blue Widget',
+          quantity: 1,
+          price: 29.99,
+        }]
+      }
+    });
+  });
+});
+```
+
+## Working with the analytics team
+
+The most common friction between developers and analytics teams comes from unclear contracts. Here is how to prevent it.
+
+**Before implementation:** Get the analytics team to provide a tracking specification — a list of all events, all properties, and expected values. If they cannot provide one, work together to create one.
+
+**After implementation:** Document what you implemented. A simple markdown file in the repo listing each event name, when it fires, and what properties it includes is enough.
+
+**For ongoing changes:** Treat dataLayer changes like API breaking changes. If you rename an event or remove a property, notify the analytics team before deploying — they may have tags in GTM that depend on the old name.
+
+<CardGrid>
+  <LinkCard
+    title="The DataLayer Deep Dive"
+    description="Complete technical understanding of how the dataLayer works, including merge behavior and persistence."
+    href="/foundations/datalayer-deep-dive/"
+  />
+  <LinkCard
+    title="SPA Setup"
+    description="How to handle GTM in single-page applications — route changes, virtual pageviews, dataLayer cleanup."
+    href="/client-side/setup/spa-setup/"
+  />
+  <LinkCard
+    title="How GTM Works"
+    description="The execution model that explains why your dataLayer pushes work the way they do."
+    href="/foundations/how-gtm-works/"
+  />
+  <LinkCard
+    title="When Not to Use GTM"
+    description="Cases where a tracking library or server-side solution is a better fit than GTM."
+    href="/foundations/when-not-to-use-gtm/"
+  />
+</CardGrid>

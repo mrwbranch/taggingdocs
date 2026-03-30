@@ -3,4 +3,195 @@ title: "Page View Triggers"
 description: "Understanding the three page view trigger types and when to use each."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+GTM gives you three distinct "page view" trigger types, each firing at a different point in the browser's page load lifecycle. They look similar in the interface, but their timing differences matter. Firing a tag too early means reading from a DOM that is not ready. Firing too late delays data you need immediately. Getting this right prevents an entire class of silent bugs.
+
+## The three triggers and when they fire
+
+### Page View — `gtm.js`
+
+Fires as soon as GTM's container has downloaded and initialized. This is the earliest moment any tag can fire. At this point, the browser is still parsing and rendering HTML — the DOM is not fully constructed. JavaScript on the page may not have run yet.
+
+**Use when**: The tag does not need to read the DOM, does not depend on page content loading, and should fire as early as possible. The GA4 Configuration tag belongs here.
+
+**Technical equivalent**: There is no exact browser equivalent. It fires after GTM's own initialization completes, which typically happens 50-200ms after the HTML begins parsing.
+
+### DOM Ready — `gtm.dom`
+
+Fires when the HTML document has been fully parsed and the DOM tree is complete — equivalent to the browser's `DOMContentLoaded` event. Images, stylesheets, and iframes may still be loading, but all HTML elements exist and are accessible via JavaScript.
+
+**Use when**: The tag needs to read element attributes, access DOM content, or depends on the page structure being complete. Custom HTML tags that query the DOM must fire here or later, or they will fail silently.
+
+**Technical equivalent**: `document.addEventListener('DOMContentLoaded', ...)`. If you know when `DOMContentLoaded` fires relative to your tag's needs, you know when DOM Ready fires.
+
+### Window Loaded — `gtm.load`
+
+Fires when the entire page has finished loading — including images, iframes, video thumbnails, fonts, and all sub-resources. This is the browser's `window.onload` event.
+
+**Use when**: The tag is non-critical for the user experience and you want to avoid any chance of it delaying interactive content. Session replay tools (Hotjar, Clarity), chat widgets, and survey tools often work fine on Window Loaded.
+
+**Technical equivalent**: `window.addEventListener('load', ...)`. This fires last among the three triggers.
+
+### Timeline on a typical page load
+
+```
+0ms        HTML starts arriving
+           ↓
+~50ms      GTM script tag parsed and starts loading
+           ↓
+~200ms     GTM container downloaded
+           → gtm.js fires (Page View triggers)
+           ↓
+~300ms     HTML fully parsed, DOM complete
+           → gtm.dom fires (DOM Ready triggers)
+           ↓
+~1500ms    All images, fonts, iframes loaded
+           → gtm.load fires (Window Loaded triggers)
+```
+
+These timings are illustrative — actual timing depends on page size, network speed, and server response time. What matters is the sequence: gtm.js always fires before gtm.dom, which always fires before gtm.load.
+
+## When to use which
+
+This is the practical guide:
+
+| Tag type | Trigger |
+|----------|---------|
+| GA4 Configuration tag | Page View |
+| Google Ads conversion linker | Page View |
+| Consent Mode defaults update | Inline script before GTM (not a GTM trigger) |
+| GA4 Event tag for custom events | Custom Event trigger (not a page view trigger) |
+| Custom HTML that reads DOM elements | DOM Ready |
+| Session replay / screen recording | Window Loaded |
+| Chat widget (Intercom, Drift) | Window Loaded |
+| Heatmap tools | Window Loaded |
+
+The recommendation for GA4 Configuration is clear: fire it on Page View. Every millisecond it fires earlier increases the window available for GA4 event tags to send properly associated hits. If your GA4 Configuration fires on Window Loaded and a user bounces after 0.5 seconds, the configuration never initializes and no GA4 data is sent.
+
+<Aside type="tip">
+If you are unsure between DOM Ready and Window Loaded, choose DOM Ready. The difference matters for performance-critical pages, but DOM Ready is always the safer default for tags that need to read page content. Window Loaded is for tags that are genuinely low-priority.
+</Aside>
+
+## Configuring page view triggers
+
+### Fire on all pages (default)
+
+The default page view trigger fires on all pages with no filtering. This is correct for your GA4 Configuration tag — you want it on every page.
+
+<TagConfig
+  name="GA4 - Configuration"
+  type="Google Analytics: GA4 Configuration"
+  trigger="Page View - All Pages (gtm.js)"
+  variables={['Measurement ID']}
+/>
+
+### Fire on specific pages only
+
+Use "Some Page Views" to add URL-based conditions. Common patterns:
+
+```
+// Fire only on product pages
+Page Path contains /products/
+
+// Fire only on the checkout
+Page Path starts with /checkout
+
+// Fire on specific pages
+Page URL matches RegEx .*(pricing|features|about).*
+
+// Exclude a page
+Page Path does not contain /thank-you
+```
+
+<Steps>
+1. Create a new trigger with type **Page View** (or DOM Ready / Window Loaded)
+2. Switch from **All Page Views** to **Some Page Views**
+3. Add your filter conditions
+4. Name it clearly: `PV - Product Pages`, `PV - Checkout Only`
+</Steps>
+
+## Filtering by URL
+
+The most common use of conditional page view triggers is URL-based filtering. GTM provides several built-in variables for this:
+
+| Variable | Value | Example |
+|----------|-------|---------|
+| `Page URL` | Full URL | `https://example.com/products?color=red` |
+| `Page Hostname` | Domain only | `example.com` |
+| `Page Path` | Path only | `/products` |
+| `Query String` | Query string only | `color=red` |
+| `Referrer` | Referring URL | `https://google.com` |
+
+For most filtering, `Page Path` is the right choice. It does not include the domain (so it works across environments) and does not include query parameters (which change frequently and vary per user).
+
+```
+// Prefer Page Path for filtering
+Page Path starts with /shop/
+Page Path equals /checkout/success
+
+// Use Page URL only when you need to match query parameters
+Page URL contains ?source=email
+
+// Use Referrer for acquisition-based filtering
+Referrer contains google.com
+```
+
+## Page view triggers in SPA environments
+
+In single-page applications, page view triggers behave differently. GTM fires `gtm.js`, `gtm.dom`, and `gtm.load` only once — on the initial page load. Subsequent SPA navigations do not trigger new page view events.
+
+For SPA tracking, you have two options:
+
+1. **History Change trigger**: GTM's built-in trigger for `pushState`/`popstate` events. Fires automatically when the URL changes.
+2. **Custom Event trigger with `page_view`**: Push your own `page_view` event to the dataLayer from your framework's router.
+
+The second option is more reliable. For a full explanation, see [SPA Setup](/client-side/setup/spa-setup/).
+
+<Aside type="caution">
+Do not use the built-in Page View trigger for GA4 pageview tracking in SPAs. It fires once, on the initial load only. Your GA4 data will show every user landing on the homepage and never navigating further. Use a Custom Event trigger for SPAs.
+</Aside>
+
+## Common mistakes
+
+### Using Window Loaded as the default for everything
+
+Some GTM tutorials recommend Window Loaded as a "safe" default because everything is definitely loaded by then. This is poor advice. Firing your GA4 Configuration on Window Loaded means analytics initialization is delayed by the full page load time. On a slow connection or a heavy page, that can be a 3-5 second delay — plenty of time for a fast user to bounce and be completely untracked.
+
+### Firing DOM-dependent Custom HTML on Page View
+
+Custom HTML tags that use `document.querySelector()` or `document.getElementById()` often fire on Page View because the developer wants them as early as possible. But on Page View, the DOM is not ready. The query returns `null`, the code throws an error, and GTM silently swallows it. Move these tags to DOM Ready.
+
+### One trigger per use case, not one trigger for everything
+
+Creating a single "All Pages - Page View" trigger and attaching it to every tag is an anti-pattern. It couples the timing of all your tags together. Create specific triggers (or name them clearly) so you can change one tag's timing without affecting others.
+
+### Not verifying trigger timing in Preview mode
+
+GTM Preview mode shows the exact sequence of events that fired on a page load. Open Preview, navigate to a page, and check the Events panel. You should see `gtm.js`, then `gtm.dom`, then `gtm.load` in order. If a tag is firing at the wrong time, Preview mode will show you exactly which event triggered it.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Trigger Types Overview"
+    description="The complete map of all GTM trigger types and their use cases."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+  <LinkCard
+    title="SPA Setup"
+    description="How to track pageviews correctly in React, Next.js, Vue, and other SPAs."
+    href="/client-side/setup/spa-setup/"
+  />
+  <LinkCard
+    title="History Change Triggers"
+    description="The built-in trigger for SPA navigation — how it works and its limitations."
+    href="/client-side/triggers/history-change-triggers/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The trigger type to use for application-level pageview events in SPAs."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+</CardGrid>

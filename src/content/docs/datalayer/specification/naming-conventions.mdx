@@ -1,6 +1,239 @@
 ---
 title: "Naming Conventions"
-description: "A consistent naming system for dataLayer events and parameters."
+description: "The definitive naming convention for dataLayer events and parameters — snake_case rules, reserved prefixes, namespace strategies, and consistency principles."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Your dataLayer naming convention is the foundation of your entire analytics implementation. Change a parameter name six months after launch and you'll spend weeks patching GTM configurations, redefining custom dimensions in GA4, and explaining to your analytics team why historical data no longer matches new data. Define it right from day one and you'll never have to touch it.
+
+This page documents the complete naming convention for a well-structured implementation. Use it as a reference and copy the structure into your own team's tracking specification.
+
+## Core rule: always use snake_case
+
+Every event name and every parameter name uses `snake_case` — lowercase letters, words separated by underscores, no spaces, no hyphens, no camelCase, no PascalCase.
+
+```javascript
+// ✅ Correct
+dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 49.99,
+    items: [{
+      item_id: 'SKU-001',
+      item_name: 'Classic Leather Jacket',
+      item_category: 'Apparel'
+    }]
+  }
+});
+
+// ❌ Wrong — various incorrect styles
+dataLayer.push({
+  event: 'addToCart',          // camelCase
+  ecommerce: {
+    Currency: 'USD',           // PascalCase
+    'item-name': 'Jacket',     // hyphens
+    itemCategory: 'Apparel'    // camelCase parameter
+  }
+});
+```
+
+The reason to follow snake_case is alignment with GA4. All of GA4's recommended event names — `page_view`, `purchase`, `add_to_cart`, `view_item_list` — are snake_case. All of GA4's auto-collected parameters — `page_location`, `page_title`, `session_id` — are snake_case. When your custom names match the convention of GA4's built-in names, your implementation looks and behaves consistently.
+
+## Reserved prefixes to never use
+
+Some prefixes are claimed by Google and will cause silent failures or conflicts.
+
+| Prefix | Owner | What happens if you use it |
+|--------|-------|---------------------------|
+| `gtm.` | Google Tag Manager | GTM uses this for built-in events (`gtm.js`, `gtm.dom`, `gtm.load`). Your custom event will be ignored or confused with GTM internals. |
+| `ga_` | Google Analytics 4 | Reserved by GA4 for internal parameters. Custom events with this prefix may be dropped. |
+| `google_` | Google | Used by Google products. Avoid entirely. |
+
+```javascript
+// ❌ Never use these prefixes
+event: 'gtm.custom_event'
+event: 'ga_form_submit'
+event: 'google_conversion'
+
+// ✅ Fine
+event: 'form_submit'
+event: 'custom_conversion'
+```
+
+## Namespace strategy for custom events
+
+When you have events that belong to specific areas of your product, use namespace prefixes to group them. This prevents naming collisions as your event taxonomy grows and makes the dataLayer easier to search and audit.
+
+Recommended namespace prefixes:
+
+| Prefix | Use for |
+|--------|---------|
+| `app_` | Application-specific events that don't fit GA4 recommended categories |
+| `content_` | Content engagement events (articles, videos, downloads) |
+| `user_` | User-state events beyond GA4's `login`/`sign_up` |
+| `form_` | Form interaction events |
+| `error_` | Error and exception events |
+| `search_` | Search and filter interactions |
+
+```javascript
+// Examples of namespaced events
+dataLayer.push({ event: 'content_article_read' });
+dataLayer.push({ event: 'content_video_complete' });
+dataLayer.push({ event: 'form_start' });
+dataLayer.push({ event: 'form_step_complete' });
+dataLayer.push({ event: 'error_api_failure' });
+dataLayer.push({ event: 'user_subscription_upgrade' });
+```
+
+<Aside type="note">
+Don't create so many namespaces that it becomes bureaucratic. Three to five namespace prefixes for a typical ecommerce site is enough. If you find yourself inventing new namespaces for every feature, consolidate.
+</Aside>
+
+## GA4 recommended events: use them exactly as specified
+
+When GA4 has a recommended event that fits your use case, use the exact GA4 name — no modifications, no additions of your own prefix. GA4 can automatically categorize and pre-configure reports for recommended events. Custom variations lose that benefit.
+
+```javascript
+// ✅ Use GA4 recommended names exactly
+event: 'purchase'
+event: 'add_to_cart'
+event: 'view_item'
+event: 'login'
+event: 'sign_up'
+event: 'search'
+event: 'begin_checkout'
+
+// ❌ Don't rename recommended events
+event: 'app_purchase'         // unnecessary prefix
+event: 'ecommerce_purchase'   // unnecessary prefix
+event: 'buy'                  // synonym but loses GA4 integration
+```
+
+## Parameter naming rules
+
+Parameters follow the same snake_case rule as events. Additional rules apply:
+
+### Use full words, not abbreviations
+
+```javascript
+// ✅ Full words
+item_category: 'Apparel'
+payment_type: 'credit_card'
+shipping_tier: 'standard'
+content_type: 'article'
+
+// ❌ Cryptic abbreviations
+itm_cat: 'Apparel'
+pmt_typ: 'cc'
+ship_t: 'std'
+```
+
+The one exception: widely understood abbreviations like `id` (not `identifier`), `url` (not `uniform_resource_locator`), and standard measurement units.
+
+### Boolean parameters use is_ or has_ prefix
+
+```javascript
+// ✅ Clear boolean naming
+is_logged_in: true
+is_sale_item: false
+has_active_subscription: true
+has_cart_items: false
+
+// ❌ Ambiguous
+logged_in: true      // Is this boolean or a string state?
+subscription: true   // Is this presence or status?
+```
+
+### Arrays use plural nouns
+
+```javascript
+// ✅ Plural for arrays
+items: [...]
+categories: [...]
+tags: [...]
+filters_applied: [...]
+
+// ❌ Singular for arrays is confusing
+item: [...]
+category: [...]
+```
+
+### IDs are always strings
+
+Product IDs, order IDs, user IDs, and any other identifier should always be a string, even if the value looks like a number. IDs are not quantities you perform math on — treat them as labels.
+
+```javascript
+// ✅ IDs as strings
+item_id: 'SKU-12345'
+transaction_id: 'ORD-2024-98765'
+user_id: '42813'
+
+// ❌ IDs as numbers
+item_id: 12345
+transaction_id: 98765
+user_id: 42813
+```
+
+If your backend stores IDs as integers, convert them to strings before pushing to the dataLayer. `String(product.id)` is enough.
+
+## Complete naming convention reference table
+
+| Category | Convention | Example |
+|----------|-----------|---------|
+| Event names | snake_case | `view_item`, `form_submit` |
+| Parameter names | snake_case | `item_name`, `payment_type` |
+| Custom event prefix | namespace_description | `content_video_play` |
+| Boolean parameters | `is_` or `has_` prefix | `is_logged_in`, `has_coupon` |
+| IDs | snake_case string | `item_id`, `transaction_id` |
+| Arrays | Plural noun | `items`, `categories` |
+| Currency codes | ISO 4217, uppercase | `USD`, `EUR`, `GBP` |
+| Monetary values | Number, two decimal places | `29.99`, `0.00` |
+| Dates | ISO 8601 string | `2024-03-15` |
+| Reserved prefixes | Never use | `gtm.`, `ga_`, `google_` |
+
+## The consistency rule
+
+Once you've named something, never rename it without a versioning strategy.
+
+Renaming `item_category` to `product_category` mid-implementation means:
+1. All existing GTM Data Layer Variables reading `item_category` return `undefined`.
+2. GA4 custom dimensions mapped to `item_category` stop receiving data.
+3. Historical reports show a break in the time series.
+4. Someone has to find and update every tag, variable, and dimension reference.
+
+The correct approach when you need to rename: version your specification (see [Versioning Strategy](/datalayer/specification/versioning-strategy/)), run both old and new names in parallel during a transition period, then deprecate the old name with a defined sunset date.
+
+## Common mistakes
+
+**Using camelCase for event names.** The most common error. Developers write `addToCart` because it feels natural in JavaScript. GA4 won't match it to `add_to_cart` — they're treated as completely different events.
+
+**Inventing synonyms for GA4 recommended events.** If GA4 has `login`, don't create `user_login`, `auth_login`, or `authentication_success` unless they genuinely represent different things. Use the recommended name and add parameters if you need more context.
+
+**Inconsistent capitalization in values.** Parameter names are case-sensitive in GTM variable paths. `item_category` and `Item_Category` are different paths. Enforce lowercase for all keys.
+
+**Using spaces or special characters.** Spaces, hyphens, slashes, and parentheses in parameter names will cause issues in GTM dot-notation paths and GA4 custom dimension registration. Only letters, numbers, and underscores.
+
+<CardGrid>
+  <LinkCard
+    title="Event Naming Rules"
+    description="Detailed rules for event names — when to use recommended events, the 40-character limit, and anti-patterns."
+    href="/datalayer/specification/event-naming-rules/"
+  />
+  <LinkCard
+    title="Parameter Naming Rules"
+    description="Deep dive on parameter naming, GA4 limits, reserved names, and parameter reuse strategies."
+    href="/datalayer/specification/parameter-naming-rules/"
+  />
+  <LinkCard
+    title="Versioning Strategy"
+    description="How to manage breaking changes without destroying your analytics history."
+    href="/datalayer/specification/versioning-strategy/"
+  />
+  <LinkCard
+    title="Data Types"
+    description="Standards for values — strings, numbers, booleans, and common type mistakes."
+    href="/datalayer/specification/data-types/"
+  />
+</CardGrid>

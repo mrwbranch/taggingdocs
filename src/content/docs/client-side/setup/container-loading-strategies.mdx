@@ -3,4 +3,286 @@ title: "Container Loading Strategies"
 description: "Advanced techniques for optimizing how and when your GTM container loads."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+GTM's default loading behavior is async: the container script loads in parallel with your page, and tags begin firing as soon as the container is ready. For most sites, this is fine. But as containers grow, as third-party scripts accumulate, and as Core Web Vitals become a ranking factor, the default is not always fast enough. This article covers the strategies available for controlling how and when GTM loads — and which ones are actually worth implementing.
+
+## How GTM loads by default
+
+The GTM snippet creates a `<script>` element with `async=true` and inserts it before the first existing script in the document. The browser downloads `gtm.js` in parallel with page rendering. Once downloaded, GTM processes the accumulated dataLayer queue (replaying any pushes that happened before GTM initialized) and sets up event listeners for page triggers.
+
+Three internal events fire in sequence:
+- `gtm.js` — container downloaded and initialized, dataLayer replayed
+- `gtm.dom` — equivalent to `DOMContentLoaded`, DOM is fully parsed
+- `gtm.load` — equivalent to `window.load`, all resources loaded
+
+Tags on Page View triggers fire after `gtm.js`. Tags on Window Loaded triggers fire after `gtm.load`. The gap between these events is typically 50-2000ms depending on page weight and network conditions.
+
+## The performance impact is what's inside, not GTM itself
+
+Let's be direct about where GTM's performance cost actually lives.
+
+The GTM container script itself (`gtm.js`) is typically 30-50KB gzipped. That is not significant. What is significant is every tag inside your container that fires on page load. A typical marketing stack might include:
+
+- Google Ads conversion tracking tag
+- Meta Pixel (Facebook)
+- LinkedIn Insight Tag
+- TikTok Pixel
+- GA4 Configuration tag
+- Hotjar / Clarity / FullStory
+- Intercom or Drift chat widget
+
+Each of these loads its own script, which may load additional scripts, which make additional network requests. A container with a dozen marketing pixels on page load can easily add 2-4 seconds of execution time and 1-2MB of network traffic.
+
+Before optimizing how GTM loads, audit what is inside it. The most effective "performance optimization" is almost always removing or deferring tags that do not need to fire on page load.
+
+## Auditing container performance
+
+GTM Preview mode shows you tag firing order and timing. For a more precise measurement, use the Web Vitals API to measure GTM's actual impact:
+
+```javascript
+// Measure the GTM container load time
+(function() {
+  const startTime = performance.now();
+
+  // GTM fires gtm.js when it initializes
+  window.dataLayer = window.dataLayer || [];
+  const originalPush = window.dataLayer.push.bind(window.dataLayer);
+
+  window.dataLayer.push = function(obj) {
+    if (obj && obj.event === 'gtm.js') {
+      const gtmLoadTime = performance.now() - startTime;
+      console.log(`GTM container initialized: ${gtmLoadTime.toFixed(0)}ms`);
+    }
+    return originalPush.apply(this, arguments);
+  };
+})();
+```
+
+For a broader performance audit, use Chrome DevTools Performance tab. Look for long tasks (>50ms) in the "Main" thread during page load. GTM-loaded scripts are often visible there.
+
+You can also measure the impact directly in the Network tab: load the page normally, note the total transfer size, then block the GTM script (in DevTools, right-click the request and select "Block request URL") and reload. The difference is GTM's direct contribution to page weight.
+
+## Strategy 1: Tag firing optimization (do this first)
+
+Before changing how GTM loads, change when your tags fire. Most sites have multiple tags that fire on Page View when they should fire on Window Loaded or after user interaction.
+
+**Audit and move these to Window Loaded:**
+- Analytics tools used for post-session analysis (Hotjar recordings, heatmaps)
+- Chat widgets that only need to be available after the page is interactive
+- A/B testing tools that do not affect above-the-fold content
+
+**Move these to user-interaction triggers:**
+- Retargeting pixels (Meta, LinkedIn, TikTok) — they only need to fire once per session, and a user interaction trigger like scroll-to-25% covers almost all non-bounce visits
+- Survey tools (only trigger after a delay or scroll depth threshold)
+- Video analytics platforms
+
+<TagConfig
+  name="Meta Pixel - PageView (deferred)"
+  type="Custom HTML"
+  trigger="Scroll Depth - 25% (once per page)"
+  variables={[]}
+/>
+
+<Aside type="tip">
+Firing a retargeting pixel on 25% scroll depth instead of page load captures nearly all non-bounce visitors (users who bounce likely aren't valuable for retargeting anyway) while eliminating the pixel's script load from your critical rendering path. This alone can meaningfully improve LCP and TBT for pages heavy with marketing pixels.
+</Aside>
+
+## Strategy 2: Lazy-loading GTM
+
+Lazy-loading GTM means deferring the container load until after the user shows intent — a mouse movement, keyboard event, scroll, or click. For the subset of users who bounce without interacting, GTM never loads at all.
+
+```html
+<script>
+// Declare dataLayer before lazy-loading so pre-GTM pushes queue correctly
+window.dataLayer = window.dataLayer || [];
+
+// Consent defaults must still be set before GTM loads
+function gtag() { dataLayer.push(arguments); }
+gtag('consent', 'default', {
+  'analytics_storage': 'denied',
+  'ad_storage': 'denied',
+  'ad_user_data': 'denied',
+  'ad_personalization': 'denied',
+  'wait_for_update': 500
+});
+
+let gtmLoaded = false;
+
+function loadGTM() {
+  if (gtmLoaded) return;
+  gtmLoaded = true;
+
+  (function(w,d,s,l,i){
+    w[l]=w[l]||[];
+    w[l].push({'gtm.start': new Date().getTime(), event:'gtm.js'});
+    var f=d.getElementsByTagName(s)[0],
+        j=d.createElement(s),
+        dl=l!='dataLayer'?'&l='+l:'';
+    j.async=true;
+    j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;
+    f.parentNode.insertBefore(j,f);
+  })(window,document,'script','dataLayer','GTM-XXXX');
+}
+
+// Load on first user interaction
+['mousemove', 'scroll', 'touchstart', 'keydown', 'click'].forEach(function(event) {
+  document.addEventListener(event, loadGTM, { once: true, passive: true });
+});
+
+// Fallback: load after 3 seconds regardless
+setTimeout(loadGTM, 3000);
+</script>
+```
+
+The `{ once: true }` option removes the event listener after first call. The `{ passive: true }` flag ensures scroll listeners do not block rendering.
+
+**When lazy-loading is appropriate:**
+- Landing pages optimized for conversion where LCP/TBT scores are measured
+- Sites with very high bounce rates where loading GTM for non-interactors is pure waste
+- Performance-critical e-commerce product pages
+
+**When lazy-loading is not appropriate:**
+- Sites with Consent Mode where the CMP banner must fire immediately — the CMP is separate from GTM, but if the CMP relies on GTM tags to function, lazy-loading creates a conflict
+- Sites where session replay tools (Hotjar, Clarity) need to capture page load behavior
+- Any page where you need to track fast users who convert and leave within 2 seconds
+
+<Aside type="caution">
+Lazy-loading GTM creates a window where users can convert before GTM fires. If someone clicks your "Buy Now" button within 500ms of page load, you may miss the conversion event. Test on your actual traffic patterns before deploying this broadly. A 3-second fallback timeout mitigates the worst case.
+</Aside>
+
+## Strategy 3: Loading GTM after consent is granted
+
+For privacy-first architectures or markets where the regulatory interpretation requires no tracking scripts before consent, you can defer GTM loading entirely until the user grants consent.
+
+This is **Basic Consent Mode** behavior applied at the container level. The tradeoff is significant: you lose all data from users who deny consent, including cookieless behavioral modeling. Only implement this if you have a specific legal requirement.
+
+```javascript
+window.dataLayer = window.dataLayer || [];
+
+let gtmLoaded = false;
+
+function loadGTMIfConsented(consentState) {
+  if (gtmLoaded) return;
+  if (consentState.analytics !== 'granted' && consentState.advertising !== 'granted') return;
+
+  gtmLoaded = true;
+  (function(w,d,s,l,i){
+    w[l]=w[l]||[];
+    w[l].push({'gtm.start': new Date().getTime(), event:'gtm.js'});
+    var f=d.getElementsByTagName(s)[0],
+        j=d.createElement(s),
+        dl=l!='dataLayer'?'&l='+l:'';
+    j.async=true;
+    j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;
+    f.parentNode.insertBefore(j,f);
+  })(window,document,'script','dataLayer','GTM-XXXX');
+}
+
+// Called by your CMP after user makes a choice
+window.onConsentDecision = function(consentState) {
+  loadGTMIfConsented(consentState);
+};
+```
+
+For returning visitors who have already consented, you need to check consent state immediately:
+
+```javascript
+// Check stored consent on page load (adjust to your CMP's cookie/storage pattern)
+const storedConsent = getCMPConsentFromCookie();
+if (storedConsent) {
+  loadGTMIfConsented(storedConsent);
+}
+```
+
+## Strategy 4: Container size optimization
+
+If your container is large (over 200KB after decompression), the container script itself becomes a meaningful performance cost. The container JS is what GTM downloads from `gtm.js` — it includes all your tag code, trigger logic, and variable expressions compiled into a single file.
+
+Container size grows with:
+- Tags using Custom HTML with large scripts
+- Many variables with complex JavaScript expressions
+- Unused built-in variables (they are still compiled in)
+- Template tags with large configuration payloads
+
+```javascript
+// To check your current container size, look at the gtm.js response in Network tab
+// Or inspect the compiled container
+Object.keys(window.google_tag_manager['GTM-XXXX'].dataLayer.get).toString().length
+// This is a rough proxy — actual size visible in Network tab response size
+```
+
+Optimization steps:
+
+<Steps>
+1. **Audit and delete unused variables.** Every unused variable adds compilation weight. In GTM, go to Variables → Built-In Variables and disable any that are not referenced in triggers or tags. Go to User-Defined Variables and delete any not in active use.
+
+2. **Remove dead tags.** Tags attached to triggers that never fire, or tags for tools you no longer use, still compile into the container. Audit annually.
+
+3. **Move large scripts out of Custom HTML tags.** Instead of pasting a 50KB third-party script into a Custom HTML tag, load it via a `<script src="...">` inside the Custom HTML tag. The container downloads faster; the third-party script loads separately (and can be cached).
+
+4. **Consolidate redundant tags.** Multiple Custom HTML tags that all include different marketing pixels are a common source of bloat. Consider using a single tag per platform with configuration variables.
+
+5. **Use native tag templates instead of Custom HTML.** Native templates (from the Template Gallery) are more efficiently compiled than equivalent Custom HTML code.
+</Steps>
+
+## Measuring the impact of your changes
+
+After any loading strategy change, measure the actual impact. Use these methods:
+
+```javascript
+// Measure time from page start to GTM initialization
+const navEntry = performance.getEntriesByType('navigation')[0];
+const gtmInitTime = performance.mark('gtm-init');
+
+// In a custom JS variable or Console:
+// Check Long Task durations attributable to GTM
+const longTasks = performance.getEntriesByType('longtask');
+longTasks.filter(t => t.duration > 50).forEach(t => console.log(t));
+```
+
+For Core Web Vitals impact, use Lighthouse in DevTools. Run a Lighthouse report with GTM active, then block the GTM request and run again. The difference in LCP, TBT, and CLS scores is GTM's measurable impact — before any tag optimizations.
+
+## Common mistakes
+
+### Lazy-loading GTM but keeping consent defaults inside GTM
+
+If you lazy-load GTM, you must still set consent defaults before GTM loads — meaning in a plain `<script>` block before any user interaction triggers GTM. The consent defaults exist to set state on the `dataLayer` before Google's tags initialize; if GTM loads lazily after interaction, those defaults must have been in place since page start.
+
+### Assuming deferred loading fixes performance
+
+Adding `defer` to the outer GTM script tag wrapper has no effect — the snippet already loads asynchronously. Many tutorials suggest this as an optimization; it is not. The performance cost of GTM is what fires inside it, not the container bootstrap.
+
+### Not auditing after adding new tags
+
+Container weight grows silently. Every time a new tag is added, the container gets larger and potentially adds new network requests on page load. Build a habit of reviewing tag firing behavior in Lighthouse or WebPageTest after any significant container change.
+
+### Forgetting the dataLayer queue
+
+If you lazy-load GTM, the `dataLayer` array collects pushes that happen before GTM initializes. When GTM eventually loads, it processes this queue (replaying all events). This is usually beneficial — your initial page data is available. But be aware that if your code pushes events that expect immediate tag firing (like consent updates), those will be processed retroactively once GTM loads, which may be too late for some use cases.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Container Installation"
+    description="The correct way to install GTM before you think about optimization."
+    href="/client-side/setup/container-installation/"
+  />
+  <LinkCard
+    title="Google Consent Mode"
+    description="Loading GTM after consent requires understanding how Consent Mode works first."
+    href="/client-side/setup/google-consent-mode/"
+  />
+  <LinkCard
+    title="How GTM Works"
+    description="Understanding the container lifecycle helps you reason about when and why tags fire."
+    href="/foundations/how-gtm-works/"
+  />
+  <LinkCard
+    title="Timer Triggers"
+    description="Deferring tag firing with timer-based triggers — a lighter alternative to lazy-loading GTM entirely."
+    href="/client-side/triggers/timer-triggers/"
+  />
+</CardGrid>

@@ -3,4 +3,293 @@ title: "Google Consent Mode"
 description: "Implementing Google Consent Mode v2 via GTM for privacy compliance."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Google Consent Mode is Google's framework for operating its measurement and advertising tags under varying consent conditions. When a user denies analytics or advertising consent, tags do not fire in the traditional sense — instead, they send cookieless pings that Google uses to model behavior in aggregate. Your GA4 data stays meaningful even when a significant portion of visitors decline cookies.
+
+With Consent Mode v2, complying with EU regulations (GDPR, ePrivacy Directive) and Google's updated enforcement for EEA traffic is not optional. Without it, Google will not serve personalized ads to EEA users, and your GA4 data will be blind to consented-off visitors entirely — no pings, no modeling, no data.
+
+## The six consent parameters
+
+Consent Mode v2 introduced two new parameters alongside the original four. Here is what each one controls:
+
+| Parameter | Controls |
+|-----------|----------|
+| `analytics_storage` | GA4 measurement cookies (`_ga`, `_ga_*`). Denied = cookieless pings only |
+| `ad_storage` | Google Ads cookies (conversion, remarketing). Denied = no cookie |
+| `ad_user_data` | Sending user data to Google for advertising purposes |
+| `ad_personalization` | Personalized advertising (remarketing audiences, personalized ads) |
+| `functionality_storage` | Cookies that support site functionality (language, preferences) |
+| `personalization_storage` | Personalization cookies other than advertising |
+| `security_storage` | Security-related cookies (always granted in most CMP implementations) |
+
+The two v2 additions — `ad_user_data` and `ad_personalization` — are required for Google Ads Enhanced Conversions and Performance Max audiences to function in the EEA. If you have Google Ads running to EU markets and these are not set, your campaigns are degraded.
+
+## Advanced vs. Basic Consent Mode
+
+These are two very different implementations with significantly different data outcomes.
+
+**Basic Consent Mode**: Google's tags are blocked entirely until consent is granted. Before consent, no pings, no modeling, no data. Simple to implement, but you lose all insight into the pre-consent user population. Google does not recommend this for sites that care about data quality.
+
+**Advanced Consent Mode**: Google's tags load immediately. If a user has denied consent, the tags still fire — but without cookies and without sending personal data. These cookieless pings allow Google to apply behavioral modeling to fill in the gaps caused by consent denial. The result: your GA4 reports show estimated data for consented-off users rather than a hole.
+
+Use Advanced Consent Mode. It is the correct default. If your legal team is concerned about any network request being sent before consent, that is a valid concern to raise — but understand the data quality tradeoff. In most EU markets, 30-50% of users deny consent. Losing all insight into that population hurts both your analytics and your ad optimization.
+
+## Setting defaults before GTM loads
+
+The most important rule in Consent Mode: **set default consent state before GTM loads**. Not inside a GTM tag. Not in a dataLayer push after the GTM snippet. Before.
+
+If GTM loads before consent defaults are set, Google tags will briefly evaluate without any consent state — and in some implementations, will use granted as the default. This is both a legal risk and a technical issue.
+
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag() { dataLayer.push(arguments); }
+
+  // Set defaults BEFORE the GTM snippet below this
+  gtag('consent', 'default', {
+    'analytics_storage': 'denied',
+    'ad_storage': 'denied',
+    'ad_user_data': 'denied',
+    'ad_personalization': 'denied',
+    'functionality_storage': 'denied',
+    'personalization_storage': 'denied',
+    'security_storage': 'granted', // Security cookies are always granted
+    'wait_for_update': 500 // Wait up to 500ms for CMP to update consent
+  });
+</script>
+
+<!-- GTM snippet goes here, AFTER the defaults above -->
+<script>(function(w,d,s,l,i)...</script>
+```
+
+The `wait_for_update` parameter tells Google tags to hold for up to 500 milliseconds to receive a consent update before proceeding. This handles the common case where a returning visitor has already consented — the CMP reads their stored consent and calls `gtag('consent', 'update', ...)` within that window. Without `wait_for_update`, a returning visitor who previously granted consent would get denied-consent pings on their second visit.
+
+<Aside type="caution">
+The `wait_for_update` value is in milliseconds. 500ms is a reasonable default. Values over 1000ms can noticeably delay tag firing for users who have already consented. Values under 300ms may be too short for slow CMPs to read and update consent on returning visitors. Test with your specific CMP to find the right value.
+</Aside>
+
+## Updating consent from your CMP
+
+When a user makes a consent choice in your Cookie Management Platform (CMP), you must call `gtag('consent', 'update', ...)` with the updated state. This is how Google's tags learn that consent has been granted or denied.
+
+```javascript
+// Called by your CMP when the user accepts all cookies
+function onConsentGranted() {
+  gtag('consent', 'update', {
+    'analytics_storage': 'granted',
+    'ad_storage': 'granted',
+    'ad_user_data': 'granted',
+    'ad_personalization': 'granted',
+    'functionality_storage': 'granted',
+    'personalization_storage': 'granted'
+  });
+}
+
+// Called by your CMP when the user rejects all non-essential cookies
+function onConsentDenied() {
+  gtag('consent', 'update', {
+    'analytics_storage': 'denied',
+    'ad_storage': 'denied',
+    'ad_user_data': 'denied',
+    'ad_personalization': 'denied',
+    'functionality_storage': 'denied',
+    'personalization_storage': 'denied'
+  });
+}
+```
+
+The `gtag('consent', 'update', ...)` call is equivalent to pushing to the dataLayer directly:
+
+```javascript
+// These two are equivalent
+gtag('consent', 'update', { 'analytics_storage': 'granted' });
+
+dataLayer.push({
+  event: 'gtm.consent',
+  'gtm.consent.analytics_storage': 'granted'
+});
+```
+
+## Integration with popular CMPs
+
+<Tabs>
+<TabItem label="Cookiebot">
+
+Cookiebot provides a built-in GTM template. Install it from the GTM Community Template Gallery, or integrate manually using Cookiebot's callback API:
+
+```javascript
+// In your site's JavaScript or a GTM Custom HTML tag
+window.addEventListener('CookiebotOnConsentReady', function () {
+  const consent = window.Cookiebot?.consent;
+  if (!consent) return;
+
+  gtag('consent', 'update', {
+    'analytics_storage': consent.statistics ? 'granted' : 'denied',
+    'ad_storage': consent.marketing ? 'granted' : 'denied',
+    'ad_user_data': consent.marketing ? 'granted' : 'denied',
+    'ad_personalization': consent.marketing ? 'granted' : 'denied',
+    'functionality_storage': consent.preferences ? 'granted' : 'denied',
+    'personalization_storage': consent.preferences ? 'granted' : 'denied'
+  });
+});
+```
+
+The `CookiebotOnConsentReady` event fires both on first visit (after user makes a choice) and on return visits (after Cookiebot reads the stored consent). This handles the `wait_for_update` window for returning visitors.
+
+</TabItem>
+<TabItem label="CookieYes">
+
+CookieYes triggers a `cookieyes-consent-update` event on the `document` when consent changes:
+
+```javascript
+document.addEventListener('cookieyes-consent-update', function (event) {
+  const data = event.detail;
+
+  gtag('consent', 'update', {
+    'analytics_storage': data.accepted?.includes('analytics') ? 'granted' : 'denied',
+    'ad_storage': data.accepted?.includes('advertisement') ? 'granted' : 'denied',
+    'ad_user_data': data.accepted?.includes('advertisement') ? 'granted' : 'denied',
+    'ad_personalization': data.accepted?.includes('advertisement') ? 'granted' : 'denied',
+    'functionality_storage': data.accepted?.includes('functional') ? 'granted' : 'denied',
+    'personalization_storage': data.accepted?.includes('functional') ? 'granted' : 'denied'
+  });
+});
+```
+
+</TabItem>
+<TabItem label="Custom / DIY">
+
+If you have a custom consent solution or are using a CMP without native GTM integration, the pattern is the same — call `gtag('consent', 'update', ...)` in the callback your CMP fires after a consent decision:
+
+```javascript
+// Assuming your CMP exposes an onConsentChange callback
+window.MyConsentManager = {
+  onConsentChange: function(consentState) {
+    gtag('consent', 'update', {
+      'analytics_storage': consentState.analytics ? 'granted' : 'denied',
+      'ad_storage': consentState.advertising ? 'granted' : 'denied',
+      'ad_user_data': consentState.advertising ? 'granted' : 'denied',
+      'ad_personalization': consentState.advertising ? 'granted' : 'denied',
+      'functionality_storage': consentState.functional ? 'granted' : 'denied',
+      'personalization_storage': consentState.functional ? 'granted' : 'denied',
+      'security_storage': 'granted'
+    });
+  }
+};
+```
+
+For returning visitors whose consent is stored in a cookie, call `gtag('consent', 'update', ...)` immediately on page load — before `wait_for_update` times out. The typical pattern is to read the consent cookie in a script that runs before GTM, and push the stored consent state immediately.
+
+</TabItem>
+</Tabs>
+
+## Configuring consent settings on Google tags in GTM
+
+For Consent Mode to influence your tags in GTM, each tag must have its consent requirements configured. In GTM, open a tag, scroll to "Consent Settings" (under Advanced Settings), and set the required consent types.
+
+For a GA4 Configuration tag:
+
+<TagConfig
+  name="GA4 - Configuration"
+  type="Google Analytics: GA4 Configuration"
+  trigger="Page View (gtm.js)"
+  variables={['measurement_id']}
+/>
+
+The GA4 Configuration tag built-in template automatically respects `analytics_storage`. You do not need to configure consent settings manually for the built-in GA4 templates — they check consent state inherently.
+
+For Custom HTML tags that load third-party scripts, you must specify which consent types are required:
+
+1. Open the tag in GTM
+2. Scroll to **Advanced Settings → Consent Settings**
+3. Click **Add required consent**
+4. Add `ad_storage` for advertising scripts, `analytics_storage` for analytics
+
+If a user has denied the specified consent type, the tag will not fire — even if the trigger condition is met.
+
+## Behavioral modeling in GA4
+
+When `analytics_storage` is denied, GA4 does not drop the user entirely. It sends cookieless pings — measurement without identification. Google uses these aggregate signals to model behavior: if 1,000 users convert after denying analytics, and you can see 600 of them via cookieless pings, Google models the full 1,000 in your reports.
+
+Behavioral modeling in GA4 activates when:
+- Advanced Consent Mode is correctly implemented
+- Your property has sufficient traffic (typically 1,000+ daily users)
+- At least 3-5% of users consent to analytics
+
+When modeling is active, you will see a "Consent" badge on your GA4 reports. The modeled data blends with observed data transparently.
+
+<Aside type="tip">
+Behavioral modeling is only available with Advanced Consent Mode. Basic Consent Mode (blocking tags entirely before consent) gets no modeling. This is the primary reason to implement Advanced over Basic — the data quality difference is significant.
+</Aside>
+
+## Testing your Consent Mode implementation
+
+Testing Consent Mode is non-negotiable. A broken implementation is a legal liability, and testing in production after the fact is too late.
+
+### In GTM Preview mode
+
+Open GTM Preview and navigate to your site. In the Preview pane, look for a "Consent" section that shows the current state of each consent parameter. You should see all parameters defaulting to `denied` on first load. After interacting with your CMP banner (accepting or denying), you should see the corresponding `update` calls appear in the events list.
+
+### Browser console verification
+
+```javascript
+// After the page loads, check current consent state
+// This reads Google's internal consent state
+document.cookie.split(';').filter(c => c.includes('_gcl') || c.includes('_ga'));
+// On denied analytics_storage: no _ga cookies should be present
+```
+
+```javascript
+// Verify the dataLayer contains your consent events
+window.dataLayer.filter(item => item[0] === 'consent');
+// Should show: default call, and update call(s) if consent has been given
+```
+
+### Verify cookieless pings in the Network tab
+
+With `analytics_storage: denied`, open DevTools Network tab and filter for `google-analytics.com/g/collect`. You should still see requests being made — these are the cookieless pings. They will not contain a `_ga` cookie value in the request headers. This confirms Advanced Consent Mode is functioning: tags fire in a privacy-preserving mode rather than being blocked entirely.
+
+## Common mistakes
+
+### Setting consent defaults inside a GTM tag
+
+This is the most critical mistake. A GTM tag that sets consent defaults fires after GTM has already loaded — which means Google's tags have already initialized without any consent state. By that point, it is too late. Consent defaults must be in a `<script>` tag that executes before GTM's IIFE snippet.
+
+### Using `granted` as the default for EU traffic
+
+Some implementations set `'analytics_storage': 'granted'` as the default, relying on the CMP to immediately update to `denied` for users who have not consented. This creates a race condition and, under GDPR, likely constitutes tracking without consent. Default to `denied` for all potentially privacy-sensitive parameters.
+
+### Forgetting `ad_user_data` and `ad_personalization`
+
+These two parameters were added in Consent Mode v2. If you implemented Consent Mode before mid-2023, your implementation is missing them. Google started enforcing v2 requirements for EEA ad serving in early 2024. Check that both are in your defaults and your update calls.
+
+### Not testing returning visitor behavior
+
+First-time visitors are straightforward — they see the banner and make a choice. Returning visitors are trickier. Their consent is stored, so the banner does not appear, but the consent update must still fire before `wait_for_update` expires. Test by clearing your site's cookies, consenting, reloading, and verifying in the Network tab that GA4 cookies are present on the second load (if analytics was granted).
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Container Installation"
+    description="Where to place the consent defaults snippet relative to the GTM snippet."
+    href="/client-side/setup/container-installation/"
+  />
+  <LinkCard
+    title="Container Loading Strategies"
+    description="Loading GTM only after consent is granted — an alternative architecture for high-privacy requirements."
+    href="/client-side/setup/container-loading-strategies/"
+  />
+  <LinkCard
+    title="Privacy and Consent"
+    description="Broader coverage of privacy architecture, server-side tagging, and cookieless measurement."
+    href="/privacy/"
+  />
+  <LinkCard
+    title="SPA Setup"
+    description="If you are on a single-page app, ensure your consent defaults fire before your SPA framework initializes."
+    href="/client-side/setup/spa-setup/"
+  />
+</CardGrid>

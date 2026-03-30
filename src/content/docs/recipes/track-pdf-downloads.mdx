@@ -1,6 +1,172 @@
 ---
 title: "Track PDF Downloads"
-description: "Tracking PDF and document downloads."
+description: "Track PDF and document downloads in GA4 via GTM — link click triggers, file extension regex, and the dataLayer approach."
+sidebar:
+  badge:
+    text: Beginner
+    variant: success
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+PDF downloads are a common conversion signal — brochures, whitepapers, pricing sheets. GA4's Enhanced Measurement will track some file downloads automatically, but its coverage is unreliable and its naming conventions are out of your control. This recipe gives you complete control over what gets tracked and what data is captured.
+
+## Option A — GTM Link Click Trigger (no code required)
+
+The fastest approach when you cannot touch the site code. GTM watches for clicks on links whose `href` matches a file extension pattern.
+
+<Steps>
+1. **Enable Click Variables**
+
+   In GTM → **Variables → Configure**, enable:
+   - Click URL
+   - Click Text
+   - Click Element
+
+2. **Create a Link Click Trigger**
+
+   - Trigger type: **Click – Just Links**
+   - Fire on: **Some Link Clicks**
+   - Condition: `Click URL` **matches RegEx (ignore case)** `\.(pdf|docx?|xlsx?|pptx?|zip|csv)(\?|$)`
+
+   Enable **Wait for Tags** (50ms) and **Check Validation** to ensure the tag fires before the browser navigates away.
+
+3. **Create Custom JavaScript Variables for file metadata**
+
+   Variable `DLV - file_name`:
+   ```javascript
+   function() {
+     var url = {{Click URL}};
+     return url ? url.split('/').pop().split('?')[0] : undefined;
+   }
+   ```
+
+   Variable `DLV - file_extension`:
+   ```javascript
+   function() {
+     var url = {{Click URL}};
+     var match = url && url.match(/\.([a-z0-9]+)(\?|$)/i);
+     return match ? match[1].toLowerCase() : undefined;
+   }
+   ```
+
+4. **Create a GA4 Event Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `file_download`
+   - Parameters:
+     - `file_name` → `{{DLV - file_name}}`
+     - `file_extension` → `{{DLV - file_extension}}`
+     - `link_url` → `{{Click URL}}`
+     - `link_text` → `{{Click Text}}`
+   - Trigger: the Link Click trigger above
+
+5. **Test in Preview Mode**
+
+   Click a PDF link. Check the Tags Fired panel — your GA4 tag should appear. Verify `file_name` and `file_extension` are populated correctly in the Variables tab.
+</Steps>
+
+<TagConfig
+  name="GA4 - file_download"
+  type="Google Analytics: GA4 Event"
+  trigger="Link Click - file extensions regex"
+  variables={["DLV - file_name", "DLV - file_extension", "Click URL", "Click Text"]}
+/>
+
+<Aside type="caution">
+GA4's Enhanced Measurement also fires `file_download` events. If you implement this recipe alongside Enhanced Measurement, you will get duplicate events. Either disable Enhanced Measurement's file download tracking in **GA4 → Admin → Data Streams → Enhanced Measurement**, or use Option B below which makes Enhanced Measurement redundant.
+</Aside>
+
+## Option B — dataLayer push (recommended)
+
+If your CMS or application serves PDFs from a known set of links, push to the dataLayer from an event listener. This gives you access to metadata that GTM cannot scrape from the DOM.
+
+<DataLayerExample event="file_download" description="Push this when a user clicks a PDF link. Add CMS metadata for richer analysis.">
+```javascript
+document.querySelectorAll('a[href$=".pdf"], a[href$=".docx"]').forEach(function(link) {
+  link.addEventListener('click', function() {
+    var ext = (this.href.match(/\.([a-z0-9]+)(\?|$)/i) || [])[1] || 'pdf';
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'file_download',
+      file_name: this.href.split('/').pop().split('?')[0],
+      file_extension: ext.toLowerCase(),
+      file_url: this.href,
+      link_text: this.innerText.trim(),
+      content_category: this.dataset.category || undefined,
+      content_id: this.dataset.contentId || undefined
+    });
+  });
+});
+```
+</DataLayerExample>
+
+<Steps>
+1. **Add the dataLayer push** to your site code. Run it after DOMContentLoaded.
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `file_download`
+
+3. **Create Data Layer Variables**
+
+   - `DLV - file_name` → Data Layer Variable name: `file_name`
+   - `DLV - file_extension` → Data Layer Variable name: `file_extension`
+   - `DLV - content_id` → Data Layer Variable name: `content_id`
+
+4. **Create a GA4 Event Tag**
+
+   - Event name: `file_download`
+   - Parameters:
+     - `file_name` → `{{DLV - file_name}}`
+     - `file_extension` → `{{DLV - file_extension}}`
+     - `content_id` → `{{DLV - content_id}}`
+   - Trigger: the Custom Event trigger
+
+5. **Test in Preview Mode**
+
+   Click a PDF link. The `file_download` event should appear in the Summary pane with all parameter values populated.
+</Steps>
+
+## Tracking downloads served behind authentication
+
+If your PDFs are served through authenticated endpoints (e.g., `/api/download?file=report-q4.pdf`), the link click trigger cannot detect the file extension in the URL. Push from your download handler instead:
+
+```javascript
+async function handleDownload(fileId, fileName) {
+  const url = await getSignedDownloadUrl(fileId);
+  window.open(url, '_blank');
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'file_download',
+    file_name: fileName,
+    file_id: fileId,
+    file_type: 'pdf'
+  });
+}
+```
+
+## Test it
+
+1. Open GTM Preview and navigate to a page with PDF links
+2. Click a PDF link
+3. In the Summary pane, find the `file_download` event
+4. Verify `file_name` and `file_extension` values are correct in the Variables tab
+5. In GA4 DebugView, look for `file_download` with your custom parameters attached
+
+## Common gotchas
+
+**PDF opens in a new tab before GTM fires.** The Link Click trigger fires the tag then allows the link to open. If the tag has not fired before the browser navigates, it may be lost. Enable **Wait for Tags** (50ms) on the trigger.
+
+**Relative vs. absolute URLs.** `{{Click URL}}` in GTM always returns the absolute URL. Your regex pattern does not need to account for relative links.
+
+**Same PDF linked from multiple paths.** If the same document appears at `/assets/report.pdf` and `/downloads/report.pdf`, normalise by filename only, not full URL. Use `file_name` as your primary identifier in GA4 reports rather than `link_url`.
+
+<CardGrid>
+  <LinkCard title="Track Button Clicks" href="/recipes/track-button-clicks/" description="The same CSS selector and dataLayer patterns for button interactions." />
+  <LinkCard title="GTM Regex Cheatsheet" href="/recipes/regex-cheatsheet/" description="File extension patterns and URL matching reference." />
+</CardGrid>

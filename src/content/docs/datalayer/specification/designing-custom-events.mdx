@@ -1,6 +1,246 @@
 ---
 title: "Designing Custom Events"
-description: "Framework for designing new custom dataLayer events from scratch."
+description: "A systematic framework for designing new dataLayer events — decision trees, documentation templates, impact assessment, and review processes."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Designing a new event is a decision that echoes forward. Name it wrong and you'll spend weeks explaining to stakeholders why your `clickButton_PDP_addToCart` event looks nothing like GA4's `add_to_cart`. Fail to document it and six months later nobody on your team knows what parameters it carries or when it fires. Rush it into production without testing and you'll discover the parameters were all `undefined` after a month of zero data.
+
+This page gives you the framework to design custom events correctly before you implement them.
+
+## Step 1: does this need to be a new event?
+
+Before designing anything, confirm you actually need a new event. Most analytics implementations have too many events, not too few.
+
+Answer these questions in order:
+
+**Does GA4 have a recommended event for this?**
+Check the [GA4 recommended event list](https://developers.google.com/analytics/devguides/collection/ga4/reference/events). If `share`, `select_content`, `generate_lead`, or any other recommended event fits — use it, don't create a custom event. You'll get pre-built reports and cleaner taxonomy.
+
+**Is this the same action as an existing event in your specification, with additional context?**
+If you already have a `form_submit` event and you want to track a new form type — add `form_type: 'newsletter'` as a parameter, don't create `newsletter_form_submit`. Parameters carry context; events represent fundamentally different action types.
+
+**Do you need to trigger a different GTM tag based on this action?**
+This is the strongest reason to create a separate event. If your newsletter form and your lead form send to different platforms (Mailchimp vs. Salesforce), and you need different GTM tags for each, separate event names make trigger configuration cleaner.
+
+**Will you build a separate funnel or report specifically for this action in GA4?**
+If you need a dedicated funnel or conversion event — a form submission that counts as a lead conversion, separate from a newsletter signup — a unique event name makes GA4 funnel configuration unambiguous.
+
+If you answered no to all four questions, you probably need a parameter, not a new event.
+
+## Step 2: draft the event specification
+
+Use this template for every new event:
+
+```markdown
+## Event: [event_name]
+
+**Description**: [One sentence: what does this event track?]
+
+**When it fires**: [Specific trigger condition — not "when user does X" but "fires when
+  the user clicks the submit button on the contact form AND the form passes client-side
+  validation". Be precise about timing.]
+
+**Where it fires**: [Which pages or contexts — product detail pages, checkout step 2, etc.]
+
+**Spec version**: [The version of your dataLayer spec this event belongs to]
+
+### Parameters
+
+| Parameter | Type | Required | Description | Example Value |
+|-----------|------|----------|-------------|---------------|
+| event     | string | Required | Always the event name | `'form_submit'` |
+| form_name | string | Required | Identifies which form | `'contact'` |
+| form_id   | string | Optional | HTML ID of the form element | `'contact-form-main'` |
+| form_location | string | Required | Where on the page/site | `'product_page_sidebar'` |
+
+### Example push
+
+[Complete dataLayer.push() with realistic example values — not placeholders]
+
+### GTM trigger
+
+[Event trigger name: `CE - form_submit`]
+
+### Custom dimensions required
+
+[List any new custom dimensions this event needs registered in GA4]
+
+### Notes
+
+[Edge cases, caveats, implementation gotchas]
+```
+
+## Step 3: impact assessment
+
+Before approving a new event, evaluate the downstream impact:
+
+**Custom dimension slots**
+- Does this event need new custom dimensions registered in GA4?
+- How many slots does it consume? (GA4 standard: 50 event-scoped, 25 user-scoped)
+- After this event, how many slots remain?
+
+**Custom dimension cardinality**
+- Are any of the new parameters high-cardinality? (product IDs across 50K products, for example)
+- High-cardinality values in custom dimensions cause the "(other)" row in GA4 reports
+- For high-cardinality identifiers, send them as parameters but analyze them in BigQuery — not as GA4 custom dimensions
+
+**Event name count**
+- GA4 allows 500 distinct event names per property
+- After adding this event, what is your total count?
+- If you're above 400, start auditing which existing events can be consolidated
+
+**Processing volume**
+- How frequently will this event fire? (every page view? every click? every product hover?)
+- GA4 has practical limits on event volume — events that fire on every mouse movement are problematic
+- High-frequency events belong in aggregate form (e.g., fire `scroll_complete` once at 90%, not `scroll_position` every 10px)
+
+<Aside type="caution">
+The GA4 "(other)" row is not just an aesthetic problem. It means data is being hidden from your reports to protect user privacy (low-count rows) or because cardinality exceeded GA4's threshold. A `page_path` dimension with 100K unique values will cause rampant (other) rows in Explore. Plan for cardinality before registering a custom dimension.
+</Aside>
+
+## Step 4: review process
+
+For teams larger than one person, new events should be reviewed before implementation. The review serves three purposes: catching naming issues before they're permanent, ensuring downstream consumers (other tags, other teams) are aware of the change, and documenting the decision rationale.
+
+A minimal review process:
+
+<Steps>
+1. **Author creates a spec document** using the template above and shares it for review.
+
+2. **Analytics team reviews** for naming alignment with existing events, cardinality concerns, and whether a custom dimension slot needs to be reserved in GA4.
+
+3. **Developer reviews** for technical feasibility — can we get all the required parameter values at the point this event fires? Are any values unavailable at that point in the user journey?
+
+4. **Approval recorded** — in a ticket, a PR comment, or a spec changelog. The approval trail is important when someone asks "why does this event exist?" six months later.
+
+5. **GTM configuration reviewed** alongside implementation — the trigger and tag should be visible for review before publishing.
+</Steps>
+
+## Step 5: test before production
+
+Never push a new event to production as the first place it runs. Every new event should pass through at least two validation checkpoints:
+
+**Development/staging validation**
+
+```javascript
+// Add a validation mode during development
+const isDev = process.env.NODE_ENV === 'development';
+
+function pushEvent(eventData) {
+  // Validate in development
+  if (isDev && window.__validateDataLayerEvent) {
+    const result = window.__validateDataLayerEvent(eventData);
+    if (!result.valid) {
+      console.error('DataLayer validation failed:', result.errors, eventData);
+    }
+  }
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push(eventData);
+}
+```
+
+**GA4 DebugView verification**
+
+Enable GTM Preview mode or the GA Debugger Chrome extension. Open GA4 Admin > DebugView. Navigate through the flow that should trigger your new event. Verify:
+- The event appears in DebugView by the correct name
+- All required parameters are present with the correct values and types
+- No required parameters show as `undefined`, `null`, or empty string
+
+**Staging environment sign-off**
+
+Run through the complete user journey in staging with someone from the analytics team confirming the data looks correct in DebugView before the event is deployed to production.
+
+## Step 6: handle version management
+
+New events are typically a minor version bump to your dataLayer spec (see [Versioning Strategy](/datalayer/specification/versioning-strategy/)). Breaking changes to existing events require a major version bump and a migration plan.
+
+Document the new event in your spec repository alongside the code change. The spec update and the implementation should ship in the same pull request.
+
+## Example: designing a wishlist event
+
+A worked example applying the full framework:
+
+**Step 1 — Check GA4**: GA4 has `add_to_wishlist` as a recommended event. Use it.
+
+**Spec draft:**
+```markdown
+## Event: add_to_wishlist
+
+**Description**: Fires when a user adds a product to their wishlist.
+
+**When it fires**: On successful API response from the wishlist endpoint,
+  not on button click (avoids firing if the API call fails).
+
+**Where it fires**: Product detail pages, product list pages (via quick-add).
+
+### Parameters
+
+| Parameter | Type | Required | Description | Example |
+|-----------|------|----------|-------------|---------|
+| event | string | Required | 'add_to_wishlist' | |
+| ecommerce.currency | string | Required | ISO 4217 code | 'USD' |
+| ecommerce.value | number | Required | Item price | 89.99 |
+| ecommerce.items[] | array | Required | Item array | see below |
+| items[].item_id | string | Required | SKU | 'SKU-001' |
+| items[].item_name | string | Required | Product name | 'Leather Jacket' |
+| items[].price | number | Required | Unit price | 89.99 |
+| items[].quantity | number | Required | Always 1 for wishlist | 1 |
+
+### Example push
+
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'add_to_wishlist',
+  ecommerce: {
+    currency: 'USD',
+    value: 89.99,
+    items: [{
+      item_id: 'SKU-001-BLK',
+      item_name: 'Classic Leather Jacket',
+      item_brand: 'Heritage Co.',
+      item_category: 'Apparel',
+      item_variant: 'Black / Large',
+      price: 89.99,
+      quantity: 1
+    }]
+  }
+});
+
+### Custom dimensions
+None new — uses existing ecommerce structure.
+
+### GTM trigger
+CE - add_to_wishlist
+```
+
+**Impact assessment**: No new custom dimensions needed. Event name count: 24 (well under 500). Event fires at most once per product per session — low volume, no concern.
+
+**Review**: analytics team confirmed wishlist behavior, developer confirmed API callback timing, approved.
+
+**Testing**: DebugView shows `add_to_wishlist` with correct item data on staging.
+
+<CardGrid>
+  <LinkCard
+    title="Event Naming Rules"
+    description="Rules for naming the event itself — when to use GA4 recommended events, the 40-character limit."
+    href="/datalayer/specification/event-naming-rules/"
+  />
+  <LinkCard
+    title="Versioning Strategy"
+    description="How to version your spec and manage breaking changes over time."
+    href="/datalayer/specification/versioning-strategy/"
+  />
+  <LinkCard
+    title="Validation Approaches"
+    description="The full validation stack — development, staging, production."
+    href="/datalayer/validation/validation-approaches/"
+  />
+  <LinkCard
+    title="Custom Event Design (Hands-on)"
+    description="Practical event design patterns for login, search, forms, and content engagement."
+    href="/datalayer/custom-events/custom-event-design/"
+  />
+</CardGrid>

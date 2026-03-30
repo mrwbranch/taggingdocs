@@ -1,6 +1,271 @@
 ---
 title: "Form Tracking"
-description: "Reliable form submission tracking strategies."
+description: "Every approach to tracking form submissions in GTM — from the built-in trigger to AJAX detection to React forms."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Form submissions are often the most important conversion event on a site — and one of the most commonly broken tracking implementations. The GTM built-in Form Submission trigger works fine for simple static forms, but most modern forms are AJAX-based, framework-rendered, or multi-step, and the built-in trigger won't catch any of them.
+
+This guide covers every approach, from the simplest to the most complex.
+
+## The built-in Form Submission trigger (and its limits)
+
+GTM's Form Submission trigger listens for the `submit` event on HTML form elements. For traditional forms that post to a URL and navigate away, it works reliably.
+
+Configure it like this:
+
+- **Trigger type**: Form Submission
+- **Check Validation**: On — waits for the browser to validate required fields before the trigger fires
+- **Wait for Tags**: On — prevents page navigation until your tags have had time to fire
+- **Condition**: Form ID equals `your-form-id`
+
+<Aside type="caution">
+The built-in Form Submission trigger does **not** fire for:
+- AJAX forms (React, Vue, any form that submits without a page reload)
+- JavaScript-triggered `form.submit()` calls that bypass the `submit` event
+- Forms inside iframes
+- Forms inside Shadow DOM
+
+If your form submits without a page reload, stop here and use the dataLayer approach below.
+</Aside>
+
+## The dataLayer approach (recommended for all modern forms)
+
+The correct pattern for any modern form is a `dataLayer.push()` call in your form submission handler. This gives you complete control over when the event fires, what data it includes, and whether the form was actually valid.
+
+```javascript
+// React example (using a form library like react-hook-form or native onSubmit)
+function ContactForm() {
+  const handleSubmit = async (formData) => {
+    const response = await submitToAPI(formData);
+
+    if (response.ok) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'form_submission',
+        form_id: 'contact_form',
+        form_name: 'Contact Us',
+        form_location: 'contact_page',
+        success: true
+      });
+    }
+  };
+
+  return <form onSubmit={handleSubmit}>...</form>;
+}
+```
+
+```javascript
+// Vanilla JS
+document.getElementById('contact-form').addEventListener('submit', function(e) {
+  e.preventDefault();
+
+  fetch('/api/contact', {
+    method: 'POST',
+    body: new FormData(this)
+  }).then(function(response) {
+    if (response.ok) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'form_submission',
+        form_id: 'contact_form',
+        form_name: 'Contact Us',
+        form_location: document.body.dataset.pageType || 'unknown'
+      });
+    }
+  });
+});
+```
+
+In GTM, create a Custom Event trigger for `form_submission` and attach it to your GA4 Event tag:
+
+<TagConfig
+  name="GA4 - Event - Form Submission"
+  type="Google Analytics: GA4 Event"
+  trigger="CE - form_submission"
+  variables={['DLV - form_id', 'DLV - form_name', 'DLV - form_location']}
+/>
+
+Push the success event **after** the server confirms the submission, not on the click. This ensures you're tracking actual conversions, not attempts.
+
+## Multi-step form tracking
+
+For forms spread across multiple steps, track each step as a separate event:
+
+```javascript
+// Step 1 complete
+window.dataLayer.push({
+  event: 'form_step_complete',
+  form_id: 'checkout',
+  form_step: 1,
+  form_step_name: 'personal_details'
+});
+
+// Step 2 complete
+window.dataLayer.push({
+  event: 'form_step_complete',
+  form_id: 'checkout',
+  form_step: 2,
+  form_step_name: 'address'
+});
+
+// Final submission
+window.dataLayer.push({
+  event: 'form_submission',
+  form_id: 'checkout',
+  form_step: 3,
+  form_step_name: 'payment',
+  total_steps: 3
+});
+```
+
+This lets you build a funnel in GA4 Explorations showing exactly where users drop off.
+
+## Form abandonment tracking
+
+Form abandonment — a user starts filling in a form but never submits — is valuable to track. The approach uses focus events combined with a visibility check on page unload:
+
+```javascript
+(function() {
+  var form = document.getElementById('signup-form');
+  if (!form) return;
+
+  var formStarted = false;
+  var formSubmitted = false;
+
+  // Mark as started on first field interaction
+  form.addEventListener('focusin', function() {
+    if (!formStarted) {
+      formStarted = true;
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'form_start',
+        form_id: 'signup',
+        form_name: 'Newsletter Signup'
+      });
+    }
+  });
+
+  // Mark as submitted on successful submission
+  form.addEventListener('submit', function() {
+    formSubmitted = true;
+  });
+
+  // On page hide: if started but not submitted, record abandonment
+  window.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden' && formStarted && !formSubmitted) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'form_abandonment',
+        form_id: 'signup',
+        form_name: 'Newsletter Signup'
+      });
+    }
+  });
+})();
+```
+
+## Detecting AJAX form submissions without code access
+
+If you cannot modify the site (legacy CMS, third-party form builder), you can detect AJAX submissions by monitoring XMLHttpRequest calls with a Custom HTML tag:
+
+```html
+<script>
+(function() {
+  var originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this._gtmUrl = url;
+    return originalOpen.apply(this, arguments);
+  };
+
+  var originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function() {
+    var xhr = this;
+    this.addEventListener('load', function() {
+      if (xhr._gtmUrl && xhr._gtmUrl.indexOf('/contact') !== -1 && xhr.status === 200) {
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({
+          event: 'form_submission',
+          form_id: 'contact_ajax',
+          detection_method: 'xhr_intercept'
+        });
+      }
+    });
+    return originalSend.apply(this, arguments);
+  };
+})();
+</script>
+```
+
+<Aside type="caution">
+XHR interception is fragile and may conflict with other scripts. It is a last resort when you genuinely cannot modify the form implementation. Direct dataLayer pushes from your own code are always more reliable.
+</Aside>
+
+## Tracking validation errors
+
+Validation errors tell you where users struggle. Track them when the user attempts to submit but validation fails:
+
+```javascript
+form.addEventListener('submit', function(e) {
+  var invalidFields = Array.prototype.slice.call(form.querySelectorAll(':invalid'));
+
+  if (invalidFields.length > 0) {
+    var fieldNames = invalidFields.map(function(field) {
+      return field.name || field.id || field.type;
+    });
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_validation_error',
+      form_id: 'registration',
+      error_fields: fieldNames.join(','),
+      error_count: invalidFields.length
+    });
+  }
+});
+```
+
+## Common mistakes
+
+### Tracking clicks instead of submissions
+
+Using a click trigger on the submit button tracks click attempts, not successful submissions. A user can click submit, see validation errors, and never submit. You want conversion-quality data, not click data.
+
+### Pushing the event before the AJAX call completes
+
+The success event must fire after you receive a successful response from your API — not on submit, not on click. Anything earlier counts attempts, not conversions.
+
+### Using the built-in trigger for React or Vue forms
+
+React and Vue manage form submission at the component level, often preventing the native `submit` event from reaching the DOM in a way GTM can intercept. Always use `dataLayer.push()` inside your component's submit handler.
+
+### Capturing form field values that contain PII
+
+Never push email addresses, full names, phone numbers, or any personally identifiable information to the dataLayer without explicit consent architecture. Push form metadata — not the data users entered.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The trigger type you'll use for all dataLayer-based form tracking."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Form Builder Tracking"
+    description="Specific patterns for Gravity Forms, HubSpot, Typeform, Contact Form 7, and other form builders."
+    href="/client-side/tracking/form-builder-tracking/"
+  />
+  <LinkCard
+    title="Form Triggers"
+    description="The built-in Form Submission trigger — when it works and when it doesn't."
+    href="/client-side/triggers/form-triggers/"
+  />
+  <LinkCard
+    title="Error Tracking"
+    description="Tracking JavaScript errors and application errors, including form validation failures."
+    href="/client-side/tracking/error-tracking/"
+  />
+</CardGrid>

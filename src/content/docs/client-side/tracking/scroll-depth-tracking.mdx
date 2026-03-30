@@ -1,6 +1,169 @@
 ---
 title: "Scroll Depth Tracking"
-description: "Measuring how far users scroll on your pages."
+description: "Implement scroll depth milestones with GTM's built-in trigger — configuration, page filtering, GA4 event setup, and what scroll depth data actually tells you."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Scroll depth is a proxy for content engagement. When a user scrolls to 75% of a page, they're likely reading it. When they don't scroll past 10%, they probably bounced. GTM's built-in Scroll Depth trigger makes this data cheap to collect — the question is whether you're collecting it on the right pages and using it correctly.
+
+## How the built-in Scroll trigger works
+
+GTM's Scroll Depth trigger listens for scroll events using `requestAnimationFrame` (not a raw scroll event listener), which makes it reasonably efficient. It fires a GTM event when the user scrolls past configured thresholds.
+
+Key behaviors:
+- Each threshold fires **once per page load** — it won't re-fire if the user scrolls back up and then down again
+- Vertical and horizontal scroll depth are tracked separately
+- The `Scroll Depth Threshold`, `Scroll Depth Units`, and `Scroll Direction` built-in variables are populated when the trigger fires
+
+## Setup
+
+<Steps>
+1. **Enable Scroll Depth built-in variables.** GTM Variables → Configure → enable: Scroll Depth Threshold, Scroll Depth Units, Scroll Direction.
+
+2. **Create a Scroll Depth trigger:**
+   - Trigger type: Scroll Depth
+   - Vertical Scroll Depths: checked
+   - Based on: Percentages
+   - Percentages: `25,50,75,90`
+   - Horizontal Scroll Depths: unchecked (rarely needed)
+   - This trigger fires on: Some Pages (see filtering below)
+
+3. **Create a GA4 Event tag** attached to this trigger.
+</Steps>
+
+<TagConfig
+  name="GA4 - Event - Scroll Depth"
+  type="Google Analytics: GA4 Event"
+  trigger="Scroll Depth - Content Pages"
+  variables={['Scroll Depth Threshold', 'Scroll Depth Units', 'Page Path']}
+/>
+
+Set the event name to `scroll` (matches GA4's enhanced measurement naming) or `scroll_depth` if you want to differentiate from GA4's automatic events. Set event parameters:
+- `percent_scrolled` → `{{Scroll Depth Threshold}}`
+- `scroll_units` → `{{Scroll Depth Units}}`
+
+## Which thresholds to track
+
+The standard set — 25%, 50%, 75%, 90% — covers the full content engagement funnel. Here's why each matters:
+
+- **25%** — Above the fold plus a bit. If users don't hit this, your above-fold content isn't pulling them down.
+- **50%** — Mid-page. Indicates genuine interest.
+- **75%** — Near the bottom. These users are readers.
+- **90%** — Near the end. More reliable than 100% because page footers push the 100% threshold further than users expect. Many users who "finished" the article never scroll through the footer.
+
+Skip tracking 100% unless your pages are short. The 90% milestone captures "read to the end" reliably.
+
+<Aside type="tip">
+For very short pages (under 500px tall, like landing pages), all thresholds will fire instantly. Either filter them out with a page condition or track pixel depths instead of percentages: 250px, 500px, 1000px.
+</Aside>
+
+## Filtering by page
+
+Scroll depth is meaningful on long-form content pages — blog posts, documentation, landing pages — and meaningless on short pages. A checkout confirmation page that's 300px tall will fire all four milestones the moment the page loads.
+
+Add a condition to your trigger that restricts it to content pages:
+
+- **By URL path:** Page Path — matches RegEx — `^/blog/|^/articles/|^/docs/`
+- **By page type (dataLayer):** Create a Data Layer Variable for `page_type`, then add a condition: `DLV - page_type` — equals — `article`
+- **By page height:** Not natively available in GTM, but you can use a Custom JavaScript variable to check `document.body.scrollHeight > 1000` and add it as a trigger condition.
+
+The cleanest approach is pushing `page_type` to the dataLayer on every page and filtering scroll tracking by content pages:
+
+```javascript
+// Push on article pages
+window.dataLayer.push({
+  page_type: 'article',
+  article_word_count: 2400,
+  article_category: 'tutorials'
+});
+```
+
+## Pixel-based scroll depth
+
+For pages where you want to track absolute scroll distances (useful for infinite scroll pages or standardizing across pages of different lengths):
+
+- Trigger type: Scroll Depth
+- Based on: **Pixels**
+- Pixel amounts: `500,1000,2000,3000`
+
+Pixel-based tracking doesn't normalize for page length, which can make cross-page comparison harder. Use it when you have a specific reason — like "did the user scroll past the fold" on a page where the fold height is a known constant.
+
+## Combining scroll with time on page
+
+Scroll alone is a weak engagement signal — a user can scroll through a page in 5 seconds without reading a word. Combine it with a timer trigger for stronger engagement scoring:
+
+Create a GA4 custom dimension called `engaged_reader` and push `true` when a user has both scrolled to 75% AND spent at least 60 seconds on the page. In GA4 Explorations, filter for `engaged_reader = true` to see your real readers.
+
+You can implement this in GTM without code changes by using a Custom HTML tag that sets a variable when the 75% scroll fires, and a Timer trigger that checks for that variable after 60 seconds. Or push a combined event from your application:
+
+```javascript
+// Application-level engagement scoring
+var scrolledTo75 = false;
+var timeThresholdMet = false;
+
+function checkEngagement() {
+  if (scrolledTo75 && timeThresholdMet) {
+    window.dataLayer.push({
+      event: 'engaged_read',
+      page_path: window.location.pathname
+    });
+  }
+}
+
+// Wire these to your scroll/timer events
+window.addEventListener('scroll_milestone_75', function() {
+  scrolledTo75 = true;
+  checkEngagement();
+});
+
+setTimeout(function() {
+  timeThresholdMet = true;
+  checkEngagement();
+}, 60000);
+```
+
+## GA4 reporting for scroll depth
+
+Once you're collecting scroll events, use GA4 Explorations to analyze them:
+
+1. **Funnel Exploration** — Create a funnel with steps: 25% → 50% → 75% → 90%. See your content engagement funnel by page and traffic source.
+
+2. **Free-form Exploration** — Pivot table with Page Path as rows and the count of `percent_scrolled = 90` events as the value. This gives you an "article completion rate" per page.
+
+3. **Audience Builder** — Create an audience of users who scrolled 90% on any blog post. Retarget these users — they're highly engaged.
+
+## Common mistakes
+
+### Tracking scroll depth on every page
+
+Every page, including short checkout pages and login screens, fires all four milestones immediately. This inflates your engagement numbers and adds noise. Always filter scroll tracking to content pages.
+
+### Using 100% as the "bottom" threshold
+
+Users rarely trigger 100% because page footers are long. 90% is the practical "read the whole page" signal. If you're seeing very low completion rates, check whether you're tracking 100% and switch to 90%.
+
+### Not differentiating from GA4 enhanced measurement scroll events
+
+GA4 enhanced measurement tracks a single `scroll` event at 90% by default. If you're tracking custom milestones via GTM with the event name `scroll`, you'll have duplicate 90% events. Either disable enhanced measurement's scroll tracking, or use a distinct event name like `scroll_depth` for your GTM events.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Scroll Triggers"
+    description="Detailed reference for the Scroll Depth trigger — all configuration options."
+    href="/client-side/triggers/scroll-triggers/"
+  />
+  <LinkCard
+    title="Timer Triggers"
+    description="Combining scroll depth with time-based triggers for engagement scoring."
+    href="/client-side/triggers/timer-triggers/"
+  />
+  <LinkCard
+    title="Core Web Vitals"
+    description="Another content performance measurement approach — measuring loading and interactivity."
+    href="/client-side/tracking/core-web-vitals/"
+  />
+</CardGrid>

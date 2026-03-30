@@ -1,6 +1,278 @@
 ---
 title: "Version-Controlled Publishing"
-description: "Treating GTM changes like code deployments with Git workflows."
+description: "Treating GTM changes like code deployments — Git workflow, automated export scripts, container diffs, and rollback procedures."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Every GTM publish is a production deployment. The problem is that GTM's built-in version history is not designed like a proper version control system — you cannot branch, you cannot review diffs outside the GTM interface, and you cannot enforce a review gate before publishing. Adding a Git-based workflow fills these gaps without changing how GTM itself works.
+
+This article shows you how to set up container version control and integrate it into a real deployment workflow.
+
+## What container exports contain
+
+A GTM container export is a JSON file containing the complete container configuration: every tag, trigger, variable, built-in variable setting, folder, workspace, and associated metadata. The file is deterministic — the same container configuration produces the same JSON structure.
+
+This means it is diff-able. You can compare two container exports and see exactly what changed: which tags were added, modified, or removed; which triggers were updated; which variable values changed. This is the foundation of the entire Git-based workflow.
+
+```json
+// Excerpt from a container export
+{
+  "exportFormatVersion": 2,
+  "exportTime": "2024-03-15 14:23:01",
+  "containerVersion": {
+    "path": "accounts/12345/containers/67890/versions/42",
+    "accountId": "12345",
+    "containerId": "67890",
+    "containerVersionId": "42",
+    "container": { ... },
+    "tag": [
+      {
+        "accountId": "12345",
+        "containerId": "67890",
+        "tagId": "7",
+        "name": "GA4 — Purchase Event",
+        "type": "gaawe",
+        "parameter": [ ... ],
+        "firingTriggerId": ["8"],
+        "tagFiringOption": "ONCE_PER_EVENT"
+      }
+    ],
+    "trigger": [ ... ],
+    "variable": [ ... ]
+  }
+}
+```
+
+## The Git workflow
+
+The basic Git workflow for GTM version control has four steps: export, commit, review, and publish.
+
+<Steps>
+1. **Make changes in GTM.** Use a workspace (GTM's staging area for unpublished changes). Name the workspace after the feature or change: `meta-pixel-purchase-event` or `2024-03-sprint-cleanup`.
+
+2. **Export the container.** In GTM: Admin → Export Container → Export current workspace as a JSON file.
+
+3. **Commit and open a PR.** Add the exported JSON to your repository and open a pull request. The PR diff shows exactly what changed in the container — which tags were added, which variables were modified.
+
+4. **Review and approve.** A second team member reviews the diff. If it looks correct and safe, they approve. The person who opened the PR publishes the container in GTM.
+</Steps>
+
+<Aside type="tip">
+The GTM workspace and the Git branch should have matching names. When you open a PR named `meta-pixel-purchase-event`, the reviewer should be able to find the corresponding GTM workspace to verify the diff matches what is in GTM before approving.
+</Aside>
+
+## Automated export scripts
+
+Manual exports are error-prone — someone forgets to export, or exports the wrong workspace, or saves it in the wrong place. Automate the export using the GTM API.
+
+**Prerequisites:**
+- A Google Cloud service account with GTM API read access
+- The `googleapis` npm package or Google's Python client library
+
+```javascript
+// scripts/export-container.js
+// Exports the live GTM container version to a JSON file
+
+const { google } = require('googleapis');
+const fs = require('fs');
+const path = require('path');
+
+const ACCOUNT_ID = process.env.GTM_ACCOUNT_ID;
+const CONTAINER_ID = process.env.GTM_CONTAINER_ID;
+
+async function exportContainer() {
+  // Authenticate with a service account key
+  const auth = new google.auth.GoogleAuth({
+    keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+    scopes: ['https://www.googleapis.com/auth/tagmanager.readonly']
+  });
+
+  const tagmanager = google.tagmanager({ version: 'v2', auth });
+
+  // Get the live container version
+  const response = await tagmanager.accounts.containers.versions.live({
+    parent: `accounts/${ACCOUNT_ID}/containers/${CONTAINER_ID}`
+  });
+
+  const containerVersion = response.data;
+  const versionId = containerVersion.containerVersionId;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+  // Write to the repository
+  const outputPath = path.join('gtm', `container-v${versionId}-${timestamp}.json`);
+  fs.writeFileSync(outputPath, JSON.stringify(containerVersion, null, 2));
+
+  // Also write a "current" file for easy diffing
+  fs.writeFileSync(
+    path.join('gtm', 'container-current.json'),
+    JSON.stringify(containerVersion, null, 2)
+  );
+
+  console.log(`Exported container version ${versionId} to ${outputPath}`);
+  return containerVersion;
+}
+
+exportContainer().catch(console.error);
+```
+
+Schedule this script to run automatically after every GTM publish using a webhook or a cron job. The result is an automatic commit to your repository every time the container changes.
+
+## GitHub Actions workflow for GTM version tracking
+
+```yaml
+# .github/workflows/gtm-export.yml
+# Triggered manually or via webhook when container is published
+
+name: GTM Container Export
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_note:
+        description: 'Describe what changed in this version'
+        required: true
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install googleapis
+
+      - name: Export GTM container
+        env:
+          GTM_ACCOUNT_ID: ${{ secrets.GTM_ACCOUNT_ID }}
+          GTM_CONTAINER_ID: ${{ secrets.GTM_CONTAINER_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          echo '${{ secrets.GTM_SERVICE_ACCOUNT_KEY }}' > /tmp/service-account.json
+          node scripts/export-container.js
+
+      - name: Check for Custom HTML changes (security gate)
+        run: node scripts/audit-custom-html.js
+
+      - name: Commit and push container export
+        run: |
+          git config user.name "GTM Export Bot"
+          git config user.email "gtm-bot@yourcompany.com"
+          git add gtm/
+          git diff --staged --quiet || git commit -m "GTM export: ${{ github.event.inputs.version_note }}"
+          git push
+```
+
+## Viewing diffs in Git
+
+The standard `git diff` command does not produce readable output for JSON files. Use a JSON-aware diff tool or a custom script.
+
+**Using `jq` to extract human-readable diffs:**
+
+```bash
+#!/bin/bash
+# scripts/diff-containers.sh
+# Show a human-readable diff between two container exports
+
+PREV=$1
+CURR=$2
+
+echo "=== TAGS ADDED ==="
+jq -r '[.tag[].name] as $curr |
+  ('"$(cat $PREV | jq '[.tag[].name]')"') as $prev |
+  $curr - $prev | .[]' "$CURR"
+
+echo ""
+echo "=== TAGS REMOVED ==="
+jq -r '[.tag[].name] as $curr |
+  ('"$(cat $PREV | jq '[.tag[].name]')"') as $prev |
+  $prev - $curr | .[]' "$CURR"
+
+echo ""
+echo "=== CUSTOM HTML TAGS (REVIEW REQUIRED) ==="
+jq -r '.tag[] | select(.type == "html") | "\(.name):\n\(.parameter[] | select(.key == "html") | .value)"' "$CURR"
+```
+
+**Using a dedicated tool:** The `gtm-json-diff` npm package (community-built) provides structured, human-readable diffs between container exports, with specific highlighting for Custom HTML tag content changes.
+
+## Rollback procedures
+
+When something goes wrong — a tag breaks the checkout flow, a variable causes errors, a bad publish slips through review — you need to roll back quickly.
+
+**GTM's built-in rollback:**
+
+GTM keeps all previous published versions. To roll back:
+1. Go to Versions in GTM
+2. Find the last known-good version
+3. Click the three-dot menu → Publish as Latest Version
+
+This takes about 30 seconds and does not require the Git workflow. But it leaves no trace of why you rolled back. Always add a version note: "Rolling back v42 — tag-X caused checkout errors."
+
+**Git-assisted rollback:**
+
+If you have been exporting to Git, you can compare the current container against any historical version and understand exactly what changed between them. This helps you identify the specific change that caused the problem, which is more useful than a blind rollback.
+
+```bash
+# Find the version that introduced a problem
+git log --oneline gtm/container-current.json
+
+# Diff the last two versions to understand what changed
+git diff HEAD~1 HEAD -- gtm/container-current.json
+
+# Roll back to a specific version in GTM,
+# then export the reverted container and commit:
+git commit -m "Rollback: reverted to GTM v38 — v39 broke checkout"
+```
+
+## Branch strategy
+
+A simple branch strategy that mirrors GTM workspaces:
+
+- **`main`** branch: reflects the live published container
+- **Feature branches:** one branch per GTM workspace, named identically
+- **Pull requests:** opened when work in a workspace is ready for review and publish
+
+When a workspace is published in GTM, the corresponding feature branch is merged to `main` after the publish. If a workspace is deleted without publishing, the feature branch is also deleted.
+
+This creates a direct correspondence between Git history and GTM version history. Every commit on `main` corresponds to a published GTM version. You can find any past container state by checking out the corresponding commit.
+
+## Common mistakes
+
+### Exporting after publishing, not before
+
+The purpose of the workflow is to enable review before publishing. If you export after publishing, the review happens after the code is already live — which defeats the purpose entirely. Export from the workspace. Review the diff. Then publish.
+
+### Not storing secrets securely
+
+The GTM API service account key grants read access to your container. Store it in your CI/CD secrets manager (GitHub Secrets, AWS Secrets Manager, etc.), not in the repository. A leaked service account key gives an attacker visibility into your complete container structure, which aids future attack planning.
+
+### Treating the export as a backup mechanism
+
+Container exports are for version control and diff visibility. They are not a reliable backup mechanism for restoring GTM state. GTM's built-in version history is the authoritative record. Use exports for auditability and code review, not as a disaster recovery tool.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Tag Auditing"
+    description="The audit process that this Git workflow makes possible and more efficient."
+    href="/security/tag-auditing/"
+  />
+  <LinkCard
+    title="Enterprise Governance"
+    description="Change management workflows that use version control as an enforcement mechanism."
+    href="/security/enterprise-governance/"
+  />
+  <LinkCard
+    title="GTM Attack Vectors"
+    description="The threats that version-controlled publishing is designed to detect and limit."
+    href="/security/gtm-attack-vectors/"
+  />
+</CardGrid>

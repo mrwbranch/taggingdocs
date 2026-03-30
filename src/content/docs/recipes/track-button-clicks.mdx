@@ -1,6 +1,191 @@
 ---
 title: "Track Button Clicks"
-description: "Step-by-step recipe for tracking button clicks with GTM."
+description: "Three approaches to tracking specific button clicks in GTM and sending them to GA4 — from CSS selectors to the dataLayer."
+sidebar:
+  badge:
+    text: Beginner
+    variant: success
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Tracking button clicks sounds simple, but the approach you choose determines how reliable and maintainable your tracking will be. GTM's built-in click trigger works for basic cases but breaks the moment your design changes. The dataLayer approach is more work up front and far more robust long term.
+
+This recipe covers three approaches from least to most reliable: CSS selector, data attribute, and the dataLayer. Pick the one that fits your situation.
+
+## Approach 1 — CSS selector (fastest, most fragile)
+
+Use this when you need a quick win and cannot touch the site code. The tradeoff is that any CSS class rename or template change will silently break your tracking.
+
+<Steps>
+1. **Enable Click Variables**
+
+   In GTM, go to **Variables → Configure** and enable:
+   - Click Element
+   - Click Classes
+   - Click ID
+   - Click Text
+   - Click URL
+
+2. **Create a Click Trigger**
+
+   - Trigger type: **All Elements**
+   - Fire on: **Some Clicks**
+   - Condition: `Click Classes` **contains** `btn-primary` (or your button's class)
+
+   Add a second condition if needed: `Click Text` **equals** `Add to Cart`
+
+3. **Create a GA4 Event Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `button_click`
+   - Parameters:
+     - `button_text` → `{{Click Text}}`
+     - `button_id` → `{{Click ID}}`
+     - `page_path` → `{{Page Path}}`
+   - Trigger: the click trigger you just created
+
+4. **Test in Preview Mode**
+
+   Open GTM Preview, visit your site, click the button. Check the **Tags** panel — your tag should appear under **Tags Fired**. Inspect the event parameters in the dataLayer panel on the left.
+</Steps>
+
+<Aside type="caution">
+CSS class-based triggers are fragile. If your design system renames `btn-primary` to `button--primary`, your tracking silently stops working. Always add the button text as a backup condition.
+</Aside>
+
+## Approach 2 — Data attribute (balanced)
+
+Add a `data-track` attribute to your HTML elements. This decouples tracking from visual styling classes and survives redesigns.
+
+```html
+<!-- Add this attribute to any button you want to track -->
+<button
+  data-track="add-to-cart"
+  data-product-id="SKU-12345"
+  class="btn-primary"
+>
+  Add to Cart
+</button>
+```
+
+In GTM, create a **DOM Element Variable** called `Click - Tracking Name`:
+- Variable type: **DOM Element**
+- Selection method: **CSS Selector**
+- Element selector: `body` (we will use `Click Element` and `.getAttribute()` instead)
+
+Actually, use a **Custom JavaScript Variable** instead:
+
+```javascript
+function() {
+  var el = {{Click Element}};
+  // Walk up the DOM if the click was on a child element
+  while (el && !el.dataset.track) {
+    el = el.parentElement;
+  }
+  return el ? el.dataset.track : undefined;
+}
+```
+
+Create a second variable `Click - Product ID` for `data-product-id` using the same pattern.
+
+**Trigger**: All Elements → Some Clicks → `Click - Tracking Name` **does not equal** `undefined`
+
+**GA4 Tag parameters**:
+- `button_name` → `{{Click - Tracking Name}}`
+- `product_id` → `{{Click - Product ID}}`
+
+## Approach 3 — dataLayer push (most reliable)
+
+The dataLayer approach gives you full control over event names, parameters, and timing. It fires at the exact moment your application logic runs — not when a DOM click is detected.
+
+<DataLayerExample event="button_click" description="Push this from your application code when the button action executes.">
+```javascript
+document.querySelector('.add-to-cart').addEventListener('click', function(e) {
+  dataLayer.push({
+    event: 'button_click',
+    button_name: 'add_to_cart',
+    product_id: e.currentTarget.dataset.productId,
+    product_name: e.currentTarget.dataset.productName,
+    page_section: 'product_detail'
+  });
+});
+```
+</DataLayerExample>
+
+For a React component:
+
+```jsx
+function AddToCartButton({ product }) {
+  const handleClick = () => {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'button_click',
+      button_name: 'add_to_cart',
+      product_id: product.id,
+      product_name: product.name,
+      page_section: 'product_detail'
+    });
+    // Your actual cart logic
+    addToCart(product);
+  };
+
+  return <button onClick={handleClick}>Add to Cart</button>;
+}
+```
+
+<Steps>
+1. **Add the dataLayer push** to your site code as shown above.
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `button_click`
+   - This fires: **All Custom Events**
+
+3. **Create a GA4 Event Tag**
+
+   - Event name: `button_click`
+   - Parameters:
+     - `button_name` → `{{DLV - button_name}}`
+     - `product_id` → `{{DLV - product_id}}`
+     - `product_name` → `{{DLV - product_name}}`
+     - `page_section` → `{{DLV - page_section}}`
+   - Trigger: the Custom Event trigger above
+
+   Create Data Layer Variables (type: **Data Layer Variable**) for each parameter.
+
+4. **Test it**
+
+   Open GTM Preview and click the button. In the left panel, find the `button_click` event. Click it and verify the Variables tab shows the correct values for all parameters.
+
+   In GA4 DebugView, the event should appear within seconds with all parameters attached.
+</Steps>
+
+## Test it
+
+1. Open GTM in **Preview mode** and navigate to your site
+2. Click the target button
+3. In the Summary pane, find the event (`button_click`) in the left panel
+4. Click the event → check **Data Layer** tab to confirm all parameter values are correct
+5. Check **Tags Fired** to confirm the GA4 tag executed
+6. In GA4 → **Admin → DebugView**, verify the event appears with the correct parameters
+
+<Aside type="tip">
+In GA4 DebugView, you may need to wait 10-15 seconds. Event parameters appear when you click on the event name in the stream.
+</Aside>
+
+## Common gotchas
+
+**Click fires on icon inside the button, not the button itself.** When you click on an SVG icon or `<span>` inside a button, `{{Click Element}}` points to the child, not the button. Use the Custom JavaScript variable with the parent-walking pattern shown in Approach 2, or use the dataLayer approach where you control the element reference explicitly.
+
+**Event fires twice.** If you have both a CSS selector trigger and a dataLayer push for the same button, you will get duplicate events. Pick one approach and stick with it.
+
+**GTM click trigger fires before your event handler.** GTM's built-in click trigger fires when the click is detected, not when your application logic completes. If your handler is async (like an AJAX add-to-cart), push the dataLayer event inside the success callback, not on click.
+
+<CardGrid>
+  <LinkCard title="Track Form Submissions" href="/recipes/track-form-submissions/" description="The same approaches applied to form submit events." />
+  <LinkCard title="dataLayer Deep Dive" href="/foundations/datalayer-deep-dive/" description="How the dataLayer merge model works and why it matters." />
+</CardGrid>

@@ -3,4 +3,232 @@ title: "Tags, Triggers & Variables"
 description: "Build the correct mental model of GTM's core abstraction and how tags, triggers, and variables connect."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Every piece of GTM configuration comes down to three concepts: tags, triggers, and variables. If you have an incorrect mental model of how these three connect, you will spend hours fighting GTM instead of building with it. This article gives you the correct model — not the simplified marketing version, but the one that actually matches how GTM behaves in the browser.
+
+## The three concepts, defined precisely
+
+### Tags: what to execute
+
+A tag is a **unit of code that does something**. It sends data somewhere, loads a script, sets a cookie, fires a pixel. In practice, most tags are one of these:
+
+- A GA4 Event tag that sends an event to Google Analytics
+- A Meta Pixel tag that fires a conversion event to Facebook
+- A Google Ads Conversion tag that registers a conversion
+- A Custom HTML tag that executes arbitrary JavaScript
+
+Tags do nothing on their own. They sit in your container waiting to be told when to fire. That is the trigger's job.
+
+### Triggers: when to evaluate
+
+A trigger is an **event listener with filter conditions**. This is the mental model that matters. Not "a button that fires tags" — an event listener with conditions attached.
+
+When an event occurs in the browser (a pageview, a click, a dataLayer push, a form submission), GTM evaluates every trigger associated with that event type. If the trigger's conditions are satisfied, it fires its associated tags.
+
+The two parts of a trigger are:
+1. **The event type** — what kind of event activates this trigger (All Pages, Click, Custom Event, etc.)
+2. **The conditions** — optional filters that narrow when the trigger actually fires ("Page URL contains /checkout" or "Click Text equals Submit")
+
+### Variables: the dynamic values
+
+A variable is a **named slot that resolves to a value at evaluation time**. Variables make triggers and tags dynamic.
+
+Without variables, you would need a separate trigger for every URL, a separate tag for every product name, a separate condition for every possible click text. Variables let you write one trigger that says "Click Text equals {{Form Submit Button Text}}" where `{{Form Submit Button Text}}` is a variable that reads the button's text content at the moment the click happens.
+
+Variables appear in double curly braces: `{{Variable Name}}`. They can be used in trigger conditions, in tag configuration fields, and in other variables.
+
+## How the three connect
+
+Here is the evaluation flow when any event occurs:
+
+<Steps>
+1. **An event fires in the browser.** This might be a built-in event (page load, click, scroll) or a custom event you pushed via `dataLayer.push({event: 'purchase'})`.
+
+2. **GTM evaluates all triggers registered for that event type.** It goes through every trigger listening for that event and checks each one's conditions.
+
+3. **GTM resolves variables to evaluate conditions.** For a trigger condition like "Page URL contains /checkout", GTM resolves the {{Page URL}} built-in variable to get the current URL, then tests the condition.
+
+4. **Matching triggers activate.** Any trigger whose conditions all pass is now active for this event.
+
+5. **GTM fires the tags associated with active triggers.** Tags execute in sequence (respecting priority settings), using variable values to fill in their configuration fields.
+</Steps>
+
+The key insight: **variables are evaluated at trigger evaluation time, not at configuration time.** When you use `{{Click URL}}` in a tag, that variable resolves to the URL of the element that was actually clicked when the trigger fired — not some static value you set earlier.
+
+## Built-in vs. user-defined
+
+GTM provides two categories for each concept.
+
+### Built-in variables
+
+GTM includes a set of pre-built variables you can enable with a checkbox. Common ones:
+
+- `{{Page URL}}` — the full URL of the current page
+- `{{Page Path}}` — the path component only (`/products/widget`)
+- `{{Click URL}}` — the `href` of the clicked element
+- `{{Click Text}}` — the text content of the clicked element
+- `{{Click Classes}}` — the CSS classes of the clicked element
+- `{{Form ID}}` — the `id` attribute of the submitted form
+- `{{Scroll Depth Threshold}}` — the percentage at which a scroll trigger fired
+- `{{Video Title}}` — title of a YouTube video that triggered an event
+
+Enable them in your container under Variables → Configure. You only pay for what you turn on — unused built-in variables don't add overhead.
+
+### User-defined variables
+
+When built-in variables do not give you what you need, you create your own. The most common types:
+
+- **Data Layer Variable** — reads a key from the dataLayer. This is how you get product IDs, prices, user segments, and any custom data your developers push.
+- **JavaScript Variable** — executes a JavaScript expression and returns the result. Useful for reading `document.title`, `navigator.language`, or any window property.
+- **Constant** — a fixed string value. Useful for things like your GA4 Measurement ID, so you change it in one place and it updates everywhere.
+- **Lookup Table** — maps input values to output values. Useful for translating page paths to section names.
+- **Regex Table** — like a Lookup Table but with regex matching. Useful for category extraction from dynamic URLs.
+- **Custom JavaScript** — a function that returns a value. The most powerful type — can do anything JavaScript can do.
+
+### Built-in trigger types
+
+GTM's built-in trigger types cover most tracking scenarios:
+
+- **Page View** — fires when GTM loads (earliest possible point)
+- **DOM Ready** — fires when the DOM is fully parsed
+- **Window Loaded** — fires after all resources load (`window.onload`)
+- **All Elements / Just Links / All Forms** — click and form triggers
+- **Custom Event** — fires when a specific event name appears in the dataLayer
+- **History Change** — fires on URL changes in SPAs
+- **Element Visibility** — fires when an element enters the viewport
+- **Scroll Depth** — fires at percentage or pixel scroll thresholds
+- **Timer** — fires at a fixed interval after page load
+- **YouTube Video** — fires on YouTube embed events (play, pause, complete, etc.)
+- **JavaScript Error** — fires on uncaught JavaScript exceptions
+
+### Exception triggers (blocking triggers)
+
+Any trigger can be used as an **exception** on a tag. An exception trigger prevents a tag from firing even when its primary trigger matches. For example:
+
+- Fire on: All Pages
+- Except: Page URL contains `/thank-you`
+
+GTM evaluates exceptions first. If any exception trigger matches, the tag does not fire, regardless of whether the primary trigger matches.
+
+## A practical walkthrough
+
+Let us trace a real scenario: you want to track a "Get Started" button click and send it to GA4.
+
+**What we need:**
+1. A trigger that fires when the "Get Started" button is clicked
+2. A tag that sends an event to GA4
+3. Variables that provide the data we want to send
+
+**Step 1: Create a Click trigger**
+
+In GTM, create a new trigger:
+- Type: All Elements
+- Trigger fires on: Some Clicks
+- Condition: Click Text equals `Get Started`
+
+This trigger will activate every time an element with the text "Get Started" is clicked anywhere on the site.
+
+**Step 2: Create a GA4 Event tag**
+
+Create a new tag:
+- Type: Google Analytics GA4 Event
+- Measurement ID: `{{GA4 Measurement ID}}` (a Constant variable with your property ID)
+- Event Name: `cta_click`
+- Event Parameters:
+  - `button_text`: `{{Click Text}}`
+  - `page_location`: `{{Page URL}}`
+
+**Step 3: Connect them**
+
+Attach the trigger to the tag. Now when GTM sees a click on any element with text "Get Started", it evaluates the Click Text condition, finds a match, and fires the GA4 Event tag — which uses `{{Click Text}}` and `{{Page URL}}` variables to populate the event parameters.
+
+<Aside type="tip">
+The Measurement ID constant is a real-world variable investment that pays off. Define it once, use it in every GA4 tag. When your property changes, update one variable and every tag updates automatically.
+</Aside>
+
+## Common mistakes
+
+### Creating too many tags instead of restructuring triggers
+
+The single most common mistake beginners make: creating a separate tag for every button, every page, every action. You end up with 200 tags that are 90% identical.
+
+The fix: use variables and trigger conditions to make one tag cover many scenarios.
+
+<Comparison leftTitle="Fragmented (wrong)" leftType="bad" rightTitle="Consolidated (correct)" rightType="good">
+  <div slot="left">
+
+- Tag: "Click — Get Started Button"
+- Tag: "Click — Sign Up Button"
+- Tag: "Click — Try Free Button"
+- Tag: "Click — Request Demo Button"
+
+Each tag hardcoded for one button, identical GA4 configuration.
+
+  </div>
+  <div slot="right">
+
+One tag: "CTA Click"
+- Event name: `cta_click`
+- Parameter `button_text`: `{{Click Text}}`
+- Parameter `button_id`: `{{Click ID}}`
+- Trigger: Click Text matches RegEx `Get Started|Sign Up|Try Free|Request Demo`
+
+  </div>
+</Comparison>
+
+### Using DOM-based triggers when a dataLayer event is available
+
+If your developers have already pushed a custom event to the dataLayer, use a Custom Event trigger. Do not set up a Click trigger to listen for the same interaction.
+
+DOM-based triggers are fragile — they break when CSS classes change, when button text changes, when the DOM structure changes. Custom Event triggers tied to dataLayer pushes are stable because they are explicitly fired by code you control.
+
+### Not understanding trigger condition logic
+
+Trigger conditions within a single trigger use **AND logic** — all conditions must pass. If you add two conditions to one trigger, both must be true for the trigger to fire.
+
+If you want OR logic — fire if condition A OR condition B — you need two separate triggers, both attached to the same tag.
+
+### Forgetting that variables can return `undefined`
+
+If a variable fails to resolve — because the element does not have the attribute you expected, or the dataLayer key is not set — it returns `undefined`. A trigger condition testing `{{Click URL}} equals /checkout` will silently fail if `{{Click URL}}` returns `undefined`.
+
+Always test your triggers in Preview mode and verify that variables are resolving to expected values before you publish.
+
+### Using All Pages triggers for tags that do not need them
+
+If a tag only needs to fire on specific pages, do not use an All Pages trigger with no conditions. Add a Page URL condition to the trigger, or use a more specific trigger type. Firing tags on every page increases the work GTM does on every page load.
+
+## Why this abstraction exists
+
+The Tag → Trigger → Variable model exists to enable **separation of concerns between technical and non-technical stakeholders**.
+
+Developers implement the dataLayer pushes — the structured data that describes what is happening. Marketers and analysts configure the triggers and tags — the business logic for what to track and where to send it.
+
+This separation is GTM's real value proposition. When marketing wants to add a new pixel, they should not need a developer deployment. When product wants to track a new event, they push to the dataLayer, and the analytics team configures the rest in GTM.
+
+The model breaks down when developers want to own GTM configuration (valid — especially for performance-critical or security-sensitive tags) or when the team lacks the GTM expertise to configure tags correctly. Neither failure mode is a problem with the model itself — it is a team structure question.
+
+<CardGrid>
+  <LinkCard
+    title="How GTM Works"
+    description="The execution model, container lifecycle, and dataLayer mechanics under the hood."
+    href="/foundations/how-gtm-works/"
+  />
+  <LinkCard
+    title="The DataLayer Deep Dive"
+    description="Everything you need to know about the dataLayer — the message bus between your site and GTM."
+    href="/foundations/datalayer-deep-dive/"
+  />
+  <LinkCard
+    title="Built-in Variables"
+    description="Complete reference for every built-in variable GTM provides and when to use each."
+    href="/client-side/variables/built-in-variables/"
+  />
+  <LinkCard
+    title="Trigger Types Overview"
+    description="Quick reference for every trigger type, what it fires on, and common use cases."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+</CardGrid>

@@ -3,4 +3,83 @@ title: "Security & Governance"
 description: "GTM has publish access to your production website. Treat it with the same security rigor as a code deployment."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Every time someone publishes a GTM container, they are deploying code to production. Not configuration. Not settings. Code — arbitrary JavaScript that executes in every visitor's browser, with full access to the DOM, cookies, form inputs, and network requests.
+
+Most organizations deploy GTM with far less oversight than they would apply to a code change in their main repository. There is no code review. There is no automated testing pipeline. In many cases, anyone with Editor access can add a Custom HTML tag and push directly to production without another human reviewing it.
+
+This section covers how to change that.
+
+## Why GTM security is underestimated
+
+GTM's interface is designed to look like a configuration tool. You fill out forms, pick from dropdowns, set conditions. It feels more like a CMS than a code deployment system. This design choice — which makes GTM accessible to non-engineers — also creates a dangerous illusion: that GTM changes are somehow lower-risk than code changes.
+
+They are not. A Custom HTML tag accepts raw JavaScript and executes it with no restrictions. A variable can call any function on the page. A trigger can fire on any user interaction. The GTM container loading on your site has the same capabilities as an inline `<script>` tag placed directly in your HTML.
+
+The difference is that your `<script>` tags go through a code review process. Your GTM tags probably do not.
+
+<Aside type="danger">
+The Magecart group specifically targeted GTM containers to inject credit card skimming code because it bypassed normal code review processes. If your container has weak access controls and no audit trail, you are exposed to this exact attack vector.
+</Aside>
+
+## What this section covers
+
+<CardGrid>
+  <LinkCard
+    title="GTM Attack Vectors"
+    description="How GTM can be exploited — real-world attack patterns including credit card skimming, data exfiltration, and supply chain attacks via compromised templates."
+    href="/security/gtm-attack-vectors/"
+  />
+  <LinkCard
+    title="Content Security Policy"
+    description="Configuring CSP to work with GTM without breaking it. Required directives, the nonce-based approach, and preview mode requirements."
+    href="/security/content-security-policy/"
+  />
+  <LinkCard
+    title="Tag Auditing"
+    description="Regular audit processes for GTM containers — weekly quick-scans, monthly deep dives, and identifying dead or suspicious tags."
+    href="/security/tag-auditing/"
+  />
+  <LinkCard
+    title="Version-Controlled Publishing"
+    description="Treating GTM changes like code deployments. Git workflow, automated export scripts, and rollback procedures."
+    href="/security/version-controlled-publishing/"
+  />
+  <LinkCard
+    title="Enterprise Governance"
+    description="GTM governance for large organizations — permission tiers, change management processes, access reviews, and GTM 360 features."
+    href="/security/enterprise-governance/"
+  />
+</CardGrid>
+
+## The security baseline
+
+Before going deeper into any of these topics, here is the minimum security posture every GTM implementation should have:
+
+**Access control.** Nobody has more access than they need. Analysts get read-only. Implementers get edit. Only leads get publish. Admins are limited to one or two named individuals who understand the security implications.
+
+**Change documentation.** Every version has a description. Every tag has a name and a documented purpose. Nobody publishes a "test" version on Friday afternoon with no notes.
+
+**Regular audits.** At minimum once per month, someone reviews new Custom HTML tags and checks outbound network requests. Monthly is the minimum — weekly is better for high-traffic containers.
+
+**Version control.** Container exports are committed to Git. Diffs are reviewable. Rollback is practiced, not theoretical.
+
+**CSP header.** A Content Security Policy that restricts what scripts can load and where data can be sent. Not perfect, but it limits the blast radius of a successful injection.
+
+None of this is complicated. All of it requires organizational commitment. The technical implementation is the easy part.
+
+## Related resources
+
+<CardGrid>
+  <LinkCard
+    title="GTM Account Structure"
+    description="How to organize accounts, containers, and workspaces — the foundation for any governance model."
+    href="/foundations/gtm-account-structure/"
+  />
+  <LinkCard
+    title="Enterprise Governance"
+    description="Detailed permission tiers, change management workflows, and GTM 360 governance features."
+    href="/security/enterprise-governance/"
+  />
+</CardGrid>

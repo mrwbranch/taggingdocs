@@ -1,6 +1,218 @@
 ---
 title: "DOM Element Variables"
-description: "Extracting values from the page DOM using CSS selectors."
+description: "Reading data directly from the page DOM when the dataLayer is not an option — plus the Auto-Event Variable for reading clicked element properties."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+DOM Element Variables let you read values directly from the page's HTML — extracting text, attribute values, or other properties from elements on the page. They are useful when you cannot push data to the dataLayer, such as on legacy sites or third-party pages where you do not control the code.
+
+That said, DOM Element Variables should be your last resort. DOM scraping is fragile: CSS class names change, element structure changes, and a redesign can silently break your tracking without any error. The dataLayer is a stable contract. The DOM is not. Use DOM variables only when you have no other option.
+
+## The two DOM-based variable types
+
+GTM gives you two distinct variable types for reading from the DOM:
+
+1. **DOM Element Variable** — reads a specific element's property, selected by CSS selector or element ID
+2. **Auto-Event Variable** — reads a property of whatever element triggered the current event (the clicked element, the submitted form, etc.)
+
+These are different tools for different situations.
+
+## DOM Element Variable
+
+The DOM Element Variable selects an element on the page and reads one of its properties. It evaluates at the moment the tag or trigger that uses it is evaluated — not at page load.
+
+### Configuration
+
+<Steps>
+1. Create a new User-Defined Variable and select **DOM Element** as the type.
+
+2. Choose the **Selection Method**:
+   - **CSS Selector** — uses `document.querySelector()` to find the element. Most flexible.
+   - **ID** — uses `document.getElementById()`. Slightly faster, but limited to ID attributes.
+
+3. Enter the selector or ID. For CSS Selector, enter the selector string (e.g., `[data-product-id]`, `#cart-total`, `.product-title`).
+
+4. Set the **Attribute Name** to read. Leave blank to get the element's text content (`innerText`). Enter an attribute name like `href`, `data-product-id`, or `value` to read that specific attribute.
+
+5. Set a **Default Value** for when the element is not found or the attribute does not exist.
+</Steps>
+
+### Examples
+
+```html
+<!-- HTML on the page -->
+<div class="product-card" data-product-id="SKU-12345" data-product-price="199.99">
+  <h2 class="product-title">Leather Jacket</h2>
+  <span id="current-price">$199.99</span>
+</div>
+```
+
+| Configuration | Returns |
+|--------------|---------|
+| CSS Selector: `[data-product-id]`, Attribute: `data-product-id` | `SKU-12345` |
+| CSS Selector: `[data-product-price]`, Attribute: `data-product-price` | `199.99` |
+| CSS Selector: `.product-title`, Attribute: (blank) | `Leather Jacket` |
+| Element ID: `current-price`, Attribute: (blank) | `$199.99` |
+
+### When `document.querySelector()` can fail
+
+`document.querySelector()` only returns the **first** matching element. If multiple elements on the page match your selector, you get the first one. For product listing pages with multiple products, this means you get the first product's data regardless of which one was interacted with. This is one reason DOM Element Variables often disappoint — they cannot track which item triggered an event.
+
+For that use case, you need the Auto-Event Variable or a dataLayer push from a click handler.
+
+## Auto-Event Variable
+
+The Auto-Event Variable reads properties of the element that triggered the current GTM event — the clicked element, the submitted form, the visible element, or the element being scrolled past. It is context-aware in a way the DOM Element Variable is not.
+
+### Configuration
+
+Create a new User-Defined Variable, select **Auto-Event Variable**, and choose the **Variable Type**:
+
+| Variable Type | Returns | Common Use |
+|--------------|---------|-----------|
+| **Element** | The DOM element itself | Pass to other custom JS variables for further reading |
+| **Element Attribute** | A named attribute value | `data-product-id`, `href`, `aria-label` |
+| **Element Classes** | Space-separated class string | CSS-class-based conditions |
+| **Element ID** | The `id` attribute | Element identification |
+| **Element Target** | The `target` attribute | New-tab detection |
+| **Element Text** | The `innerText` content | Button/link text |
+| **Element URL** | The resolved `href` | Link destination |
+| **History New URL Fragment** | Hash after history change | SPA navigation |
+| **History Old URL Fragment** | Hash before history change | SPA back-navigation |
+
+For **Element Attribute**, you specify the exact attribute name in the "Attribute Name" field.
+
+### Reading data attributes from clicked elements
+
+This is the most common use case:
+
+```html
+<button class="add-to-cart"
+        data-product-id="SKU-12345"
+        data-product-name="Leather Jacket"
+        data-product-price="199.99">
+  Add to Cart
+</button>
+```
+
+Create an Auto-Event Variable with:
+- Variable Type: **Element Attribute**
+- Attribute Name: `data-product-id`
+
+When this button is clicked and a Click trigger fires, this variable returns `SKU-12345`. Create separate variables for `data-product-name` and `data-product-price` similarly.
+
+<Aside type="tip">
+`data-*` attributes are the most stable selector strategy for DOM-based tracking. They are invisible to users, they survive CSS redesigns, and they communicate intent clearly to both developers and analysts. If you must do DOM-based tracking, ask your developers to add `data-tracking-*` attributes to key elements.
+</Aside>
+
+## CSS selectors for DOM variables
+
+The CSS selector you choose determines how stable your tracking is. Here is a reliability ranking from most to least stable:
+
+**Most stable:**
+- ID selectors: `#checkout-form` — fast and unambiguous, but IDs must be unique
+- Data attribute selectors: `[data-product-id]` — semantically meaningful, resistant to redesign
+- ARIA attributes: `[aria-label="Add to cart"]` — designed to be stable identifiers
+
+**Moderately stable:**
+- Name attributes: `[name="email"]` — good for form fields
+- Type attributes: `[type="submit"]` — works for simple cases, fails when there are multiple submit buttons
+
+**Least stable:**
+- Class selectors: `.product-title` — changes with CSS refactors
+- Positional: `:nth-child(3)` — breaks when elements are added or reordered
+- Text content: DOM scraping by visible text — changes with copy rewrites
+
+### The `closest()` pattern for hierarchical data
+
+A common scenario: a product card has product data on the outer container, but the user clicks a button nested inside. `document.querySelector()` finds elements from the top — it cannot know which button was clicked. Auto-Event Variable gives you the clicked element, but the data is on the parent.
+
+The solution is a Custom JavaScript Variable that uses `closest()`:
+
+```javascript
+function() {
+  var clickedElement = {{Click Element}};
+  if (!clickedElement) return undefined;
+  var card = clickedElement.closest('[data-product-id]');
+  if (!card) return undefined;
+  return card.getAttribute('data-product-id');
+}
+```
+
+`closest()` walks up the DOM tree from the clicked element, looking for an ancestor that matches the selector. This correctly returns the product ID for the card regardless of which child element inside the card was clicked.
+
+## Performance considerations
+
+DOM Element Variables run `document.querySelector()` every time they are evaluated — which happens on every event that uses them in a trigger condition or tag. On complex pages with many elements, `document.querySelector('[data-product-id]')` is fast. But deeply nested selectors or selectors that traverse large subtrees can add measurable overhead.
+
+For Auto-Event Variables, the performance cost is negligible — GTM has already identified the element that triggered the event, so reading its attributes is a property access, not a DOM traversal.
+
+## Common mistakes
+
+### Using class names as selectors
+
+```html
+<!-- Bad: class name changes frequently -->
+<button class="btn-primary add-to-cart-v2">Add to Cart</button>
+<!-- Selector: .add-to-cart-v2 — breaks on next redesign -->
+
+<!-- Good: data attribute is stable -->
+<button class="btn-primary" data-action="add-to-cart">Add to Cart</button>
+<!-- Selector: [data-action="add-to-cart"] — survives redesigns -->
+```
+
+### Forgetting that DOM Element Variables get the first match
+
+If you use a DOM Element Variable with selector `.product-price` on a page with 20 products, you always get the price of the first product on the page, not the product the user clicked. For interaction-specific data, use Auto-Event Variables or push to the dataLayer from your click handler.
+
+### Not setting a default value
+
+When the element does not exist on the page (wrong page type, element not rendered yet, A/B test variant without the element), the variable returns `undefined`. Set a sensible default like `(not set)` to prevent `undefined` from reaching your tags.
+
+### Relying on element text content
+
+```html
+<!-- Text changes break this -->
+<button class="cta">Get Started for Free</button>
+<!-- Using blank attribute to read inner text: returns "Get Started for Free" -->
+<!-- Next sprint: "Start Free Trial" — your tracking silently breaks -->
+```
+
+Text content is the least stable thing you can read from the DOM. Use `data-*` attributes.
+
+## When DOM variables are acceptable
+
+Despite their fragility, there are legitimate use cases:
+
+- **Legacy systems**: Older CMS or e-commerce platforms with no developer access
+- **Third-party embeds**: Widgets you cannot modify but need to extract data from
+- **Quick wins**: Temporary tracking where speed matters more than long-term stability
+- **Verification**: Quickly checking what value is on the page during debugging
+
+For any of these: document clearly that you are using DOM scraping and why, so the next person who inherits the container knows to watch for breakage.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="CSS Selectors for GTM"
+    description="The complete CSS selector reference for writing stable, reliable selectors in GTM."
+    href="/client-side/variables/css-selectors-for-gtm/"
+  />
+  <LinkCard
+    title="Data Layer Variables"
+    description="The clean alternative to DOM scraping — always prefer this when you control the code."
+    href="/client-side/variables/datalayer-variables/"
+  />
+  <LinkCard
+    title="JavaScript Variables"
+    description="When you need to combine DOM reading with logic, Custom JavaScript Variables are the answer."
+    href="/client-side/variables/javascript-variables/"
+  />
+  <LinkCard
+    title="Click Triggers"
+    description="Using click triggers with Auto-Event Variables to track specific element interactions."
+    href="/client-side/triggers/click-triggers/"
+  />
+</CardGrid>

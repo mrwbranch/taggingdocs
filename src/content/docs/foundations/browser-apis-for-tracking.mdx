@@ -3,4 +3,503 @@ title: "Browser APIs for Tracking"
 description: "Browser APIs that unlock advanced tracking capabilities — Visibility, sendBeacon, IntersectionObserver, and more."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+GTM's built-in triggers cover the common cases well. But when you need to measure something beyond page views, clicks, and scroll depth — actual engaged time, whether a specific element was truly seen, reliable data delivery when a user navigates away — you need to reach for the browser's own APIs. These APIs are available in any Custom HTML tag or Custom JavaScript variable in GTM, and they unlock measurement capabilities that no built-in trigger can match.
+
+## Page Visibility API
+
+The standard engagement time metric — time on page — is unreliable. It measures the time between page load and the next navigation, which means a user who opens your article in a background tab, reads their email, and then closes the tab counts as a highly engaged session.
+
+The Page Visibility API tells you when your page is actually visible to the user.
+
+### The API
+
+```javascript
+// Current visibility state
+document.visibilityState; // 'visible' or 'hidden'
+document.hidden; // boolean shorthand
+
+// Listen for changes
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    // Tab switched, window minimized, or device locked
+  } else {
+    // Tab is active again
+  }
+});
+```
+
+### Measuring true engaged time
+
+Use this in a Custom HTML tag to build an accurate engaged time metric:
+
+```javascript
+<script>
+(function() {
+  var startTime = null;
+  var totalEngaged = 0;
+
+  function onVisible() {
+    startTime = Date.now();
+  }
+
+  function onHidden() {
+    if (startTime !== null) {
+      totalEngaged += Date.now() - startTime;
+      startTime = null;
+    }
+  }
+
+  // Start counting if the page is already visible
+  if (!document.hidden) {
+    onVisible();
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      onHidden();
+    } else {
+      onVisible();
+    }
+  });
+
+  // Report on page unload
+  window.addEventListener('pagehide', function() {
+    onHidden();
+    var engagedSeconds = Math.round(totalEngaged / 1000);
+    if (engagedSeconds > 0) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'engaged_time',
+        engaged_time_seconds: engagedSeconds,
+        page_path: window.location.pathname
+      });
+    }
+  });
+})();
+</script>
+```
+
+Fire this Custom HTML tag on Page View — Window Loaded. The `pagehide` event (preferred over `beforeunload` for modern browsers) fires when the user navigates away, at which point you push the final engaged time to the dataLayer.
+
+<Aside type="note">
+`pagehide` is more reliable than `beforeunload` because it works with the browser's back-forward cache (bfcache). If a user navigates back to your page from their browser history, `beforeunload` may not have fired properly, but `pagehide` will have.
+</Aside>
+
+## navigator.sendBeacon()
+
+The `beforeunload` and `pagehide` events fire when the user is about to leave the page. This creates a timing problem: any network request you initiate at unload time may be aborted before it completes, because the browser cancels in-flight XHR requests during navigation.
+
+`navigator.sendBeacon()` solves this. It sends a small HTTP POST request that is **guaranteed to complete even after the page unloads**. The browser queues the beacon and sends it asynchronously, outside the page's lifecycle.
+
+### Using sendBeacon directly
+
+```javascript
+// Syntax
+navigator.sendBeacon(url, data);
+
+// Example: send JSON data to your own endpoint
+var payload = JSON.stringify({
+  event: 'page_exit',
+  engaged_seconds: 42,
+  page: window.location.pathname,
+  timestamp: Date.now()
+});
+
+navigator.sendBeacon('/analytics/beacon', payload);
+```
+
+### When sendBeacon matters
+
+For GTM use cases, `sendBeacon` is most valuable for:
+
+1. **Exit/unload tracking** — any data you want to capture when the user leaves
+2. **Session end events** — sending a final "session_end" event to GA4 Measurement Protocol
+3. **Engaged time capture** — making sure the last batch of engagement data gets sent
+
+```javascript
+// Custom HTML tag: reliable exit tracking
+<script>
+window.addEventListener('pagehide', function(event) {
+  var data = new FormData();
+  data.append('event', 'page_exit');
+  data.append('page', window.location.pathname);
+  data.append('referrer', document.referrer);
+
+  navigator.sendBeacon('/api/analytics', data);
+});
+</script>
+```
+
+<Aside type="tip">
+Do not use `sendBeacon` for GA4 — the GA4 SDK handles its own reliable delivery internally. Use `sendBeacon` when you are sending data to your own endpoint or a server-side ingestion pipeline.
+</Aside>
+
+## IntersectionObserver: element viewability
+
+GTM's built-in Element Visibility trigger is powered by IntersectionObserver under the hood. But building your own IntersectionObserver in a Custom HTML tag gives you more control — percentage thresholds, custom timing, and behavior for multiple elements simultaneously.
+
+### Why viewability matters
+
+Firing a "product impression" event when a product card is anywhere in the DOM is meaningless. A product card at the bottom of a long page may load without ever being seen. IntersectionObserver lets you fire events only when an element is actually visible in the viewport.
+
+### Basic implementation
+
+```javascript
+<script>
+(function() {
+  var impressionsFired = new Set();
+
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+        var element = entry.target;
+        var productId = element.getAttribute('data-product-id');
+
+        // Only fire once per element per page
+        if (productId && !impressionsFired.has(productId)) {
+          impressionsFired.add(productId);
+
+          window.dataLayer = window.dataLayer || [];
+          window.dataLayer.push({
+            event: 'product_impression',
+            ecommerce: {
+              items: [{
+                item_id: productId,
+                item_name: element.getAttribute('data-product-name'),
+                item_list_name: element.getAttribute('data-list-name')
+              }]
+            }
+          });
+        }
+      }
+    });
+  }, {
+    threshold: 0.5,       // 50% of the element must be visible
+    rootMargin: '0px'     // No margin — true viewport intersection
+  });
+
+  // Observe all product cards
+  document.querySelectorAll('[data-product-id]').forEach(function(el) {
+    observer.observe(el);
+  });
+})();
+</script>
+```
+
+### IAB viewability standard
+
+The IAB standard for a viewable display ad is 50% of pixels visible for at least one continuous second. You can implement this with a combination of IntersectionObserver and a timer:
+
+```javascript
+<script>
+(function() {
+  var viewabilityTimers = {};
+
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      var id = entry.target.dataset.adId;
+      if (!id) return;
+
+      if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+        // Start 1-second timer when element becomes 50% visible
+        if (!viewabilityTimers[id]) {
+          viewabilityTimers[id] = setTimeout(function() {
+            window.dataLayer = window.dataLayer || [];
+            window.dataLayer.push({
+              event: 'ad_viewable',
+              ad_id: id,
+              ad_position: entry.target.dataset.adPosition
+            });
+            delete viewabilityTimers[id];
+            observer.unobserve(entry.target);
+          }, 1000);
+        }
+      } else {
+        // Element left viewport before 1 second — cancel timer
+        if (viewabilityTimers[id]) {
+          clearTimeout(viewabilityTimers[id]);
+          delete viewabilityTimers[id];
+        }
+      }
+    });
+  }, { threshold: 0.5 });
+
+  document.querySelectorAll('[data-ad-id]').forEach(function(el) {
+    observer.observe(el);
+  });
+})();
+</script>
+```
+
+## PerformanceObserver: measuring Web Vitals
+
+The PerformanceObserver API lets you subscribe to browser performance events, including the ones that underpin Core Web Vitals. This is how the `web-vitals` library works under the hood.
+
+### Measuring LCP (Largest Contentful Paint)
+
+```javascript
+<script>
+(function() {
+  var lcp = 0;
+
+  var observer = new PerformanceObserver(function(list) {
+    var entries = list.getEntries();
+    // The last LCP entry is the most recent and relevant one
+    var lastEntry = entries[entries.length - 1];
+    lcp = lastEntry.startTime;
+  });
+
+  try {
+    observer.observe({ type: 'largest-contentful-paint', buffered: true });
+  } catch (e) {
+    // LCP not supported in this browser
+  }
+
+  // Report on page hide
+  window.addEventListener('pagehide', function() {
+    if (lcp > 0) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'web_vital',
+        metric_name: 'LCP',
+        metric_value: Math.round(lcp),
+        metric_rating: lcp < 2500 ? 'good' : lcp < 4000 ? 'needs-improvement' : 'poor'
+      });
+    }
+  });
+})();
+</script>
+```
+
+### Measuring CLS (Cumulative Layout Shift)
+
+```javascript
+<script>
+(function() {
+  var clsValue = 0;
+  var clsEntries = [];
+
+  var observer = new PerformanceObserver(function(list) {
+    list.getEntries().forEach(function(entry) {
+      // Only count layout shifts without recent user input
+      if (!entry.hadRecentInput) {
+        clsValue += entry.value;
+        clsEntries.push(entry);
+      }
+    });
+  });
+
+  try {
+    observer.observe({ type: 'layout-shift', buffered: true });
+  } catch (e) {}
+
+  window.addEventListener('pagehide', function() {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'web_vital',
+      metric_name: 'CLS',
+      metric_value: Math.round(clsValue * 1000) / 1000,
+      metric_rating: clsValue < 0.1 ? 'good' : clsValue < 0.25 ? 'needs-improvement' : 'poor'
+    });
+  });
+})();
+</script>
+```
+
+<Aside type="tip">
+For production use, the `web-vitals` library from Google handles browser compatibility, correct measurement timing, and edge cases better than a manual implementation. Use it via a Custom HTML tag: `<script src="https://unpkg.com/web-vitals/dist/web-vitals.attribution.iife.js"></script>`. The attribution build includes element-level diagnostics for debugging CLS and LCP issues.
+</Aside>
+
+## MutationObserver: tracking dynamic content
+
+Some content loads after the initial page render — chatbot widgets that inject HTML, AJAX-loaded product recommendations, dynamic modals. MutationObserver lets you detect these DOM changes and fire tracking events when they appear.
+
+```javascript
+<script>
+(function() {
+  var observer = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+      mutation.addedNodes.forEach(function(node) {
+        if (node.nodeType !== 1) return; // Element nodes only
+
+        // Detect when a modal appears
+        if (node.classList && node.classList.contains('modal-overlay')) {
+          var modalId = node.getAttribute('data-modal-id') || 'unknown';
+          window.dataLayer = window.dataLayer || [];
+          window.dataLayer.push({
+            event: 'modal_view',
+            modal_id: modalId
+          });
+        }
+      });
+    });
+  });
+
+  // Observe the document body for child additions
+  observer.observe(document.body, {
+    childList: true,    // Watch for added/removed children
+    subtree: true       // Watch the entire subtree
+  });
+})();
+</script>
+```
+
+<Aside type="caution">
+`subtree: true` on `document.body` can be expensive on pages with high DOM mutation rates (chat widgets, real-time feeds). Consider narrowing the observed element to the specific container where your dynamic content appears.
+</Aside>
+
+## requestIdleCallback: deferring non-critical tracking
+
+Not all tracking needs to happen immediately. Analytics events that do not affect user experience — content impression logging, engagement scoring, non-conversion behavior tracking — can be deferred to periods when the browser is idle, reducing their impact on page responsiveness.
+
+```javascript
+<script>
+function trackWhenIdle(eventData) {
+  if ('requestIdleCallback' in window) {
+    requestIdleCallback(function(deadline) {
+      // deadline.timeRemaining() tells you how many ms of idle time are available
+      if (deadline.timeRemaining() > 0 || deadline.didTimeout) {
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push(eventData);
+      }
+    }, {
+      timeout: 5000 // Fall back to immediate execution after 5 seconds
+    });
+  } else {
+    // Fallback for browsers without requestIdleCallback (Safari < 16)
+    setTimeout(function() {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push(eventData);
+    }, 1000);
+  }
+}
+
+// Use it for non-critical events
+trackWhenIdle({
+  event: 'content_engagement',
+  content_type: 'article',
+  content_id: 'post-123',
+  reading_progress: 75
+});
+</script>
+```
+
+## Clipboard API: copy/paste detection
+
+Some content has high copy-paste value — code snippets, product descriptions, addresses, prices. The Clipboard API's `copy` and `cut` events let you measure this:
+
+```javascript
+<script>
+document.addEventListener('copy', function() {
+  var selection = window.getSelection();
+  if (!selection || selection.isCollapsed) return;
+
+  var selectedText = selection.toString().trim();
+  if (selectedText.length < 10) return; // Ignore trivial selections
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'content_copy',
+    page_path: window.location.pathname,
+    selection_length: selectedText.length,
+    // Optionally: first 50 chars of selection for content analysis
+    // selection_preview: selectedText.substring(0, 50)
+  });
+});
+</script>
+```
+
+<Aside type="caution">
+Never capture the full selected text in the dataLayer if there is any chance it contains user-entered PII. Limit collection to character count, section identifier, or a short non-sensitive preview.
+</Aside>
+
+## Putting it together: a practical engagement measurement stack
+
+Here is a Custom HTML tag that combines several of these APIs into a cohesive engagement measurement system:
+
+```javascript
+<script>
+(function() {
+  var engagementData = {
+    pageStart: Date.now(),
+    engagedMs: 0,
+    maxScroll: 0,
+    visibilityStart: !document.hidden ? Date.now() : null
+  };
+
+  // Page Visibility for true engaged time
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      if (engagementData.visibilityStart) {
+        engagementData.engagedMs += Date.now() - engagementData.visibilityStart;
+        engagementData.visibilityStart = null;
+      }
+    } else {
+      engagementData.visibilityStart = Date.now();
+    }
+  });
+
+  // Scroll tracking
+  window.addEventListener('scroll', function() {
+    var scrollPct = Math.round(
+      (window.scrollY + window.innerHeight) /
+      document.documentElement.scrollHeight * 100
+    );
+    if (scrollPct > engagementData.maxScroll) {
+      engagementData.maxScroll = scrollPct;
+    }
+  }, { passive: true });
+
+  // Report on exit
+  window.addEventListener('pagehide', function() {
+    if (engagementData.visibilityStart) {
+      engagementData.engagedMs += Date.now() - engagementData.visibilityStart;
+    }
+
+    var engagedSeconds = Math.round(engagementData.engagedMs / 1000);
+
+    if (engagedSeconds >= 1) {
+      navigator.sendBeacon('/api/engagement', JSON.stringify({
+        page: window.location.pathname,
+        engaged_seconds: engagedSeconds,
+        max_scroll_pct: engagementData.maxScroll,
+        total_time_seconds: Math.round((Date.now() - engagementData.pageStart) / 1000)
+      }));
+
+      // Also push to dataLayer for GTM tags
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'page_engagement',
+        engaged_seconds: engagedSeconds,
+        max_scroll_pct: engagementData.maxScroll
+      });
+    }
+  });
+})();
+</script>
+```
+
+<CardGrid>
+  <LinkCard
+    title="How GTM Works"
+    description="The execution model that determines when Custom HTML tags like these actually run."
+    href="/foundations/how-gtm-works/"
+  />
+  <LinkCard
+    title="Custom HTML Tags"
+    description="How to use Custom HTML tags in GTM — execution context, limitations, and best practices."
+    href="/client-side/tags/custom-html-tags/"
+  />
+  <LinkCard
+    title="Scroll Depth Tracking"
+    description="GTM's built-in scroll tracking and how to extend it."
+    href="/client-side/tracking/scroll-depth-tracking/"
+  />
+  <LinkCard
+    title="Element Visibility Trigger"
+    description="GTM's built-in visibility trigger and when to use it vs. a custom IntersectionObserver."
+    href="/client-side/triggers/trigger-types-overview/"
+  />
+</CardGrid>

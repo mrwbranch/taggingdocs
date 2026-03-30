@@ -1,6 +1,102 @@
 ---
 title: "Custom Templates"
-description: "Building and using GTM's custom template system for tags, variables, and clients."
+description: "Building GTM tag, variable, and client templates in the sandboxed JavaScript environment — from your first template to publishing in the Community Gallery."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Custom HTML tags execute arbitrary JavaScript in the user's browser with no guardrails. Custom Templates do the same job, but in a **sandboxed JavaScript environment** with declared permissions, a built-in test runner, and the ability to share and receive updates through the Community Template Gallery.
+
+If you are writing Custom HTML tags for third-party vendor integrations, you should be writing Custom Templates instead. The sandbox is not a limitation — it is a feature. It makes your templates auditable, testable, and safer for the organizations that deploy them.
+
+<Aside type="tip">
+Custom Templates require comfort with JavaScript. This section assumes you already know how to write Custom HTML tags and understand GTM's variable system. If you're new to GTM, start with [Tags, Triggers, and Variables](/foundations/tags-triggers-variables/).
+</Aside>
+
+## The template system
+
+<CardGrid>
+  <LinkCard
+    title="Sandboxed JavaScript APIs"
+    description="Complete reference for every API available in the template sandbox — what's available, what's not, and why the restrictions exist."
+    href="/templates/sandboxed-javascript/"
+  />
+  <LinkCard
+    title="Template Permissions and Security"
+    description="The permissions model, auto-detection, Template Policies, and what a malicious template could do without proper governance."
+    href="/templates/template-permissions-security/"
+  />
+</CardGrid>
+
+## Building templates
+
+<CardGrid>
+  <LinkCard
+    title="Building Tag Templates"
+    description="Complete walkthrough: field types, code structure, permissions, and building a real vendor pixel template from scratch."
+    href="/templates/building-tag-templates/"
+  />
+  <LinkCard
+    title="Building Variable Templates"
+    description="Creating custom variable templates for data transformation, cookie parsing, and server-side async lookups."
+    href="/templates/building-variable-templates/"
+  />
+  <LinkCard
+    title="Building Client Templates"
+    description="Server-side GTM client templates — claimRequest(), event model construction, response handling, and webhook receivers."
+    href="/templates/building-client-templates/"
+  />
+  <LinkCard
+    title="Testing Custom Templates"
+    description="Writing and running tests with runCode(), assertThat(), and mock() — template testing that actually catches bugs."
+    href="/templates/testing-custom-templates/"
+  />
+</CardGrid>
+
+## Community Gallery
+
+<CardGrid>
+  <LinkCard
+    title="Community Gallery Guide"
+    description="How to evaluate, install, and maintain templates from the Gallery — including which ones are actually worth using."
+    href="/templates/community-gallery-guide/"
+  />
+  <LinkCard
+    title="Publishing to the Gallery"
+    description="Repository structure, the .tpl format, metadata.yaml, submission requirements, and common rejection reasons."
+    href="/templates/template-publishing/"
+  />
+</CardGrid>
+
+## Custom Template vs. Custom HTML
+
+The choice is not always obvious. Here is how to think about it:
+
+<Comparison leftTitle="Use Custom Templates" rightTitle="Use Custom HTML" leftType="good" rightType="neutral">
+  <div slot="left">
+
+- You are building something you plan to reuse or share
+- You want the permission model to make the implementation auditable
+- You are building a server-side client or variable template
+- You want a built-in test runner
+- You are distributing to containers you don't control
+
+  </div>
+  <div slot="right">
+
+- You need a quick one-off implementation
+- You require browser APIs the sandbox doesn't expose directly
+- The tag fires in a single container you control fully
+- Speed of implementation matters more than long-term maintainability
+
+  </div>
+</Comparison>
+
+In practice, if the Custom HTML tag you are writing could be installed by someone else — even just another developer at your company — it should be a template. The declarative permissions alone make code review dramatically easier.
+
+## A note on server-side templates
+
+Server-side GTM uses the same template system with additional APIs. Client templates, which are unique to sGTM, are covered in [Building Client Templates](/templates/building-client-templates/). Variable templates for sGTM follow the same structure as client-side variable templates but support async patterns with Promises, covered in [Building Variable Templates](/templates/building-variable-templates/).
+
+The sandboxed JavaScript APIs differ between client-side and server-side contexts. The [Sandboxed JavaScript APIs](/templates/sandboxed-javascript/) article covers both, with clear labeling of which APIs are available where.

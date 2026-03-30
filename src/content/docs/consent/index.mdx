@@ -1,6 +1,103 @@
 ---
 title: "Consent & Privacy"
-description: "Implementing privacy-compliant tracking with Consent Mode, CMPs, and data governance."
+description: "Implementing privacy-compliant tracking with Consent Mode v2, CMPs, and data governance. Everything you need to track legally across the EU and beyond."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Tracking without consent is no longer just an ethical grey area — it is a legal liability. GDPR, the ePrivacy Directive, and Google's own enforcement actions have made consent management a core technical competency for anyone running analytics or advertising tags.
+
+This section covers everything you need to implement consent correctly: what Consent Mode v2 actually does under the hood, how to connect your CMP to GTM, how to handle non-Google tags that don't respect Consent Mode, and how to test that your setup does what you think it does.
+
+<Aside type="caution">
+Consent Mode is not a substitute for a real Consent Management Platform and a legal review of your privacy policy. Getting the technical implementation right is necessary but not sufficient. Consult your legal team.
+</Aside>
+
+## Start here
+
+If you are new to Consent Mode, read these two articles first. They give you the conceptual foundation you need before touching any GTM configuration.
+
+<CardGrid>
+  <LinkCard
+    title="Consent Mode v2 Explained"
+    description="What the seven consent types actually do, how cookieless pings work, and why behavioral modeling matters."
+    href="/consent/consent-mode-v2/"
+  />
+  <LinkCard
+    title="Basic vs. Advanced Consent Mode"
+    description="The single most consequential configuration decision in your consent setup — and how to choose correctly."
+    href="/consent/basic-consent-mode/"
+  />
+</CardGrid>
+
+## GTM configuration
+
+<CardGrid>
+  <LinkCard
+    title="Consent Mode GTM Setup"
+    description="Step-by-step: setting default consent state, updating on user interaction, and configuring per-tag consent checks."
+    href="/consent/consent-mode-gtm-setup/"
+  />
+  <LinkCard
+    title="CMP Integration"
+    description="Connecting Cookiebot, OneTrust, Usercentrics, CookieYes, and other CMPs to Consent Mode via GTM."
+    href="/consent/cmp-integration/"
+  />
+  <LinkCard
+    title="Consent Initialization Timing"
+    description="The most common Consent Mode misconfiguration — and the trigger order that fixes it."
+    href="/consent/consent-initialization-timing/"
+  />
+  <LinkCard
+    title="Consent State via DataLayer"
+    description="Managing and reading consent state in the dataLayer for non-native tags and custom logic."
+    href="/consent/consent-state-datalayer/"
+  />
+</CardGrid>
+
+## Advanced topics
+
+<CardGrid>
+  <LinkCard
+    title="Advanced Consent Mode"
+    description="Cookieless pings, behavioral modeling, and the privacy tradeoffs of sending data before consent."
+    href="/consent/advanced-consent-mode/"
+  />
+  <LinkCard
+    title="Consent for Non-Google Tags"
+    description="How to gate Meta Pixel, TikTok, LinkedIn, and other tags that don't natively respect Consent Mode."
+    href="/consent/consent-non-google-tags/"
+  />
+  <LinkCard
+    title="Cross-Domain Consent"
+    description="Consistent consent state across multiple domains — and what breaks when you get it wrong."
+    href="/consent/consent-cross-domain/"
+  />
+  <LinkCard
+    title="Server-Side Consent"
+    description="Consent handling in server-side GTM — the architecture, the event model, and PII redaction."
+    href="/consent/server-side-consent/"
+  />
+</CardGrid>
+
+## Testing
+
+<LinkCard
+  title="Testing Your Consent Implementation"
+  description="A complete testing protocol: cookies, network requests, GTM Preview mode, GA4 DebugView, and automated verification."
+  href="/consent/testing-consent/"
+/>
+
+## What you need to understand before starting
+
+Consent Mode is a **signal-passing system**. You pass signals to Google's tags describing the user's consent choices. Google's tags then modify their behavior accordingly — collecting less data, dropping cookies, or firing cookieless pings instead.
+
+What Consent Mode does **not** do:
+- It does not show a consent banner to your users
+- It does not automatically block non-Google tags
+- It does not guarantee legal compliance on its own
+- It does not replace your CMP
+
+The CMP (Consent Management Platform) is the tool that shows the banner, records the choice, and calls the consent update function. GTM + Consent Mode is the mechanism that receives that signal and acts on it. You need both.
+
+The articles in this section assume you have (or are about to get) a CMP. If you don't have one, start with [CMP Integration](/consent/cmp-integration/) to understand your options before configuring anything in GTM.

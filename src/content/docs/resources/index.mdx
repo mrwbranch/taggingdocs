@@ -1,6 +1,99 @@
 ---
 title: "Resources"
-description: "Checklists, templates, and tools for GTM and GA4 practitioners."
+description: "Checklists, templates, tools, and frameworks for GTM and GA4 practitioners. Save time, reduce mistakes, and build better implementations."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
+
+Good implementations do not happen by accident. They follow processes, use tested frameworks, and lean on the right tools. This section contains the practical resources that make your day-to-day GTM and GA4 work faster, more consistent, and easier to hand off to others.
+
+<Aside type="tip">
+New to GTM and GA4? Start with the [Foundations](/foundations/) section to build the conceptual framework first. Come back here when you are ready to apply it.
+</Aside>
+
+## Checklists & Audits
+
+Use these when you inherit a new implementation, before a major launch, or when something starts behaving unexpectedly. A good checklist turns guesswork into a systematic review.
+
+<CardGrid>
+  <LinkCard
+    title="GTM & GA4 Audit Checklist"
+    description="A comprehensive checklist covering container health, data quality, consent implementation, performance, and documentation. Use it to audit any implementation in under two hours."
+    href="/resources/audit-checklist/"
+  />
+  <LinkCard
+    title="GA4 Configuration Audit Checklist"
+    description="Focused specifically on GA4 property settings — data retention, Google Signals, custom dimensions, key events, BigQuery export, and attribution. A systematic review of every configuration decision."
+    href="/resources/ga4-audit-checklist/"
+  />
+</CardGrid>
+
+## Migration
+
+Universal Analytics is gone. But the mental models, data structures, and reporting patterns many practitioners rely on still come from that era. These guides help you make the transition correctly.
+
+<CardGrid>
+  <LinkCard
+    title="Migration: Universal Analytics to GA4"
+    description="The conceptual shift from sessions to events, the event mapping from Category/Action/Label to GA4 parameters, Enhanced Ecommerce to GA4 ecommerce, and custom dimensions scope changes."
+    href="/resources/migration-ua-to-ga4/"
+  />
+</CardGrid>
+
+## Templates
+
+Documentation, strategy, and specification templates you can copy, adapt, and use immediately. Nothing kills a good implementation faster than undocumented tracking — these templates prevent that.
+
+<CardGrid>
+  <LinkCard
+    title="Tracking Documentation Template"
+    description="Ready-to-use templates for your dataLayer specification, GTM container inventory, GA4 configuration document, testing protocol, and change log. Covers everything you need to document an implementation."
+    href="/resources/documentation-template/"
+  />
+  <LinkCard
+    title="Measurement Strategy Template"
+    description="A structured template for planning your measurement strategy before writing a single line of code. Maps business objectives to KPIs to events, with stakeholder sign-off sections and implementation prioritization."
+    href="/resources/measurement-strategy-template/"
+  />
+</CardGrid>
+
+## Testing & Quality
+
+Analytics bugs are silent and expensive. A broken purchase tag does not throw a console error — it just stops recording revenue. Building proper testing processes protects you from that.
+
+<CardGrid>
+  <LinkCard
+    title="Analytics Testing Framework"
+    description="Building a full testing pyramid for analytics: manual verification, automated dataLayer validation, integration tests for GTM triggers, and end-to-end data flow verification. Includes Playwright code examples."
+    href="/resources/testing-framework/"
+  />
+</CardGrid>
+
+## Performance
+
+GTM adds real overhead. Scripts load, tags fire, network requests go out. This section covers how to measure that impact and reduce it without sacrificing measurement completeness.
+
+<CardGrid>
+  <LinkCard
+    title="GTM Performance Optimization"
+    description="Measuring and reducing the performance impact of your GTM implementation. Container size audits, tag firing optimization, lazy-loading strategies, and the performance budget approach for analytics."
+    href="/resources/performance-optimization/"
+  />
+</CardGrid>
+
+## Automation & Tooling
+
+GTM has a full API. Most practitioners never use it. If you manage large implementations, multiple containers, or want to version-control your configuration, automation is worth the investment.
+
+<CardGrid>
+  <LinkCard
+    title="GTM API Automation"
+    description="Practical guide to the GTM API v2: authentication, common operations, bulk updates, container export/import, and building automation workflows. Includes real Python and Node.js code examples."
+    href="/resources/gtm-api-automation/"
+  />
+  <LinkCard
+    title="Community Tools & Extensions"
+    description="Curated list of 15+ browser extensions, Chrome DevTools techniques, open-source tools, and learning resources for GTM and GA4 practitioners."
+    href="/resources/community-tools/"
+  />
+</CardGrid>

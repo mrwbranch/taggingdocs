@@ -1,6 +1,183 @@
 ---
 title: "Outbound Link Tracking"
-description: "Tracking clicks to external websites."
+description: "Track clicks to external sites with GTM — from the basic setup to excluding partner domains and using custom events for precise control."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+An outbound link click tells you when a user leaves your site to visit an external domain. For most sites, this means social media, affiliate links, partner sites, app store links, or competitor research. Knowing where your users go — and from which page — is worth having.
+
+## GA4 enhanced measurement (the free version)
+
+GA4 automatically tracks `click` events for outbound links when enhanced measurement is enabled in your GA4 data stream settings. It fires when a user clicks any link pointing to a different hostname than the current page.
+
+You'll see these events in GA4 with:
+- `event_name`: `click`
+- `link_url`: the destination URL
+- `link_domain`: the destination domain
+- `outbound`: `true`
+
+The limitation: you can't add custom parameters (like which marketing channel the link belongs to), you can't exclude specific domains, and you can't control the event name. If the default `click` event is good enough, use enhanced measurement and skip GTM entirely.
+
+## GTM approach: Link Click trigger with hostname filter
+
+For custom parameters, domain exclusions, or a different event name, use GTM.
+
+<Steps>
+1. **Enable Link Click built-in variables.** GTM Variables → Configure → enable: Click URL, Click Text, Click Element, Click Target.
+
+2. **Create a Link Click trigger:**
+   - Trigger type: Click — Just Links
+   - This trigger fires on: Some Link Clicks
+   - Condition 1: Click URL — does not contain — `yourdomain.com`
+   - Condition 2: Click URL — starts with — `http` (excludes `mailto:`, `tel:`, `javascript:`, and `#anchor` links)
+   - Enable "Check Validation": ON
+   - Enable "Wait for Tags": ON
+
+3. **Create a GA4 Event tag with the outbound_click event.**
+</Steps>
+
+<TagConfig
+  name="GA4 - Event - Outbound Link Click"
+  type="Google Analytics: GA4 Event"
+  trigger="Click - Outbound Links"
+  variables={['Click URL', 'Click Text', 'Page URL']}
+/>
+
+Set event parameters:
+- `link_url` → `{{Click URL}}`
+- `link_text` → `{{Click Text}}`
+- `outbound` → `true`
+- `page_location` → `{{Page URL}}`
+
+## Excluding specific domains
+
+Some external links shouldn't count as "outbound" — payment processors, authentication providers, CDN domains, or partner sites you own:
+
+Add additional trigger conditions using "OR" logic isn't possible directly, but you can use a Lookup Table or Regex Table to define a "is_excluded_domain" variable, then add a blocking condition:
+
+**Option 1: Multiple trigger conditions (simple case)**
+
+Add condition: Click URL — does not contain — `trustedpartner.com`
+Add condition: Click URL — does not contain — `payments.stripe.com`
+
+This works for a small list. For larger lists, use the Custom JavaScript approach.
+
+**Option 2: Custom JavaScript variable for domain exclusion**
+
+```javascript
+// Custom JS Variable: "CJS - Is Excluded Outbound Domain"
+function() {
+  var url = {{Click URL}};
+  if (!url) return true; // Exclude if no URL
+
+  var excludedDomains = [
+    'trustedpartner.com',
+    'stripe.com',
+    'paypal.com',
+    'accounts.google.com',
+    'auth0.com'
+  ];
+
+  return excludedDomains.some(function(domain) {
+    return url.indexOf(domain) !== -1;
+  });
+}
+```
+
+Then add a trigger condition: `CJS - Is Excluded Outbound Domain` equals `false`.
+
+## Tracking specific link categories
+
+If you want to categorize outbound links by type, use a Regex Table variable:
+
+Create a variable named `Regex Table - Outbound Link Type`:
+- Input Variable: `{{Click URL}}`
+- Rows:
+  - `twitter\.com|x\.com` → `social_media`
+  - `linkedin\.com` → `social_media`
+  - `instagram\.com|facebook\.com` → `social_media`
+  - `apps\.apple\.com|play\.google\.com` → `app_store`
+  - `github\.com` → `developer`
+- Default Value: `external`
+
+Add `link_type` → `{{Regex Table - Outbound Link Type}}` as an event parameter.
+
+## Tracking affiliate and referral links
+
+For affiliate links specifically, you often want to track the destination domain and the referring page together:
+
+```javascript
+// dataLayer approach for affiliate links with structured tracking
+document.querySelectorAll('a[data-affiliate]').forEach(function(link) {
+  link.addEventListener('click', function() {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'affiliate_click',
+      affiliate_partner: this.dataset.affiliate,
+      affiliate_destination: this.href,
+      link_text: this.textContent.trim(),
+      page_location: window.location.href,
+      content_block: this.closest('[data-block]')
+        ? this.closest('[data-block]').dataset.block
+        : 'unknown'
+    });
+  });
+});
+```
+
+Using `data-affiliate` attributes makes the intent explicit and removes guesswork from URL pattern matching.
+
+## Check Validation and Wait for Tags
+
+Both of these options matter for outbound links:
+
+**Check Validation** — Runs GTM's own validation check on the link. It verifies the link isn't prevented from navigating (e.g., by `e.preventDefault()`). This prevents false tracking of links that don't actually navigate.
+
+**Wait for Tags** — Pauses the link click response for up to 2000ms while GTM fires its tags. Without this, the browser may navigate before GA4 receives the hit, especially on slow connections. Set the timeout to 500ms. Going higher than 500ms creates a noticeable delay for the user.
+
+<Aside type="caution">
+If you use both "Check Validation" and "Wait for Tags," test thoroughly. Some single-page apps intercept link clicks and handle navigation themselves. "Wait for Tags" can cause a perceptible lag on these sites. Consider using the `navigator.sendBeacon()` approach for non-blocking tracking on fast navigations.
+</Aside>
+
+## Common mistakes
+
+### Not excluding your own domain
+
+If you forget to add a condition excluding your own hostname, every internal link fires as "outbound." Your GA4 data fills with your own domain as the top outbound destination.
+
+A pattern that catches this: build a constant variable with your domain name (`yoursite.com`), then use it in the trigger condition: Click URL — does not contain — `{{Const - Site Hostname}}`.
+
+### Including mailto: and tel: links
+
+Links like `mailto:info@example.com` and `tel:+12025551234` start with `mailto:` and `tel:`, not `http`. They will match a link click trigger but should typically be tracked separately. Add a condition: Click URL — starts with — `http` to exclude them from outbound tracking.
+
+### Forgetting to disable enhanced measurement after setting up GTM
+
+If you configure GTM to send `click` events for outbound links AND keep GA4 enhanced measurement enabled, you'll get double events. Either disable enhanced measurement's "Outbound clicks" option, or change your GTM event name to something like `outbound_click` to differentiate.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Click Triggers"
+    description="Everything about All Clicks and Link Click triggers — how click event delegation works."
+    href="/client-side/triggers/click-triggers/"
+  />
+  <LinkCard
+    title="File Download Tracking"
+    description="Tracking file downloads — uses the same Link Click trigger mechanism."
+    href="/client-side/tracking/file-download-tracking/"
+  />
+  <LinkCard
+    title="Comprehensive Link Tracking"
+    description="Building one unified system to track outbound links, downloads, email links, and phone links."
+    href="/client-side/tracking/comprehensive-link-tracking/"
+  />
+  <LinkCard
+    title="Cross-Domain Tracking"
+    description="When the destination is another domain you own — cross-domain tracking keeps the session unified."
+    href="/client-side/tracking/cross-domain-tracking/"
+  />
+</CardGrid>

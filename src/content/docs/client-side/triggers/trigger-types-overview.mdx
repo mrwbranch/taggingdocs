@@ -3,4 +3,178 @@ title: "Trigger Types Overview"
 description: "Complete reference for every trigger type available in GTM."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Triggers are the conditions that determine when GTM fires a tag. Every tag in GTM needs at least one trigger. Understanding the full range of available trigger types — and when to use each — is foundational to building a maintainable, accurate GTM setup.
+
+This page is a reference overview. Each trigger type has its own dedicated article with full configuration details and examples.
+
+## Quick reference: all trigger types
+
+| Trigger | Fires when | Best for |
+|---------|-----------|----------|
+| Page View | GTM container initializes | GA4 config, early-load tags |
+| DOM Ready | HTML fully parsed | Tags that need to read the DOM |
+| Window Loaded | All resources loaded | Non-critical tags, session replay tools |
+| Click – All Elements | Any element is clicked | Broad click capture |
+| Click – Just Links | An `<a>` element is clicked | Outbound link tracking, download tracking |
+| Form Submission | An HTML form is submitted | Simple form tracking |
+| Scroll Depth | User scrolls a percentage or pixel threshold | Engagement measurement |
+| Timer | A time interval elapses | Delayed tag firing, keepalive signals |
+| History Change | `pushState` / `popstate` fires | SPA virtual pageviews |
+| Custom Event | `dataLayer.push({ event: '...' })` is called | Everything requiring application-level control |
+| Element Visibility | An element enters the viewport | Impression tracking, ad viewability |
+| YouTube Video | YouTube video events occur | Video engagement (via GTM's YouTube template) |
+| JavaScript Error | `window.onerror` fires | Error monitoring |
+| Trigger Group | Multiple triggers have all fired | Complex conditions requiring sequential events |
+
+## How triggers work
+
+A trigger is not a standalone thing. It only does something in the context of a tag. The relationship is:
+
+1. An event occurs in the browser (a click, a dataLayer push, a scroll)
+2. GTM evaluates all triggers that listen for that event type
+3. Each matching trigger checks its filter conditions (if any)
+4. Tags attached to triggers that pass their conditions fire
+
+The event is always the starting point. GTM does not poll the page — it responds to events. This is why timing matters so much in GTM: if your trigger listens for `gtm.js` (Page View) but the data you need is not available until `gtm.dom` (DOM Ready), you will get empty values.
+
+## Trigger categories
+
+### Page-based triggers
+
+These respond to the page lifecycle events that GTM tracks internally.
+
+**Page View** (`gtm.js`) fires when GTM initializes. This is the earliest moment tags can fire. Use it for GA4 Configuration tags and any tag that must be present before user interaction is possible.
+
+**DOM Ready** (`gtm.dom`) fires when the HTML document has been fully parsed — equivalent to `DOMContentLoaded`. Tags that need to read DOM elements must fire here or later, otherwise the elements they read may not exist yet.
+
+**Window Loaded** (`gtm.load`) fires when all page resources — images, iframes, stylesheets — have loaded. This is the last lifecycle event GTM tracks. Use it for low-priority tags that have no user-facing impact on page load.
+
+### User interaction triggers
+
+These respond to actions the user takes on the page.
+
+**All Clicks** fires on every click anywhere on the page. It is broad by design — use it with tight filter conditions. Without conditions, it fires on every mouse click, which is noisy and potentially slow if you have complex tags attached.
+
+**Just Links** fires specifically when an `<a>` element or its descendant is clicked. Unlike All Clicks, it is scoped to link interactions. It has a "Wait for Tags" option that delays navigation briefly while tags fire — essential for outbound link tracking.
+
+**Form Submission** fires when an HTML `<form>` element's `submit` event fires. It has a "Check Validation" option that waits for form validation to pass before firing tags. Critical limitation: it does not work with JavaScript-intercepted form submissions (React/Vue forms, AJAX forms). For those, use Custom Events.
+
+**Scroll Depth** fires when the user scrolls past threshold values you define, either as percentages (25%, 50%, 75%) or pixel distances. Each threshold fires once per page load. Use it for content engagement measurement.
+
+**Element Visibility** fires when a specific element enters the viewport. Uses `IntersectionObserver` under the hood. Excellent for impression tracking — did the user actually see this product card, this CTA, this ad unit?
+
+**YouTube Video** fires on YouTube player events (play, pause, complete, progress). Requires the YouTube Video trigger to be enabled and a YouTube embed on the page.
+
+### Time-based triggers
+
+**Timer** fires at a specified interval in milliseconds. You can set it to fire once (limit of 1) or repeatedly. The primary use case is deferring tag execution — firing a survey pop-up 30 seconds after page load, for example.
+
+### Navigation triggers
+
+**History Change** fires when the browser's History API is used — `pushState`, `replaceState`, or the `popstate` event. This is how single-page applications change the URL without a full page load. SPA frameworks (React Router, Vue Router, Next.js) all use the History API internally.
+
+### Custom and advanced triggers
+
+**Custom Event** listens for named events in the `dataLayer`. When your code calls `dataLayer.push({ event: 'add_to_cart', ... })`, the Custom Event trigger with event name `add_to_cart` fires. This is the most powerful and flexible trigger type in GTM — and the one you should default to for any application-specific tracking.
+
+**JavaScript Error** fires when `window.onerror` catches an uncaught exception. Variables available include error message, error URL, and error line number. Useful for error monitoring setups.
+
+**Trigger Group** fires a tag only after all specified triggers in the group have fired on the same page. Use it for complex conditions like: fire this tag only after the user has both scrolled to 50% AND spent 30 seconds on the page.
+
+## Trigger conditions (filters)
+
+Every trigger can have conditions — filter rules that must be true for the trigger to fire. Without conditions, a trigger fires on every instance of its event type. With conditions, it fires only when the additional criteria are met.
+
+Example: A Page View trigger with the condition `Page Path contains /blog` fires only on pages within the blog section.
+
+Conditions use GTM variables for the left-hand side and support these operators:
+- equals / does not equal
+- contains / does not contain
+- starts with / ends with
+- matches CSS selector
+- matches RegEx / does not match RegEx
+- less than / greater than
+
+You can have multiple conditions on a single trigger. All conditions must be true (AND logic). For OR logic, create two separate triggers and attach both to the same tag.
+
+## Blocking triggers (exceptions)
+
+Blocking triggers — called "Exception" triggers in GTM — prevent a tag from firing when specific conditions are met, even if a firing trigger would otherwise activate the tag.
+
+A common pattern: fire your GA4 tag on all page views, except on the `/thank-you` confirmation page (where you want a separate conversion tag to fire, not the regular pageview).
+
+<Steps>
+1. Create a regular Page View trigger with no conditions (fires on all pages)
+2. Create a Blocking trigger: Page View, with condition `Page Path equals /thank-you`
+3. Attach both to your GA4 Configuration tag
+4. The tag fires on all pages except /thank-you
+</Steps>
+
+Blocking triggers are underused and save a lot of "Page Path does not contain X" conditions that would otherwise clutter your firing trigger.
+
+## Trigger evaluation order
+
+When multiple triggers match the same event, GTM evaluates them all. There is no sequential ordering — all matching triggers for a given event fire their associated tags. If you need tags to fire in a specific sequence, use GTM's tag sequencing feature (Setup/Teardown tags) rather than trying to control trigger evaluation order.
+
+The exception is Trigger Groups, which explicitly require all constituent triggers to have fired before executing.
+
+## The right trigger for the job
+
+Choosing the right trigger type comes down to three questions:
+
+1. **When does the event happen?** Is it at page load, on user interaction, or in response to application logic?
+2. **Who controls the event?** Is it the browser (lifecycle events, DOM events) or your application (dataLayer pushes)?
+3. **How much data do you need?** DOM events give you element attributes; custom events give you anything you push.
+
+The general rule: if you have access to the application code, use Custom Event triggers. They are more reliable, more data-rich, and more maintainable than DOM-based triggers. DOM-based triggers (click, form, scroll) are useful when you do not control the page code, or for universal behaviors like outbound link tracking.
+
+## Common mistakes
+
+### Using All Clicks without conditions
+
+An All Clicks trigger with no filter conditions fires on every click on the page. If your tag has any cost — network requests, JavaScript execution, third-party calls — you are paying that cost on every single click event. Always add conditions to click triggers to narrow the scope.
+
+### Treating Page View as the default for everything
+
+New GTM users tend to fire every tag on Page View because it is the first trigger option visible. Many tags — session replay tools, chat widgets, retargeting pixels — do not need to fire at page start and would be better placed on Window Loaded or a user interaction trigger. Audit your container for Page View-triggered tags that have no business requirement to fire that early.
+
+### Not understanding History Change timing
+
+The History Change trigger fires at the moment the URL changes, before the new page component renders. If you use it for SPA pageview tracking and your GA4 tag reads `document.title`, you will capture the previous page's title. For accurate SPA tracking, use Custom Event triggers pushed from your framework's post-render lifecycle hooks.
+
+### Ignoring blocking triggers
+
+Instead of creating complex conditions like "Page Path does not contain X AND does not contain Y AND does not contain Z," create a blocking trigger for those specific paths. Blocking triggers are cleaner, easier to maintain, and easier to understand in the GTM interface.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The most powerful and flexible trigger type — start here if you can push to the dataLayer."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Page View Triggers"
+    description="The three page lifecycle trigger types and when to use each."
+    href="/client-side/triggers/page-view-triggers/"
+  />
+  <LinkCard
+    title="Click Triggers"
+    description="All Clicks and Just Links — configuration, variables, and common pitfalls."
+    href="/client-side/triggers/click-triggers/"
+  />
+  <LinkCard
+    title="Element Visibility Trigger"
+    description="Track when elements become visible in the viewport — the most underused trigger in GTM."
+    href="/client-side/triggers/element-visibility-trigger/"
+  />
+  <LinkCard
+    title="Trigger Groups"
+    description="Fire a tag only after multiple conditions have all been met."
+    href="/client-side/triggers/trigger-groups/"
+  />
+</CardGrid>

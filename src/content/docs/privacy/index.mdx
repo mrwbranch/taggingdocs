@@ -1,6 +1,82 @@
 ---
 title: "Browser & Privacy"
-description: "Navigating browser restrictions and privacy requirements that affect tracking."
+description: "Navigating browser restrictions and privacy requirements that affect tracking accuracy and compliance."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The tracking environment has changed more in the last five years than in the previous fifteen. Safari's ITP has capped JavaScript-set cookies since 2017. Firefox added Enhanced Tracking Protection in 2019. Chrome committed to removing third-party cookies and is building the Privacy Sandbox as a replacement. Ad blockers now affect 20-40% of desktop web traffic depending on your audience.
+
+These are not temporary technical problems with workarounds. They are structural shifts in how browsers handle privacy, driven by regulation (GDPR, ePrivacy, CCPA), platform competition, and genuine user demand for less tracking. The organizations that adapt their measurement approach will maintain accurate data. The ones that fight the browser vendors will lose ground slowly and permanently.
+
+This section covers the technical reality of each browser restriction, what it means for your analytics and advertising measurement, and what you can legitimately do about it.
+
+## The central problem
+
+Most web analytics and ad conversion tracking relies on persistent identifiers stored in cookies or localStorage to recognize returning users and attribute actions across sessions. Browser vendors have been systematically removing or degrading this capability:
+
+- **Third-party cookies** are blocked in Safari and Firefox, deprecated in Chrome
+- **JavaScript-set first-party cookies** are capped at 7 days in Safari and 24 hours for sites classified as tracking domains
+- **Cross-site tracking** via redirect chains and CNAME cloaking has been addressed in ITP updates
+- **Fingerprinting** is actively resisted by Firefox and Brave with API noise and restrictions
+
+The result: the same user visiting your site on Safari looks like a new user after 7 days. Attribution windows shrink. Returning user counts inflate. Marketing ROI calculations become unreliable.
+
+Server-side tagging exists primarily as a response to these restrictions. Cookies set via HTTP server response headers are not subject to ITP's JavaScript cookie caps. A server-side implementation can maintain accurate user identification where client-side JavaScript cannot.
+
+## What this section covers
+
+<CardGrid>
+  <LinkCard
+    title="ITP History & Impact"
+    description="The complete evolution of Safari's Intelligent Tracking Prevention from 1.0 to today, and its specific impact on GA4 and analytics accuracy."
+    href="/privacy/itp-history-impact/"
+  />
+  <LinkCard
+    title="Cross-Browser Tracking Differences"
+    description="How Safari, Firefox, Chrome, Brave, and Edge each handle tracking differently — with a comparison table of what each blocks for GA4."
+    href="/privacy/cross-browser-tracking-differences/"
+  />
+  <LinkCard
+    title="Extending Cookie Lifetimes"
+    description="Server-side techniques for bypassing browser cookie restrictions while remaining compliant — cookie refresh patterns, CDN-based extension, and legal context."
+    href="/privacy/extending-cookie-lifetimes/"
+  />
+  <LinkCard
+    title="FPID Cookie Management"
+    description="How the FPID cookie works in server-side GTM, how it interacts with client_id, and when to suppress it."
+    href="/privacy/fpid-cookie-management/"
+  />
+  <LinkCard
+    title="Ad Blocker Impact"
+    description="How ad blockers affect GTM and GA4, how to quantify the impact, and the legitimate approaches to working with them."
+    href="/privacy/ad-blocker-impact/"
+  />
+</CardGrid>
+
+## The key distinction: compliance vs. circumvention
+
+Every technique in this section has a legitimate use case and an illegitimate one. The distinction comes down to consent.
+
+Extending cookie lifetimes server-side is a legitimate technical approach — **when the user has consented to analytics cookies**. Using the same technique to track users who have explicitly opted out of cookies is a privacy violation, regardless of the technical method.
+
+Server-side tagging, FPID cookies, first-party data collection, and cookie refresh patterns are all legitimate tools. They are not a way to ignore consent. If a user has rejected analytics cookies, none of these techniques should be used to track that user.
+
+<Aside type="caution">
+The legal risk of circumventing explicit user consent is significantly greater than the business risk of reduced tracking coverage. The ICO, CNIL, and other data protection authorities have issued substantial fines specifically for collecting tracking data without consent. When in doubt, err on the side of not tracking.
+</Aside>
+
+## Related resources
+
+<CardGrid>
+  <LinkCard
+    title="Server-Side GTM Overview"
+    description="The server-side approach that underpins most solutions to browser privacy restrictions."
+    href="/server-side/"
+  />
+  <LinkCard
+    title="Consent Mode"
+    description="Google's framework for respecting user consent in analytics and advertising."
+    href="/consent/"
+  />
+</CardGrid>

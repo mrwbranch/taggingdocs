@@ -1,6 +1,248 @@
 ---
-title: "Audit Checklist"
-description: "Comprehensive GTM and GA4 audit checklist."
+title: "GTM & GA4 Audit Checklist"
+description: "A comprehensive audit checklist for GTM containers and GA4 properties. Use it to review any implementation for health, data quality, consent, performance, and documentation."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Most analytics implementations accumulate problems silently. Tags fire twice because someone added a fallback that became permanent. Custom dimensions were never registered in GA4. The consent banner fires after the Google Analytics tag. Nobody documented what `dl_event_001` was supposed to do.
+
+This checklist is your systematic review process. Work through it when you inherit a new implementation, before a major launch, or when data starts behaving unexpectedly. A complete audit takes two to three hours — and consistently uncovers issues that silently corrupt data for months.
+
+<Aside type="note">
+This is the general GTM and GA4 audit checklist. For a detailed GA4-specific configuration audit, see the [GA4 Configuration Audit Checklist](/resources/ga4-audit-checklist/).
+</Aside>
+
+## How to use this checklist
+
+Print it, paste it into a document, or copy it into a Notion/Confluence page. Mark each item Pass, Fail, or N/A. For each Fail, write a one-sentence note on what needs fixing. At the end, you have an actionable remediation list.
+
+The sections are ordered by priority. If your container has consent issues, fix those before worrying about naming conventions.
+
+---
+
+## Section 1: Consent Implementation
+
+This section comes first because consent errors create legal exposure, not just data quality problems.
+
+### Consent Mode
+
+- [ ] Consent Mode v2 is implemented (not just v1)
+- [ ] Default consent state is set **before** any tags fire — the `gtag('consent', 'default', {...})` call precedes the GTM container snippet
+- [ ] `ad_storage`, `analytics_storage`, `ad_user_data`, and `ad_personalization` are all explicitly set in the default
+- [ ] The consent update (`gtag('consent', 'update', {...})`) fires when the user makes a selection
+- [ ] Consent state is correctly restored on subsequent page loads (via cookie read, not re-prompting)
+- [ ] GA4 tags are marked as "Require additional consent check" in GTM — OR — the implementation correctly uses Consent Mode signals without that setting
+- [ ] Google Ads tags and Floodlight tags respect consent state
+- [ ] Third-party marketing pixels (Meta, LinkedIn, TikTok) fire only after appropriate consent
+
+### CMP Integration
+
+- [ ] The CMP (Consent Management Platform) loads synchronously or via a blocking script before GTM fires
+- [ ] Consent is not granted by default without user interaction in EU/EEA/UK contexts
+- [ ] A test with an adblocker or incognito window confirms tags are blocked until consent is given
+- [ ] Consent mode behavior is confirmed with the [Google Tag Diagnostics](https://tagassistant.google.com/) tool
+
+<Aside type="caution">
+The most common consent failure: the GTM snippet loads in the `<head>` and GA4 fires immediately, while the CMP loads a few hundred milliseconds later. Even if Consent Mode is configured, the timing means events fire before consent is registered. Always verify with Tag Assistant in a fresh session.
+</Aside>
+
+---
+
+## Section 2: Container Health
+
+### Naming Conventions
+
+- [ ] Tags follow a consistent naming pattern (e.g., `GA4 - Event - [event_name]` or `[Platform] | [Type] | [Description]`)
+- [ ] Triggers follow a consistent naming pattern
+- [ ] Variables follow a consistent naming pattern
+- [ ] The naming convention is documented somewhere the team can reference
+
+### Unused and Duplicate Tags
+
+- [ ] No tags are in "Paused" state that have been paused for more than 30 days (review and delete or re-enable)
+- [ ] No duplicate tags fire on the same event (use Tag Assistant to check)
+- [ ] No redundant pageview tags (e.g., two GA4 page_view tags both firing on Page View)
+- [ ] No legacy Universal Analytics tags remain in the container
+
+### Container Size
+
+- [ ] Total container size is below 200KB uncompressed (check via Tag Assistant → Container tab)
+- [ ] If above 200KB, review which tags are largest and whether they can be trimmed or deferred
+- [ ] No excessive use of Custom HTML tags with embedded third-party scripts that should be loaded via proper tag types
+
+### Tag Configuration
+
+- [ ] All GA4 Event tags use the GA4 Event tag type, not Custom HTML with `gtag()` calls
+- [ ] The GA4 Configuration tag (or Google Tag) is not duplicated
+- [ ] Tag sequencing (Setup/Cleanup tags) is used intentionally, not accidentally
+- [ ] No tags fire on All Pages without a specific reason
+
+---
+
+## Section 3: Data Quality
+
+### Event Naming
+
+- [ ] All custom event names follow a consistent convention (e.g., `snake_case`, all lowercase)
+- [ ] Event names are unique and descriptive — not generic names like `click` or `interaction`
+- [ ] No event names start with an underscore (reserved for GA4 automatic events)
+- [ ] No event names longer than 40 characters
+- [ ] No parameter names longer than 40 characters
+
+### Parameter Validation
+
+- [ ] Every event includes only the parameters it should — no accidental extra parameters from the dataLayer being passed through wholesale
+- [ ] String values are actual strings, not `[object Object]` or `undefined`
+- [ ] Numeric values (value, price, quantity) are passed as numbers, not strings
+- [ ] The `currency` parameter is a valid ISO 4217 three-letter code (e.g., `USD`, `EUR`)
+
+### Ecommerce Data
+
+- [ ] `ecommerce: null` is pushed to the dataLayer **before** every ecommerce event push
+- [ ] Every `items` array contains at least `item_id` and `item_name`
+- [ ] `purchase` events include `transaction_id`, `value`, and `currency`
+- [ ] `transaction_id` values are unique per transaction (no duplicate purchase events in GA4)
+- [ ] Item-level prices in the `items` array match the order-level `value` (accounting for quantity and discounts)
+
+### Custom Events
+
+- [ ] Every custom event has a corresponding dataLayer spec document
+- [ ] Verify 3-5 recent events in GA4 DebugView or Realtime → the expected parameters appear with expected values
+- [ ] User-scoped properties (user ID, logged-in status, customer segment) are set correctly and not changing per event
+
+<Aside type="tip">
+To quickly audit event quality, go to GA4 → Reports → Realtime, trigger a few events in another browser tab, and check whether parameters look correct. For systematic validation, use the GA4 Realtime API or DebugView.
+</Aside>
+
+---
+
+## Section 4: GA4 Configuration
+
+### Property Settings
+
+- [ ] Data retention is set to **14 months** (Settings → Data Settings → Data Retention)
+- [ ] Google Signals is enabled (if appropriate for your use case and user base size)
+- [ ] Reporting identity is configured intentionally (Blended, Observed, or Device-based)
+- [ ] Internal traffic filter is active — not just defined, but set to "Active" (not "Testing")
+- [ ] The developer traffic IP is excluded
+- [ ] Cross-domain tracking is configured if the user journey spans multiple domains
+
+### Events and Conversions
+
+- [ ] All key events (conversions) are marked correctly in GA4 (Events → toggle "Mark as key event")
+- [ ] Key events use the correct counting method: once per session vs. once per event
+- [ ] No automatic events are accidentally marked as key events (e.g., `session_start`, `first_visit`)
+- [ ] Custom events that should be conversions but are not are documented as pending
+
+### Custom Dimensions and Metrics
+
+- [ ] Every parameter you intend to use in reports is registered as a Custom Dimension (Admin → Custom Definitions → Custom Dimensions)
+- [ ] Custom Dimension scope is correct: event-scoped for event-level data, user-scoped for user properties
+- [ ] No custom dimensions are registered that are never actually sent (wasted allocation — GA4 limits you to 50 event-scoped and 25 user-scoped)
+- [ ] The custom dimension name matches what your team calls this value in reports
+
+### Enhanced Measurement
+
+- [ ] Enhanced Measurement settings have been reviewed deliberately (not left on defaults)
+- [ ] File downloads tracking does not capture unexpected file types as events
+- [ ] Outbound clicks tracking is intentional and not double-tracking links with custom click tags
+- [ ] Video engagement tracking is appropriate for your video usage
+
+---
+
+## Section 5: Triggers and Variables
+
+### Trigger Hygiene
+
+- [ ] No triggers fire on "All Elements" click when a more specific selector would work
+- [ ] No Page View triggers fire on URLs that should be excluded (internal pages, admin routes)
+- [ ] Custom Event triggers use specific event names — not patterns that match too broadly
+- [ ] Triggers are not duplicated across multiple triggers with identical conditions
+
+### Variable Quality
+
+- [ ] All user-defined variables are in active use — remove unused variables
+- [ ] DataLayer variables reference keys that actually exist in the dataLayer specification
+- [ ] JavaScript variables are tested across all major browsers if they use modern syntax
+- [ ] Lookup tables and regex variables have been tested with edge case inputs
+- [ ] No variables use hardcoded values that should be data-driven
+
+---
+
+## Section 6: Performance
+
+### Tag Load Impact
+
+- [ ] Baseline page performance was measured before this GTM implementation
+- [ ] Total blocking time added by GTM tags is below 100ms on desktop and 250ms on mobile
+- [ ] No synchronous tags are loading in the `<head>` via Custom HTML
+- [ ] Large third-party scripts (CRM chat widgets, A/B testing tools) are loaded with appropriate tag sequencing or DOM Ready triggers
+
+### Firing Optimization
+
+- [ ] Tags that only need to fire once per session use the "Once per page" or session-scoped trigger settings
+- [ ] Tags that do not need to fire on every page use page-type conditions in their triggers
+- [ ] Image pixels and beacons are using the GA4 Measurement Protocol or server-side GTM instead of client-side pixels where possible
+
+<Aside type="note">
+Use [WebPageTest](https://www.webpagetest.org/) to measure the actual network and CPU impact of your GTM container. The "waterfall" view shows when the container loads and when each tag fires, making bottlenecks immediately visible.
+</Aside>
+
+---
+
+## Section 7: Server-Side GTM (if applicable)
+
+Skip this section if you are not using sGTM.
+
+- [ ] The sGTM container URL is set as the `server_container_url` in the GA4 Configuration tag
+- [ ] The sGTM endpoint is on a first-party subdomain (e.g., `metrics.yourdomain.com`), not `gtm.yourhost.com` or the default Stape/GTM.io domain
+- [ ] GA4 client is correctly configured and receiving events
+- [ ] The GA4 tag in sGTM is sending to the correct GA4 Measurement ID
+- [ ] Cost monitoring is set up — unexpected traffic spikes on sGTM scale proportionally with cost
+- [ ] HTTP Request logs are enabled for debugging
+- [ ] A monitoring alert is configured for error rate increases in the sGTM container
+
+---
+
+## Section 8: Documentation
+
+Good documentation is what turns your implementation from a single-person knowledge hold into something the team can maintain.
+
+- [ ] A dataLayer specification document exists and reflects the current implementation
+- [ ] The specification includes: event name, trigger conditions, parameters, types, example values, and owning team/developer
+- [ ] A GTM container inventory exists (what each tag does and why it exists)
+- [ ] A change log is being maintained (who changed what and when)
+- [ ] Access control is reviewed: who has publish rights, who has edit-only
+- [ ] The implementation has been handed off to at least one other person who could maintain it
+
+---
+
+## Audit Score Summary
+
+Use this to track your findings:
+
+| Section | Pass | Fail | N/A | Notes |
+|---------|------|------|-----|-------|
+| Consent | | | | |
+| Container Health | | | | |
+| Data Quality | | | | |
+| GA4 Configuration | | | | |
+| Triggers & Variables | | | | |
+| Performance | | | | |
+| sGTM (if applicable) | | | | |
+| Documentation | | | | |
+
+**Priority tiers for remediation:**
+- **Critical (fix immediately)**: Consent failures, duplicate purchase tracking, GA4 misconfigured conversions
+- **High (fix this sprint)**: Missing custom dimensions, unnamed events, no documentation
+- **Medium (fix this quarter)**: Naming conventions, container size, unused variables
+- **Low (backlog)**: Performance micro-optimizations, noscript cleanup
+
+---
+
+## Related Resources
+
+- [GA4 Configuration Audit Checklist](/resources/ga4-audit-checklist/) — deep dive on GA4-specific settings
+- [Analytics Testing Framework](/resources/testing-framework/) — automated testing to catch regressions
+- [Tracking Documentation Template](/resources/documentation-template/) — templates for fixing the documentation gaps this audit reveals

@@ -3,4 +3,224 @@ title: "GTM Account Structure"
 description: "How to organize GTM accounts, containers, and workspaces for teams of any size."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+How you set up your GTM account structure on day one determines how manageable your implementation will be in year three. A good structure is invisible — it just works. A bad one creates access headaches, version conflicts, and confusion about what container controls what. This article covers the decisions you need to make, with concrete recommendations for the most common scenarios.
+
+## The hierarchy: Account → Container → Workspace
+
+GTM has three levels of organization:
+
+**Account** — The top level. Typically corresponds to a company or brand. Multiple containers can exist under one account. Access is managed at the account level.
+
+**Container** — The deployable unit. Each container has its own snippet (`GTM-XXXXXX`), its own tag library, and its own version history. A container is what you install on a website or app.
+
+**Workspace** — A draft environment inside a container. All editing happens in workspaces. Changes are not live until you submit (publish) a workspace.
+
+## How many accounts?
+
+Most organizations need **one account**. The exception is if you are an agency managing GTM for multiple unrelated clients — each client should have their own account for access isolation and billing separation.
+
+If you are a company with multiple brands, a single account with multiple containers is usually cleaner than multiple accounts. You can share access across containers within one account more easily.
+
+## How many containers?
+
+This is where most organizations make mistakes. The temptation is to share one container across multiple domains. Resist it.
+
+### One container per domain
+
+The recommended default. One container per domain means:
+
+- Changes to Site A cannot accidentally break Site B
+- Version history is clean and relevant to that site only
+- Debugging is unambiguous — you know which container controls which site
+- Access can be granted at the container level without exposing other sites
+
+<Comparison leftTitle="Shared container (anti-pattern)" leftType="bad" rightTitle="Separate containers (correct)" rightType="good">
+  <div slot="left">
+
+`GTM-SHARED` installed on:
+- example.com
+- store.example.com
+- blog.example.com
+
+One version history. A change for the store fires on the blog. Trigger conditions become complex to avoid cross-domain misfires.
+
+  </div>
+  <div slot="right">
+
+- `GTM-MAIN` → example.com
+- `GTM-STORE` → store.example.com
+- `GTM-BLOG` → blog.example.com
+
+Independent version histories. Changes to each are isolated. Debugging is straightforward.
+
+  </div>
+</Comparison>
+
+### When shared containers make sense
+
+The only legitimate use case for a shared container is a very tightly integrated multi-domain property where the same tags and triggers apply everywhere. If your main site and subdomain share the exact same analytics setup, shared consent, and identical business logic — and your team understands the cross-domain implications — a shared container is defensible.
+
+Even then, the maintenance cost tends to creep up over time as the domains evolve differently.
+
+### Container types
+
+GTM has five container types. Choose at setup time — you cannot change it later.
+
+| Type | Use for |
+|------|---------|
+| **Web** | Websites and web apps (HTML/JS environments) |
+| **AMP** | Accelerated Mobile Pages |
+| **iOS** | iOS apps via Firebase SDK |
+| **Android** | Android apps via Firebase SDK |
+| **Server** | Server-side GTM (requires a server to deploy to) |
+
+For most implementations, you are creating a **Web** container. Server containers are for sGTM deployments.
+
+## Workspaces
+
+Workspaces are underused by most teams. Here is the pattern that works:
+
+### One workspace per change set
+
+Create a new workspace for every distinct change that takes more than a few minutes. Name it descriptively:
+
+- "Meta Pixel Base + Purchase Event"
+- "Q4 Campaign Tracking — Google Ads"
+- "Fix: Scroll Depth trigger firing twice"
+
+Do not work directly in Default Workspace for anything significant. Default Workspace is for trivial fixes where you are confident nothing will conflict.
+
+### Parallel workspaces and merge conflicts
+
+Multiple workspaces can exist simultaneously. If two workspaces both modify the same tag, GTM will flag a conflict when the second one tries to publish.
+
+GTM's conflict resolution is basic — it shows you both versions and asks you to choose one. It does not merge changes within a tag. For teams making parallel changes, coordinate before starting work to avoid both workspaces touching the same tags.
+
+<Aside type="tip">
+For large teams, treat GTM workspaces like Git feature branches: one workspace per issue or feature, short-lived, reviewed before merging. The analogy is imperfect (GTM has no real merge), but the discipline is the same.
+</Aside>
+
+## Environments
+
+GTM environments let you test a specific container version on a specific environment before pushing it to production.
+
+By default, you have three environments:
+
+- **Live** — the published container that all users see
+- **Latest** — the most recent version (may differ from Live if you have unpublished workspaces)
+- **Now Editing** — the current workspace in progress
+
+You can create **custom environments** tied to your staging or QA servers. When you create a custom environment, GTM gives you an alternate snippet that loads a specific container version on that environment.
+
+### Setting up a staging environment
+
+<Steps>
+1. In your container, go to Admin → Environments → Create.
+
+2. Name it "Staging" (or whatever matches your environment names).
+
+3. GTM generates a different snippet for this environment. Install it on your staging server alongside (or instead of) your production snippet.
+
+4. When you want to test a workspace before publishing to production: in Environments, click the staging environment and select which workspace to use.
+</Steps>
+
+Your staging server now loads that workspace's configuration. Production still runs the last published version. This lets you test GTM changes on real data before they go live.
+
+<Aside type="note">
+Setting up a staging environment from day one costs 15 minutes. Not having one costs hours the first time a bad publish breaks production tracking. Set it up now.
+</Aside>
+
+## User permissions
+
+GTM has four permission levels, set per container:
+
+| Level | What they can do |
+|-------|-----------------|
+| **Read** | View container configuration and version history |
+| **Edit** | Create and modify tags, triggers, variables; cannot publish |
+| **Approve** | Edit + review and approve workspaces before publishing |
+| **Publish** | Full access including publishing to production |
+
+### Recommended permission model
+
+**Large teams:**
+- Developers: Edit
+- Analytics team members: Edit
+- Analytics team leads: Approve
+- Designated release manager: Publish
+
+**Small teams (2-5 people):**
+- Developers: Edit or Approve
+- Analytics lead: Publish
+
+The key constraint: limit Publish access. Publishing is the action with real production impact. Every person with Publish access is someone who could accidentally push a breaking change. Keep the set small.
+
+### Account-level vs. container-level access
+
+Permissions can be granted at the account level (applies to all containers) or at the container level (applies to one container). Always use the most restrictive scope.
+
+If an agency needs access to one of your five containers, grant them container-level Edit access. Do not grant account-level access.
+
+## Multi-brand and multi-site strategies
+
+### Agency managing client accounts
+
+Each client should own their own GTM account. The agency should be added as a user with appropriate permissions. Never create client containers inside an agency-owned account — if the relationship ends, account ownership transfer is painful.
+
+### Enterprise with multiple brands
+
+One account with containers per domain-or-property is typically the right model. Each brand or product line gets its own container. Shared infrastructure (consent, user identification, cross-brand analytics) lives in a shared layer — typically handled through sGTM rather than by sharing a client-side container.
+
+### Microsite and campaign landing pages
+
+Short-lived microsites and campaign landing pages often get their own containers. This keeps them isolated from the main site container. Alternatively, install the main domain's container on the microsite if the tracking requirements are identical — it is simpler than maintaining a separate container for a page that lives for 30 days.
+
+## Naming your containers
+
+Container names are visible in the GTM interface but do not affect behavior. Make them descriptive:
+
+- `example.com — Web` (not "Container 1")
+- `app.example.com — Web`
+- `example.com — Server`
+
+If you have multiple environments for one property:
+- `example.com — Web (Production)`
+- `example.com — Web (Staging)` — only if your staging and production truly need different container configurations (rarely true; use environments instead)
+
+## Audit regularly
+
+GTM accounts accumulate cruft: paused tags that were "temporary," duplicate tags from migrations, abandoned workspaces, permissions granted to ex-employees. A quarterly audit keeps the container manageable.
+
+The checklist:
+
+- Remove or archive tags that have been paused for more than 90 days
+- Close workspaces that are more than 30 days old without a publish
+- Revoke access for anyone who has left the team or organization
+- Verify that the container's tag count is reasonable (>100 tags is a warning sign)
+- Check that every container has at least two users with Publish access (prevent single points of failure)
+
+<CardGrid>
+  <LinkCard
+    title="Workspaces"
+    description="Deep dive into using workspaces effectively for team-based GTM work."
+    href="/client-side/management/workspaces/"
+  />
+  <LinkCard
+    title="Environments"
+    description="Setting up and using GTM environments for staging and QA workflows."
+    href="/client-side/management/environments/"
+  />
+  <LinkCard
+    title="Permissions"
+    description="Complete guide to GTM user permissions and access management."
+    href="/client-side/management/permissions/"
+  />
+  <LinkCard
+    title="Naming Conventions"
+    description="Naming systems for tags, triggers, and variables that scale with your team."
+    href="/client-side/management/naming-conventions/"
+  />
+</CardGrid>

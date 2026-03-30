@@ -1,6 +1,184 @@
 ---
 title: "Parameter Naming Rules"
-description: "Consistent parameter naming across your dataLayer specification."
+description: "Custom parameter conventions, GA4 limits per event and per property, reserved names, and strategies for building a reusable parameter library."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Parameters are how GA4 receives the detail behind each event. Event names describe what happened — parameters describe everything else: which product, what price, which user segment, what page. Getting parameter naming right is what makes your reports filterable, your funnels accurate, and your custom dimensions useful.
+
+## GA4 auto-collected parameters: don't duplicate them
+
+GA4 automatically collects these parameters on every event. You do not need to push them to the dataLayer — doing so either has no effect or creates conflicts.
+
+| Parameter | What it captures |
+|-----------|----------------|
+| `page_location` | Full URL including query string |
+| `page_title` | Document title |
+| `page_referrer` | Previous page URL |
+| `screen_resolution` | Viewport dimensions |
+| `language` | Browser language |
+| `session_id` | Session identifier |
+| `engagement_time_msec` | Time spent engaged |
+
+If you push a `page_location` parameter manually to an event, it will appear as a separate parameter in the event payload — but GA4 already captures it automatically at the hit level. The result is clutter, not data.
+
+## The 25 custom parameter limit per event
+
+Each event you send to GA4 can carry a maximum of 25 custom parameters (not counting GA4's auto-collected parameters). This limit is per event hit, not per property.
+
+In practice you're unlikely to hit this limit on most events — a typical ecommerce event carries 6–10 parameters. Where it matters is events that try to do too much, like a "page view" event that bundles all possible page metadata into a single push.
+
+```javascript
+// ❌ Over-stuffed event — approaches the 25-parameter limit fast
+dataLayer.push({
+  event: 'page_view',
+  page_type: 'product_detail',
+  page_category: 'Apparel',
+  page_subcategory: 'Jackets',
+  page_brand: 'Heritage Co.',
+  user_id: '12345',
+  user_segment: 'returning_buyer',
+  user_loyalty_tier: 'gold',
+  ab_test_id: 'EXP-447',
+  ab_test_variant: 'B',
+  cms_template: 'product_v3',
+  // ... and 15 more ...
+});
+```
+
+The solution is not to pack everything into one event. Separate concerns: push user properties once at login, push page-level context on page view, push product context on product events. Each event carries only what's relevant to that specific action.
+
+## The 50 custom dimension limit per property
+
+Even if you stay within 25 parameters per event, there's a property-level limit: GA4 allows 50 event-scoped custom dimensions and 25 user-scoped custom dimensions per property (standard). Every unique parameter name you register as a custom dimension counts against this limit.
+
+This limit is the one that bites teams mid-project. You register 30 custom dimensions, then a new feature needs 10 more, and you're suddenly at the ceiling with no room for future tracking.
+
+**Strategy**: design your parameter library before implementation, not during. Audit how many custom dimensions you'll need before you write the first `dataLayer.push`. If you're close to 50, consider whether some parameters can reuse existing custom dimension slots with a different name, or whether some data belongs in BigQuery rather than GA4 reports.
+
+<Aside type="caution">
+GA4 360 raises the custom dimension limit to 125 event-scoped dimensions. If you're on standard GA4 and approaching the ceiling, this is a legitimate reason to evaluate GA4 360 — not to exceed limits arbitrarily, but because a large implementation genuinely needs the headroom.
+</Aside>
+
+## Parameter length limits
+
+| What | Limit |
+|------|-------|
+| Parameter name | 40 characters |
+| Parameter value (string) | 100 characters |
+| User property name | 24 characters |
+| User property value | 36 characters |
+
+Values longer than these limits are truncated — not rejected, not flagged, just silently cut off. Product descriptions, full URLs, and long category paths are the usual culprits.
+
+```javascript
+// ❌ Value truncated at 100 characters
+item_description: 'This premium hand-stitched leather jacket is made from full-grain cowhide sourced from...'
+// Becomes: 'This premium hand-stitched leather jacket is made from full-grain cowhide sourced from...' [truncated]
+
+// ✅ Keep values short and categorical
+item_category: 'Outerwear'
+item_type: 'Leather Jacket'
+```
+
+For long-form data you want to keep intact, BigQuery export is the right destination — not GA4 event parameters.
+
+## Reserved parameter names
+
+These parameter names have special meaning in GA4 and should not be used for custom data:
+
+```
+campaign, content, medium, source, term  — UTM parameters
+currency, value, items                   — Ecommerce parameters (fine to use in ecommerce context)
+engagement_time_msec, session_id         — Auto-collected parameters
+firebase_screen, firebase_class          — Firebase-specific parameters
+first_open_time                          — App parameters
+```
+
+Using these names for custom data that isn't what GA4 expects will produce confusing results — your custom data will overwrite or be overwritten by the auto-collected equivalent.
+
+## Parameter reuse: building a shared library
+
+The most maintainable parameter libraries are the ones with the smallest footprint. Instead of creating unique parameters for every event, define a shared set of parameters that reuse the same names when the same kind of data is being described.
+
+**Universal parameters** — appear on many events, always with the same name:
+
+```javascript
+// These should be consistent across your entire dataLayer
+user_id           // the authenticated user's ID — always this name
+page_type         // always 'product_detail', 'category', 'cart', etc.
+content_type      // always 'article', 'video', 'guide', etc.
+form_name         // always the form's name string
+```
+
+**Event-specific parameters** — only appear on certain event types:
+
+```javascript
+// Only on ecommerce events
+transaction_id
+shipping_tier
+payment_type
+
+// Only on content events
+content_author
+reading_time_seconds
+content_word_count
+```
+
+When a parameter name means the same thing on multiple events, always use the same name. When you register it as a custom dimension in GA4, you register it once and it works across all events.
+
+## Data type conventions for parameters
+
+Parameters that represent numbers should always be numbers, not strings. Parameters that represent categorical data should always be strings.
+
+```javascript
+// ✅ Correct types
+price: 49.99          // number
+quantity: 2           // number
+is_sale: true         // boolean
+item_category: 'Apparel'  // string
+currency: 'USD'       // string (ISO code)
+item_id: 'SKU-001'    // string (even if it looks numeric)
+
+// ❌ Wrong types
+price: '49.99'        // string — GA4 won't aggregate this as revenue
+price: '$49.99'       // string with currency symbol
+quantity: '2'         // string — GA4 won't do quantity math
+is_sale: 'true'       // string instead of boolean
+```
+
+See [Data Types](/datalayer/specification/data-types/) for the complete type reference.
+
+## Common mistakes
+
+**Registering parameters as custom dimensions before testing.** Custom dimension registration in GA4 is permanent — you can archive a dimension but you cannot reuse its slot completely. Register only parameters you've validated are firing correctly with the right values.
+
+**Different names for the same concept across events.** `form_name` on a form event and `form_identifier` on an error event are the same data — pick one name and use it everywhere.
+
+**High-cardinality values in custom dimensions.** A custom dimension on `item_id` across a product catalog of 50,000 SKUs will generate the "(other)" row in GA4 reports as the cardinality threshold is exceeded. For high-cardinality identifiers, send them as parameters in your dataLayer but use BigQuery for analysis instead of GA4 custom dimensions.
+
+**Sending user PII.** Never push email addresses, names, phone numbers, or any personally identifiable information as event parameters. If you need user identification for cross-device tracking, use hashed user IDs (`user_id` parameter) — never raw PII.
+
+<CardGrid>
+  <LinkCard
+    title="Event Naming Rules"
+    description="Rules for naming events — GA4 recommended events, the 40-character limit, event taxonomy design."
+    href="/datalayer/specification/event-naming-rules/"
+  />
+  <LinkCard
+    title="Data Types"
+    description="Standards for parameter values — when to use strings, numbers, booleans, and common type mistakes."
+    href="/datalayer/specification/data-types/"
+  />
+  <LinkCard
+    title="TypeScript Schemas"
+    description="Enforce parameter naming and types at compile time with TypeScript interfaces."
+    href="/datalayer/validation/typescript-schemas/"
+  />
+  <LinkCard
+    title="Naming Conventions"
+    description="The complete naming convention reference for events and parameters."
+    href="/datalayer/specification/naming-conventions/"
+  />
+</CardGrid>

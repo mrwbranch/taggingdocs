@@ -1,6 +1,539 @@
 ---
-title: "Testing Framework"
-description: "Framework for systematic tracking QA and testing."
+title: "Analytics Testing Framework"
+description: "Building a systematic testing framework for your GTM and GA4 implementation — from manual verification to automated dataLayer tests to CI/CD integration."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Analytics bugs are uniquely dangerous because they are silent. A broken `purchase` event does not throw a console error, crash the site, or trigger an alert. It just stops recording revenue — and the business might not notice for days or weeks.
+
+The testing pyramid for analytics mirrors software testing: fast, cheap unit tests at the base, integration tests in the middle, end-to-end verification at the top. This article builds that pyramid for your implementation, from manual verification through automated test suites and CI/CD integration.
+
+<Aside type="caution">
+Manual testing in GTM Preview is necessary but insufficient. Preview mode does not catch bugs that only appear in production (consent differences, async timing, server-side processing). Automate what you can.
+</Aside>
+
+---
+
+## The analytics testing pyramid
+
+```
+         ┌──────────────────┐
+         │   E2E: Data in   │  Slowest, most expensive
+         │     GA4/BQ       │  Run: pre-launch, weekly
+         ├──────────────────┤
+         │  Integration:    │  Medium speed
+         │ GTM Preview &    │  Run: before every publish
+         │  GA4 DebugView   │
+         ├──────────────────┤
+         │   Unit: dL push  │  Fastest, cheapest
+         │   validation     │  Run: in CI on every commit
+         └──────────────────┘
+```
+
+**Layer 1 — Unit tests**: Verify that your application pushes correctly shaped dataLayer events. These are JavaScript tests that run against your frontend code in isolation — no browser, no GTM, no GA4.
+
+**Layer 2 — Integration tests**: Verify that GTM receives the events and fires the right tags. Run these in GTM Preview mode, or with a headless browser against your staging environment.
+
+**Layer 3 — End-to-end tests**: Verify that data flows from the browser all the way through GTM into GA4 with the right parameters. These are the most valuable and the most expensive to run.
+
+---
+
+## Layer 1: Unit testing your dataLayer
+
+Unit tests for the dataLayer validate that your application code pushes the right event structure. They do not test GTM or GA4 — they test your code.
+
+### Setting up the test environment
+
+Use Jest or Vitest. You need to mock the `window.dataLayer` global.
+
+```javascript
+// test/setup.js
+beforeEach(() => {
+  // Reset the dataLayer before each test
+  window.dataLayer = [];
+  // Mock the push method to capture calls
+  window.dataLayer.push = jest.fn((...args) => {
+    Array.prototype.push.apply(window.dataLayer, args);
+  });
+});
+```
+
+### Writing dataLayer unit tests
+
+Test the shape, types, and required fields of every event your application pushes.
+
+```javascript
+// test/tracking/purchase.test.js
+import { trackPurchase } from '../../src/tracking/purchase';
+
+describe('Purchase event tracking', () => {
+  test('pushes ecommerce: null before purchase event', () => {
+    const orderData = {
+      transactionId: 'TXN-001',
+      total: 54.98,
+      currency: 'USD',
+      items: [{ id: 'SKU-001', name: 'T-Shirt', price: 27.49, quantity: 2 }]
+    };
+
+    trackPurchase(orderData);
+
+    // The first push should always be the ecommerce clear
+    expect(window.dataLayer[0]).toEqual({ ecommerce: null });
+  });
+
+  test('pushes correctly shaped purchase event', () => {
+    const orderData = {
+      transactionId: 'TXN-001',
+      total: 54.98,
+      currency: 'USD',
+      items: [{ id: 'SKU-001', name: 'T-Shirt', price: 27.49, quantity: 2 }]
+    };
+
+    trackPurchase(orderData);
+
+    const purchaseEvent = window.dataLayer[1];
+    expect(purchaseEvent.event).toBe('purchase');
+    expect(purchaseEvent.ecommerce.transaction_id).toBe('TXN-001');
+    expect(purchaseEvent.ecommerce.value).toBe(54.98);
+    expect(purchaseEvent.ecommerce.currency).toBe('USD');
+    expect(purchaseEvent.ecommerce.items).toHaveLength(1);
+  });
+
+  test('item array contains required fields', () => {
+    const orderData = {
+      transactionId: 'TXN-001',
+      total: 27.49,
+      currency: 'USD',
+      items: [{ id: 'SKU-001', name: 'T-Shirt', price: 27.49, quantity: 1 }]
+    };
+
+    trackPurchase(orderData);
+
+    const item = window.dataLayer[1].ecommerce.items[0];
+    expect(item).toHaveProperty('item_id');
+    expect(item).toHaveProperty('item_name');
+    expect(typeof item.price).toBe('number');
+    expect(typeof item.quantity).toBe('number');
+  });
+
+  test('value is a number, not a string', () => {
+    const orderData = {
+      transactionId: 'TXN-001',
+      total: 54.98,  // Make sure this does not become "54.98"
+      currency: 'USD',
+      items: []
+    };
+
+    trackPurchase(orderData);
+
+    expect(typeof window.dataLayer[1].ecommerce.value).toBe('number');
+  });
+
+  test('currency is a valid 3-letter ISO code', () => {
+    const orderData = {
+      transactionId: 'TXN-001',
+      total: 54.98,
+      currency: 'USD',
+      items: []
+    };
+
+    trackPurchase(orderData);
+
+    const currency = window.dataLayer[1].ecommerce.currency;
+    expect(currency).toMatch(/^[A-Z]{3}$/);
+  });
+});
+```
+
+### Testing React components
+
+If your tracking is in React components, test through user interactions with `@testing-library/react`:
+
+```javascript
+// test/tracking/AddToCartButton.test.jsx
+import { render, fireEvent } from '@testing-library/react';
+import { AddToCartButton } from '../../src/components/AddToCartButton';
+
+describe('AddToCartButton tracking', () => {
+  const product = {
+    id: 'SKU-001',
+    name: 'Classic T-Shirt',
+    price: 29.99,
+    category: 'Clothing'
+  };
+
+  test('fires add_to_cart event when clicked', () => {
+    const { getByText } = render(<AddToCartButton product={product} />);
+
+    fireEvent.click(getByText('Add to Cart'));
+
+    expect(window.dataLayer).toHaveLength(2); // null clear + event
+    expect(window.dataLayer[1].event).toBe('add_to_cart');
+    expect(window.dataLayer[1].ecommerce.items[0].item_id).toBe('SKU-001');
+    expect(window.dataLayer[1].ecommerce.items[0].price).toBe(29.99);
+  });
+
+  test('does not fire if product is out of stock', () => {
+    const outOfStockProduct = { ...product, inStock: false };
+    const { getByText } = render(<AddToCartButton product={outOfStockProduct} />);
+
+    fireEvent.click(getByText('Notify Me'));
+
+    // Should not have fired an add_to_cart event
+    const addToCartEvents = window.dataLayer.filter(e => e.event === 'add_to_cart');
+    expect(addToCartEvents).toHaveLength(0);
+  });
+});
+```
+
+---
+
+## Layer 2: Integration testing with Playwright
+
+Playwright lets you run a real browser, navigate your site (or staging environment), and assert that GTM fires correctly and the dataLayer contains the expected values.
+
+### Setup
+
+```bash
+npm install --save-dev @playwright/test
+npx playwright install chromium
+```
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './tests/analytics',
+  use: {
+    baseURL: process.env.TEST_BASE_URL || 'https://staging.yoursite.com',
+    // Collect console logs for debugging
+    launchOptions: {
+      args: ['--disable-extensions']
+    }
+  },
+  reporter: [['list'], ['html', { outputFolder: 'playwright-report' }]]
+});
+```
+
+### DataLayer helper utilities
+
+```typescript
+// tests/analytics/helpers/dataLayer.ts
+import { Page } from '@playwright/test';
+
+/**
+ * Wait for a specific dataLayer event to appear, with timeout.
+ */
+export async function waitForDataLayerEvent(
+  page: Page,
+  eventName: string,
+  timeoutMs = 5000
+): Promise<Record<string, unknown>> {
+  const event = await page.waitForFunction(
+    (name) => {
+      const dl = window.dataLayer || [];
+      return dl.find((entry: Record<string, unknown>) => entry.event === name);
+    },
+    eventName,
+    { timeout: timeoutMs }
+  );
+
+  return event.jsonValue() as Promise<Record<string, unknown>>;
+}
+
+/**
+ * Get all dataLayer events of a specific type.
+ */
+export async function getDataLayerEvents(
+  page: Page,
+  eventName?: string
+): Promise<Array<Record<string, unknown>>> {
+  return page.evaluate((name) => {
+    const dl = window.dataLayer || [];
+    if (!name) return dl;
+    return dl.filter((entry: Record<string, unknown>) => entry.event === name);
+  }, eventName);
+}
+
+/**
+ * Get the most recent dataLayer entry.
+ */
+export async function getLastDataLayerEvent(
+  page: Page
+): Promise<Record<string, unknown> | null> {
+  return page.evaluate(() => {
+    const dl = window.dataLayer || [];
+    return dl.length > 0 ? dl[dl.length - 1] : null;
+  });
+}
+```
+
+### Integration test suite
+
+```typescript
+// tests/analytics/ecommerce.spec.ts
+import { test, expect } from '@playwright/test';
+import { waitForDataLayerEvent, getDataLayerEvents } from './helpers/dataLayer';
+
+test.describe('Ecommerce tracking', () => {
+  test('product detail page fires view_item', async ({ page }) => {
+    await page.goto('/products/classic-t-shirt');
+
+    const event = await waitForDataLayerEvent(page, 'view_item');
+
+    expect(event.event).toBe('view_item');
+    const ecom = event.ecommerce as Record<string, unknown>;
+    expect(ecom).toBeTruthy();
+
+    const items = ecom.items as Array<Record<string, unknown>>;
+    expect(items).toHaveLength(1);
+    expect(items[0].item_id).toBeTruthy();
+    expect(items[0].item_name).toBeTruthy();
+    expect(typeof items[0].price).toBe('number');
+  });
+
+  test('add to cart fires correct event structure', async ({ page }) => {
+    await page.goto('/products/classic-t-shirt');
+    await page.click('[data-testid="add-to-cart-button"]');
+
+    const event = await waitForDataLayerEvent(page, 'add_to_cart');
+
+    const ecom = event.ecommerce as Record<string, unknown>;
+    expect(ecom.currency).toMatch(/^[A-Z]{3}$/);
+    expect(typeof ecom.value).toBe('number');
+
+    const items = ecom.items as Array<Record<string, unknown>>;
+    expect(items[0].item_id).toBeTruthy();
+  });
+
+  test('ecommerce: null is pushed before purchase event', async ({ page }) => {
+    // Complete a purchase flow
+    await page.goto('/checkout/confirmation?order_id=TEST-001');
+
+    const allEvents = await getDataLayerEvents(page);
+    const purchaseIndex = allEvents.findIndex(e => e.event === 'purchase');
+
+    expect(purchaseIndex).toBeGreaterThan(0);
+
+    // The event immediately before purchase should be the ecommerce null clear
+    const clearEvent = allEvents[purchaseIndex - 1];
+    expect(clearEvent).toEqual({ ecommerce: null });
+  });
+
+  test('purchase event contains complete required fields', async ({ page }) => {
+    await page.goto('/checkout/confirmation?order_id=TEST-001');
+
+    const event = await waitForDataLayerEvent(page, 'purchase');
+    const ecom = event.ecommerce as Record<string, unknown>;
+
+    expect(ecom.transaction_id).toBeTruthy();
+    expect(typeof ecom.value).toBe('number');
+    expect(ecom.value).toBeGreaterThan(0);
+    expect(ecom.currency).toMatch(/^[A-Z]{3}$/);
+
+    const items = ecom.items as Array<Record<string, unknown>>;
+    expect(items.length).toBeGreaterThan(0);
+    items.forEach(item => {
+      expect(item.item_id).toBeTruthy();
+      expect(item.item_name).toBeTruthy();
+    });
+  });
+});
+
+test.describe('Consent compliance', () => {
+  test('GA4 does not fire before consent is given', async ({ page }) => {
+    // Intercept GA4 network requests
+    const ga4Requests: string[] = [];
+    page.on('request', (req) => {
+      if (req.url().includes('google-analytics.com/g/collect')) {
+        ga4Requests.push(req.url());
+      }
+    });
+
+    // Navigate without accepting consent
+    await page.goto('/');
+
+    // Wait a moment for any incorrect fires
+    await page.waitForTimeout(2000);
+
+    expect(ga4Requests).toHaveLength(0);
+  });
+
+  test('GA4 fires after consent is granted', async ({ page }) => {
+    const ga4Requests: string[] = [];
+    page.on('request', (req) => {
+      if (req.url().includes('google-analytics.com/g/collect')) {
+        ga4Requests.push(req.url());
+      }
+    });
+
+    await page.goto('/');
+    await page.click('[data-testid="consent-accept-all"]');
+
+    // Wait for GA4 to fire
+    await page.waitForTimeout(2000);
+
+    expect(ga4Requests.length).toBeGreaterThan(0);
+  });
+});
+```
+
+---
+
+## Layer 3: End-to-end verification in GA4
+
+End-to-end tests verify that data arrives in GA4 with the correct structure. This requires querying the GA4 API or BigQuery.
+
+### Using GA4 DebugView programmatically
+
+The GA4 Realtime API lets you query events that have fired in the last 30 minutes, but it is rate-limited and does not show parameter-level detail. For development verification, use DebugView in the browser.
+
+For automated E2E, the most practical approach is BigQuery with intraday tables.
+
+### BigQuery intraday verification
+
+GA4 exports events to BigQuery with intraday tables available within minutes for properties with BigQuery linking:
+
+```sql
+-- Verify purchase events from the last hour
+SELECT
+  event_date,
+  event_timestamp,
+  event_name,
+  user_pseudo_id,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id') AS transaction_id,
+  (SELECT value.double_value FROM UNNEST(event_params) WHERE key = 'value') AS order_value,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'currency') AS currency,
+  ARRAY_LENGTH(items) AS item_count
+FROM `your-project.analytics_XXXXXXXXX.events_intraday_*`
+WHERE event_name = 'purchase'
+  AND TIMESTAMP_MICROS(event_timestamp) > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+ORDER BY event_timestamp DESC
+LIMIT 20;
+```
+
+---
+
+## CI/CD integration
+
+Integrate your unit tests into CI to catch dataLayer regressions on every pull request.
+
+### GitHub Actions workflow
+
+```yaml
+# .github/workflows/analytics-tests.yml
+name: Analytics Tests
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/analytics/**'
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test -- --testPathPattern="tracking"
+        env:
+          CI: true
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    if: github.event.pull_request.base.ref == 'main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test tests/analytics/
+        env:
+          TEST_BASE_URL: ${{ secrets.STAGING_URL }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+```
+
+### Regression testing after GTM publishes
+
+GTM container publishes are not code deployments — they do not go through your CI pipeline. Create a separate workflow that triggers after a publish, or run the integration test suite manually before publishing.
+
+The simplest approach: tag GTM publishes in your change log, then run the integration suite against staging with GTM Preview mode pointing to the new container version before promoting to production.
+
+---
+
+## Canary testing for container publishes
+
+Before publishing a GTM container to 100% of users, test it on a small slice. GTM does not have built-in traffic splitting, but you can approximate it:
+
+1. Publish the new version to a **preview environment** (your staging URL)
+2. Run the full integration test suite against staging
+3. After staging passes, publish to production
+4. Monitor GA4 Realtime for 15-30 minutes immediately post-publish
+5. Check for unexpected drops in key event counts in GA4 Realtime
+
+For high-traffic sites, consider temporarily routing 10% of users to a container version that includes extra validation tags that log to your monitoring system.
+
+---
+
+## Monitoring: catching regressions after they happen
+
+Testing catches problems before launch. Monitoring catches problems that slip through.
+
+Set up anomaly alerts in GA4 (Admin → Alerts) for:
+- Key event volume dropping more than 20% week-over-week
+- Purchase event `value` average dropping significantly
+- Any key event going to zero
+
+For BigQuery users, a daily query comparing yesterday's event counts to the 7-day average flags silent breakages quickly:
+
+```sql
+-- Anomaly detection: events below 80% of 7-day average
+WITH daily_counts AS (
+  SELECT
+    event_name,
+    event_date,
+    COUNT(*) AS event_count,
+    AVG(COUNT(*)) OVER (
+      PARTITION BY event_name
+      ORDER BY event_date
+      ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING
+    ) AS avg_7d
+  FROM `your-project.analytics_XXXXXXXXX.events_*`
+  WHERE _TABLE_SUFFIX >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY))
+  GROUP BY event_name, event_date
+)
+SELECT
+  event_name,
+  event_date,
+  event_count,
+  ROUND(avg_7d) AS avg_7d,
+  ROUND(event_count / avg_7d * 100) AS pct_of_avg
+FROM daily_counts
+WHERE event_date = FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
+  AND avg_7d > 10  -- Only flag events with meaningful volume
+  AND event_count < avg_7d * 0.8  -- Below 80% of average
+ORDER BY pct_of_avg ASC;
+```
+
+---
+
+## Related Resources
+
+- [GTM & GA4 Audit Checklist](/resources/audit-checklist/) — Systematic review to catch issues the test suite may not cover
+- [Tracking Documentation Template](/resources/documentation-template/) — The test scenarios in Template 4 formalize what these tests verify
+- [GTM API Automation](/resources/gtm-api-automation/) — Automating container exports and notifications that complement this testing framework

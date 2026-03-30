@@ -1,6 +1,342 @@
 ---
-title: "Migration: UA to GA4"
-description: "Guide for migrating from Universal Analytics to GA4."
+title: "Migration: Universal Analytics to GA4"
+description: "The complete guide to migrating from Universal Analytics to GA4 — mental model shifts, event mapping, Enhanced Ecommerce conversion, custom dimensions, and BigQuery schema changes."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Universal Analytics is gone. Google shut it down in July 2023, and the data access window closed in 2024. Yet the mental models, data structures, and reporting habits built on UA still influence how many practitioners approach GA4 — often in ways that cause problems.
+
+This guide covers the migration comprehensively: the conceptual shift you need to make, how UA event structures map to GA4, how Enhanced Ecommerce becomes GA4 ecommerce, how custom dimensions work differently, and what changed in BigQuery. Treat this as a reference to return to whenever something in GA4 does not behave the way UA did.
+
+<Aside type="note">
+This guide is for teams who already have UA experience and are translating that knowledge to GA4. If you are starting fresh with GA4, read the [GA4 Fundamentals](/ga4/fundamentals/) section instead.
+</Aside>
+
+## The fundamental mental model shift
+
+The most important thing to understand about GA4 is that **it is not UA with a different UI**. It is a different data model built on different assumptions.
+
+Universal Analytics modeled behavior as **sessions** containing **hits**. A session was the container; hits (pageviews, events, transactions) were the content. Every metric was ultimately anchored to sessions — session duration, pages per session, bounce rate, goal conversion rate.
+
+GA4 models behavior as a **stream of events**. There is no natural session boundary in the data model. Sessions are a derived concept, computed after the fact from event timestamps and idle gaps. Every interaction — pageviews, clicks, purchases, user engagement — is just an event with parameters.
+
+This shift has practical consequences:
+
+**Bounce rate is gone (mostly).** GA4 replaced it with engagement rate. An "engaged session" is one lasting 10+ seconds, triggering a conversion, or containing 2+ page views. Bounce rate is 100 minus engagement rate. Neither metric is directly comparable to UA's bounce rate.
+
+**Sessions are calculated differently.** UA sessions reset at midnight and reset when campaign parameters change mid-session. GA4 sessions do not reset at midnight. A user visiting at 11:58 PM and leaving at 12:05 AM is one session in GA4, two in UA. This makes direct comparisons impossible.
+
+**Goals are now key events.** GA4 does not have goals. You mark events as "key events" (previously called conversions). The mechanism is similar but there is no goal funnel visualization built in the same way.
+
+**Direct traffic attribution is smaller in GA4.** GA4's default attribution is data-driven (for properties with enough data) or last-click. UA defaulted to last non-direct click. If your GA4 direct traffic looks higher than UA, the attribution model is likely the explanation.
+
+---
+
+## Event mapping: Category/Action/Label to GA4
+
+UA events had a rigid three-tier structure: Category, Action, Label, plus an optional Value. Every event fit this shape, which meant practitioners shoehorned everything into it.
+
+```javascript
+// Universal Analytics event structure
+ga('send', 'event', 'Video', 'play', 'How-to Tutorial', 30);
+// Category   Action   Label              Value
+```
+
+GA4 events have a name and up to 25 parameters. There is no imposed hierarchy — you name the event descriptively and add whichever parameters are relevant.
+
+```javascript
+// GA4 equivalent
+window.dataLayer.push({
+  event: 'video_play',
+  video_title: 'How-to Tutorial',
+  video_duration: 30,
+  video_provider: 'youtube',
+  video_percent: 0
+});
+```
+
+<Comparison leftTitle="UA Event Structure" rightTitle="GA4 Event Structure" leftType="bad" rightType="good">
+  <Fragment slot="left">
+    ```javascript
+    // UA: forced into Category/Action/Label
+    ga('send', 'event', {
+      eventCategory: 'CTA Button',
+      eventAction: 'click',
+      eventLabel: 'hero-signup-button',
+      eventValue: undefined
+    });
+
+    // The structure doesn't tell you much.
+    // Was this a top-of-page button? A modal?
+    // Which page was the user on?
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```javascript
+    // GA4: descriptive event name + parameters
+    window.dataLayer.push({
+      event: 'cta_click',
+      cta_text: 'Get Started Free',
+      cta_location: 'hero',
+      cta_destination: '/signup',
+      page_type: 'homepage'
+    });
+
+    // Each parameter is independently filterable
+    // and reportable in GA4 explorations
+    ```
+  </Fragment>
+</Comparison>
+
+### Common UA event → GA4 event mappings
+
+| UA Category / Action | GA4 Event Name | Key Parameters |
+|---------------------|----------------|----------------|
+| Video / play | `video_start` | `video_title`, `video_provider`, `video_url` |
+| Video / 25% | `video_progress` | `video_percent: 25`, `video_title` |
+| Form / submit | `form_submit` | `form_id`, `form_name`, `form_destination` |
+| CTA Button / click | `cta_click` | `cta_text`, `cta_location`, `page_type` |
+| PDF / download | `file_download` | `file_name`, `file_extension: 'pdf'`, `link_url` |
+| Outbound / click | `click` | `link_url`, `link_domain`, `outbound: true` |
+| Social / share | `share` | `method`, `content_type`, `item_id` |
+| Search / query | `search` | `search_term` |
+| Error / 404 | `page_not_found` | `page_location`, `referrer` |
+
+<Aside type="tip">
+GA4 has a list of recommended event names for common interaction types. Using these recommended names enables automatic comparisons with benchmarks and makes it easier for Google to understand your data. See the [GA4 Events reference](https://developers.google.com/analytics/devguides/collection/ga4/reference/events) for the full list.
+</Aside>
+
+---
+
+## Ecommerce migration: Enhanced Ecommerce to GA4
+
+This is where migrations get complex. UA Enhanced Ecommerce had its own data structure with specific object shapes. GA4 ecommerce uses different event names, different parameter names, and a different items array structure.
+
+### Event name mapping
+
+| UA Enhanced Ecommerce | GA4 Ecommerce |
+|----------------------|---------------|
+| Product Impression | `view_item_list` |
+| Product Click | `select_item` |
+| Product Detail | `view_item` |
+| Add to Cart | `add_to_cart` |
+| Remove from Cart | `remove_from_cart` |
+| Checkout Step 1 | `begin_checkout` |
+| Checkout Step 2+ | `add_shipping_info`, `add_payment_info` |
+| Purchase | `purchase` |
+| Refund | `refund` |
+| Promo Impression | `view_promotion` |
+| Promo Click | `select_promotion` |
+
+### Item object structure
+
+UA products and GA4 items have different field names:
+
+| UA Product Field | GA4 Item Field | Notes |
+|-----------------|----------------|-------|
+| `id` | `item_id` | Required |
+| `name` | `item_name` | Required |
+| `brand` | `item_brand` | |
+| `category` | `item_category` | GA4 supports up to `item_category5` for hierarchy |
+| `variant` | `item_variant` | |
+| `price` | `price` | |
+| `quantity` | `quantity` | |
+| `position` | `index` | |
+| N/A | `item_list_id` | New in GA4 |
+| N/A | `item_list_name` | New in GA4 |
+| N/A | `affiliation` | New in GA4 |
+| N/A | `discount` | New in GA4 |
+
+### Full GA4 purchase event example
+
+```javascript
+// Before every ecommerce push, clear the previous data
+window.dataLayer.push({ ecommerce: null });
+
+// GA4 purchase event
+window.dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: 'TXN-12345',
+    value: 54.98,
+    tax: 4.50,
+    shipping: 5.99,
+    currency: 'USD',
+    coupon: 'SUMMER10',
+    items: [
+      {
+        item_id: 'SKU-001',
+        item_name: 'Classic T-Shirt',
+        item_brand: 'Acme',
+        item_category: 'Clothing',
+        item_category2: 'Tops',
+        item_variant: 'Blue / L',
+        price: 24.99,
+        quantity: 2,
+        discount: 2.50,
+        affiliation: 'Online Store'
+      }
+    ]
+  }
+});
+```
+
+<Aside type="caution">
+The `ecommerce: null` push before every ecommerce event is critical. GTM's internal data model merges objects recursively, which means without this clearing step, items from a previous `add_to_cart` event will bleed into your `purchase` event. This bug is easy to miss because it only shows up when users complete multiple ecommerce actions in the same session.
+
+See the [DataLayer Deep Dive](/foundations/datalayer-deep-dive/) for full details on this behavior.
+</Aside>
+
+---
+
+## Custom dimensions: scope changes
+
+UA had four custom dimension scopes: Hit, Session, User, and Product. GA4 simplified this to two scopes with different mechanics.
+
+### UA scopes vs. GA4 scopes
+
+| UA Scope | GA4 Equivalent | Notes |
+|----------|----------------|-------|
+| Hit | Event-scoped | Attached to a specific event |
+| Session | No direct equivalent | Use event-scoped with session-identifying parameters |
+| User | User-scoped | Set via `set_user_properties` or user properties in config |
+| Product | Item-scoped | Parameters inside the `items` array |
+
+### Custom dimension registration
+
+In UA, you registered custom dimensions in the property settings with an index number, then referenced that index in your tracking code. In GA4, you register them by parameter name in the Admin panel.
+
+Every parameter you want to use in GA4 Explorations, Segments, or custom reports must be registered as a Custom Dimension. If you send a parameter but do not register it, GA4 collects the data but you cannot use it in reports.
+
+```javascript
+// GA4: sending a custom event-scoped dimension
+window.dataLayer.push({
+  event: 'article_read',
+  article_author: 'Jane Smith',     // Register this in GA4 as event-scoped
+  article_category: 'Analytics',   // Register this in GA4 as event-scoped
+  article_word_count: 1850,         // Register this as a custom metric
+  user_subscription_tier: 'pro'     // Register this as user-scoped
+});
+```
+
+**GA4 custom dimension limits:**
+- 50 event-scoped custom dimensions
+- 25 user-scoped custom dimensions
+- 50 event-scoped custom metrics
+- 5 user-scoped custom metrics
+
+These limits are per property. In UA, the limits were also 20 hit-scoped and 20 session/user-scoped, but the counting was separate. Plan your custom dimension allocation before you start registering.
+
+---
+
+## Reporting differences
+
+The reports changed significantly. Here is what you need to know about finding the equivalent of your UA reports in GA4.
+
+### Where to find your UA reports in GA4
+
+| UA Report | GA4 Equivalent |
+|-----------|----------------|
+| Audience → Overview | Reports → User → User Attributes |
+| Acquisition → All Traffic | Reports → Acquisition → Traffic Acquisition |
+| Behavior → Site Content → All Pages | Reports → Engagement → Pages and Screens |
+| Behavior → Events → Top Events | Reports → Engagement → Events |
+| Conversions → Goals → Overview | Reports → Engagement → Conversions (key events) |
+| Ecommerce → Overview | Reports → Monetization → Ecommerce Purchases |
+| Custom Reports | Explore → Exploration |
+| Funnel Visualization | Explore → Funnel Exploration |
+| Cohort Analysis | Explore → Cohort Exploration |
+
+### What is genuinely better in GA4
+
+- **Funnels**: GA4 funnel explorations are more flexible than UA's goal funnels. You can make them open or closed, retroactively apply them to historical data, and segment within the funnel.
+- **Path exploration**: Sankey diagram of event sequences. Much more flexible than UA's Behavior Flow.
+- **BigQuery integration**: Free export for all properties (UA required GA360). The event-level schema gives you every parameter of every event.
+- **Cross-device reporting**: Google Signals integration for cross-device user counting is baked in.
+- **Predictive metrics**: Purchase probability, churn probability for remarketing audiences.
+
+### What you will miss from UA
+
+- **Views**: GA4 has no view-level filtering. Property-level data filters exist but are less flexible.
+- **Direct report customization**: UA's custom reports were simpler. GA4 Explorations are more powerful but require more setup.
+- **Keyword data**: UA showed (limited) organic keyword data via Search Console integration more seamlessly.
+- **Sampling thresholds**: UA sampled more aggressively. GA4 samples at different thresholds, which affects large Explorations.
+
+---
+
+## BigQuery schema changes
+
+If your team relies on BigQuery for advanced analysis, the schema change is significant.
+
+### UA BigQuery schema (GA360 only)
+
+UA exported session-level data. Each row represented a session, with hits nested in a `hits` repeated record. To analyze events, you had to unnest hits.
+
+```sql
+-- UA BigQuery: getting event data required unnesting
+SELECT
+  fullVisitorId,
+  visitId,
+  h.eventInfo.eventCategory,
+  h.eventInfo.eventAction,
+  h.eventInfo.eventLabel
+FROM `project.dataset.ga_sessions_*`,
+UNNEST(hits) AS h
+WHERE h.type = 'EVENT'
+  AND _TABLE_SUFFIX BETWEEN '20230101' AND '20230131'
+```
+
+### GA4 BigQuery schema
+
+GA4 exports event-level data. Each row is one event. Parameters are stored in an `event_params` repeated record as key-value pairs.
+
+```sql
+-- GA4 BigQuery: each row is one event
+SELECT
+  user_pseudo_id,
+  event_name,
+  event_date,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_location,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'source') AS source,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec') AS engagement_time
+FROM `project.dataset.events_*`
+WHERE event_name = 'page_view'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+```
+
+The `event_params` pattern (unnesting a repeated key-value record to extract values) is the most common GA4 BigQuery pattern. You will write this in nearly every query.
+
+### Key schema differences
+
+| Concept | UA BigQuery | GA4 BigQuery |
+|---------|-------------|--------------|
+| Row unit | Session | Event |
+| User identifier | `fullVisitorId` | `user_pseudo_id` |
+| Session identifier | `visitId` | `(SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id')` |
+| Custom dimensions | `customDimensions` repeated record | `event_params` or `user_properties` |
+| Ecommerce | `hits.transaction`, `hits.item` | `ecommerce` struct + `items` array |
+| Table naming | `ga_sessions_YYYYMMDD` | `events_YYYYMMDD` (or `events_intraday_YYYYMMDD`) |
+
+---
+
+## Common migration mistakes
+
+**Comparing GA4 and UA numbers directly.** You cannot. Different session definitions, different attribution models, different sampling thresholds. Expect GA4 to show different session counts and different conversion rates. This is expected, not a bug.
+
+**Forgetting to register custom dimensions.** You migrated all your dataLayer pushes to GA4 format — but the parameters do not appear in reports. Check Admin → Custom Definitions. Everything you want to report on needs to be registered.
+
+**Using the wrong attribution model.** GA4 defaults to data-driven attribution if you have enough conversions. UA defaulted to last non-direct click. If you are comparing ROAS across platforms, make sure you are comparing the same attribution model.
+
+**Treating Enhanced Measurement as complete tracking.** GA4's Enhanced Measurement is convenient but it fires based on DOM events and URL patterns — it is not based on your dataLayer. For reliable ecommerce tracking, always implement dataLayer-based events and disable any Enhanced Measurement events that overlap.
+
+**Not clearing ecommerce before every push.** The single most common GA4 ecommerce bug. Always push `{ ecommerce: null }` immediately before your ecommerce event push.
+
+---
+
+## Related Resources
+
+- [DataLayer Deep Dive](/foundations/datalayer-deep-dive/) — Understanding the dataLayer mechanics underlying GA4 implementation
+- [GA4 Audit Checklist](/resources/ga4-audit-checklist/) — Verify your GA4 property is configured correctly
+- [GTM & GA4 Audit Checklist](/resources/audit-checklist/) — Full implementation audit

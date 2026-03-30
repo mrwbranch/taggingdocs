@@ -1,6 +1,241 @@
 ---
 title: "Server-Side GTM"
-description: "Move your tracking server-side for better performance, privacy, and data quality."
+description: "Move your tracking infrastructure server-side for better data quality, stronger privacy controls, and first-party cookie lifetimes that browsers can't cut short."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Client-side tracking is gradually losing ground to browser restrictions, ad blockers, and tightening privacy regulations. Server-side Google Tag Manager addresses the most significant problems by moving tag execution from the user's browser to a server you control — collecting data via a first-party endpoint and forwarding it to your marketing and analytics vendors via server-to-server API calls.
+
+This section covers everything from the conceptual case for going server-side to production setup, client and tag configuration, advanced data engineering patterns, and day-to-day operations.
+
+<Aside type="note">
+Server-side GTM is not a replacement for your client-side container. The two work together: your client-side container (or a GA4 tag) sends data to your server-side endpoint, which then distributes it to your vendors. Most production implementations run both.
+</Aside>
+
+## Start here
+
+If you're new to server-side GTM, begin with the fundamentals. Understanding the architecture before touching the setup saves you hours of debugging later.
+
+<CardGrid>
+  <LinkCard
+    title="Why Server-Side?"
+    description="The honest case for sGTM — what it actually fixes, what it doesn't, and when it's not worth the investment."
+    href="/server-side/fundamentals/why-server-side/"
+  />
+  <LinkCard
+    title="Architecture Overview"
+    description="How sGTM works: clients, tags, the Event Model, and the full data flow from browser to vendor."
+    href="/server-side/fundamentals/architecture-overview/"
+  />
+  <LinkCard
+    title="Client vs. Server Comparison"
+    description="Side-by-side comparison of client-side and server-side GTM — execution environment, capabilities, and tradeoffs."
+    href="/server-side/fundamentals/client-vs-server-comparison/"
+  />
+  <LinkCard
+    title="When to Use sGTM"
+    description="Decision framework for adopting server-side GTM — traffic thresholds, ad spend considerations, and team capability requirements."
+    href="/server-side/fundamentals/when-to-use-sgtm/"
+  />
+</CardGrid>
+
+## Setup
+
+Getting sGTM running requires cloud infrastructure, DNS configuration, and SSL certificates. Pick your hosting path and follow the guide.
+
+<CardGrid>
+  <LinkCard
+    title="GCP Setup"
+    description="Deploy sGTM on Google Cloud Platform using Cloud Run — the canonical setup recommended by Google."
+    href="/server-side/setup/gcp-setup/"
+  />
+  <LinkCard
+    title="AWS Setup"
+    description="Running sGTM on AWS with ECS Fargate — when your team is already on Amazon's infrastructure."
+    href="/server-side/setup/aws-setup/"
+  />
+  <LinkCard
+    title="Stape Setup"
+    description="Managed sGTM hosting with Stape — fastest path to production without managing your own cloud infrastructure."
+    href="/server-side/setup/stape-setup/"
+  />
+  <LinkCard
+    title="Custom Domain Setup"
+    description="Configuring a first-party subdomain for your sGTM server — the foundation of first-party tracking."
+    href="/server-side/setup/custom-domain-setup/"
+  />
+  <LinkCard
+    title="First-Party Domain Config"
+    description="Cookie settings, FPID, and the full first-party data collection configuration."
+    href="/server-side/setup/first-party-domain-config/"
+  />
+  <LinkCard
+    title="Cloud Run Scaling"
+    description="Autoscaling, cold starts, minimum instances, and cost optimization for Cloud Run deployments."
+    href="/server-side/setup/cloud-run-scaling/"
+  />
+</CardGrid>
+
+## Clients
+
+Clients are the components that receive incoming HTTP requests and transform them into the Event Model. Understanding how they work is prerequisite knowledge for debugging anything in sGTM.
+
+<CardGrid>
+  <LinkCard
+    title="What Are Clients?"
+    description="The Client concept in sGTM — how they claim requests, build the Event Model, and what happens when no client claims."
+    href="/server-side/clients/what-are-clients/"
+  />
+  <LinkCard
+    title="GA4 Web Client"
+    description="The default GA4 client — configuration, request parsing, and Event Model mapping."
+    href="/server-side/clients/ga4-web-client/"
+  />
+  <LinkCard
+    title="Custom Clients"
+    description="Building clients to receive webhooks, custom data formats, and non-GA4 tracking requests."
+    href="/server-side/clients/custom-clients/"
+  />
+  <LinkCard
+    title="Client Claiming"
+    description="How the claiming mechanism works, priority order, and debugging which client handled which request."
+    href="/server-side/clients/client-claiming/"
+  />
+</CardGrid>
+
+## Tags
+
+Server-side tags send data to your marketing and analytics vendors. Unlike client-side tags, these run on your server with no user-facing performance impact.
+
+<CardGrid>
+  <LinkCard
+    title="GA4 Server Tag"
+    description="Forwarding events from your sGTM server to GA4 — configuration, deduplication, and parameter control."
+    href="/server-side/tags/ga4-server-tag/"
+  />
+  <LinkCard
+    title="Facebook Conversions API"
+    description="Meta CAPI via sGTM — event mapping, deduplication with the browser pixel, and match quality optimization."
+    href="/server-side/tags/facebook-capi/"
+  />
+  <LinkCard
+    title="TikTok Events API"
+    description="TikTok server-side event tracking — setup, event mapping, and deduplication."
+    href="/server-side/tags/tiktok-events-api/"
+  />
+  <LinkCard
+    title="Google Ads Conversions"
+    description="Server-side conversion tracking and enhanced conversions for Google Ads."
+    href="/server-side/tags/google-ads-conversions/"
+  />
+  <LinkCard
+    title="Custom HTTP Requests"
+    description="Sending data to any endpoint from sGTM — webhooks, data warehouses, custom APIs."
+    href="/server-side/tags/custom-http-requests/"
+  />
+  <LinkCard
+    title="Firestore Writer"
+    description="Writing event data directly to Firestore for real-time storage and enrichment."
+    href="/server-side/tags/firestore-writer/"
+  />
+</CardGrid>
+
+## Advanced
+
+These patterns separate basic sGTM deployments from production-grade data pipelines.
+
+<CardGrid>
+  <LinkCard
+    title="Event Enrichment"
+    description="Adding server-side context to events — Firestore lookups, internal API calls, and computed fields."
+    href="/server-side/advanced/event-enrichment/"
+  />
+  <LinkCard
+    title="Server-Side Cookies"
+    description="Setting first-party cookies from sGTM — HTTP-only, longer lifetimes, and ITP-resistant identifiers."
+    href="/server-side/advanced/server-side-cookies/"
+  />
+  <LinkCard
+    title="User Stitching"
+    description="Connecting anonymous sessions to authenticated users — identity resolution in sGTM."
+    href="/server-side/advanced/user-stitching/"
+  />
+  <LinkCard
+    title="Data Redaction & PII"
+    description="Stripping sensitive data before it reaches your vendors — regex redaction, hashing, and compliance logging."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+  <LinkCard
+    title="Custom Templates"
+    description="Building tag, client, and variable templates for sGTM using the sandboxed JavaScript environment."
+    href="/server-side/advanced/custom-templates/"
+  />
+  <LinkCard
+    title="Monitoring & Logging"
+    description="Cloud Logging, Cloud Monitoring, custom log statements, and alerting for production sGTM deployments."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+  <LinkCard
+    title="Webhook Integrations"
+    description="Receiving and processing inbound webhooks through sGTM — CRM events, payment platforms, and more."
+    href="/server-side/advanced/webhook-integrations/"
+  />
+  <LinkCard
+    title="Building a Custom CDP"
+    description="Using sGTM and Firestore as a lightweight customer data platform for enrichment and segmentation."
+    href="/server-side/advanced/building-custom-cdp/"
+  />
+  <LinkCard
+    title="Bot Detection & Filtering"
+    description="Identifying and excluding non-human traffic before it reaches your analytics and ad platforms."
+    href="/server-side/advanced/bot-detection-filtering/"
+  />
+  <LinkCard
+    title="Event Deduplication"
+    description="Preventing double-counting when client-side pixels and server-side Conversion APIs both fire."
+    href="/server-side/advanced/event-deduplication/"
+  />
+  <LinkCard
+    title="Conversion Adjustments"
+    description="Handling refunds and cancellations — sending retractions and restated values to Google Ads."
+    href="/server-side/advanced/conversion-adjustments/"
+  />
+  <LinkCard
+    title="Same-Origin Proxy"
+    description="Routing sGTM traffic through your main domain via reverse proxy for maximum first-party benefits."
+    href="/server-side/advanced/same-origin-proxy/"
+  />
+</CardGrid>
+
+## Operations
+
+Running sGTM in production means managing costs, scaling, uptime, and debugging — skills that don't come from the GTM UI.
+
+<CardGrid>
+  <LinkCard
+    title="Cost Management"
+    description="Cloud Run pricing, cost estimation by traffic volume, and optimization strategies."
+    href="/server-side/operations/cost-management/"
+  />
+  <LinkCard
+    title="Scaling Strategies"
+    description="Multi-region deployment, traffic spike handling, and load testing your sGTM infrastructure."
+    href="/server-side/operations/scaling-strategies/"
+  />
+  <LinkCard
+    title="Uptime Monitoring"
+    description="Health checks, alerting, and failover configuration for your sGTM endpoint."
+    href="/server-side/operations/uptime-monitoring/"
+  />
+  <LinkCard
+    title="Debugging sGTM"
+    description="Preview mode, Cloud Logging, Postman testing, and systematic approaches to diagnosing sGTM issues."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+  <LinkCard
+    title="Hosting Comparison"
+    description="GCP Cloud Run vs. AWS ECS vs. Stape vs. self-hosted — cost and capability comparison across all options."
+    href="/server-side/operations/hosting-comparison/"
+  />
+</CardGrid>

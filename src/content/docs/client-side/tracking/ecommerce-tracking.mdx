@@ -1,6 +1,372 @@
 ---
 title: "Ecommerce Tracking"
-description: "Complete guide to GA4 ecommerce tracking via GTM."
+description: "Complete GA4 ecommerce tracking via GTM — every event, every parameter, and the patterns that actually work in production."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+GA4 ecommerce tracking is not difficult — but it is unforgiving. Get the data structure right and the Shopping Behavior report fills itself. Get it wrong and you get silently missing data that you won't notice until your stakeholders ask why the purchase funnel looks broken.
+
+This guide covers every event in the GA4 ecommerce lifecycle, the exact dataLayer structure each one requires, and the GTM configuration that ties it all together.
+
+## The ecommerce event lifecycle
+
+GA4's ecommerce model maps a user's journey from discovery to purchase. You don't need to implement every event — but each one you skip is a gap in your funnel visibility.
+
+| Event | When to fire | Required |
+|---|---|---|
+| `view_item_list` | Product grid, search results | Recommended |
+| `select_item` | User clicks a product | Recommended |
+| `view_item` | Product detail page | Yes |
+| `add_to_cart` | Item added to cart | Yes |
+| `view_cart` | Cart page viewed | Recommended |
+| `remove_from_cart` | Item removed from cart | Recommended |
+| `begin_checkout` | Checkout initiated | Yes |
+| `add_shipping_info` | Shipping step completed | Recommended |
+| `add_payment_info` | Payment step completed | Recommended |
+| `purchase` | Order confirmed | Yes |
+| `refund` | Order refunded | Recommended |
+
+## The item object structure
+
+Every ecommerce event contains an `items` array. This is the most important part of the entire implementation — every item must include all available parameters, because truncating it now means you lose reporting capability later.
+
+```javascript
+{
+  item_id: 'SKU-1234',           // Required. Your internal product ID.
+  item_name: 'Canvas Sneakers',  // Required. Human-readable product name.
+  affiliation: 'Main Store',     // Optional. Store name for marketplace tracking.
+  coupon: 'SUMMER20',            // Optional. Coupon applied to this item.
+  currency: 'USD',               // Optional at item level; required at event level.
+  discount: 5.00,                // Optional. Discount amount applied.
+  index: 0,                      // Position in the list (0-indexed).
+  item_brand: 'Stride',          // Brand name.
+  item_category: 'Footwear',     // Primary category.
+  item_category2: 'Sneakers',    // Sub-category.
+  item_category3: 'Canvas',      // Further sub-category.
+  item_category4: 'Low Top',     // Even further.
+  item_list_id: 'homepage_recs', // The list this item came from.
+  item_list_name: 'Homepage Recommendations',
+  item_variant: 'White / Size 10',
+  price: 79.99,                  // Unit price. Must be a number, not a string.
+  quantity: 1                    // Must be a number, not a string.
+}
+```
+
+<Aside type="caution">
+`price` and `quantity` must be JavaScript numbers, not strings. `"79.99"` will cause silent tracking failures. Enforce this in your backend when you render the dataLayer.
+</Aside>
+
+## The ecommerce null pattern
+
+Before every single ecommerce push, clear the previous ecommerce data:
+
+```javascript
+// Step 1: Always clear first
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({ ecommerce: null });
+
+// Step 2: Then push your event
+window.dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    value: 79.99,
+    items: [{ /* ... */ }]
+  }
+});
+```
+
+This is non-negotiable. GTM's dataLayer uses a recursive merge model — without clearing, data from a previous `add_to_cart` event can contaminate your `purchase` event. If you've ever seen a purchase event with the wrong items, this is why.
+
+## Event implementations
+
+### view_item_list
+
+Fire this when users see a grid of products — category pages, search results, recommendation carousels.
+
+```javascript
+window.dataLayer.push({ ecommerce: null });
+window.dataLayer.push({
+  event: 'view_item_list',
+  ecommerce: {
+    item_list_id: 'category_womens_tops',
+    item_list_name: "Women's Tops",
+    items: [
+      {
+        item_id: 'SKU-1001',
+        item_name: 'Linen Button Shirt',
+        item_brand: 'Strand',
+        item_category: 'Clothing',
+        item_category2: "Women's",
+        item_category3: 'Tops',
+        item_list_id: 'category_womens_tops',
+        item_list_name: "Women's Tops",
+        index: 0,
+        price: 89.00,
+        quantity: 1
+      },
+      {
+        item_id: 'SKU-1002',
+        item_name: 'Silk Blouse',
+        item_brand: 'Strand',
+        item_category: 'Clothing',
+        item_category2: "Women's",
+        item_category3: 'Tops',
+        item_list_id: 'category_womens_tops',
+        item_list_name: "Women's Tops",
+        index: 1,
+        price: 129.00,
+        quantity: 1
+      }
+    ]
+  }
+});
+```
+
+### view_item
+
+Fire on the product detail page. This is the most important single event for funnel analysis.
+
+```javascript
+window.dataLayer.push({ ecommerce: null });
+window.dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    value: 89.00,
+    items: [
+      {
+        item_id: 'SKU-1001',
+        item_name: 'Linen Button Shirt',
+        item_brand: 'Strand',
+        item_category: 'Clothing',
+        item_category2: "Women's",
+        item_category3: 'Tops',
+        item_list_id: 'category_womens_tops',
+        item_list_name: "Women's Tops",
+        item_variant: 'White / Size M',
+        price: 89.00,
+        quantity: 1
+      }
+    ]
+  }
+});
+```
+
+### add_to_cart
+
+Fire immediately when the user adds an item — not on page load, not on cart page view.
+
+```javascript
+window.dataLayer.push({ ecommerce: null });
+window.dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 89.00,          // price × quantity
+    items: [
+      {
+        item_id: 'SKU-1001',
+        item_name: 'Linen Button Shirt',
+        item_brand: 'Strand',
+        item_category: 'Clothing',
+        item_variant: 'White / Size M',
+        price: 89.00,
+        quantity: 1
+      }
+    ]
+  }
+});
+```
+
+### purchase
+
+The most critical event. Include every item in the order, and match the `transaction_id` exactly to your order management system.
+
+```javascript
+window.dataLayer.push({ ecommerce: null });
+window.dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: 'ORDER-7829',  // Your order ID. Must be unique.
+    currency: 'USD',
+    value: 164.00,                 // Revenue after discounts, before tax/shipping.
+    tax: 13.12,
+    shipping: 8.99,
+    coupon: 'SUMMER20',
+    items: [
+      {
+        item_id: 'SKU-1001',
+        item_name: 'Linen Button Shirt',
+        item_brand: 'Strand',
+        item_category: 'Clothing',
+        item_variant: 'White / Size M',
+        price: 89.00,
+        quantity: 1,
+        coupon: 'SUMMER20',
+        discount: 14.00
+      },
+      {
+        item_id: 'SKU-0892',
+        item_name: 'Canvas Tote Bag',
+        item_brand: 'Strand',
+        item_category: 'Accessories',
+        price: 75.00,
+        quantity: 1
+      }
+    ]
+  }
+});
+```
+
+<Aside type="tip">
+`value` should be revenue — what the customer paid — not the sum of list prices. For accurate ROAS calculations, `value` should match what your payment processor records.
+</Aside>
+
+## TypeScript types for ecommerce dataLayer
+
+If your team uses TypeScript, type the dataLayer contract and enforce it at compile time:
+
+```typescript
+interface GA4EcommerceItem {
+  item_id: string;
+  item_name: string;
+  affiliation?: string;
+  coupon?: string;
+  currency?: string;
+  discount?: number;
+  index?: number;
+  item_brand?: string;
+  item_category?: string;
+  item_category2?: string;
+  item_category3?: string;
+  item_category4?: string;
+  item_list_id?: string;
+  item_list_name?: string;
+  item_variant?: string;
+  price?: number;
+  quantity?: number;
+}
+
+interface GA4EcommerceEvent {
+  event: string;
+  ecommerce: {
+    currency?: string;
+    value?: number;
+    transaction_id?: string;
+    tax?: number;
+    shipping?: number;
+    coupon?: string;
+    item_list_id?: string;
+    item_list_name?: string;
+    items: GA4EcommerceItem[];
+  };
+}
+
+declare global {
+  interface Window {
+    dataLayer: (GA4EcommerceEvent | { ecommerce: null } | Record<string, unknown>)[];
+  }
+}
+```
+
+## GTM configuration
+
+### GA4 Event tag with Send Ecommerce Data
+
+You need one GA4 Event tag per ecommerce event type, each with the "Send Ecommerce Data" checkbox enabled:
+
+<TagConfig
+  name="GA4 - Ecommerce - purchase"
+  type="Google Analytics: GA4 Event"
+  trigger="CE - purchase"
+  variables={['Google Tag - Measurement ID']}
+/>
+
+In the tag configuration:
+1. Set **Event Name** to `purchase` (or use `{{Event}}` to read the event name from the dataLayer)
+2. Under **More Settings → Ecommerce**, check **Send Ecommerce Data**
+3. Set **Data Source** to **Data Layer**
+
+With this configuration, GTM reads the `ecommerce` object from the dataLayer automatically and sends it to GA4.
+
+### Reusable approach: one tag for all ecommerce events
+
+Instead of creating a separate tag for each event, use `{{Event}}` as the event name and set conditions on your trigger:
+
+<Steps>
+1. Create a Custom Event trigger that matches a regex covering all ecommerce events: `^(view_item_list|select_item|view_item|add_to_cart|view_cart|remove_from_cart|begin_checkout|add_shipping_info|add_payment_info|purchase|refund)$`
+
+2. Create one GA4 Event tag with Event Name = `{{Event}}` and Send Ecommerce Data enabled.
+
+3. Attach the single trigger. All ecommerce events now fire through one tag.
+</Steps>
+
+This keeps your container clean. One tag, one trigger, all ecommerce events handled.
+
+## Common mistakes
+
+### Not clearing ecommerce between events
+
+Every practitioner learns this the hard way. Push `{ ecommerce: null }` before every ecommerce push. No exceptions.
+
+### String prices and quantities
+
+```javascript
+// ❌ This will silently fail or produce wrong data in GA4
+items: [{ item_id: 'SKU-1', price: '89.00', quantity: '1' }]
+
+// ✅ Numbers only
+items: [{ item_id: 'SKU-1', price: 89.00, quantity: 1 }]
+```
+
+### Missing item_id
+
+GA4 cannot merge ecommerce data across events without `item_id`. Without it, you lose the ability to trace a product from impression to purchase. `item_id` and `item_name` are the two non-negotiable fields.
+
+### Wrong value field
+
+`value` at the event level should equal the sum of `(price - discount) × quantity` for all items in that specific interaction — not the cart total, not the catalog price.
+
+### Abbreviated items arrays
+
+Never send a truncated items array in production. Some teams only send the first item for performance reasons. You lose all multi-item analytics.
+
+### Forgetting the Send Ecommerce Data checkbox
+
+The most common GTM configuration mistake. Your dataLayer push can be perfect, but if the GA4 Event tag doesn't have "Send Ecommerce Data" checked, none of the ecommerce data reaches GA4.
+
+## Verifying your implementation
+
+1. **GA4 DebugView** — Log in to GA4, go to Configure → DebugView. Trigger events on your site with GTM Preview mode active. You should see each event with its ecommerce parameters within seconds.
+
+2. **GTM Preview → Data Layer tab** — After each user action, click on the event in the Tag Assistant panel and check the Data Layer tab. Confirm the `ecommerce` object contains the expected structure.
+
+3. **Network tab** — Filter for `collect` requests to `www.google-analytics.com` or `analytics.google.com`. Inspect the `ep.items` and `pr` parameters in the request payload.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Event Triggers"
+    description="How to configure the Custom Event triggers that fire your ecommerce tags."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="DataLayer Variables"
+    description="Reading ecommerce parameters from the dataLayer into GTM variables."
+    href="/client-side/variables/datalayer-variables/"
+  />
+  <LinkCard
+    title="DataLayer Deep Dive"
+    description="Understanding the merge behavior that makes the ecommerce null clearing pattern necessary."
+    href="/foundations/datalayer-deep-dive/"
+  />
+  <LinkCard
+    title="GA4 Event Tag"
+    description="Complete reference for configuring the GA4 Event tag, including the ecommerce checkbox."
+    href="/client-side/tags/ga4-event-tag/"
+  />
+</CardGrid>

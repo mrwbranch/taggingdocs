@@ -1,6 +1,246 @@
 ---
 title: "User-Defined Variables"
-description: "Overview of all user-defined variable types and when to use each."
+description: "Quick reference for every variable type in GTM — when to use each one and which to reach for first."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+GTM offers over a dozen user-defined variable types. Knowing which one to reach for — and why — is one of those fundamentals that separates fast, clean implementations from cluttered containers full of Custom JavaScript Variables doing jobs that simpler types could handle.
+
+This page is a decision guide. For deep dives into the most important types, follow the links in the Related Articles section.
+
+## The hierarchy you should follow
+
+Before choosing a variable type, ask these questions in order:
+
+1. **Is the data in the dataLayer?** → Use a **Data Layer Variable**. Always prefer this.
+2. **Is it a fixed value you configure once?** → Use a **Constant Variable** (or Lookup Table for environment-specific configs).
+3. **Does it map one value to another without logic?** → Use a **Lookup Table** (exact match) or **Regex Table** (pattern match).
+4. **Is it a property of the element the user just clicked?** → Use an **Auto-Event Variable** (built-in).
+5. **Is it a standard browser property — URL, cookie, referrer?** → Use a dedicated type: **URL**, **1st Party Cookie**, or **HTTP Referrer**.
+6. **Is it in a global JavaScript variable on the page?** → Use the **JavaScript Variable** type.
+7. **Is it in the DOM and nowhere else?** → Use a **DOM Element Variable** (reluctantly).
+8. **Do you need computation, transformation, or conditional logic?** → Use a **Custom JavaScript Variable** as a last resort.
+
+Following this hierarchy keeps your container maintainable. Most practitioners jump straight to Custom JavaScript Variable because it can do anything — but the cost is a container full of functions that need debugging, testing, and documentation.
+
+## Variable type reference
+
+### Data Layer Variable
+**What it does:** Reads a value from GTM's internal data model, populated by `dataLayer.push()` calls.
+
+**When to use:** Whenever your application pushes structured data to the dataLayer. This should be your most-used variable type.
+
+**Key settings:** Variable Name (dot notation for nested access), Data Layer Version (always Version 2), Default Value.
+
+**Example:** `ecommerce.items.0.item_id` → reads the first item's ID from a GA4 ecommerce push.
+
+---
+
+### Constant
+**What it does:** Stores a single static string value.
+
+**When to use:** Configuration values that appear in multiple tags — GA4 Measurement IDs, Google Ads Conversion IDs, vendor pixel IDs, API endpoints.
+
+**Example:** `G-XXXXXXXXXX` stored once, referenced in all GA4 tags.
+
+---
+
+### Lookup Table
+**What it does:** Maps input values to output values using exact matching. Takes a GTM variable as input, returns a mapped output.
+
+**When to use:** Categorical mapping — page paths to page types, event names to display names, hostnames to environments.
+
+**Example:** Input `{{Page Path}}` → `/cart` returns `cart`, `/checkout` returns `checkout`, default `other`.
+
+---
+
+### Regex Table
+**What it does:** Same as Lookup Table but uses regular expression patterns instead of exact match. Supports capture groups for value extraction.
+
+**When to use:** URL pattern matching, extracting IDs from URL paths, categorizing by URL structure.
+
+**Example:** Input `{{Page Path}}`, pattern `^/products/([0-9]+)$`, output `$1` extracts the product ID.
+
+---
+
+### Custom JavaScript
+**What it does:** Executes a JavaScript function and returns its result. Has access to the browser environment, GTM variables, and the dataLayer.
+
+**When to use:** Transformation logic that simpler variable types cannot handle — combining variables, conditional logic, reading complex data structures, cookie parsing.
+
+**Performance note:** Runs on every event evaluation. Keep it fast and always wrap in try/catch.
+
+**Example:**
+```javascript
+function() {
+  try {
+    var price = {{DLV - product_price}};
+    return price ? parseFloat(price).toFixed(2) : '0.00';
+  } catch(e) {
+    return '0.00';
+  }
+}
+```
+
+---
+
+### JavaScript Variable
+**What it does:** Reads a property from a global JavaScript variable on the page — navigates a dot-notation path on `window`.
+
+**When to use:** When your application stores data in a global object (e.g., `window.pageData.userId`) and you want to read it without writing a Custom JavaScript Variable.
+
+**Difference from Custom JavaScript:** No function, no logic — just a property path. Faster and simpler.
+
+**Example:** Variable Name `pageData.userId` reads `window.pageData.userId`.
+
+---
+
+### DOM Element
+**What it does:** Reads an attribute or text content from a specific DOM element, selected by CSS selector or element ID.
+
+**When to use:** When data exists only in the DOM and not in the dataLayer. Legacy systems, third-party embeds.
+
+**Warning:** Fragile. CSS class changes, element restructuring, and page redesigns break DOM-based variables silently.
+
+**Example:** CSS Selector `[data-product-id]`, Attribute `data-product-id` → reads the attribute value.
+
+---
+
+### URL
+**What it does:** Extracts specific components from the current page URL — the protocol, hostname, port, path, query parameter, fragment, or the full URL.
+
+**When to use:** Reading specific URL components more precisely than the built-in Page variables allow, particularly for extracting individual query parameters.
+
+**Key setting:** Component — choose from Full URL, Protocol, Host, Port, Path, Query, Fragment, or **Query Key** (reads a named query parameter).
+
+**Example:** Component `Query Key`, Query Key `utm_source` → returns the value of `?utm_source=` from the URL.
+
+---
+
+### 1st Party Cookie
+**What it does:** Reads the value of a first-party browser cookie by name.
+
+**When to use:** Reading consent flags, session identifiers, AB test assignments, or campaign data stored in cookies by your server.
+
+**Example:** Cookie Name `experiment_variant` → returns the cookie value.
+
+---
+
+### HTTP Referrer
+**What it does:** Returns the referring URL — the page the user came from before the current page.
+
+**When to use:** When you need the full referrer URL (not just the hostname). Built-in `Page Referrer` variable does the same thing — use whichever is already available.
+
+**Note:** Same behavior as `document.referrer`. Empty on direct visits and when the referring page has `Referrer-Policy: no-referrer`.
+
+---
+
+### Auto-Event Variable
+**What it does:** Reads properties from the element that triggered the current GTM event (clicked element, submitted form, visible element).
+
+**When to use:** Reading attributes of the element the user just interacted with — the `data-*` attribute on a clicked button, the `href` of a clicked link, the `id` of a submitted form.
+
+**Types:** Element, Element Attribute, Element Classes, Element ID, Element Target, Element Text, Element URL, plus History-related types.
+
+---
+
+### Container Version Number
+**What it does:** Returns the current version number of the published GTM container.
+
+**When to use:** Rarely. Useful for debugging — including it as a GA4 event parameter lets you correlate tracking behavior changes with container versions.
+
+---
+
+### Environment Name
+**What it does:** Returns the name of the current GTM environment (Live, Staging, etc.) when using GTM Environments.
+
+**When to use:** When you have configured GTM Environments and want to filter analytics data or change tag behavior based on the environment.
+
+---
+
+### Undefined Value
+**What it does:** Returns `undefined` explicitly.
+
+**When to use:** Clearing a parameter in a tag — set a parameter's value to the Undefined Value variable to explicitly pass undefined, which is different from an empty string or null in some contexts.
+
+## Quick decision table
+
+| You need to... | Use this variable type |
+|---------------|----------------------|
+| Read a dataLayer push value | Data Layer Variable |
+| Store a GA4 Measurement ID | Constant |
+| Map page paths to page type names | Lookup Table |
+| Extract a product ID from a URL | Regex Table |
+| Read a query parameter from the URL | URL (Query Key component) |
+| Read a cookie | 1st Party Cookie |
+| Read the referring URL | HTTP Referrer or Page Referrer (built-in) |
+| Read a property off `window.someObject` | JavaScript Variable |
+| Read a data attribute on a clicked button | Auto-Event Variable |
+| Read an element's content from the DOM | DOM Element Variable |
+| Combine two variables or add logic | Custom JavaScript Variable |
+| Store a static config value | Constant |
+| Map URL patterns to categories | Regex Table |
+
+## Common mistakes
+
+### Using Custom JavaScript for things Lookup Tables handle
+
+The most common bloat in GTM containers is Custom JavaScript Variables that do nothing but map values:
+
+```javascript
+// BAD — this is a Lookup Table disguised as JavaScript
+function() {
+  var path = {{Page Path}};
+  if (path === '/') return 'home';
+  if (path === '/cart') return 'cart';
+  if (path === '/checkout') return 'checkout';
+  return 'other';
+}
+```
+
+A Lookup Table with `{{Page Path}}` as the input handles this identically, with no code to maintain or debug.
+
+### Using URL variable when a built-in does the job
+
+GTM's built-in variables `Page Path`, `Page Hostname`, and `Page URL` are equivalent to the URL variable with those components selected. There is no reason to create a URL variable if the built-in already exists.
+
+The URL variable adds value for:
+- Extracting specific query parameters (`?utm_campaign=spring-sale` → `spring-sale`)
+- Reading fragments after the `#`
+- Reading port numbers when they matter
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Data Layer Variables"
+    description="The most important variable type — detailed guide to dot notation, persistence, and defaults."
+    href="/client-side/variables/datalayer-variables/"
+  />
+  <LinkCard
+    title="JavaScript Variables"
+    description="How to write Custom JavaScript Variables safely and efficiently."
+    href="/client-side/variables/javascript-variables/"
+  />
+  <LinkCard
+    title="Lookup Tables"
+    description="Exact-match value mapping without code — complete guide with patterns."
+    href="/client-side/variables/lookup-tables/"
+  />
+  <LinkCard
+    title="Regex Tables"
+    description="Pattern-based mapping for URLs and flexible categorization."
+    href="/client-side/variables/regex-tables/"
+  />
+  <LinkCard
+    title="Constant Variables"
+    description="Storing and reusing configuration values across your GTM container."
+    href="/client-side/variables/constant-variables/"
+  />
+  <LinkCard
+    title="Built-in Variables"
+    description="The variables GTM provides out of the box — which to enable and what each returns."
+    href="/client-side/variables/built-in-variables/"
+  />
+</CardGrid>

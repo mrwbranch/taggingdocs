@@ -1,6 +1,249 @@
 ---
 title: "DataLayer"
-description: "The contract between your website and your analytics — specifications, events, and validation."
+description: "The complete reference for designing, implementing, and validating your GA4 dataLayer — specifications, ecommerce events, platform guides, and validation strategies."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
+
+The dataLayer is the contract between your website and your analytics tools. Every piece of tracking data — product impressions, cart actions, conversions, custom interactions — travels through it. Get the contract right and your analytics becomes a reliable foundation for business decisions. Get it wrong and you're building dashboards on sand.
+
+This section covers everything from naming conventions to platform-specific implementations. Whether you're designing a new tracking specification, implementing GA4 ecommerce events, or validating what you've already built, you'll find the definitive reference here.
+
+<Aside type="tip">
+New to the dataLayer? Start with the [DataLayer Deep Dive](/foundations/datalayer-deep-dive/) in the Foundations section before diving into these specifications. It explains the core mechanics — push semantics, GTM's merge model, the ecommerce null clear pattern — that everything here builds on.
+</Aside>
+
+## Specification
+
+Design your dataLayer right from the start. These articles cover the naming rules, data types, and versioning strategies that determine whether your implementation scales or collapses under its own complexity.
+
+<CardGrid>
+  <LinkCard
+    title="Naming Conventions"
+    description="The definitive naming rules for events and parameters — snake_case, reserved prefixes, consistency rules."
+    href="/datalayer/specification/naming-conventions/"
+  />
+  <LinkCard
+    title="Event Naming Rules"
+    description="When to use GA4 recommended events vs. custom events, the 40-character limit, and anti-patterns to avoid."
+    href="/datalayer/specification/event-naming-rules/"
+  />
+  <LinkCard
+    title="Parameter Naming Rules"
+    description="Custom parameter conventions, GA4 limits, reserved names, and strategies for parameter reuse."
+    href="/datalayer/specification/parameter-naming-rules/"
+  />
+  <LinkCard
+    title="Data Types"
+    description="Standards for strings, numbers, booleans, arrays, and objects — including common mistakes with prices and currencies."
+    href="/datalayer/specification/data-types/"
+  />
+  <LinkCard
+    title="Versioning Strategy"
+    description="How to version your dataLayer spec, manage breaking changes, and support multiple versions simultaneously."
+    href="/datalayer/specification/versioning-strategy/"
+  />
+  <LinkCard
+    title="Designing Custom Events"
+    description="A systematic framework for designing new events — decision trees, documentation templates, and review processes."
+    href="/datalayer/specification/designing-custom-events/"
+  />
+</CardGrid>
+
+## Ecommerce Events
+
+The GA4 ecommerce event specification defines a funnel from product discovery to purchase. Each event in this section maps directly to a stage in that funnel and connects to the next. Implement them in order — `view_item_list` feeds `select_item`, which feeds `view_item`, which feeds the cart and checkout events, which feed `purchase`.
+
+<CardGrid>
+  <LinkCard
+    title="Ecommerce Overview"
+    description="The complete GA4 ecommerce funnel — event flow, the items array structure, currency handling, and the ecommerce null clear pattern."
+    href="/datalayer/ecommerce/ecommerce-overview/"
+  />
+  <LinkCard
+    title="view_item_list"
+    description="Product list impressions — category pages, search results, recommendation widgets."
+    href="/datalayer/ecommerce/view-item-list/"
+  />
+  <LinkCard
+    title="select_item"
+    description="User clicks a product in a list — linking list context to the product detail page."
+    href="/datalayer/ecommerce/select-item/"
+  />
+  <LinkCard
+    title="view_item"
+    description="Product detail page views — the full item specification with variants."
+    href="/datalayer/ecommerce/view-item/"
+  />
+  <LinkCard
+    title="add_to_cart"
+    description="Adding products to the cart — quantity handling, quick-add patterns."
+    href="/datalayer/ecommerce/add-to-cart/"
+  />
+  <LinkCard
+    title="remove_from_cart"
+    description="Removing products from the cart — full removal vs. quantity reduction."
+    href="/datalayer/ecommerce/remove-from-cart/"
+  />
+  <LinkCard
+    title="view_cart"
+    description="Cart page views — full cart contents with total value calculation."
+    href="/datalayer/ecommerce/view-cart/"
+  />
+  <LinkCard
+    title="begin_checkout"
+    description="Checkout initiation — capturing cart contents and coupon codes at checkout start."
+    href="/datalayer/ecommerce/begin-checkout/"
+  />
+  <LinkCard
+    title="add_shipping_info"
+    description="Shipping step completion — shipping tier and full item details."
+    href="/datalayer/ecommerce/add-shipping-info/"
+  />
+  <LinkCard
+    title="add_payment_info"
+    description="Payment step completion — payment method type and checkout totals."
+    href="/datalayer/ecommerce/add-payment-info/"
+  />
+  <LinkCard
+    title="purchase"
+    description="Order confirmation — the most critical event. Deduplication, transaction parameters, and validation."
+    href="/datalayer/ecommerce/purchase/"
+  />
+  <LinkCard
+    title="refund"
+    description="Full and partial refunds — server-side implementation and Measurement Protocol."
+    href="/datalayer/ecommerce/refund/"
+  />
+  <LinkCard
+    title="view_promotion / select_promotion"
+    description="Internal promotion tracking — banners, featured offers, recommendation modules."
+    href="/datalayer/ecommerce/view-promotion/"
+  />
+</CardGrid>
+
+## Custom Events
+
+Beyond ecommerce, you'll need events that reflect your specific product interactions. These articles cover the standard patterns for authentication, search, forms, content engagement, and errors — plus a guide to designing your own events from scratch.
+
+<CardGrid>
+  <LinkCard
+    title="Login & Sign Up"
+    description="GA4 recommended login and sign_up events — method parameter, user_id, and privacy considerations."
+    href="/datalayer/custom-events/login-signup/"
+  />
+  <LinkCard
+    title="Search"
+    description="Site search tracking — search_term, results count, zero-result queries, and filter interactions."
+    href="/datalayer/custom-events/search/"
+  />
+  <LinkCard
+    title="Form Submission"
+    description="Form tracking across types — contact, lead gen, newsletter, multi-step forms, and error events."
+    href="/datalayer/custom-events/form-submission/"
+  />
+  <LinkCard
+    title="Content Engagement"
+    description="Article reads, video plays, content shares — events for content-heavy properties."
+    href="/datalayer/custom-events/content-engagement/"
+  />
+  <LinkCard
+    title="Error Events"
+    description="Application errors, 404s, API failures, and JS errors — structured error tracking for debugging."
+    href="/datalayer/custom-events/error-events/"
+  />
+  <LinkCard
+    title="Custom Event Design"
+    description="Hands-on guide to building new events — when to create, how to document, how to test."
+    href="/datalayer/custom-events/custom-event-design/"
+  />
+</CardGrid>
+
+## Platform Guides
+
+Platform-specific implementation guides. Each covers the quirks, hooks, and patterns specific to that platform — from Shopify's Custom Pixels sandbox to WooCommerce's AJAX cart to Next.js App Router route tracking.
+
+<CardGrid>
+  <LinkCard
+    title="Shopify"
+    description="GTM installation, theme.liquid dataLayer, Customer Events API, checkout limitations."
+    href="/datalayer/platforms/shopify/"
+  />
+  <LinkCard
+    title="Shopify Custom Pixels"
+    description="The sandboxed Custom Pixel environment — what GTM can and can't do inside it."
+    href="/datalayer/platforms/shopify-custom-pixels/"
+  />
+  <LinkCard
+    title="Shopify Checkout Extensibility"
+    description="How the checkout.liquid deprecation changes your tracking strategy."
+    href="/datalayer/platforms/shopify-checkout-extensibility/"
+  />
+  <LinkCard
+    title="Shopify Headless"
+    description="Tracking on Hydrogen, Next.js, and other headless Shopify storefronts."
+    href="/datalayer/platforms/shopify-headless/"
+  />
+  <LinkCard
+    title="Shopify Advanced"
+    description="Post-purchase upsells, subscriptions, multi-currency, B2B, and server-side tracking."
+    href="/datalayer/platforms/shopify-advanced/"
+  />
+  <LinkCard
+    title="WooCommerce"
+    description="PHP hooks, AJAX cart, checkout events, and thank you page deduplication."
+    href="/datalayer/platforms/woocommerce/"
+  />
+  <LinkCard
+    title="WooCommerce Advanced"
+    description="GTM4WP deep configuration, variable products, subscriptions, HPOS compatibility."
+    href="/datalayer/platforms/woocommerce-advanced/"
+  />
+  <LinkCard
+    title="Magento / Adobe Commerce"
+    description="Magento 2 frontend architecture, layout XML, JavaScript mixins, full page cache."
+    href="/datalayer/platforms/magento/"
+  />
+  <LinkCard
+    title="Next.js"
+    description="App Router vs Pages Router, route tracking, Server/Client Components, typed dataLayer."
+    href="/datalayer/platforms/nextjs/"
+  />
+  <LinkCard
+    title="Nuxt.js"
+    description="Nuxt 3 plugin, route middleware, composable-based tracking, TypeScript support."
+    href="/datalayer/platforms/nuxtjs/"
+  />
+  <LinkCard
+    title="WordPress"
+    description="Plugin options, manual implementation via functions.php, WP hooks, form integrations."
+    href="/datalayer/platforms/wordpress/"
+  />
+</CardGrid>
+
+## Validation
+
+Bad data in equals bad decisions out. These articles cover every layer of the validation stack — from TypeScript compile-time checks to runtime Zod schemas to automated Playwright tests running in CI.
+
+<CardGrid>
+  <LinkCard
+    title="Validation Approaches"
+    description="The validation pyramid — development, staging, production. Which tools for which layer."
+    href="/datalayer/validation/validation-approaches/"
+  />
+  <LinkCard
+    title="TypeScript Schemas"
+    description="Complete TypeScript types for the GA4 ecommerce dataLayer — discriminated unions, type-safe push wrappers."
+    href="/datalayer/validation/typescript-schemas/"
+  />
+  <LinkCard
+    title="Runtime Validation"
+    description="Zod schemas, dataLayer interceptor pattern, error reporting, dev vs. production modes."
+    href="/datalayer/validation/runtime-validation/"
+  />
+  <LinkCard
+    title="Automated Testing"
+    description="Playwright and Cypress tests for the complete ecommerce funnel — CI/CD integration."
+    href="/datalayer/validation/automated-testing/"
+  />
+</CardGrid>

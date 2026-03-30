@@ -1,6 +1,343 @@
 ---
 title: "Content Security Policy"
-description: "Configuring CSP to work with GTM without compromising security."
+description: "Configuring CSP to work with GTM without breaking it. Required directives, the nonce-based approach, preview mode, and CSP reporting."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+A Content Security Policy is the most effective technical control available against script injection attacks in GTM. It does not prevent unauthorized publishes, but it limits what injected code can do — blocking exfiltration to unauthorized domains, restricting which scripts can load, and reporting violations in real time.
+
+Getting CSP to coexist with GTM requires understanding what GTM loads and where it sends data. This guide gives you the complete picture.
+
+## What CSP does
+
+A Content Security Policy is an HTTP response header that tells the browser which resources are allowed to load and where data can be sent. If a script tries to load from an unlisted domain or send data to an unauthorized endpoint, the browser blocks the request and (if you configure it) reports the violation to your logging endpoint.
+
+For GTM security, CSP provides three specific protections:
+
+1. **Blocks exfiltration to unauthorized domains.** If a malicious tag tries to send data to `cdn-analytics-tracker.com` and that domain is not in your `connect-src` allowlist, the browser blocks the request and logs a violation. You get an alert before data leaves your users' browsers.
+
+2. **Restricts which scripts can load.** If a tag tries to inject a `<script>` from an external domain not in your `script-src`, the script is blocked.
+
+3. **Provides an audit trail.** CSP violations are logged in real time, creating a record of attempted policy breaches.
+
+<Aside type="note">
+CSP does not prevent authorized GTM users from publishing malicious tags. It limits what those tags can do. A malicious tag can still read form fields and manipulate the DOM — CSP only blocks exfiltration to domains you have not allowlisted.
+</Aside>
+
+## The GTM + GA4 CSP allowlist
+
+GTM and GA4 require several domains across multiple directives. Here is the complete allowlist for a standard GTM + GA4 deployment:
+
+```http
+Content-Security-Policy:
+  default-src 'self';
+  script-src
+    'self'
+    https://www.googletagmanager.com
+    https://ssl.google-analytics.com
+    https://www.google-analytics.com
+    https://tagmanager.google.com;
+  img-src
+    'self'
+    data:
+    https://www.googletagmanager.com
+    https://ssl.google-analytics.com
+    https://www.google-analytics.com
+    https://www.google.com
+    https://stats.g.doubleclick.net;
+  style-src
+    'self'
+    https://tagmanager.google.com
+    https://fonts.googleapis.com;
+  font-src
+    'self'
+    https://fonts.gstatic.com;
+  connect-src
+    'self'
+    https://www.google-analytics.com
+    https://analytics.google.com
+    https://stats.g.doubleclick.net
+    https://region1.google-analytics.com;
+  frame-src
+    https://www.googletagmanager.com;
+```
+
+<Aside type="caution">
+This is the baseline for GTM + GA4 only. Each additional tag you add to GTM (Google Ads, Meta Pixel, LinkedIn, etc.) requires additional CSP entries. Build your allowlist by running your page in CSP report-only mode first and collecting violations to understand exactly which domains your current tags use.
+</Aside>
+
+## The nonce-based approach (recommended)
+
+Allowlisting domains works, but it has a weakness: once a domain is allowlisted, any script from that domain is allowed. The nonce-based approach is more secure because it requires every inline script and every dynamically injected script to carry a cryptographic token that was generated server-side for that specific page load.
+
+**How nonces work:**
+
+1. Your server generates a random, unique token for each page request: `const nonce = crypto.randomBytes(16).toString('base64');`
+2. The nonce is added to your CSP header: `script-src 'nonce-RANDOM_TOKEN_HERE' 'strict-dynamic';`
+3. The GTM snippet in your HTML receives the same nonce attribute: `<script nonce="RANDOM_TOKEN_HERE" src="https://www.googletagmanager.com/gtm.js?id=GTM-XXXX">`
+4. GTM propagates the nonce to scripts it injects
+5. Any script without a valid nonce is blocked — even if it comes from an allowlisted domain
+
+The `'strict-dynamic'` keyword is critical here. It tells the browser to trust scripts that are loaded by a script carrying a valid nonce — which is how GTM's dynamically injected scripts work. Without `'strict-dynamic'`, every script GTM loads would need to be explicitly allowlisted.
+
+**Server-side nonce implementation:**
+
+<Tabs>
+  <TabItem label="Node.js / Express">
+    ```javascript
+    const crypto = require('crypto');
+
+    app.use((req, res, next) => {
+      // Generate a unique nonce for each request
+      res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
+
+      res.setHeader('Content-Security-Policy', [
+        `script-src 'nonce-${res.locals.cspNonce}' 'strict-dynamic'`,
+        "object-src 'none'",
+        "base-uri 'none'"
+      ].join('; '));
+
+      next();
+    });
+    ```
+  </TabItem>
+  <TabItem label="PHP">
+    ```php
+    <?php
+    $nonce = base64_encode(random_bytes(16));
+    header("Content-Security-Policy: " .
+      "script-src 'nonce-{$nonce}' 'strict-dynamic'; " .
+      "object-src 'none'; " .
+      "base-uri 'none'"
+    );
+    ?>
+
+    <!-- GTM snippet with nonce attribute -->
+    <script nonce="<?= htmlspecialchars($nonce) ?>">
+    (function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+    new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+    j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;
+    j.nonce='<?= htmlspecialchars($nonce) ?>';
+    j.src='https://www.googletagmanager.com/gtm.js?id=GTM-XXXX'+dl;
+    f.parentNode.insertBefore(j,f);
+    })(window,document,'script','dataLayer','GTM-XXXX');
+    </script>
+    ```
+  </TabItem>
+  <TabItem label="Next.js">
+    ```javascript
+    // pages/_document.js or app/layout.js
+    import { Html, Head, Main, NextScript } from 'next/document';
+    import crypto from 'crypto';
+
+    export default function Document() {
+      const nonce = crypto.randomBytes(16).toString('base64');
+
+      return (
+        <Html>
+          <Head nonce={nonce}>
+            {/* GTM script tag gets nonce automatically via Head */}
+          </Head>
+          <body>
+            {/* GTM noscript - nonces don't apply to iframes */}
+            <Main />
+            <NextScript nonce={nonce} />
+          </body>
+        </Html>
+      );
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## Chrome's nonce-masking and the data-nonce workaround
+
+Chrome implements a behavior called "nonce masking" — it hides the `nonce` attribute from CSS selectors and JavaScript `getAttribute()` calls to prevent injected code from reading and reusing the nonce. GTM's snippet code reads the nonce of the inline GTM script to propagate it to dynamically injected scripts.
+
+In older versions of Chrome, GTM read the nonce with `getAttribute('nonce')`. After nonce masking was introduced, this stopped working — GTM could no longer propagate the nonce, and scripts it loaded would be blocked by CSP.
+
+**The fix:** Use `data-nonce` as a fallback attribute alongside `nonce`:
+
+```html
+<!-- Add both nonce and data-nonce attributes to the GTM snippet -->
+<script
+  nonce="RANDOM_TOKEN_HERE"
+  data-nonce="RANDOM_TOKEN_HERE"
+>
+(function(w,d,s,l,i){
+  // ... GTM snippet code ...
+})(window,document,'script','dataLayer','GTM-XXXX');
+</script>
+```
+
+GTM reads `data-nonce` when `getAttribute('nonce')` returns empty, which is the correct behavior in all current Chrome versions. Both attributes should carry the same nonce value.
+
+## Preview mode requires additional CSP entries
+
+GTM's Preview mode (Tag Assistant) requires additional domains that are not needed in production. If you test with CSP enabled and Preview mode, you need:
+
+```http
+# Additional entries required for GTM Preview mode only
+script-src ... https://tagassistant.google.com;
+connect-src ... https://tagassistant.google.com wss://tagassistant.google.com;
+frame-src ... https://tagassistant.google.com https://9086094.collect.igodigital.com;
+```
+
+The WebSocket connection (`wss://`) is used for the live Preview communication channel. If you block it, Preview mode appears to connect but never receives real-time data from the page.
+
+**Recommendation:** Maintain a separate CSP for development/staging that includes Preview mode domains, and a stricter CSP for production that excludes them.
+
+## CSP report-only mode for testing
+
+Before deploying a blocking CSP, use `Content-Security-Policy-Report-Only` to collect violations without breaking anything:
+
+```http
+Content-Security-Policy-Report-Only:
+  default-src 'self';
+  script-src 'self' https://www.googletagmanager.com 'nonce-TOKEN';
+  connect-src 'self' https://www.google-analytics.com;
+  report-uri https://your-logging-endpoint.com/csp-violations;
+```
+
+In report-only mode, the browser logs violations to your reporting endpoint but does not block any requests. Run this for 2-4 weeks across all page types (including checkout, search, blog) to collect the complete set of domains your current tags use. Then build your production CSP from that list.
+
+**Collecting violations with a simple endpoint:**
+
+```javascript
+// Express endpoint for CSP violation reports
+app.post('/csp-violations', express.json({ type: 'application/csp-report' }), (req, res) => {
+  const report = req.body['csp-report'];
+  console.log('CSP Violation:', {
+    blockedUri: report['blocked-uri'],
+    violatedDirective: report['violated-directive'],
+    documentUri: report['document-uri'],
+    timestamp: new Date().toISOString()
+  });
+  res.status(204).end();
+});
+```
+
+Production violation reports from a real enforcement policy are invaluable for detecting both legitimate configuration gaps and actual injection attempts.
+
+## The tradeoff: strict CSP limits what Custom HTML tags can do
+
+This is a feature, not a bug. If your CSP only allowlists your known vendors' domains in `script-src` and `connect-src`, then a Custom HTML tag that tries to load a script from an unauthorized domain or send data to an unknown endpoint will be blocked.
+
+This is exactly the protection you want against malicious injection. The tradeoff is that it also blocks legitimate-but-unplanned tags from working until you update the CSP.
+
+<Comparison leftTitle="Without CSP" rightTitle="With strict CSP" leftType="bad" rightType="good">
+  <Fragment slot="left">
+    ```
+    ❌ Malicious tags can exfiltrate data
+       to any domain
+    ❌ Injected scripts can load from
+       any external domain
+    ❌ No visibility into what data is
+       leaving users' browsers
+    ❌ Silent failure — no alerts
+       when something unexpected runs
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```
+    ✅ Exfiltration blocked for
+       unlisted domains
+    ✅ Script loading restricted to
+       approved domains
+    ✅ Violation reports provide
+       real-time alerts
+    ✅ New tags must go through
+       CSP review before working
+       (good governance side effect)
+    ```
+  </Fragment>
+</Comparison>
+
+## Complete production CSP for GTM + GA4 + Google Ads
+
+This is a complete, production-grade CSP for a site using GTM, GA4, and Google Ads conversion tracking:
+
+```http
+Content-Security-Policy:
+  default-src 'self';
+  script-src
+    'self'
+    'nonce-{CSP_NONCE}'
+    'strict-dynamic'
+    https://www.googletagmanager.com
+    https://ssl.google-analytics.com;
+  img-src
+    'self'
+    data:
+    https://www.googletagmanager.com
+    https://ssl.google-analytics.com
+    https://www.google-analytics.com
+    https://www.google.com
+    https://googleads.g.doubleclick.net
+    https://stats.g.doubleclick.net;
+  style-src
+    'self'
+    'unsafe-inline'
+    https://tagmanager.google.com
+    https://fonts.googleapis.com;
+  font-src
+    'self'
+    https://fonts.gstatic.com;
+  connect-src
+    'self'
+    https://www.google-analytics.com
+    https://analytics.google.com
+    https://stats.g.doubleclick.net
+    https://region1.google-analytics.com
+    https://googleads.googleapis.com;
+  frame-src
+    https://www.googletagmanager.com
+    https://td.doubleclick.net;
+  object-src 'none';
+  base-uri 'self';
+  report-uri /csp-violations;
+```
+
+<Aside type="note">
+The `'unsafe-inline'` in `style-src` is unfortunately required by some GTM tags that inject inline styles. This is a known limitation — focus your security effort on `script-src` and `connect-src`, which are the directives that matter most for preventing injection attacks and data exfiltration.
+</Aside>
+
+## Common mistakes
+
+### Using `'unsafe-eval'` in script-src
+
+Some implementations add `'unsafe-eval'` to `script-src` because a tag appears to need it. `'unsafe-eval'` allows `eval()`, `new Function()`, and similar dynamic code execution — which is exactly what attackers use for obfuscated payloads. Almost no legitimate GTM tag requires `'unsafe-eval'`. If a tag is failing without it, investigate the tag rather than weakening your policy.
+
+### Setting CSP and forgetting it
+
+CSP is not a one-time configuration. Every new vendor tag added to GTM may require new CSP entries. Build a process: before adding any new tag to GTM, check whether it requires new CSP entries and update the header before the tag goes live.
+
+### Only protecting the home page
+
+CSP is applied per URL via your server configuration. Make sure your policy covers all page types — especially checkout pages, login pages, and account pages where sensitive data is entered.
+
+### Not acting on violation reports
+
+Collecting violation reports without reviewing them defeats the purpose. Set up alerting for new violation types — a spike in violations from a new blocked-uri is a signal that warrants immediate investigation.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GTM Attack Vectors"
+    description="The attack patterns CSP is designed to defend against — understand the threat before the defense."
+    href="/security/gtm-attack-vectors/"
+  />
+  <LinkCard
+    title="Tag Auditing"
+    description="Regular audit processes to complement CSP with proactive tag review."
+    href="/security/tag-auditing/"
+  />
+  <LinkCard
+    title="Version-Controlled Publishing"
+    description="Track container changes in Git so CSP updates can be coordinated with tag deployments."
+    href="/security/version-controlled-publishing/"
+  />
+</CardGrid>

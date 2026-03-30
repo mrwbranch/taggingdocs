@@ -1,6 +1,177 @@
 ---
-title: "Sessions & Attribution"
-description: "How GA4 defines sessions and attributes conversions."
+title: "Sessions and Attribution"
+description: "How GA4 defines sessions, handles session timeouts, and attributes conversions — including why numbers differ from Universal Analytics."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Sessions in GA4 are not collected — they are derived. GA4 collects individual events, and sessions are reconstructed from those events during processing. This distinction explains many of the differences between GA4 and Universal Analytics session counts.
+
+## How GA4 sessions work
+
+A session in GA4 is a group of events from a single user within a continuous time window. Sessions are identified by the `ga_session_id` event parameter — an integer timestamp of when the session started.
+
+A new session begins when:
+- A user arrives with no active session (first visit, or after a 30-minute inactivity gap)
+- A user arrives with a new campaign source (`utm_source`, `utm_medium`, etc.), even within the 30-minute window
+- Midnight passes (in some configurations — controlled in **Admin → Reporting identity**)
+
+A session ends when:
+- The user is inactive for 30 minutes (default, configurable)
+- The session has lasted 24 hours (hard limit)
+
+### Session timeout
+
+The default 30-minute timeout can be changed at **Admin → Data streams → [stream] → Configure tag settings → Session timeout**. Range: 1 minute to 7 hours, 55 minutes.
+
+Shorter timeout = more sessions, higher bounce rates, shorter average duration.
+Longer timeout = fewer sessions, lower bounce rates, longer average duration.
+
+Most implementations should keep the default unless users routinely have inactivity gaps longer than 30 minutes during legitimate sessions (e.g., reading long documents, watching videos).
+
+### Session identifiers
+
+When a new session begins, GA4 fires `session_start` with:
+- `ga_session_id` — a numeric timestamp (the session identifier)
+- `ga_session_number` — which session this is for the user (1, 2, 3, etc.)
+
+Both parameters attach to every subsequent event in the session. The canonical unique session identifier in BigQuery is the combination of `user_pseudo_id` + `ga_session_id`.
+
+### Engaged sessions
+
+An "engaged session" meets at least one of:
+- Lasted longer than 10 seconds with the page in focus
+- Had 2 or more page views or screen views
+- Had at least 1 conversion event
+
+**Engagement rate** = engaged sessions ÷ total sessions. This is GA4's primary engagement signal.
+
+<Aside type="tip">
+GA4 has a bounce rate field — it is the inverse of engagement rate. A GA4 bounce is a non-engaged session, not a single-page session. Do not compare GA4 bounce rates to Universal Analytics bounce rates; the definitions are incompatible.
+</Aside>
+
+## Session counting differences from Universal Analytics
+
+Expect different session counts between GA4 and UA for the same site and date range.
+
+**Midnight session splits** — UA starts a new session at midnight by default. GA4 does not. A user active from 11:45 PM to 12:15 AM = 2 UA sessions, 1 GA4 session.
+
+**Cross-device stitching** — When User ID is configured, GA4 merges sessions across devices. UA counted cross-device visits as separate sessions. GA4 may count fewer sessions per user.
+
+**Bot filtering** — GA4 automatically filters known bot traffic. UA required an opt-in setting.
+
+Do not use session count as a migration validation metric between GA4 and UA. Use specific, well-defined event counts instead.
+
+## Attribution in GA4
+
+Attribution assigns credit for a conversion to a traffic source. GA4 supports multiple attribution models.
+
+### Attribution models
+
+| Model | How credit is assigned |
+|-------|----------------------|
+| Data-driven (default) | ML distributes fractional credit based on actual impact of each touchpoint |
+| Last click | 100% to the last touchpoint before conversion |
+| First click | 100% to the first touchpoint that introduced the user |
+| Linear | Equal credit across all touchpoints in the conversion path |
+| Time decay | More credit to touchpoints closer to conversion |
+| Position-based | 40% first, 40% last, 20% distributed across middle touchpoints |
+
+Data-driven attribution requires sufficient volume — Google recommends 30+ conversions per day. Below that threshold, it falls back to last click.
+
+Configure the default model in **Admin → Attribution settings**.
+
+### Lookback windows
+
+| Event type | Default lookback window |
+|-----------|------------------------|
+| Acquisition events (first_visit, first_open) | 30 days |
+| All other conversions | 90 days |
+
+Change in **Admin → Attribution settings**. Shorter windows concentrate credit on recent channels.
+
+### Attribution changes apply retroactively
+
+Unlike Universal Analytics, GA4 attribution model changes restate historical data in the Advertising reports. Changing from last-click to data-driven will change how historical channel performance is reported. This is intentional — you can compare models on the same data — but be careful when reporting to stakeholders.
+
+### Standard reports use last non-direct click
+
+The Traffic acquisition and User acquisition reports use last non-direct click attribution regardless of your attribution settings. Your attribution settings affect:
+- The Advertising section
+- The Data API when you request a specific attribution model
+- Looker Studio GA4 connector
+
+<Aside type="caution">
+A common confusion: "I configured data-driven attribution but my Traffic acquisition report looks the same." Yes — standard acquisition reports always use last non-direct click. Data-driven numbers appear in the Advertising section only.
+</Aside>
+
+## Source/medium attribution logic
+
+GA4 determines traffic source in this priority order:
+1. **UTM parameters** — explicit `utm_source`, `utm_medium`, etc.
+2. **Auto-tagging** — Google Ads `gclid`
+3. **Document referrer** — the referring domain
+4. **Direct** — no referrer, no campaign parameters
+
+Campaign parameters persist for the session. All events in a session are attributed to the source that started it.
+
+## Session reconstruction in BigQuery
+
+Count sessions using `user_pseudo_id` + `ga_session_id`:
+
+```sql
+SELECT
+  event_date,
+  COUNT(DISTINCT CONCAT(
+    user_pseudo_id, '.',
+    CAST(
+      (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id')
+      AS STRING
+    )
+  )) AS sessions
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_date
+ORDER BY event_date
+```
+
+Do not count sessions by counting `session_start` events — some sessions may not have one due to data collection gaps or identity stitching.
+
+## Common mistakes
+
+### Expecting campaign attribution to persist across sessions
+
+Campaign attribution is session-scoped. A user from an email campaign today who returns directly tomorrow is attributed to Direct on the second visit. Use the Advertising section or BigQuery for multi-touch attribution.
+
+### Comparing GA4 and UA session counts for validation
+
+Session counts differ by design. Validate GA4 implementation with specific event counts, not total session volume.
+
+### Not adjusting session timeout for long-form content
+
+A site where users read 20-minute articles needs a longer session timeout. The default 30 minutes will split legitimate sessions, inflating session counts and deflating per-session metrics.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Attribution Settings"
+    description="Configure default attribution models and lookback windows."
+    href="/ga4/configuration/attribution-settings/"
+  />
+  <LinkCard
+    title="Session Reconstruction"
+    description="Rebuild sessions from raw events in BigQuery."
+    href="/ga4/bigquery/session-reconstruction/"
+  />
+  <LinkCard
+    title="Attribution Queries"
+    description="Implement multi-touch attribution models in SQL."
+    href="/ga4/bigquery/attribution-queries/"
+  />
+  <LinkCard
+    title="Data Discrepancies"
+    description="Why GA4 numbers don't match other tools."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+</CardGrid>

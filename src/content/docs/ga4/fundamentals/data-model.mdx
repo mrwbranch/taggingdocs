@@ -1,6 +1,209 @@
 ---
 title: "Data Model"
-description: "Understanding GA4's event-based data model."
+description: "Understanding GA4's event-based data model — how events, parameters, and user properties replace the session/hit hierarchy of Universal Analytics."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Every piece of data in GA4 is an event. Not page views that happen to contain events, not sessions that get populated by hits — everything is an event. This is the first and most important thing to understand about GA4, because it changes how you think about tracking, reporting, and data structure.
+
+## From sessions and hits to events and parameters
+
+Universal Analytics organized data in a strict hierarchy: sessions contained hits, hits were typed (pageview, event, transaction, social), and each type had a fixed schema. You knew that a transaction hit had `revenue`, `tax`, `shipping`. A pageview hit had `page`, `title`, `hostname`. The schema was fixed, and Google Analytics defined it.
+
+GA4 abandons this hierarchy entirely. Everything is an event. A page view is an event called `page_view`. A purchase is an event called `purchase`. A button click you define yourself is an event called whatever you want. There are no hit types. There is no session-based aggregation happening at collection time.
+
+Each event has:
+- **An event name** — a string, maximum 40 characters, following `[A-Za-z][A-Za-z0-9_]*` pattern
+- **Event parameters** — key-value pairs attached to that specific event occurrence, up to 25 per event
+- **User properties** — key-value pairs that describe the user across sessions, up to 25 per property
+- **Timestamp and session context** — automatically added by the SDK or tag
+
+That is the entire data model. Everything you see in GA4 reports is derived from this structure.
+
+## Automatic events
+
+GA4 collects a set of events automatically without any implementation work. These vary by platform.
+
+**Web (via gtag.js or GTM)**:
+- `page_view` — fires on each page load (and in SPAs when you call `config` or use GTM's history change trigger)
+- `first_visit` — fires on the first time a user loads your site in that browser
+- `session_start` — fires when a new session begins
+- `user_engagement` — fires when the page has been in focus for more than 10 seconds, 2+ page views occur, or a conversion happens
+
+**Enhanced Measurement** (opt-in per stream, on by default):
+- `scroll` — fires when a user reaches 90% page depth
+- `click` — fires on clicks to external links (outbound)
+- `view_search_results` — fires on URLs matching a query parameter pattern
+- `video_start`, `video_progress`, `video_complete` — for embedded YouTube videos
+- `file_download` — for clicks on links to downloadable file types
+
+<Aside type="caution">
+Enhanced Measurement events look convenient but contain landmines. The scroll event fires at 90% only — you cannot get 25%, 50%, or 75% without custom implementation. The outbound click trigger misclassifies your own subdomains as external unless you configure cross-domain tracking. See [Enhanced Measurement Pitfalls](/ga4/configuration/enhanced-measurement-pitfalls/) before relying on these.
+</Aside>
+
+## Recommended events
+
+GA4 has a list of "recommended events" — event names Google has pre-defined with expected parameter names. Using these names (rather than inventing your own) means GA4 can populate standard reports automatically.
+
+The most important recommended events:
+- `purchase` with `transaction_id`, `value`, `currency`, `items[]`
+- `add_to_cart`, `remove_from_cart`, `view_item`, `view_item_list`
+- `begin_checkout`, `add_payment_info`, `add_shipping_info`
+- `login` with `method`
+- `sign_up` with `method`
+- `search` with `search_term`
+- `share` with `method`, `content_type`, `item_id`
+- `generate_lead` with `currency`, `value`
+
+You are not required to use these names. If you push `product_added` instead of `add_to_cart`, GA4 will collect it — but ecommerce reports will not populate, and you will need custom dimensions and explorations to analyze it.
+
+## Event parameters
+
+Parameters are the data that travels with an event. They are what make events useful for analysis.
+
+```javascript
+// A purchase event with parameters
+gtag('event', 'purchase', {
+  transaction_id: 'T-12345',
+  value: 89.99,
+  currency: 'USD',
+  items: [
+    {
+      item_id: 'SKU-001',
+      item_name: 'Leather Wallet',
+      item_category: 'Accessories',
+      quantity: 1,
+      price: 89.99
+    }
+  ]
+});
+```
+
+Parameters exist at two levels:
+
+**Event-scoped parameters** — attached to a single event occurrence. If a user triggers `purchase` five times, each instance has its own `transaction_id`, `value`, etc. These become event-scoped custom dimensions or feed into standard reports if they use recommended parameter names.
+
+**Item-scoped parameters** — nested within the `items` array in ecommerce events. These describe the products involved in a transaction and are accessible in item-level reports.
+
+To analyze custom parameters in GA4 reports, you must register them as custom dimensions. Parameters you push but never register as custom dimensions are collected (you can see them in BigQuery) but invisible in the reporting interface.
+
+## User properties
+
+User properties persist across sessions for a given user. They are the right place to store information that does not change event-by-event: subscription tier, user role, account type, language preference.
+
+```javascript
+// Set user properties with gtag
+gtag('set', 'user_properties', {
+  subscription_tier: 'premium',
+  account_type: 'business',
+  years_as_customer: '3'
+});
+
+// Or via dataLayer in GTM
+dataLayer.push({
+  event: 'user_properties_update',
+  user_properties: {
+    subscription_tier: 'premium'
+  }
+});
+```
+
+User properties must also be registered as custom dimensions in GA4 (user scope) before they appear in reports. There is a limit of 25 user-scoped custom dimensions per property.
+
+## User identity
+
+GA4 uses three identity signals, in priority order:
+
+1. **User ID** — a first-party identifier you set when a user logs in. This is the most reliable signal.
+2. **Google signals** — cross-device linking for users signed into Google (requires opt-in, only works when Ads Personalization is enabled for the user)
+3. **Device ID** — `client_id` on web (a cookie), App Instance ID on mobile
+
+```javascript
+// Set User ID when user logs in
+gtag('config', 'G-XXXXXXXXXX', {
+  user_id: 'authenticated-user-id-123'
+});
+```
+
+<Aside type="tip">
+Implement User ID from the start. It is the only reliable way to deduplicate users across devices and browsers. GA4's blended identity model (using all three signals) can cause confusion — a single real user may appear as multiple users if they clear cookies, switch browsers, or use incognito mode without User ID.
+</Aside>
+
+## How this affects reporting
+
+Because everything is an event, GA4 calculates sessions and user metrics by analyzing event streams rather than reading pre-aggregated session data. Sessions are reconstructed from events:
+
+- A new session begins when no session has been active for 30 minutes, or when a new campaign parameter arrives
+- The `ga_session_id` event parameter identifies which session an event belongs to
+- `ga_session_number` tracks whether this is a user's first, second, or nth session
+
+This means you can see session context in BigQuery even though sessions are not a first-class collection unit — they are derived from the event stream.
+
+## BigQuery representation
+
+In BigQuery, each row in the `events_*` table is one event. Event parameters are stored in an `ARRAY<STRUCT>` named `event_params`, not as flat columns:
+
+```sql
+-- Extract a specific event parameter
+SELECT
+  event_name,
+  (SELECT value.string_value
+   FROM UNNEST(event_params)
+   WHERE key = 'page_title') AS page_title,
+  (SELECT value.int_value
+   FROM UNNEST(event_params)
+   WHERE key = 'ga_session_id') AS session_id
+FROM `project.dataset.events_*`
+WHERE event_name = 'page_view'
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+```
+
+This nested structure is the single biggest learning curve for analysts coming from flat SQL. Every parameter lookup requires an `UNNEST` and a `WHERE key = 'param_name'` filter. See [Unnesting Patterns](/ga4/bigquery/unnesting-patterns/) for the full reference.
+
+## Common mistakes
+
+### Registering every parameter as a custom dimension
+
+Not every parameter you send needs a custom dimension. Only register dimensions for parameters you actually need to filter or segment by in GA4 reports. You have a limit of 50 event-scoped custom dimensions per property — using them up on rarely-used fields means you cannot add important ones later.
+
+Use BigQuery for ad-hoc analysis of parameters that do not need custom dimensions.
+
+### Using reserved event names
+
+GA4 reserves certain event names that you cannot use for custom events: `ad_activeview`, `ad_click`, `ad_exposure`, `ad_impression`, `ad_query`, `adunit_exposure`, `app_clear_data`, `app_exception`, `app_install`, `app_remove`, `app_store_refund`, `app_update`, `app_upgrade`, `dynamic_link_first_open`, `dynamic_link_open`, `error`, `firebase_campaign`, `firebase_in_app_message_action`, `firebase_in_app_message_dismiss`, `firebase_in_app_message_impression`, `first_open`, `first_visit`, `in_app_purchase`, `notification_dismiss`, `notification_foreground`, `notification_open`, `notification_receive`, `notification_send`, `os_update`, `screen_view`, `session_start`, `user_engagement`.
+
+Using these names for your custom events will result in data loss or unpredictable behavior.
+
+### Expecting parameters to appear without custom dimensions
+
+Pushing `user_type: 'premium'` with every event does not make `user_type` filterable in GA4 reports. You must create a custom dimension named `user_type` (event scope, matching parameter name `user_type`) in the GA4 admin before the parameter becomes accessible in the reporting interface. The data is still in BigQuery — but if you need it in GA4 reports, register the dimension first.
+
+### Confusing event-scoped and user-scoped dimensions
+
+If `subscription_tier` describes the user, register it as a user-scoped custom dimension and set it as a user property. If `product_category` describes a specific event, register it as event-scoped and send it as an event parameter. Using the wrong scope means misaligned attribution and incorrect segmentation.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Events, Parameters, and User Properties"
+    description="Detailed breakdown of each building block with implementation examples."
+    href="/ga4/fundamentals/events-parameters-properties/"
+  />
+  <LinkCard
+    title="Custom Dimensions"
+    description="How to register parameters as custom dimensions so they appear in reports."
+    href="/ga4/configuration/custom-dimensions/"
+  />
+  <LinkCard
+    title="Unnesting Patterns"
+    description="How to work with GA4's nested BigQuery schema in practice."
+    href="/ga4/bigquery/unnesting-patterns/"
+  />
+  <LinkCard
+    title="Schema Reference"
+    description="Complete field reference for the GA4 BigQuery export."
+    href="/ga4/bigquery/schema-reference/"
+  />
+</CardGrid>

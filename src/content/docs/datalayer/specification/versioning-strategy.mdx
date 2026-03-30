@@ -1,6 +1,214 @@
 ---
 title: "Versioning Strategy"
-description: "How to version your dataLayer specification as it evolves."
+description: "How to version your dataLayer specification, manage breaking changes, support multiple spec versions simultaneously, and handle migrations without losing analytics history."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Most teams treat their dataLayer specification like application code — write it, deploy it, and never think about the version until something breaks. That works fine until the first time you need to rename a parameter, restructure the items array, or add required fields to an existing event. Then you discover that your live site, your GTM container, and your GA4 custom dimensions are all tightly coupled to your original spec, and any change cascades into hours of coordinated work.
+
+Versioning your dataLayer spec from the start is cheap insurance against that pain.
+
+## Why versioning matters
+
+The dataLayer is consumed by multiple systems simultaneously:
+- **GTM** has Data Layer Variables pointing to specific paths in the dataLayer
+- **GA4** has custom dimensions and metrics registered to specific parameter names
+- **Your analytics team** has reports and segments built on those dimensions
+- **Other tools** (pixels, CDPs, server-side containers) may read the dataLayer directly
+
+A change to any event name or parameter path can silently break all downstream consumers. Without versioning, you have no way to communicate "this is a breaking change" vs. "this is a backward-compatible addition."
+
+## Semantic versioning for dataLayer specs
+
+Use three-part semantic versioning:
+
+```
+MAJOR.MINOR.PATCH
+  │      │      └── Bug fixes: a parameter had the wrong type, a value was incorrect
+  │      └────────── Minor additions: new optional parameters, new events
+  └───────────────── Breaking changes: renamed parameters, removed parameters, structural changes
+```
+
+Examples:
+- `1.0.0` — initial specification
+- `1.1.0` — added `shipping_tier` as an optional parameter on `add_shipping_info`
+- `1.2.0` — added `content_engagement` event family
+- `2.0.0` — renamed `product_id` to `item_id` to align with GA4 v4 naming
+- `2.0.1` — fixed: `price` was incorrectly documented as a string, it must be a number
+
+## Adding a version indicator to the dataLayer
+
+Include the spec version in every dataLayer push so that GTM tags, validation scripts, and downstream consumers know which spec version generated the data.
+
+There are two approaches:
+
+### Option 1: Version in every event push
+
+```javascript
+dataLayer.push({
+  event: 'add_to_cart',
+  spec_version: '2.1.0',
+  ecommerce: {
+    currency: 'USD',
+    value: 49.99,
+    items: [...]
+  }
+});
+```
+
+**Pros**: Every event in GA4 carries the version, making it easy to see which spec version generated any given event.
+
+**Cons**: Adds one parameter to every event, using up a small amount of your 25-parameter budget per event.
+
+### Option 2: Version on page load only
+
+```javascript
+// Push once on page load
+dataLayer.push({
+  event: 'dl_spec_version',
+  spec_version: '2.1.0'
+});
+```
+
+**Pros**: Doesn't add a parameter to every event.
+
+**Cons**: The version is only associated with events via session context, not directly on each event.
+
+The first approach is more useful for debugging and data quality monitoring. Use it unless parameter budget is genuinely tight.
+
+## Breaking vs. non-breaking changes
+
+Understanding which changes are breaking is what determines your version bump.
+
+**Breaking changes (major version bump required):**
+- Renaming an event (`add_to_cart` → `cart_add`)
+- Renaming a parameter (`item_category` → `product_category`)
+- Changing a parameter's type (string price → number price)
+- Removing a parameter that downstream consumers depend on
+- Restructuring the ecommerce object hierarchy
+- Changing an optional parameter to required
+
+**Non-breaking changes (minor version bump):**
+- Adding a new optional parameter to an existing event
+- Adding a new event entirely
+- Adding new valid values to a parameter that accepts categoricals
+
+**Patches (patch version bump):**
+- Correcting documentation that misrepresented how an existing parameter works
+- Fixing a parameter that was pushed as the wrong type in implementation
+
+<Aside type="note">
+In practice, "non-breaking" means "won't break GTM or existing GA4 custom dimensions." New optional parameters are safe because GTM Data Layer Variables return `undefined` (or their default value) if the path doesn't exist, and GA4 simply ignores parameters it doesn't have a custom dimension for.
+</Aside>
+
+## Supporting old and new versions simultaneously
+
+When you ship a breaking change, you cannot flip a switch and have everything updated atomically. The web doesn't work that way. Server-rendered pages, CDN caches, and browser-cached scripts may serve old code for hours or days after a deploy.
+
+The migration pattern:
+
+<Steps>
+1. **Push both old and new parameter names in parallel** — during the transition period, push both `item_category` (old) and `product_category` (new) on every relevant event. GTM reads whichever one its variables are configured for.
+
+2. **Update GTM first** — update Data Layer Variable paths in GTM to point to the new parameter names. Test in Preview mode.
+
+3. **Publish the GTM update** — now GTM reads both old and new, but uses new.
+
+4. **Update GA4 custom dimensions** — add new custom dimensions for new parameter names if needed. Leave old dimensions in place until no data is flowing to them.
+
+5. **Deploy the application code** — remove the old parameter from application code once GTM and GA4 are updated.
+
+6. **Sunset the old parameter** — after a defined transition period (typically 2–4 weeks), remove the old parameter from both the application and GTM.
+</Steps>
+
+```javascript
+// Transition period: push both old and new
+dataLayer.push({
+  event: 'view_item',
+  spec_version: '2.0.0',
+  ecommerce: {
+    items: [{
+      item_id: 'SKU-001',
+      item_name: 'Classic Leather Jacket',
+      item_category: 'Apparel',      // old — keep during transition
+      product_category: 'Apparel',   // new — used by updated GTM variables
+    }]
+  }
+});
+```
+
+## Documentation as code: keeping the spec in git
+
+Your dataLayer specification should live in your application repository, versioned alongside the implementation. Treat it like an API contract.
+
+Recommended structure:
+
+```
+docs/
+  datalayer-spec/
+    v1/
+      events/
+        ecommerce.md
+        custom-events.md
+      changelog.md
+    v2/
+      events/
+        ecommerce.md
+        custom-events.md
+      changelog.md
+    CHANGELOG.md
+```
+
+Each version directory contains the full specification for that version. The root `CHANGELOG.md` documents every version and what changed.
+
+When a developer makes a change that affects the dataLayer, the specification update should be part of the same pull request — not a follow-up task that gets forgotten.
+
+## Change management process
+
+For teams with multiple stakeholders (developers, analytics team, marketing), a lightweight process prevents accidental breaking changes:
+
+1. **Propose**: create a GitHub issue or ticket describing the intended change, the version bump it requires, and the downstream impact.
+
+2. **Review**: the analytics team and any other dataLayer consumers review and approve.
+
+3. **Plan migration**: for breaking changes, document the transition steps and timeline.
+
+4. **Implement**: the change, the documentation update, and the migration implementation ship together.
+
+5. **Communicate**: a brief message to stakeholders when the new version is live, with links to the updated spec.
+
+This process doesn't need to be heavyweight. For small teams it can be a single Slack thread and a PR comment. The key is that breaking changes are never invisible.
+
+## Common mistakes
+
+**Treating the dataLayer like internal code.** Internal code is yours to refactor freely. The dataLayer is an interface with external consumers. Refactoring it without communicating the change breaks those consumers silently.
+
+**No versioning until the first breaking change.** Teams that add versioning retroactively have to backfill version history and convince stakeholders to trust data that was never labeled by version. Start versioning at `1.0.0` before anything goes live.
+
+**Deprecating without a sunset date.** "We'll remove the old parameter eventually" becomes "the old parameter has been there for two years." Define a specific date when deprecated parameters are removed and communicate it with the initial deprecation notice.
+
+**Breaking changes as minor version bumps.** Renaming a parameter and calling it `1.3.0` instead of `2.0.0` obscures the impact. Downstream consumers see a minor version bump and don't know to check for breakage.
+
+<CardGrid>
+  <LinkCard
+    title="Naming Conventions"
+    description="The naming rules that make your spec stable across versions."
+    href="/datalayer/specification/naming-conventions/"
+  />
+  <LinkCard
+    title="Designing Custom Events"
+    description="How to design new events that don't require frequent revision."
+    href="/datalayer/specification/designing-custom-events/"
+  />
+  <LinkCard
+    title="TypeScript Schemas"
+    description="Type-safe dataLayer pushes that catch breaking changes at compile time."
+    href="/datalayer/validation/typescript-schemas/"
+  />
+  <LinkCard
+    title="Validation Approaches"
+    description="How to validate your dataLayer implementation across development, staging, and production."
+    href="/datalayer/validation/validation-approaches/"
+  />
+</CardGrid>

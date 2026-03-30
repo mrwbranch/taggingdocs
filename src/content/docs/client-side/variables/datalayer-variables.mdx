@@ -1,6 +1,281 @@
 ---
-title: "DataLayer Variables"
-description: "Reading values from the dataLayer into GTM variables."
+title: "Data Layer Variables"
+description: "How to create GTM variables that read data from your dataLayer pushes — the most important variable type in any serious GTM implementation."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Data Layer Variables are the most important variable type in GTM. They read values that your application pushes to the dataLayer, bridging your application's data with the tags you fire.
+
+Every time you push an event with data — a product view, a form submission, a purchase — you are pushing data that Data Layer Variables can expose. Without them, you would have to rely on DOM scraping to retrieve that data, which is fragile, timing-dependent, and frequently wrong. Data Layer Variables are the clean alternative.
+
+## How Data Layer Variables work
+
+When you push to the dataLayer:
+
+```javascript
+dataLayer.push({
+  event: 'product_viewed',
+  product_id: 'SKU-12345',
+  product_name: 'Leather Jacket',
+  product_price: 199.99,
+  product_category: 'Outerwear'
+});
+```
+
+GTM processes this push and merges the key-value pairs into its internal data model. A Data Layer Variable with the Variable Name `product_id` will now return `'SKU-12345'` for the duration of that event processing.
+
+The variable does not read directly from the `window.dataLayer` array. It reads from GTM's internal Abstract Data Model — the merged, persistent state. This distinction matters and we cover it in detail below.
+
+## Creating a Data Layer Variable
+
+<Steps>
+1. Go to **Variables** in GTM and click **New** under User-Defined Variables.
+
+2. Click the variable type and select **Data Layer Variable**.
+
+3. In the **Data Layer Variable Name** field, enter the key path to the value you want. For a flat value, this is just the key name: `product_id`.
+
+4. Set a **Default Value**. This is what the variable returns when the key does not exist in the data model. Set something meaningful — `undefined`, an empty string, or a sentinel value like `(not set)`. Never leave this blank in production.
+
+5. Leave **Data Layer Version** set to **Version 2** unless you have a specific legacy reason to use Version 1. Version 2 is correct for all modern GTM implementations.
+
+6. Name the variable. Use a consistent convention like `DLV - product_id` (DLV for Data Layer Variable).
+</Steps>
+
+## Dot notation for nested values
+
+The real power of Data Layer Variables is accessing nested objects using dot notation in the Variable Name field.
+
+Given this push:
+
+```javascript
+dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    currency: 'USD',
+    value: 199.99,
+    items: [{
+      item_id: 'SKU-12345',
+      item_name: 'Leather Jacket',
+      item_brand: 'Acme Co',
+      item_category: 'Apparel',
+      item_category2: 'Outerwear',
+      price: 199.99,
+      quantity: 1
+    }]
+  }
+});
+```
+
+You can create these Data Layer Variables:
+
+| Variable Name | Returns |
+|--------------|---------|
+| `ecommerce.currency` | `USD` |
+| `ecommerce.value` | `199.99` |
+| `ecommerce.items.0.item_id` | `SKU-12345` |
+| `ecommerce.items.0.item_name` | `Leather Jacket` |
+| `ecommerce.items.0.price` | `199.99` |
+
+The `0` in `ecommerce.items.0.item_id` accesses the first element of the items array. For the GA4 ecommerce implementation, you typically do not need to access individual items this way — instead, you send the entire `ecommerce` object to GA4 using the "Send Ecommerce Data" checkbox on the GA4 Event tag. But for other use cases — logging the first item's ID to a custom dimension, checking the item count, or conditional logic — array index access is essential.
+
+<Aside type="caution">
+Dot notation only goes as deep as the data model. If you try to access `ecommerce.items.0.item_id` but `items` is undefined (because you forgot to push ecommerce data), the variable returns your default value. Always set a meaningful default.
+</Aside>
+
+## Data Layer Version: always use Version 2
+
+GTM has two data layer version modes, and you should always use Version 2.
+
+**Version 1** (legacy): Reads directly from the `window.dataLayer` array, scanning backwards through all pushes to find the most recent value for a key. This was the original behavior.
+
+**Version 2** (current): Reads from GTM's internal data model — the merged state of all pushes. This is what GTM actually uses internally.
+
+The difference is subtle but important for nested objects. With Version 1, a push of `{ ecommerce: { items: [...] } }` followed by `{ ecommerce: { currency: 'USD' } }` would result in the second push *replacing* the first ecommerce object, losing the items. With Version 2, the two objects are recursively merged: you get `{ ecommerce: { items: [...], currency: 'USD' } }`.
+
+Unless you are maintaining a very old container that was originally built with Version 1, do not touch this setting.
+
+## The persistence model
+
+Here is something that trips up many GTM practitioners: Data Layer Variables read the *current state* of the data model, not just the most recent push.
+
+When you push:
+```javascript
+dataLayer.push({ product_id: 'SKU-001' });
+```
+
+The value `'SKU-001'` is now in the data model. If you then push:
+```javascript
+dataLayer.push({ event: 'some_other_event' });
+```
+
+A Data Layer Variable for `product_id` will *still* return `'SKU-001'` in a tag that fires on `some_other_event` — because `product_id` is still in the merged data model. It was never overwritten.
+
+This behavior is powerful when you want data to persist across events (pushing user properties once and having them available on subsequent events), but it is dangerous when you push fresh data for sequential events of the same type, like multiple ecommerce events.
+
+**The ecommerce clearing pattern:**
+
+```javascript
+// ALWAYS clear ecommerce before pushing new ecommerce data
+dataLayer.push({ ecommerce: null });
+
+// Then push the new ecommerce data
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    value: 199.99,
+    items: [{ /* ... */ }]
+  }
+});
+```
+
+Pushing `{ ecommerce: null }` removes the `ecommerce` key from the data model, ensuring stale data from a previous push does not pollute the current event.
+
+## Setting default values correctly
+
+The default value is what your variable returns when the key is not found in the data model. Choose it thoughtfully.
+
+**Good default values:**
+- `(not set)` — clearly indicates missing data, works in GA4 as a readable value
+- `0` — for numeric values where zero makes semantic sense (quantity, price)
+- `false` — for boolean flags
+- An empty string `""` — if your tag configuration handles empty strings gracefully
+
+**Avoid:**
+- Leaving it blank (returns `undefined`, which can cause unexpected behavior in tags)
+- Using a string like `undefined` literally — it looks weird in GA4 reports
+- Using `null` — some tag configurations treat null and undefined differently
+
+```
+// Recommended naming and defaults:
+DLV - product_id       Default: (not set)
+DLV - product_price    Default: 0
+DLV - user_logged_in   Default: false
+DLV - page_type        Default: unknown
+```
+
+## Array access patterns
+
+You can access array elements by index, but this has limitations. The most common pattern in GA4 ecommerce is accessing `items.0.item_name` to get the first item — which works fine when there is always exactly one item, like on a product detail page.
+
+For events where the items array has a variable length (cart views, purchase events with multiple products), you typically send the entire items array to GA4 rather than accessing individual elements. Use the GA4 Event tag's "Send Ecommerce Data" checkbox for this.
+
+When you do need to count array length or check whether an array is non-empty, use a Custom JavaScript Variable:
+
+```javascript
+function() {
+  var items = {{DLV - ecommerce.items}};
+  if (!items || !Array.isArray(items)) return 0;
+  return items.length;
+}
+```
+
+## Data transformation
+
+Data Layer Variables do not have built-in formatting options. They return the raw value from the data model. If you need to transform the value — format a price, convert a boolean to a string, extract a substring — you have two options:
+
+1. **Lookup Table Variable**: Map exact input values to output values. Good for simple categorical transformations.
+2. **Custom JavaScript Variable**: Return a transformed version using the Data Layer Variable as input.
+
+```javascript
+// Custom JS variable to format a price for display
+function() {
+  var price = {{DLV - product_price}};
+  if (!price) return '0.00';
+  return parseFloat(price).toFixed(2);
+}
+```
+
+## Practical patterns
+
+### User properties that persist across the session
+
+Push user data once on page load, then reference it in all subsequent event tags:
+
+```javascript
+// On authenticated page load
+dataLayer.push({
+  user_id: 'U-98765',
+  user_tier: 'premium',
+  user_country: 'US'
+});
+```
+
+Create Data Layer Variables `DLV - user_id`, `DLV - user_tier`, `DLV - user_country`. These will be available on every subsequent event because the data model persists.
+
+### Page-level metadata
+
+```javascript
+// On every page load
+dataLayer.push({
+  page_type: 'product',
+  content_group: 'Apparel',
+  ab_test_variant: 'B'
+});
+```
+
+These values are then available throughout the session as Data Layer Variables without needing to re-push them.
+
+### Conditional access with safe defaults
+
+When your data structure might vary between page types:
+
+```javascript
+// On product pages
+dataLayer.push({
+  page_type: 'product',
+  product: { id: 'SKU-001', name: 'Widget', price: 29.99 }
+});
+
+// On other pages — product keys do not exist
+dataLayer.push({
+  page_type: 'blog'
+});
+```
+
+For `DLV - product.id`, set Default Value to `(not set)`. Your GA4 tag can then use this variable — on product pages it returns the actual ID, on other pages it returns `(not set)`. This is better than `undefined` crashing something downstream.
+
+## Common mistakes
+
+### Not setting a default value
+
+If you leave Default Value blank and a tag fires when the variable is not in the data model, the variable returns `undefined`. Depending on how the tag uses the value, this can result in parameters sent as the string `"undefined"`, which pollutes your GA4 data. Always set a default.
+
+### Using Version 1 when you mean Version 2
+
+New variables default to Version 2, but if you copy an old variable or import a container from an old setup, you might end up with Version 1 unexpectedly. Check the version setting if a variable is returning unexpected values.
+
+### Forgetting to clear ecommerce before pushing new ecommerce data
+
+This is the most common ecommerce data quality problem. A user views product A (pushes `view_item` with product A's ecommerce data), then adds product B to cart (pushes `add_to_cart`). If you forget to push `{ ecommerce: null }` before the `add_to_cart` push, the `view_item` ecommerce data may still be in the model and can leak into the `add_to_cart` event.
+
+### Accessing deeply nested data that might not exist
+
+`ecommerce.items.0.item_category3` will work when the data exists, but if `items` is `null` or the first item does not have `item_category3`, the variable returns the default value. This is expected behavior — just make sure your default value is sensible.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Event Triggers"
+    description="Custom event triggers and Data Layer Variables are a pair — this is how events and data travel together through GTM."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="JavaScript Variables"
+    description="When you need to transform or combine data layer values, Custom JavaScript Variables are the next step."
+    href="/client-side/variables/javascript-variables/"
+  />
+  <LinkCard
+    title="Ecommerce Tracking"
+    description="The full GA4 ecommerce implementation — every dataLayer push and the variables needed to read the data."
+    href="/client-side/tracking/ecommerce-tracking/"
+  />
+  <LinkCard
+    title="Lookup Tables"
+    description="Map data layer values to analytics-friendly names without writing JavaScript."
+    href="/client-side/variables/lookup-tables/"
+  />
+</CardGrid>

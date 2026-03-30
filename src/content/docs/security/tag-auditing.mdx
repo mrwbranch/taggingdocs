@@ -1,6 +1,248 @@
 ---
 title: "Tag Auditing"
-description: "Regular audit process for GTM containers."
+description: "Regular audit process for GTM containers — weekly quick-scans, monthly deep dives, identifying dead tags, and tools for automated monitoring."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Tag auditing is the operational backbone of GTM security. Access controls prevent unauthorized users from making changes. Auditing catches unauthorized changes that slipped through anyway — and, more commonly, catches legitimate changes that have accumulated into a bloated, unmaintainable container.
+
+This article gives you a concrete audit process: what to check, how often, and what to do when you find something wrong.
+
+## Why containers accumulate problems
+
+GTM containers grow like weeds. A marketing team runs a campaign, adds a conversion tag, and the campaign ends — but nobody removes the tag. A developer adds a debugging snippet to fix an issue, publishes, and forgets to clean it up. An agency onboards and adds their tracking stack; when the agency relationship ends, those tags remain.
+
+Over 12-18 months of active use, a container accumulates:
+- Tags for vendors the company no longer works with
+- Paused tags nobody has reviewed in years
+- Custom HTML tags whose original purpose is undocumented
+- Variables that are referenced only by deleted tags
+- Triggers that fire on events that no longer exist
+
+This accumulation is a security problem (unreviewed code running on every page load), a performance problem (container size affects load time), and a maintenance problem (nobody understands what half the container does).
+
+The solution is a consistent, scheduled audit process.
+
+## The weekly quick-scan (15 minutes)
+
+Run this after every publish, or at minimum once per week.
+
+<Steps>
+1. **Review the version history.** In GTM, go to Versions. Who published the last change? When? Every version should have a description. If a version was published without a description or by an unexpected user, investigate before moving on.
+
+2. **Check for new Custom HTML tags.** Filter the Tags view by "Custom HTML." Sort by last modified date. Any Custom HTML tag modified or created since your last audit requires review. Read the entire code. Do not skim.
+
+3. **Spot-check outbound network requests.** Open your site in a fresh browser session (incognito, no extensions). Open DevTools Network tab. Filter by your known bad pattern: look for `fetch`, `XHR`, and `img` requests to domains you do not recognize. Compare against your known-good vendor list.
+
+4. **Verify the container size.** GTM containers have a 200KB limit for the container configuration (not including third-party scripts). A sudden large increase in container size is a signal that substantial code was added.
+</Steps>
+
+This 15-minute routine catches the most common attack patterns before they run for more than a few days.
+
+## The monthly deep dive (2 hours)
+
+Once per month, block two hours for a thorough audit. This is not glamorous work, but it is essential.
+
+### Step 1: Inventory all Custom HTML tags
+
+Every Custom HTML tag should be audited for:
+
+- **Purpose:** Is it clearly documented? Does the tag name describe what it does?
+- **Code review:** Read the entire JavaScript. Could it be exfiltrating data? Does it have outbound requests to unfamiliar domains?
+- **Base64 or hexadecimal encoding:** Any Custom HTML tag with `atob()`, `btoa()`, hex-encoded strings, or heavy string concatenation deserves extra scrutiny.
+- **Unused imports:** Is the tag loading an external script? Is that script's URL still the correct, official URL for that vendor?
+- **Still needed:** Is this tag still serving a business purpose? If nobody on the marketing team can explain why it exists, it should be paused for 30 days and then deleted.
+
+### Step 2: Review all outbound domains
+
+Export a complete list of domains your container sends data to. You can do this by:
+
+1. Running your container through a scanner (ObservePoint, Ghostery, TagInspector)
+2. Running a browser session with all pages and collecting Network requests manually
+3. Using Chrome's Network panel with "Preserve log" enabled across a full user journey
+
+Compare this list against your approved vendor list. Every domain that receives data from your site should be documented, with a business justification and the name of the vendor.
+
+**Flag immediately:**
+- Any domain added in the last 30 days that is not in your approved vendor list
+- Any domain that looks like it is mimicking a legitimate vendor name (subtle misspellings, extra hyphens, TLD variations)
+- Any domain receiving data that is not part of an active vendor relationship
+
+### Step 3: Identify dead tags
+
+A dead tag is a tag that has not fired in 90+ days. GTM does not provide a built-in "last fired" timestamp, but you have two approaches:
+
+**GA4 DebugView history:** For tags that send events to GA4, the last event date gives you a proxy for last fire date.
+
+**Tag firing history in Preview mode:** GTM's Preview mode shows how many times each tag fired in a Preview session. A tag that never fires in a realistic user journey is probably dead.
+
+**The 90-day rule:** Any tag that has not demonstrably fired in 90 days should be paused. Any paused tag that has been paused for 90 days without a documented plan to reactive it should be deleted. This rule prevents the accumulation of unmaintained code.
+
+### Step 4: Audit orphaned resources
+
+An orphaned resource is one that exists but is not connected to anything useful:
+
+**Orphaned triggers:** A trigger not referenced by any tag. Filter Tags view and note all triggers in use. Cross-reference against all triggers in the container. Any trigger not in use can be deleted.
+
+**Orphaned variables:** A variable not referenced by any tag, trigger, or other variable. GTM's built-in variables (Page URL, Click Element, etc.) are fine to leave — they do not affect performance. Custom variables that are not referenced by anything are dead weight.
+
+**Paused tags older than 90 days:** Review each one. If there is a documented reason it is paused and a plan to unpause, keep it. Otherwise, delete it.
+
+### Step 5: Review version history for anomalies
+
+Go back 90 days in the version history. For each version, check:
+
+- **Who published it?** Anyone unexpected?
+- **Does the description match what was actually changed?** Compare the description to the diff.
+- **Were changes made outside business hours?** A publish at 2am on a Saturday warrants explanation.
+- **Were multiple large changes bundled into one version?** Large bundled changes can obscure a small malicious addition.
+
+## Tools and automation
+
+### GTM's built-in audit features
+
+GTM provides a basic audit view in **Admin > Container > Versions**. The diff view between versions shows exactly what was added, modified, or removed. This is your primary tool for version-by-version review.
+
+### Browser-based scanning tools
+
+**ObservePoint:** Enterprise-level scanning that crawls your site, executes the page, and inventories all technologies, network requests, and data flows. Expensive but comprehensive.
+
+**TagInspector:** Similar capability, focused specifically on tag management auditing.
+
+**Ghostery:** Browser extension that identifies and categorizes all trackers on a page. Free, but requires manual review.
+
+**Wappalyzer:** Identifies technologies loaded on a page. Good for spotting unexpected third-party scripts.
+
+### Manual Network tab auditing
+
+The simplest and most reliable approach for checkout page auditing: open Chrome DevTools, enable Network tab with "Preserve log," go through the complete checkout flow as a real user would, then filter the network requests and review every outbound domain.
+
+This takes 10 minutes and requires no external tools.
+
+### Automated container diff via GTM API
+
+If you export your container regularly (see [Version-Controlled Publishing](/security/version-controlled-publishing/)), you can automate diff analysis to specifically flag changes to Custom HTML tags:
+
+```javascript
+// Node.js script to diff Custom HTML tags between two container exports
+const fs = require('fs');
+
+function extractCustomHtmlTags(container) {
+  return container.containerVersion.tag
+    .filter(tag => tag.type === 'html')
+    .reduce((acc, tag) => {
+      const htmlParam = tag.parameter.find(p => p.key === 'html');
+      acc[tag.name] = htmlParam ? htmlParam.value : '';
+      return acc;
+    }, {});
+}
+
+function diffContainers(previousExport, currentExport) {
+  const prev = extractCustomHtmlTags(JSON.parse(fs.readFileSync(previousExport)));
+  const curr = extractCustomHtmlTags(JSON.parse(fs.readFileSync(currentExport)));
+
+  const changes = [];
+
+  // New tags
+  Object.keys(curr).forEach(name => {
+    if (!prev[name]) {
+      changes.push({ type: 'ADDED', name, code: curr[name] });
+    }
+  });
+
+  // Modified tags
+  Object.keys(curr).forEach(name => {
+    if (prev[name] && prev[name] !== curr[name]) {
+      changes.push({ type: 'MODIFIED', name, prev: prev[name], curr: curr[name] });
+    }
+  });
+
+  // Deleted tags
+  Object.keys(prev).forEach(name => {
+    if (!curr[name]) {
+      changes.push({ type: 'DELETED', name });
+    }
+  });
+
+  return changes;
+}
+
+const changes = diffContainers('container-previous.json', 'container-current.json');
+
+if (changes.length > 0) {
+  console.log('Custom HTML tag changes detected — REVIEW REQUIRED:');
+  changes.forEach(change => console.log(JSON.stringify(change, null, 2)));
+  process.exit(1); // Fail CI if changes are found
+}
+```
+
+Run this script in CI/CD after every container export. A non-zero exit code means a human must review Custom HTML tag changes before the export is accepted.
+
+## Documentation requirements
+
+Every tag in your container should have:
+
+1. **A descriptive name** that states its purpose: `Meta Pixel — Purchase Event` not `Facebook tag v3`.
+2. **A version note** when it was changed: explain why the change was made, not just what changed.
+3. **An owner:** who is responsible for this tag? Who do you ask when it needs to change?
+4. **A review date:** when should this tag be evaluated for continued necessity?
+
+An undocumented tag is a tag that nobody will notice is missing — and nobody will notice has been compromised.
+
+## What to do when you find something suspicious
+
+<Steps>
+1. **Do not delete immediately.** Preserve evidence. Take screenshots of the tag code, the version history showing when it was published, and who published it.
+
+2. **Pause the suspicious tag.** Pausing prevents it from firing while you investigate, without losing the evidence.
+
+3. **Publish the container with the tag paused.** A paused tag does not fire, even if published.
+
+4. **Investigate the version history.** Who published the version that added or modified this tag? What was their stated reason? Does the rest of that version's changes look legitimate?
+
+5. **Review network request logs.** How long has this tag been running? Have you been logging CSP violations? Check your violation log for the domain the tag was sending to.
+
+6. **Consult your security team.** If the tag appears to be a genuine security incident, this becomes a data breach investigation, not just a cleanup task.
+
+7. **Document your findings.** Whether the tag turns out to be malicious or just poorly written, document what you found and what you did about it.
+</Steps>
+
+## Common mistakes
+
+### Treating "paused" as equivalent to "safe"
+
+A paused tag does not fire — but it is still code in your container that accumulates technical debt and security review overhead. Paused tags should be deleted on a schedule, not treated as permanent storage.
+
+### Only auditing tags, not triggers and variables
+
+A malicious actor who compromised your container could modify a trigger to capture additional data via an existing legitimate tag. Audit all three components — tags, triggers, and variables — not just tags.
+
+### Skipping the audit when "nothing changed"
+
+"Nothing changed" is almost never accurate in a living container with multiple users. Someone added a tag. Someone updated a template. An agency made a "small fix." The audit is not conditional on perceived activity — it is scheduled and non-negotiable.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GTM Attack Vectors"
+    description="What you are looking for during audits — the attack patterns and red flags."
+    href="/security/gtm-attack-vectors/"
+  />
+  <LinkCard
+    title="Version-Controlled Publishing"
+    description="Export containers to Git to make diffs easy and create an audit trail."
+    href="/security/version-controlled-publishing/"
+  />
+  <LinkCard
+    title="Enterprise Governance"
+    description="Permission structures and change management workflows that make auditing easier."
+    href="/security/enterprise-governance/"
+  />
+  <LinkCard
+    title="Content Security Policy"
+    description="Automated detection of unauthorized data flows to complement manual auditing."
+    href="/security/content-security-policy/"
+  />
+</CardGrid>

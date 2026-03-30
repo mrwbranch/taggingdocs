@@ -1,6 +1,253 @@
 ---
 title: "Video Tracking"
-description: "YouTube and custom video player tracking with GTM."
+description: "YouTube, Vimeo, and HTML5 video tracking with GTM — built-in triggers and custom event patterns for any video player."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Video engagement is one of the richest behavioral signals you can collect. GTM has a built-in YouTube Video trigger that works with zero code for embedded YouTube players. But most real-world implementations also need Vimeo, self-hosted HTML5 players, or proprietary players like Wistia, and those all require custom event patterns.
+
+## YouTube video tracking (built-in trigger)
+
+GTM's YouTube Video trigger injects the YouTube Player API listener automatically. No code changes are needed to your page.
+
+### Setup
+
+<Steps>
+1. **Enable YouTube Video built-in variables.** In GTM, go to Variables → Configure. Enable all Video variables: Video Provider, Video Status, Video URL, Video Title, Video Duration, Video Current Time, Video Percent, Video Visible.
+
+2. **Create a YouTube Video trigger.** Triggers → New → YouTube Video.
+
+3. **Select capture options:**
+   - **Start** — fires when video begins playing
+   - **Complete** — fires when video reaches 100%
+   - **Pause / Seek / Buffer** — fires on those player state changes
+   - **Progress** — fires at percentage thresholds you specify (25, 50, 75, 90 recommended)
+
+4. **Create a GA4 Event tag.** Use `{{Video Status}}` or `video_{{Video Status}}` as the event name. Add the video variables as event parameters.
+</Steps>
+
+<TagConfig
+  name="GA4 - Video - YouTube Engagement"
+  type="Google Analytics: GA4 Event"
+  trigger="YouTube Video Trigger"
+  variables={['Video Provider', 'Video Status', 'Video URL', 'Video Title', 'Video Duration', 'Video Current Time', 'Video Percent']}
+/>
+
+<Aside type="tip">
+Set progress thresholds to 10, 25, 50, 75, and 90. The 90% threshold is more reliable than 100% — videos often buffer near the end and the "complete" event may not fire if a user closes the tab early.
+</Aside>
+
+### YouTube API requirements
+
+The YouTube trigger requires embeds using `<iframe>` pointing to `youtube.com/embed/`. GTM automatically adds `enablejsapi=1` if missing. Two things will prevent this from working:
+
+- A Content Security Policy that blocks `www.youtube.com` in `frame-src` or `script-src`
+- Non-standard embed methods (shortlinks, playlists embedded differently)
+
+## Vimeo tracking
+
+Vimeo uses the postMessage API. GTM has no built-in Vimeo trigger, so you need a Custom HTML tag listening for messages from the Vimeo player iframe.
+
+```html
+<!-- Custom HTML tag, fires on DOM Ready -->
+<script>
+(function() {
+  // Ensure all Vimeo embeds have the API parameter
+  document.querySelectorAll('iframe[src*="vimeo.com"]').forEach(function(iframe) {
+    var src = iframe.src;
+    if (src.indexOf('api=1') === -1) {
+      iframe.src = src + (src.indexOf('?') !== -1 ? '&' : '?') + 'api=1';
+    }
+  });
+
+  var milestones = { 25: false, 50: false, 75: false, 90: false };
+
+  window.addEventListener('message', function(event) {
+    if (event.origin !== 'https://player.vimeo.com') return;
+
+    var data;
+    try { data = JSON.parse(event.data); } catch (e) { return; }
+    if (!data.event) return;
+
+    var statusMap = { play: 'start', pause: 'pause', finish: 'complete' };
+    var status = statusMap[data.event];
+
+    if (status) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'video_engagement',
+        video_provider: 'Vimeo',
+        video_status: status,
+        video_current_time: data.data ? Math.round(data.data.seconds || 0) : 0,
+        video_duration: data.data ? Math.round(data.data.duration || 0) : 0
+      });
+    }
+
+    // Progress milestone detection via timeupdate
+    if (data.event === 'timeupdate' && data.data && data.data.duration) {
+      var percent = Math.round((data.data.seconds / data.data.duration) * 100);
+      [25, 50, 75, 90].forEach(function(m) {
+        if (percent >= m && !milestones[m]) {
+          milestones[m] = true;
+          window.dataLayer = window.dataLayer || [];
+          window.dataLayer.push({
+            event: 'video_engagement',
+            video_provider: 'Vimeo',
+            video_status: 'progress',
+            video_percent: m,
+            video_duration: Math.round(data.data.duration)
+          });
+        }
+      });
+    }
+  });
+})();
+</script>
+```
+
+<Aside type="caution">
+The `timeupdate` event from Vimeo fires multiple times per second. The milestone guard (`milestones[m]`) ensures each threshold only fires once. Do not push to the dataLayer on every timeupdate.
+</Aside>
+
+## HTML5 `<video>` element tracking
+
+For self-hosted video using the standard HTML5 `<video>` element, add a Custom HTML tag or embed this in your application:
+
+```javascript
+(function() {
+  document.querySelectorAll('video[data-track="true"]').forEach(function(video) {
+    var firedMilestones = {};
+    var videoTitle = video.getAttribute('data-title') || 'Unknown Video';
+
+    function push(status, extras) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push(Object.assign({
+        event: 'video_engagement',
+        video_provider: 'HTML5',
+        video_status: status,
+        video_title: videoTitle,
+        video_url: video.currentSrc || video.src,
+        video_duration: Math.round(video.duration) || 0,
+        video_current_time: Math.round(video.currentTime) || 0
+      }, extras || {}));
+    }
+
+    video.addEventListener('play', function() {
+      if (video.currentTime < 1) push('start');
+    });
+
+    video.addEventListener('pause', function() {
+      if (!video.ended) push('pause');
+    });
+
+    video.addEventListener('ended', function() {
+      push('complete', { video_percent: 100 });
+    });
+
+    video.addEventListener('timeupdate', function() {
+      if (!video.duration) return;
+      var pct = Math.round((video.currentTime / video.duration) * 100);
+      [25, 50, 75, 90].forEach(function(m) {
+        if (pct >= m && !firedMilestones[m]) {
+          firedMilestones[m] = true;
+          push('progress', { video_percent: m });
+        }
+      });
+    });
+  });
+})();
+```
+
+Add `data-track="true"` and `data-title="Your Video Title"` to your `<video>` elements to opt them in.
+
+## Wistia tracking
+
+Wistia exposes a JavaScript API with event callbacks:
+
+```html
+<!-- Custom HTML tag, fires on Window Loaded -->
+<script>
+window._wq = window._wq || [];
+window._wq.push({
+  id: '_all',
+  onReady: function(video) {
+    function track(status, extras) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push(Object.assign({
+        event: 'video_engagement',
+        video_provider: 'Wistia',
+        video_status: status,
+        video_title: video.name(),
+        video_id: video.hashedId(),
+        video_duration: Math.round(video.duration())
+      }, extras || {}));
+    }
+
+    video.bind('play', function() { track('start'); });
+    video.bind('pause', function() { track('pause', { video_current_time: Math.round(video.time()) }); });
+    video.bind('end', function() { track('complete', { video_percent: 100 }); });
+
+    var firedWistia = {};
+    video.bind('timechange', function(t) {
+      var pct = video.duration() > 0 ? Math.round((t / video.duration()) * 100) : 0;
+      [25, 50, 75, 90].forEach(function(m) {
+        if (pct >= m && !firedWistia[m]) {
+          firedWistia[m] = true;
+          track('progress', { video_percent: m });
+        }
+      });
+    });
+  }
+});
+</script>
+```
+
+## Standardized GA4 event parameters
+
+Use consistent parameter names across all video providers. This makes cross-platform analysis possible in GA4 Explorations:
+
+| Parameter | Description | Example |
+|---|---|---|
+| `video_provider` | Player platform | `YouTube`, `Vimeo`, `HTML5`, `Wistia` |
+| `video_status` | Playback state | `start`, `progress`, `pause`, `complete` |
+| `video_title` | Video title | `Product Demo` |
+| `video_url` | Video URL or ID | `https://youtu.be/abc123` |
+| `video_duration` | Total length (seconds) | `182` |
+| `video_current_time` | Current position (seconds) | `45` |
+| `video_percent` | Progress percentage | `50` |
+
+## Common mistakes
+
+### Using separate event names per provider
+
+Naming YouTube events `youtube_play` and Vimeo events `vimeo_start` means you can't analyze video performance across providers without creating complex Explorations. Use `video_engagement` for all providers and differentiate with the `video_provider` parameter.
+
+### Not enabling built-in video variables
+
+The YouTube trigger fires correctly but your GA4 tag parameters are empty — because you forgot to enable the built-in video variables. Always enable them before building video tags.
+
+### Pushing on every timeupdate
+
+Without a milestone guard, your `timeupdate` handler floods the dataLayer with hundreds of events per video play. Always gate progress pushes with a fired-milestone tracker.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Event Triggers"
+    description="How to configure triggers for non-YouTube video tracking."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Built-in Variables"
+    description="The full list of built-in video variables for YouTube triggers."
+    href="/client-side/variables/built-in-variables/"
+  />
+  <LinkCard
+    title="GA4 Event Tag"
+    description="Configuring the GA4 Event tag with video parameters."
+    href="/client-side/tags/ga4-event-tag/"
+  />
+</CardGrid>

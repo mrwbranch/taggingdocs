@@ -1,6 +1,380 @@
 ---
-title: "Documentation Template"
-description: "Template for documenting your tracking implementation."
+title: "Tracking Documentation Template"
+description: "Ready-to-use templates for documenting your GTM and GA4 implementation — dataLayer specs, container inventory, GA4 configuration, testing protocols, and change logs."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Undocumented tracking is a liability. When the person who built the implementation leaves, when you inherit a client's container, when a new developer needs to add a feature without breaking existing tracking — the absence of documentation costs real time and introduces real errors.
+
+These templates give you everything you need to document an implementation properly. Copy them into your documentation system (Notion, Confluence, Google Docs, a GitHub repo — anywhere your team actually uses). Adapt the structure to your needs, but keep all sections. Each one exists because missing it causes a specific class of problem.
+
+<Aside type="tip">
+The best time to write documentation is as you build. The second best time is immediately after a launch. Never let more than a week pass between implementing something and documenting it — you will forget the details and the context.
+</Aside>
+
+---
+
+## Template 1: DataLayer Specification
+
+The dataLayer spec is the contract between your development team and your analytics implementation. Every custom event your developers push should appear here. If it is not in the spec, it should not be in the dataLayer.
+
+Copy this template once per custom event. Store all events in a single document organized by feature or user journey.
+
+```markdown
+## Event: [event_name]
+
+**Event name**: `event_name_in_snake_case`
+**Category**: [Purchase / Navigation / Engagement / Form / Video / Custom]
+**Status**: [Draft / Approved / Implemented / Deprecated]
+**Owner**: [Team or person responsible for implementation]
+**Added**: YYYY-MM-DD
+**Last updated**: YYYY-MM-DD
+
+### When this event fires
+[2-3 sentences describing exactly when this event fires. Include the user action,
+the page context, and any conditions. Example: "Fires when a user clicks the
+'Add to Cart' button on a product detail page. Does not fire on quick-view
+modals or wishlist additions."]
+
+### DataLayer push
+
+window.dataLayer.push({ ecommerce: null }); // Only for ecommerce events
+
+window.dataLayer.push({
+  event: 'event_name',
+  parameter_one: 'string value',     // Description of this parameter
+  parameter_two: 123,                // Description (numeric)
+  parameter_three: true,             // Description (boolean)
+  ecommerce: {                       // Only for ecommerce events
+    currency: 'USD',
+    value: 29.99,
+    items: [
+      {
+        item_id: 'SKU-001',
+        item_name: 'Product Name',
+        price: 29.99,
+        quantity: 1
+      }
+    ]
+  }
+});
+
+### Parameters
+
+| Parameter      | Type    | Required | Example     | Description                      |
+|----------------|---------|----------|-------------|----------------------------------|
+| parameter_one  | string  | Yes      | 'homepage'  | What this captures               |
+| parameter_two  | number  | Yes      | 29.99       | Description                      |
+| parameter_three| boolean | No       | true        | Description                      |
+
+### GA4 Destination
+
+- **GA4 Event Name**: event_name (same as dataLayer event OR mapped to)
+- **Custom Dimensions registered**: [List GA4 custom dimensions for these parameters]
+- **Key Event (conversion)**: Yes / No
+
+### GTM Configuration
+
+- **Trigger**: [Trigger name in GTM]
+- **Tag**: [Tag name in GTM]
+- **Variables used**: [List of GTM variable names]
+
+### Test Cases
+
+| Scenario                         | Expected dataLayer output                          | Pass/Fail |
+|----------------------------------|----------------------------------------------------|-----------|
+| User clicks Add to Cart on PDP   | event: 'add_to_cart', item_id: 'SKU-001'           |           |
+| Item is out of stock             | Event should NOT fire                              |           |
+| User adds same item twice        | Event fires once per click                         |           |
+
+### Notes
+[Any implementation notes, edge cases, or gotchas the next developer needs to know.]
+```
+
+---
+
+## Template 2: GTM Container Inventory
+
+The container inventory is the living document of what is in your GTM container and why. It prevents zombie tags (tags that nobody knows the purpose of), documents the business reason for each tag, and provides an audit trail.
+
+```markdown
+# GTM Container Inventory
+
+**Container ID**: GTM-XXXXXXX
+**Property**: [Property name and URL]
+**GA4 Measurement ID**: G-XXXXXXXXXX
+**Last audited**: YYYY-MM-DD
+**Audited by**: [Name]
+
+---
+
+## Tags
+
+| Tag Name                  | Type        | Purpose                           | Trigger(s)               | Owner          | Modified   | Status       |
+|---------------------------|-------------|-----------------------------------|--------------------------|----------------|------------|--------------|
+| GA4 - Config - Main       | Google Tag  | Initialize GA4 configuration tag | All Pages                | Analytics Team | 2024-03-15 | Active       |
+| GA4 - Event - Purchase    | GA4 Event   | Record purchase completions       | CE - purchase            | Analytics Team | 2024-03-15 | Active       |
+| Meta - Base Pixel         | Custom HTML | Load Meta Pixel base code         | All Pages (post-consent) | Marketing      | 2024-01-10 | Active       |
+| [Tag Name]                | [Type]      | [Business purpose]                | [Trigger list]           | [Owner]        | [Date]     | Active/Paused|
+
+### Tag Notes
+[Document anything not obvious from the table — e.g., "The Meta Pixel tag uses Tag
+Sequencing to fire after the Consent Check tag", or "GA4 Config tag passes custom
+user_id via a JS variable"]
+
+---
+
+## Triggers
+
+| Trigger Name         | Type           | Conditions                              | Used By Tags               |
+|----------------------|----------------|-----------------------------------------|----------------------------|
+| All Pages            | Page View      | None (fires on all pages)               | GA4 Config, Base Pixels    |
+| CE - purchase        | Custom Event   | Event equals purchase                   | GA4 Purchase, Meta Purchase|
+| CE - add_to_cart     | Custom Event   | Event equals add_to_cart                | GA4 Add to Cart            |
+| Click - CTA Hero     | Click - All    | Click Classes contains btn-hero-cta     | GA4 CTA Click              |
+| [Name]               | [Type]         | [Conditions]                            | [Tags]                     |
+
+---
+
+## Variables
+
+| Variable Name              | Type                | Value / Configuration        | Used By                |
+|---------------------------|---------------------|------------------------------|------------------------|
+| DL - ecommerce.value       | Data Layer Variable | Path: ecommerce.value        | GA4 Purchase tag       |
+| DL - ecommerce.items       | Data Layer Variable | Path: ecommerce.items        | GA4 ecommerce tags     |
+| JS - Page Type             | Custom JavaScript   | Returns page_type from body  | Multiple tags          |
+| Const - GA4 Measurement ID | Constant            | G-XXXXXXXXXX                 | GA4 Config tag         |
+| [Name]                     | [Type]              | [Value]                      | [Tags]                 |
+
+---
+
+## Folders
+
+| Folder     | Contents                             | Purpose                          |
+|------------|--------------------------------------|----------------------------------|
+| GA4        | All GA4 tags, triggers, variables    | Google Analytics 4 tracking      |
+| Meta       | Meta Pixel tags and variables        | Meta advertising tracking        |
+| Consent    | Consent check tags and variables     | Consent mode implementation      |
+| Utilities  | Shared utility variables             | Reused across multiple tags      |
+```
+
+---
+
+## Template 3: GA4 Property Configuration Document
+
+This documents the decisions made in your GA4 property settings — the ones that are easy to forget and hard to reconstruct.
+
+```markdown
+# GA4 Property Configuration
+
+**Property Name**: [Name]
+**Measurement ID**: G-XXXXXXXXXX
+**Timezone**: [e.g., America/New_York]
+**Currency**: [e.g., USD]
+**Created**: YYYY-MM-DD
+**Last reviewed**: YYYY-MM-DD
+
+---
+
+## Data Settings
+
+| Setting           | Current Value  | Rationale                                                       |
+|-------------------|----------------|-----------------------------------------------------------------|
+| Data Retention    | 14 months      | Maximum available; required for Explorations beyond 2 months    |
+| Google Signals    | Enabled        | Cross-device user counting; thresholding applies in reports     |
+| Reporting Identity| Blended        | User ID when available, falls back to Google Signals, then device|
+| User ID           | Implemented    | Logged-in users have persistent cross-device tracking           |
+
+## Data Filters
+
+| Filter Name         | Type             | Value                | Status  |
+|---------------------|------------------|----------------------|---------|
+| Internal Traffic    | Internal Traffic | IP: 203.0.113.0/24   | Active  |
+| Developer Traffic   | Developer Traffic| debug_mode=true      | Active  |
+| [Filter Name]       | [Type]           | [Value]              | Active  |
+
+## Custom Dimensions
+
+| Dimension Name          | Scope  | Parameter Name       | Status | Notes                                 |
+|-------------------------|--------|----------------------|--------|---------------------------------------|
+| Page Type               | Event  | page_type            | Active | Sent on all page_view events          |
+| Article Author          | Event  | article_author       | Active | Sent on article-related events        |
+| User Subscription Tier  | User   | subscription_tier    | Active | Set from CRM on login                 |
+| [Name]                  | [Scope]| [parameter_name]     | Active | [Notes]                               |
+
+## Key Events (Conversions)
+
+| Event Name         | Counting         | Purpose               | Expected Monthly Volume |
+|--------------------|------------------|-----------------------|-------------------------|
+| purchase           | Once per event   | Primary revenue       | ~500                    |
+| lead_form_submit   | Once per event   | Lead generation       | ~1,200                  |
+| newsletter_signup  | Once per event   | Email acquisition     | ~800                    |
+
+## Linked Products
+
+| Product        | Status     | Purpose                              |
+|----------------|------------|--------------------------------------|
+| Google Ads     | Linked     | Conversion import, audience sharing  |
+| Search Console | Linked     | Organic search data                  |
+| BigQuery       | Linked     | Raw event export, advanced analysis  |
+| Merchant Center| Not linked | Not applicable                       |
+
+## Enhanced Measurement Settings
+
+| Feature         | Status   | Notes                                      |
+|-----------------|----------|--------------------------------------------|
+| Page Views      | Enabled  | Standard                                   |
+| Scrolls         | Enabled  | 90% threshold                              |
+| Outbound Clicks | Disabled | Using custom click tracking instead        |
+| Site Search     | Enabled  | Query parameter: q                         |
+| Video Engagement| Disabled | Using custom video tracking                |
+| File Downloads  | Enabled  | Standard file extensions                   |
+
+## Attribution Settings
+
+| Setting                          | Current Value  | Rationale                              |
+|----------------------------------|----------------|----------------------------------------|
+| Reporting Attribution Model      | Data-Driven    | Google ML model; requires 50+ conversions/month|
+| Lookback Window - Acquisition    | 30 days        | Matches paid media contracts           |
+| Lookback Window - Engagement     | 90 days        | Extended for long purchase cycles      |
+```
+
+---
+
+## Template 4: Testing Protocol
+
+Document your testing process so anyone on the team can verify tracking before and after changes.
+
+```markdown
+# Tracking Testing Protocol
+
+**Version**: 1.0
+**Last updated**: YYYY-MM-DD
+
+---
+
+## Pre-Launch Checklist
+
+Before every GTM container publish:
+
+- [ ] GTM Preview mode active and connected
+- [ ] All new/modified tags tested in Preview
+- [ ] GA4 DebugView open and showing expected events
+- [ ] Events include correct parameters with correct types
+- [ ] No duplicate events firing
+- [ ] Consent mode tested: tags do not fire before consent in an incognito window
+- [ ] Mobile tested: all events fire on mobile viewport
+
+## Core Test Scenarios
+
+### Pageview Events
+1. Load homepage in GTM Preview
+2. Confirm page_view event fires
+3. Confirm page_location, page_title, and page_referrer parameters are correct
+4. Navigate to product page — confirm new page_view fires with updated parameters
+5. Check GA4 DebugView: page_view appears with correct page_location
+
+### Purchase Events
+1. Add item to cart → proceed through checkout → complete purchase
+2. In GA4 DebugView: purchase event appears
+3. Verify transaction_id is unique
+4. Verify value matches order total
+5. Verify items array contains correct products with prices
+6. In GTM Preview: confirm ecommerce: null fired immediately before purchase event
+
+### Consent
+1. Open incognito window
+2. Load page before accepting consent banner
+3. Verify in GTM Preview: only consent-exempt tags have fired
+4. Accept consent
+5. Verify GA4 and marketing tags now fire
+6. Verify consent_update tag fires with correct consent state
+
+## Regression Testing Schedule
+
+| Test                              | Frequency     | Pass Criteria                                       |
+|-----------------------------------|---------------|-----------------------------------------------------|
+| Smoke test: key conversions fire  | Every publish | All key events appear in GA4 DebugView              |
+| Pageview test                     | Every publish | page_view fires on all page types                   |
+| Consent test                      | Consent changes| No tags fire before consent grant                  |
+| Mobile regression                 | Weekly        | All events fire correctly on mobile                 |
+| Ecommerce end-to-end              | Ecommerce changes | Full funnel from view_item to purchase         |
+
+## Known Issues and Workarounds
+
+| Issue              | Workaround                   | Status                |
+|--------------------|------------------------------|-----------------------|
+| [Describe issue]   | [Describe workaround]        | Active / Fixed in v45 |
+```
+
+---
+
+## Template 5: Change Log
+
+A change log is essential for debugging. "The data changed on the 14th" becomes immediately actionable if your change log shows a container was published on the 13th.
+
+```markdown
+# GTM Implementation Change Log
+
+| Date       | Version | Change Description                                               | Changed By | Ticket  |
+|------------|---------|------------------------------------------------------------------|------------|---------|
+| 2024-03-15 | v45     | Added GA4 purchase event; migrated from UA ecommerce             | J. Smith   | TRACK-142|
+| 2024-02-28 | v44     | Fixed duplicate pageview on checkout step 2                      | A. Jones   | TRACK-138|
+| 2024-02-10 | v43     | Added Meta CAPI deduplication event_id parameter                 | M. Lee     | TRACK-131|
+| 2024-01-22 | v42     | Implemented Consent Mode v2; updated all tag consent checks      | J. Smith   | TRACK-125|
+| [Date]     | [Ver]   | [What changed and why]                                           | [Who]      | [Link]  |
+
+## Rollback Log
+
+| Date   | Rolled Back To | Reason                     | Resolution                |
+|--------|---------------|----------------------------|---------------------------|
+| [Date] | [Version]     | [Why it was rolled back]   | [What was done to fix it] |
+```
+
+---
+
+## Template 6: Stakeholder Summary
+
+When non-technical stakeholders need to understand what tracking exists and what data they can expect.
+
+```markdown
+# Tracking Overview for Stakeholders
+
+**Document purpose**: Non-technical summary of analytics events and the questions they answer.
+**Last updated**: YYYY-MM-DD
+**Contact for questions**: [Name and contact]
+
+---
+
+## What we track and why
+
+| Business Question                             | Events That Answer It              | Where to Find in GA4              |
+|-----------------------------------------------|------------------------------------|-----------------------------------|
+| How many users complete a purchase?           | purchase                           | Reports → Monetization            |
+| What is our lead volume by source?            | lead_form_submit                   | Reports → Conversions by Source   |
+| Which content drives the most engagement?     | scroll, video_play, article_read   | Reports → Engagement              |
+| Where do users drop off in checkout?          | begin_checkout → purchase          | Explore → Funnel Exploration      |
+
+## What we do NOT track
+
+[Document deliberate exclusions — PII, sensitive categories, admin pages, etc.]
+
+## Data freshness
+
+- **Standard reports**: 24-48 hour delay
+- **Realtime reports**: Up to 30 minutes
+- **BigQuery**: Daily export, available by ~10 AM UTC next day
+
+## Known limitations
+
+[Be honest about sampling, attribution uncertainty, cross-device tracking gaps, etc.]
+```
+
+---
+
+## Related Resources
+
+- [GTM & GA4 Audit Checklist](/resources/audit-checklist/) — Use these templates to fix documentation gaps an audit reveals
+- [Measurement Strategy Template](/resources/measurement-strategy-template/) — Plan your events before you document them
+- [Analytics Testing Framework](/resources/testing-framework/) — Formalizing the test scenarios in Template 4

@@ -1,6 +1,198 @@
 ---
-title: "Client vs Server Comparison"
-description: "Side-by-side comparison of client-side and server-side GTM."
+title: "Client-Side vs. Server-Side GTM"
+description: "A technical comparison of client-side and server-side GTM — execution environment, capabilities, limitations, and when to use each."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+Most teams don't choose between client-side and server-side GTM. They use both. Client-side collects; server-side distributes. But understanding the meaningful differences between the two execution environments shapes how you design your tracking architecture, where you put your logic, and what you can realistically achieve with each.
+
+## The fundamental difference
+
+Client-side GTM executes JavaScript in the user's browser. It has access to the DOM, browser APIs, cookies, and every piece of data visible in the browser context. It is also subject to every constraint the browser imposes: ad blockers, privacy features, ITP cookie caps, Content Security Policies, and the user's network connection.
+
+Server-side GTM executes in a cloud server you control. It has no browser access whatsoever — no DOM, no `window`, no `document`. What it has instead is the HTTP request that arrived from the browser, a processing environment outside any browser's jurisdiction, and the ability to call any external API with server-to-server reliability.
+
+## Side-by-side comparison
+
+| Dimension | Client-Side GTM | Server-Side GTM |
+|---|---|---|
+| **Execution environment** | User's browser | Cloud server (GCP/AWS/managed) |
+| **Data access** | DOM, browser cookies, local storage, JS variables | HTTP request: headers, body, query params, server-side cookies |
+| **Affected by ad blockers** | Yes — blocking is common | No — first-party domain bypasses most blockers |
+| **Cookie lifetime** | 7 days max on Safari (ITP); restricted on Firefox | Full expiration you configure — server-set cookies are not browser-capped |
+| **Third-party script load** | Each tag = one more vendor script in the browser | No vendor scripts in the browser — server makes API calls |
+| **Page performance impact** | Each tag adds weight and network requests | Minimal — one first-party request from the browser |
+| **PII control** | No — browser sends data directly to vendors | Yes — server can redact, hash, or withhold before forwarding |
+| **Data enrichment** | Limited to what's visible in the browser | Full — can call internal APIs, databases, Firestore |
+| **Debugging** | GTM Preview mode, browser DevTools | sGTM Preview mode + Cloud Logging (more complex) |
+| **Setup cost** | Free | $20–$800+/month for hosting |
+| **Operational complexity** | Low — GTM UI only | High — cloud infrastructure, DNS, SSL, monitoring |
+| **Team requirements** | Marketing/analytics team | Marketing + developer/DevOps |
+| **Tag creation speed** | Immediate — publish to production | Same GTM workflow, but requires a working server first |
+| **Consent enforcement** | Client-side consent manager | Belt-and-suspenders — server can enforce consent again |
+
+## What moves to the server vs. what stays on the client
+
+Understanding which components belong where is more useful than thinking of it as a binary migration.
+
+### Stays on the client-side
+
+- **Data collection logic**: click listeners, scroll depth tracking, form interaction events, timing-based events — anything that observes browser behavior must happen where the behavior occurs
+- **Consent management**: the user's consent is granted or denied in the browser; the consent banner runs client-side
+- **The GA4 transport tag**: even in a server-side setup, you still have a GA4 tag client-side — it is just reconfigured to send to your sGTM endpoint instead of Google's
+- **DOM-dependent measurements**: viewport size, scroll position, element visibility, click coordinates
+
+### Moves to the server-side
+
+- **Tag distribution**: instead of having 8 separate marketing pixel tags in the browser, the browser sends one request to your server, and your server distributes to all 8 vendors
+- **Conversion API calls**: Meta CAPI, TikTok Events API, Google Ads Conversion API — these are server-to-server calls with no reason to originate from the browser
+- **Data enrichment**: adding user segment, customer lifetime value, product margin, or any server-side business data to events before they reach vendors
+- **PII handling**: redacting or hashing email addresses, phone numbers, or other identifiers before they reach third-party platforms
+- **Consent enforcement**: checking that consent was granted before forwarding data to marketing platforms
+
+## The hybrid architecture
+
+Almost no implementation is purely client-side or purely server-side. The practical architecture is hybrid:
+
+```
+Browser                          Your sGTM Server
+├── Client-side GTM               ├── GA4 server tag → GA4
+│   ├── GA4 tag ─────────────────→│   (Measurement Protocol)
+│   │   (transport_url = sGTM)    │
+│   └── Consent management        ├── Meta CAPI tag → Meta
+│                                 │
+│   Still in browser:             ├── Google Ads tag → Google Ads
+│   ├── DOM event collection      │
+│   ├── Click/scroll tracking     ├── TikTok Events API → TikTok
+│   └── Consent state             │
+│                                 └── Internal enrichment API
+└────────────────────────────────→    (adds CLV, segment, margin)
+```
+
+The client-side container becomes leaner: it collects data and sends it to your server. The server-side container handles all vendor distribution. You do not eliminate client-side GTM — you change its role.
+
+## Performance comparison: real numbers
+
+The performance difference between client-side and server-side varies with the size of your marketing stack. Here are representative numbers for a mid-sized ecommerce site:
+
+**Client-side (typical stack: GA4, Meta Pixel, TikTok Pixel, Google Ads, Hotjar)**
+
+- 5 third-party scripts loaded per page
+- ~1.2MB of JavaScript (initial + deferred)
+- ~30 network requests to external domains
+- 4–6 DNS lookups to third-party domains
+- Blocking behavior from Meta and TikTok pixels during initialization
+
+**Server-side (same stack, moved server-side)**
+
+- 1 first-party script (the client-side GA4 tag, reconfigured)
+- ~15KB for the GA4 client-side tag
+- 1 network request to your first-party domain
+- 0 DNS lookups to third-party domains from the browser
+
+The reduction in browser-side network activity translates directly to better `Largest Contentful Paint` and `Interaction to Next Paint` scores. How much depends on your existing stack — the more tags you have, the more you gain.
+
+<Aside type="note">
+Server-side GTM does not remove the GA4 tag from the browser entirely. You still need a client-side mechanism to collect browser-based events and send them to your sGTM endpoint. The performance gain comes from eliminating all the other vendor scripts, not all client-side JavaScript.
+</Aside>
+
+## Debugging: where it gets harder
+
+Client-side GTM debugging is straightforward: GTM Preview mode shows you exactly what triggered, what variables resolved to, and what the tag sent. Everything is visible in one interface.
+
+Server-side debugging involves two Preview sessions that must be linked, Cloud Logging for production issues, and network inspection tools like Postman or curl for testing endpoint behavior directly. When a server-side tag fails silently, there is no browser console error — the evidence is in Cloud Logging or in the vendor platform's event debugger.
+
+This added complexity is one of the genuine costs of server-side GTM. Errors that would be immediately visible in the browser console now require log access and knowledge of your cloud platform's monitoring tools.
+
+<Comparison leftTitle="Debugging client-side" rightTitle="Debugging server-side" leftType="neutral" rightType="neutral">
+  <Fragment slot="left">
+    ```
+    Tool: GTM Preview mode
+    Access: Anyone with GTM access
+    Error visibility: Browser console
+    Real-time: Yes
+    No-code: Yes
+    Production: Same as dev
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```
+    Tools: sGTM Preview + Cloud Logging
+    Access: GTM access + cloud platform
+    Error visibility: Cloud Logging or
+                     vendor debug tools
+    Real-time: Preview yes, prod = logs
+    No-code: Partial
+    Production: Requires log access
+    ```
+  </Fragment>
+</Comparison>
+
+## Migration considerations
+
+When you add server-side GTM to an existing client-side implementation, three things change:
+
+**1. Your client-side GA4 tag gets a new `server_container_url`.** This is the only change required to redirect GA4 data through your server. All existing triggers and variables in your client-side container continue working as before.
+
+**2. You will likely see a brief data gap or temporary double-counting.** When you first enable the GA4 server tag, if your client-side GA4 tag still also sends to Google directly, you will count events twice. The correct transition sequence is: enable server-side → verify data in GA4 → update client-side tag's `server_container_url` → confirm data still flows → optionally disable direct client-side GA4 sending.
+
+**3. Cookie identifiers may change.** The FPID (First-Party ID) cookie set by the sGTM GA4 client takes precedence over the browser-set `_ga` cookie. Existing users will initially have their client IDs reassigned. This is expected behavior, but it will appear as a spike in "new users" in GA4 when you first roll out sGTM. Plan for this in your reporting.
+
+## When to use which
+
+**Use client-side GTM for:**
+- Data collection from browser interactions (clicks, scrolls, form submissions, element visibility)
+- Any tracking that depends on DOM access or browser APIs
+- Teams without cloud infrastructure expertise
+- Sites with fewer than 4 marketing tags where performance impact is manageable
+- Development and prototyping — get it working client-side first, then migrate if needed
+
+**Use server-side GTM for:**
+- Distributing events to multiple vendor APIs (Meta CAPI, Google Ads, TikTok, etc.)
+- Any event that requires enrichment from server-side data
+- PII handling — strip or hash before forwarding to vendors
+- Improving cookie persistence on Safari and Firefox
+- High-traffic sites where tag performance is a meaningful ranking factor
+- Regulated industries where data processing transparency is a compliance requirement
+
+**Use both (the standard production architecture):**
+- Collect with client-side GTM
+- Distribute via server-side GTM
+- Keep consent management client-side
+- Keep DOM-based tracking client-side
+- Move vendor-specific pixels server-side progressively, starting with GA4 and one Conversion API
+
+## Common mistakes
+
+**Migrating every tag to server-side immediately.** Start with GA4 and one Conversion API. Validate the data matches. Then expand. Migrating all tags at once makes debugging nearly impossible.
+
+**Removing client-side tags before server-side equivalents are verified.** Always verify server-side data in the vendor platform before removing the client-side source. Running both briefly — and accepting some double-counting — is safer than going dark.
+
+**Thinking server-side eliminates the need for client-side skills.** Every server-side implementation is built on top of a client-side implementation. You still need to understand triggers, variables, and the dataLayer. Server-side adds complexity; it does not replace foundations.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Architecture Overview"
+    description="The full technical picture: request lifecycle, components, and infrastructure options."
+    href="/server-side/fundamentals/architecture-overview/"
+  />
+  <LinkCard
+    title="When to Use sGTM"
+    description="Decision framework for whether server-side GTM is the right investment for your situation."
+    href="/server-side/fundamentals/when-to-use-sgtm/"
+  />
+  <LinkCard
+    title="GCP Setup"
+    description="Step-by-step deployment guide for getting your first sGTM server running."
+    href="/server-side/setup/gcp-setup/"
+  />
+  <LinkCard
+    title="Debugging sGTM"
+    description="How to use dual Preview mode, Cloud Logging, and Postman to diagnose server-side issues."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+</CardGrid>

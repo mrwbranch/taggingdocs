@@ -1,6 +1,213 @@
 ---
 title: "Lookup Tables"
-description: "Mapping input values to output values without code."
+description: "Mapping input values to output values in GTM without writing JavaScript — the clean, maintainable way to transform categorical data."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Lookup Tables map one value to another. You give them an input variable, define a set of input/output pairs, and they return the matching output. No JavaScript, no maintenance overhead, no try/catch required.
+
+They are underused. Every time you see a Custom JavaScript Variable with a series of `if/else` statements mapping page paths to page types, or event names to display labels, a Lookup Table would have been cleaner. They are declarative, readable, and easy to update without touching code.
+
+## How Lookup Tables work
+
+The mechanism is straightforward:
+
+1. You select an **Input Variable** — any GTM variable whose value you want to transform.
+2. You define **rows**, each with an **Input** value and an **Output** value.
+3. When GTM evaluates the variable, it finds the first row where the Input matches the current value of your Input Variable, and returns the corresponding Output.
+4. If no row matches, it returns the **Default Value** (optional).
+
+First match wins. Order matters when you have overlapping inputs.
+
+## Creating a Lookup Table Variable
+
+<Steps>
+1. Go to **Variables** in GTM and click **New** under User-Defined Variables.
+2. Select **Lookup Table** as the variable type.
+3. Choose the **Input Variable** — the variable whose value you want to map. Click the variable icon and select or create the variable.
+4. Add your rows. Click **Add Row** and fill in each **Input** and **Output** pair.
+5. Optionally, check **Set Default Value** and enter a fallback value for when no row matches.
+6. Name the variable with a convention like `LUT - page-type` (LUT for Lookup Table).
+</Steps>
+
+## Practical examples
+
+### Mapping page paths to page types
+
+Instead of a Custom JavaScript Variable full of `if/else` statements:
+
+**Input Variable:** `{{Page Path}}`
+
+| Input | Output |
+|-------|--------|
+| `/` | `home` |
+| `/products` | `product_listing` |
+| `/cart` | `cart` |
+| `/checkout` | `checkout` |
+| `/order-confirmation` | `purchase_complete` |
+| `/blog` | `blog_index` |
+
+**Default Value:** `other`
+
+This maps common paths to clean page type names suitable for GA4's `content_group` parameter.
+
+### Mapping GTM event names to GA4 event names
+
+When your dataLayer uses internal event names that differ from GA4's recommended naming:
+
+**Input Variable:** `{{Event}}`
+
+| Input | Output |
+|-------|--------|
+| `form_submitted` | `generate_lead` |
+| `item_added` | `add_to_cart` |
+| `order_placed` | `purchase` |
+| `signup_complete` | `sign_up` |
+
+### Mapping product categories to revenue categories
+
+**Input Variable:** `{{DLV - item_category}}`
+
+| Input | Output |
+|-------|--------|
+| `Outerwear` | `apparel_outerwear` |
+| `Shoes` | `apparel_footwear` |
+| `Electronics` | `electronics` |
+| `Books` | `media_books` |
+
+**Default Value:** `uncategorized`
+
+### Environment-specific configuration
+
+**Input Variable:** `{{Page Hostname}}`
+
+| Input | Output |
+|-------|--------|
+| `example.com` | `production` |
+| `staging.example.com` | `staging` |
+| `localhost` | `development` |
+
+**Default Value:** `unknown`
+
+Use this environment variable in trigger conditions to prevent dev/staging events from reaching your production GA4 property.
+
+## Lookup Tables vs. Regex Tables
+
+Lookup Tables use **exact match** only. The input must match the row value exactly (case-sensitive by default).
+
+Use a Lookup Table when:
+- Your input values are known, finite, and exact
+- You are mapping specific strings, not patterns
+- The mapping is simple categorical translation
+
+Use a Regex Table when:
+- You need pattern matching (URLs that start with, contain, or match a pattern)
+- You want to extract portions of the matched string using capture groups
+- The input space is too large to enumerate
+
+**Rule of thumb:** If you can list every possible input value and what it maps to, use a Lookup Table. If the input is a URL pattern or you need wildcards, use a Regex Table.
+
+## Case sensitivity
+
+Lookup Table matching is case-sensitive by default. If your input variable might return `Products`, `products`, or `PRODUCTS`, you need to handle this.
+
+**Option 1:** Add rows for every case variation (tedious but explicit).
+
+**Option 2:** Wrap the input variable in a Custom JavaScript Variable that normalizes the case:
+
+```javascript
+function() {
+  return ({{Page Path}} || '').toLowerCase();
+}
+```
+
+Use that normalized variable as the Input Variable in your Lookup Table.
+
+**Option 3:** Use a Regex Table with case-insensitive matching enabled.
+
+## Ordering and first-match behavior
+
+When multiple rows could match, GTM uses the first match — starting from the top of your row list. This matters for cases where inputs overlap.
+
+A practical example: you want to map paths like `/products/sale` to `sale_products` and `/products` to `product_listing`. If your Lookup Table has `/products` before `/products/sale`, then `/products/sale` will match `/products` first (exact match — it will not, actually, since it is an exact match check). Since it is exact match, `/products/sale` will not match `/products`. But if you are using a Regex Table, order absolutely matters.
+
+For Lookup Tables: since matching is always exact, order does not matter for correctness — but putting the most common values at the top of a long list is a minor optimization (GTM evaluates top to bottom and stops at the first match).
+
+## Default values
+
+Always set a default value for Lookup Tables used in tags. Without a default, the variable returns `undefined` when no row matches, and `undefined` in a GA4 parameter is data quality problem.
+
+Choose your default meaningfully:
+- `other` or `unknown` for page type classification
+- `(not set)` for parameters where absence is meaningful
+- `false` for boolean-type lookups
+- `0` for numeric lookups
+
+## Lookup Tables as configuration stores
+
+An interesting use of Lookup Tables is storing configuration values keyed by environment or domain. Instead of a constant variable, you use a Lookup Table:
+
+**Input Variable:** `{{Page Hostname}}`
+
+| Input | Output |
+|-------|--------|
+| `example.com` | `G-PROD12345` |
+| `staging.example.com` | `G-STG67890` |
+
+**Default Value:** `G-DEV11111`
+
+Now your GA4 Measurement ID variable automatically returns the right property for each environment. No code, no condition complexity, just a table.
+
+<Aside type="tip">
+This pattern — using Page Hostname as the input to look up environment-specific IDs — is one of the cleanest ways to manage multi-environment GTM containers without duplicating tags.
+</Aside>
+
+## Combining Lookup Tables with other variables
+
+Lookup Tables are often the middle step in a variable chain:
+
+1. `{{Page Path}}` → `{{LUT - page-type}}` → used in GA4 event tags as `content_group`
+2. `{{DLV - item_category}}` → `{{LUT - category-revenue-mapping}}` → used to assign revenue categories
+3. `{{Event}}` → `{{LUT - event-display-name}}` → used in a Floodlight tag for conversion label
+
+Each step is simple and testable individually. This is much cleaner than one large Custom JavaScript Variable that tries to do all three transformations in a single function.
+
+## Common mistakes
+
+### Building a Lookup Table for pattern-based matching
+
+If your input is a URL like `/products/leather-jacket-123`, a Lookup Table cannot match it to a row of `/products/*` — because Lookup Tables do exact matches only. Switch to a Regex Table.
+
+### Forgetting the default value
+
+A Lookup Table without a default value silently returns `undefined` when no row matches. You will not see an error. You will just see blank values in GA4 and wonder what happened.
+
+### Too many rows in one table
+
+Lookup Tables can technically hold hundreds of rows. But beyond ~20-30 rows, consider whether a different approach is cleaner — a Regex Table pattern, a JavaScript Variable with a lookup object, or better data pushed to the dataLayer from your application.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Regex Tables"
+    description="Pattern-based value mapping for URLs, event names, and anything that requires wildcards."
+    href="/client-side/variables/regex-tables/"
+  />
+  <LinkCard
+    title="JavaScript Variables"
+    description="When you need logic beyond simple mapping, Custom JavaScript Variables give you full flexibility."
+    href="/client-side/variables/javascript-variables/"
+  />
+  <LinkCard
+    title="Constant Variables"
+    description="For single static values — the simpler alternative when you only need one configuration value."
+    href="/client-side/variables/constant-variables/"
+  />
+  <LinkCard
+    title="Data Layer Variables"
+    description="Read application data from the dataLayer as inputs to your Lookup Tables."
+    href="/client-side/variables/datalayer-variables/"
+  />
+</CardGrid>

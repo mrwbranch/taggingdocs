@@ -1,6 +1,94 @@
 ---
 title: "GTM Internals"
-description: "How GTM actually works under the hood — the mechanics that cause 90% of debugging headaches."
+description: "How GTM actually works under the hood — the data model, container mechanics, race conditions, and edge cases that cause 90% of debugging headaches."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Most GTM debugging is frustrating because practitioners are working with a surface-level mental model. They know what buttons to press but not what the machine actually does. When the expected thing doesn't happen, they are guessing.
+
+This section changes that. These articles go deep into GTM's internal mechanics — the Abstract Data Model, the container snippet's execution flow, race conditions in tag firing, and the undocumented behaviors that explain bugs that look inexplicable from the outside.
+
+<Aside type="tip">
+These articles assume you are comfortable with GTM fundamentals. If you are new to GTM, start with [How GTM Works](/foundations/how-gtm-works/) and [DataLayer Deep Dive](/foundations/datalayer-deep-dive/) in the Foundations section.
+</Aside>
+
+## Core mechanics
+
+<CardGrid>
+  <LinkCard
+    title="Data Model Deep Dive"
+    description="The critical difference between the dataLayer array and GTM's internal Abstract Data Model — and why most 'random data' bugs are actually merge behavior."
+    href="/internals/data-model-deep-dive/"
+  />
+  <LinkCard
+    title="Container Snippet Decoded"
+    description="Line-by-line breakdown of what the GTM snippet actually does, including the async loading mechanism, the dataLayer queue, and what happens if you modify it."
+    href="/internals/container-snippet-decoded/"
+  />
+  <LinkCard
+    title="DataLayer Push Functions"
+    description="The undocumented ability to push functions to the dataLayer — and how to use this.get() and this.set() to read and modify the internal data model."
+    href="/internals/datalayer-push-functions/"
+  />
+</CardGrid>
+
+## Timing and race conditions
+
+<CardGrid>
+  <LinkCard
+    title="Race Conditions and Tag Timing"
+    description="A systematic guide to every timing bug in GTM — consent manager loading, SPA render timing, page exit races, and how to architect around all of them."
+    href="/internals/race-conditions-tag-timing/"
+  />
+  <LinkCard
+    title="Google Tag Auto-Loading"
+    description="How GTM auto-loads a Google Tag when Ads or Floodlight tags are present, and what this means for your consent and GA4 configuration."
+    href="/internals/google-tag-auto-loading/"
+  />
+</CardGrid>
+
+## SPA and state management
+
+<CardGrid>
+  <LinkCard
+    title="Flushing Stale Variables"
+    description="How to properly clear dataLayer state between virtual pageviews in SPAs — and what happens when you don't."
+    href="/internals/flushing-stale-variables/"
+  />
+  <LinkCard
+    title="Persisting DataLayer Across Pages"
+    description="Maintaining dataLayer state across hard page navigations using localStorage, sessionStorage, and cookies."
+    href="/internals/persisting-datalayer-across-pages/"
+  />
+</CardGrid>
+
+## Deployment conflicts and edge environments
+
+<CardGrid>
+  <LinkCard
+    title="Dual Deployment Conflicts"
+    description="What happens when GTM and a hardcoded gtag.js instance coexist on the same page — and how to resolve it."
+    href="/internals/dual-deployment-conflicts/"
+  />
+  <LinkCard
+    title="File Protocol and Edge Environments"
+    description="Running GTM in non-HTTP environments: local development, Electron apps, WebViews, and file:// contexts."
+    href="/internals/file-protocol-edge-environments/"
+  />
+</CardGrid>
+
+## Why this section exists
+
+Official GTM documentation tells you how to use GTM. It does not tell you how GTM works. Simo Ahava and a handful of researchers have documented the internals through reverse engineering and experimentation. Most of what is in this section comes from that body of work — tested and verified in production.
+
+The payoff is real. Once you understand that Data Layer Variables read from GTM's internal merged state (not the raw array), that object pushes merge while array pushes replace, and that tag execution order is non-deterministic without explicit sequencing, a large category of mysterious bugs becomes immediately diagnosable.
+
+The console commands shown in these articles are your primary debugging tool. Open DevTools, paste them in, and you can see exactly what GTM is holding in its data model at any moment:
+
+```javascript
+// Replace GTM-XXXX with your container ID
+google_tag_manager["GTM-XXXX"].dataLayer.get("ecommerce")
+```
+
+Use this. It will save you hours.

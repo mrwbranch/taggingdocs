@@ -1,6 +1,205 @@
 ---
 title: "select_item"
-description: "DataLayer specification for product click from a list."
+description: "Complete dataLayer specification for the GA4 select_item event — tracking when users click a product in a list to view its detail page."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+The `select_item` event fires when a user clicks on a product in a list to navigate to the product detail page. Its primary purpose is to carry the list context — which list the user came from, what position the product held — from the product listing page through to the product detail page and eventually to `add_to_cart` and `purchase`.
+
+Without `select_item`, you can measure list impressions (`view_item_list`) and product detail views (`view_item`), but you cannot close the loop between them. You cannot answer "which list sends the most engaged buyers" because you have no record of the path from list to detail page.
+
+## When to fire
+
+Fire `select_item` when:
+- A user clicks a product card in a category list, search results, or recommendation widget
+- A user clicks a product in a "related products" or "customers also bought" widget
+- A user selects a product from an autocomplete search suggestion list
+
+Fire it **on the source page** (where the list is), not on the destination page. The event fires before navigation — on click, not on page load.
+
+## Complete dataLayer push
+
+```javascript
+// On click of a product in a list
+dataLayer.push({ ecommerce: null });
+
+dataLayer.push({
+  event: 'select_item',
+  ecommerce: {
+    item_list_id: 'mens_outerwear',
+    item_list_name: "Men's Outerwear",
+    items: [
+      {
+        item_id: 'SKU-001-BLK',
+        item_name: 'Classic Leather Jacket',
+        item_brand: 'Heritage Co.',
+        item_category: 'Apparel',
+        item_category2: 'Outerwear',
+        item_category3: 'Jackets',
+        item_variant: 'Black',
+        price: 89.99,
+        quantity: 1,
+        index: 0,
+        item_list_id: 'mens_outerwear',
+        item_list_name: "Men's Outerwear"
+      }
+    ]
+  }
+});
+```
+
+The `items` array for `select_item` contains exactly one item — the product that was clicked. This is in contrast to `view_item_list`, which contains all visible products.
+
+<Aside type="note">
+Preserve the exact `item_list_id`, `item_list_name`, and `index` values from the `view_item_list` push for the same list. GA4 uses these to stitch together the click-through path from list impression to product view to purchase.
+</Aside>
+
+## Event schema
+
+<EventSchema
+  event="select_item"
+  parameters={[
+    { name: 'event', type: 'string', required: true, description: 'Must be "select_item"' },
+    { name: 'ecommerce.item_list_id', type: 'string', required: false, description: 'The list identifier from the view_item_list event for this list. Must match exactly.' },
+    { name: 'ecommerce.item_list_name', type: 'string', required: false, description: 'The human-readable list name from the view_item_list event. Must match exactly.' },
+    { name: 'ecommerce.items[]', type: 'Array<Item>', required: true, description: 'Array containing exactly one item — the product that was clicked.' },
+    { name: 'items[].item_id', type: 'string', required: true, description: 'SKU or unique product identifier.' },
+    { name: 'items[].item_name', type: 'string', required: true, description: 'Product name.' },
+    { name: 'items[].item_brand', type: 'string', required: false, description: 'Brand or manufacturer.' },
+    { name: 'items[].item_category', type: 'string', required: false, description: 'Primary product category.' },
+    { name: 'items[].item_variant', type: 'string', required: false, description: 'Variant shown in the list at time of click.' },
+    { name: 'items[].price', type: 'number', required: false, description: 'Listed price at time of click.' },
+    { name: 'items[].quantity', type: 'number', required: false, description: 'Always 1 for select_item.' },
+    { name: 'items[].index', type: 'number', required: false, description: 'Position in the list (0-based). Must match the index from view_item_list.' },
+    { name: 'items[].item_list_id', type: 'string', required: false, description: 'Same as ecommerce.item_list_id — repeat at item level.' },
+    { name: 'items[].item_list_name', type: 'string', required: false, description: 'Same as ecommerce.item_list_name — repeat at item level.' },
+  ]}
+/>
+
+## Implementation patterns
+
+### Reading list context from rendered product cards
+
+The most reliable implementation stores the list context in data attributes on the product card HTML, then reads those attributes on click.
+
+```javascript
+// HTML — server-rendered product card
+// <div class="product-card"
+//   data-item-id="SKU-001-BLK"
+//   data-item-name="Classic Leather Jacket"
+//   data-item-price="89.99"
+//   data-item-list-id="mens_outerwear"
+//   data-item-list-name="Men's Outerwear"
+//   data-index="0">
+
+document.querySelectorAll('.product-card').forEach(card => {
+  card.addEventListener('click', () => {
+    const d = card.dataset;
+
+    dataLayer.push({ ecommerce: null });
+    dataLayer.push({
+      event: 'select_item',
+      ecommerce: {
+        item_list_id: d.itemListId,
+        item_list_name: d.itemListName,
+        items: [{
+          item_id: d.itemId,
+          item_name: d.itemName,
+          price: parseFloat(d.itemPrice),
+          quantity: 1,
+          index: parseInt(d.index, 10),
+          item_list_id: d.itemListId,
+          item_list_name: d.itemListName
+        }]
+      }
+    });
+  });
+});
+```
+
+### React component pattern
+
+```tsx
+interface ProductCardProps {
+  product: Product;
+  listId: string;
+  listName: string;
+  index: number;
+}
+
+function ProductCard({ product, listId, listName, index }: ProductCardProps) {
+  function handleClick() {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({ ecommerce: null });
+    window.dataLayer.push({
+      event: 'select_item',
+      ecommerce: {
+        item_list_id: listId,
+        item_list_name: listName,
+        items: [{
+          item_id: product.sku,
+          item_name: product.name,
+          item_brand: product.brand,
+          item_category: product.category,
+          item_variant: product.defaultVariant,
+          price: product.price,
+          quantity: 1,
+          index,
+          item_list_id: listId,
+          item_list_name: listName
+        }]
+      }
+    });
+  }
+
+  return (
+    <a href={product.url} onClick={handleClick}>
+      <img src={product.image} alt={product.name} />
+      <h3>{product.name}</h3>
+      <span>{product.formattedPrice}</span>
+    </a>
+  );
+}
+```
+
+## GTM configuration
+
+<Steps>
+1. **Create a Custom Event trigger.** Event name: `select_item`. Name it `CE - select_item`.
+
+2. **Create Data Layer Variables.** Variables for `ecommerce.items` (the full array), `ecommerce.item_list_id`, and `ecommerce.item_list_name`.
+
+3. **Create the GA4 Event tag.** Event name: `select_item`. Enable **Send Ecommerce data**. Optionally add `item_list_id` and `item_list_name` as additional event parameters for list-level filtering in GA4.
+
+4. **Test in Preview mode.** Click a product. Confirm the event fires with one item in the items array, and that `index` matches the product's position.
+</Steps>
+
+## Common mistakes
+
+**Missing list context.** The entire point of `select_item` is to carry list context forward. If `item_list_id` and `item_list_name` are missing or don't match what was pushed on `view_item_list`, the funnel path data is broken.
+
+**Including multiple items.** `select_item` describes a single product click. The items array should contain exactly one item. Including the whole list is wrong.
+
+**Firing on page load instead of on click.** This event fires on the source page when the user interacts, not on the destination page when it loads. Firing it on the product detail page misses the list context entirely.
+
+**Not preserving the index.** If your product cards are rendered dynamically and you don't track position, you lose the ability to analyze how product position affects click-through rate. Always store `index` and include it in the push.
+
+<CardGrid>
+  <LinkCard
+    title="view_item_list"
+    description="The event that precedes select_item — product list impressions with list context."
+    href="/datalayer/ecommerce/view-item-list/"
+  />
+  <LinkCard
+    title="view_item"
+    description="The event that follows select_item — product detail page view."
+    href="/datalayer/ecommerce/view-item/"
+  />
+  <LinkCard
+    title="Ecommerce Overview"
+    description="How all the GA4 ecommerce events connect in the shopping funnel."
+    href="/datalayer/ecommerce/ecommerce-overview/"
+  />
+</CardGrid>

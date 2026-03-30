@@ -1,6 +1,238 @@
 ---
-title: "Architecture Overview"
-description: "How server-side GTM works — clients, tags, and the event model."
+title: "sGTM Architecture Overview"
+description: "How server-side GTM works — clients, tags, the Event Model, and the full request lifecycle from browser to vendor endpoint."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+Server-side GTM is not a proxy. It is a programmable processing layer that sits between your website and your marketing vendors. Understanding the architecture — specifically what each component does and in what order — is the prerequisite for configuring, debugging, and extending any sGTM implementation.
+
+## The request lifecycle
+
+Every hit that flows through your sGTM server follows the same path: the browser sends a request, a client claims it and builds a data object, tags read from that data object and make outgoing requests to vendors. That is the entire model. Everything else is configuration detail layered on top of it.
+
+The sequence in full:
+
+1. A user's browser executes your client-side GA4 tag (inside a client-side GTM container, or hardcoded)
+2. Instead of sending directly to `www.google-analytics.com`, the tag sends to your custom domain — for example, `collect.yoursite.com/g/collect`
+3. Your sGTM server receives the HTTP request
+4. A **Client** evaluates the request, claims it, and transforms the raw request data into the **Event Model**
+5. sGTM evaluates **Triggers** against the Event Model
+6. Matching triggers fire their associated **Tags**
+7. Each tag makes a server-to-server HTTP request to a vendor API (GA4, Meta CAPI, Google Ads, etc.)
+8. The server returns an HTTP response to the browser — typically a `204 No Content` or a 1×1 pixel
+
+The browser is involved only at steps 1 and 8. Everything in between happens on your server, invisible to ad blockers and browser privacy restrictions.
+
+## Components
+
+### Clients
+
+A Client is the entry point for incoming requests. It is responsible for:
+
+- **Claiming** the request: deciding whether this client should handle this particular request
+- **Parsing** the request: extracting data from headers, body, query parameters, and cookies
+- **Building the Event Model**: transforming raw request data into a structured object that tags can read
+- **Returning a response**: sending an HTTP response back to the caller
+
+The GA4 web client handles the standard Measurement Protocol requests sent by client-side GA4 tags. If you are receiving GA4 pageview and event data in sGTM, this client processes it.
+
+You can install multiple clients for different data sources. A typical production setup might include:
+
+- The GA4 web client for browser-originated GA4 data
+- A custom client for receiving webhooks from an order management system
+- A custom client for processing events from a mobile app
+
+When a request arrives, clients are evaluated in priority order. The first client that claims the request wins. If no client claims the request, it is handled by the default client.
+
+<Aside type="note">
+Give each data source its own URL path, and write a client that matches on that path. You cannot reliably multiplex multiple data formats on the same endpoint without explicit path-based routing in your client templates.
+</Aside>
+
+### The Event Model
+
+The Event Model is the core data structure in sGTM — a standardized object that all tags and triggers read from. The client creates it; tags consume it.
+
+For GA4 Measurement Protocol requests, the Event Model includes:
+
+- `event_name` — the GA4 event name (`page_view`, `purchase`, `add_to_cart`, etc.)
+- `client_id` — the GA4 client identifier
+- `user_id` — if set in the original request
+- All event parameters (`page_location`, `page_title`, ecommerce parameters, custom parameters)
+- User properties
+- Request metadata: IP address, user agent, timestamp
+
+The Event Model exists only within the sGTM processing context for a single request. Tags read from it, and advanced configurations (enrichment variables, custom templates) can augment it during processing.
+
+### Tags
+
+Server-side tags are conceptually identical to client-side tags — they are the actions that execute when a trigger fires. But instead of injecting a script into a browser, they make outbound HTTP requests from your server to vendor APIs.
+
+The GA4 server tag reads the event name and parameters from the Event Model and formats them into a GA4 Measurement Protocol v2 request, sent to `www.google-analytics.com/mp/collect`. The Meta CAPI tag reads those same fields, maps them to Facebook's event schema, and sends them to `graph.facebook.com/{version}/events`.
+
+Tags run on the server. They have no performance impact on the user's browser. A tag that makes a slow API call to an enrichment service delays the server's response — it does not block the browser's rendering pipeline. This is a critical architectural advantage over client-side tags.
+
+### Triggers
+
+Triggers in sGTM work the same way as in client-side GTM: they define the conditions under which a tag fires. Common trigger conditions include:
+
+- Event name equals `purchase`
+- `page_location` contains `/checkout/confirmation`
+- A custom parameter `subscription_type` equals `premium`
+
+The difference is that triggers evaluate against the Event Model, not the DOM. There are no click triggers, no scroll depth triggers, no DOM-ready triggers in sGTM. Every trigger is effectively a Custom Event trigger evaluated against the data the client extracted from the incoming request.
+
+### Variables
+
+Variables read values from the Event Model, request context, or external sources. They work identically to client-side GTM variables in terms of interface — referenced with double curly braces in tag configuration. The values they return, however, come from the server context.
+
+Common server-side variable types:
+
+- **Event Data** — reads named fields from the Event Model (`event_name`, `ip_override`, custom parameters)
+- **Cookie** — reads cookies from the incoming request headers
+- **HTTP Header** — reads specific request headers
+- **Firestore Lookup** — queries Firestore for enrichment data using a key from the Event Model
+- **Custom JavaScript** — executes sandboxed JavaScript to compute a value
+
+## The two-container architecture
+
+A production sGTM implementation always runs two GTM containers together:
+
+<Comparison leftTitle="Client-side container" rightTitle="Server-side container" leftType="neutral" rightType="neutral">
+  <Fragment slot="left">
+    ```
+    Runs in: User's browser
+    Role: Data collection
+
+    Collects: Pageviews, clicks, events,
+              ecommerce, user interactions
+
+    Sends to: Your sGTM endpoint
+              collect.yoursite.com
+
+    Contains: GA4 tag (transport_url set
+              to your sGTM domain)
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```
+    Runs in: Your cloud server
+    Role: Data distribution
+
+    Receives: Requests from client container
+
+    Forwards to: GA4, Meta CAPI,
+                 Google Ads, TikTok,
+                 Firestore, custom APIs
+
+    Contains: GA4 server tag, CAPI tag,
+              enrichment variables
+    ```
+  </Fragment>
+</Comparison>
+
+The client-side container is responsible for collection. The server-side container is responsible for distribution. They are not interchangeable — you need both.
+
+The connection between them is the `server_container_url` setting in your client-side GA4 tag. Pointing this at your sGTM endpoint instead of Google's endpoint redirects the data flow through your server. This is the single configuration change that activates the entire server-side architecture.
+
+## Infrastructure
+
+### Google Cloud Platform — Cloud Run
+
+The Google-recommended deployment runs sGTM on Cloud Run using Google's official Docker image. Cloud Run scales automatically from zero instances during idle periods to many instances under load, and you pay only for the compute time actually used.
+
+This is the most common self-managed setup. It requires a GCP project, billing, and DNS access to configure your custom domain.
+
+### Managed hosting
+
+Providers like Stape and Addingwell handle the infrastructure for you. You supply your GTM container ID and domain configuration; they provision the Cloud Run instances. The tradeoff is slightly less control in exchange for simpler setup and predictable pricing. For teams without dedicated DevOps resources, managed hosting is often the pragmatic choice.
+
+### AWS and others
+
+sGTM is a Docker container. It runs on any container-capable platform: AWS ECS Fargate, Azure Container Apps, Google Kubernetes Engine, or a single VPS running Docker. Google's setup wizard only automates GCP provisioning, so alternative platforms require manual container deployment and environment variable configuration.
+
+## How sGTM differs from a reverse proxy
+
+A proxy forwards requests unchanged. sGTM transforms them. When a browser request arrives:
+
+1. The raw Measurement Protocol request is **parsed** by a client into a structured Event Model
+2. The Event Model can be **modified** — parameters added, PII stripped, enrichment data injected
+3. Tags make **separate outbound requests** to each vendor, formatted according to that vendor's API requirements
+4. The original browser request is **consumed** — it never reaches Google's servers directly
+
+The data your vendors receive is data your server has processed. Not raw browser data forwarded intact. This processing step is what enables PII redaction, data enrichment, and multi-vendor distribution from a single event source.
+
+## Network topology
+
+```
+User's Browser
+│
+│  HTTPS to collect.yoursite.com
+│  (first-party subdomain)
+│
+▼
+Your sGTM Server (Cloud Run / Stape)
+│
+├── GA4 Measurement Protocol API
+│   www.google-analytics.com/mp/collect
+│
+├── Meta Conversions API
+│   graph.facebook.com/{version}/events
+│
+├── Google Ads API
+│   googleads.googleapis.com
+│
+├── TikTok Events API
+│   business-api.tiktok.com/open_api
+│
+└── Your internal APIs / Firestore
+    (enrichment, logging, CDP writes)
+```
+
+All vendor communication is server-to-server, originating from your cloud server's IP address — not from your user's IP address. This matters for geolocation accuracy, IP-based targeting, and privacy regulations that treat IP as personal data.
+
+## Preview mode
+
+sGTM has its own Preview mode, separate from client-side GTM Preview. To use it:
+
+1. Click **Preview** in the sGTM container editor — a debug session starts
+2. In your client-side GTM Preview, link the two sessions so client-side and server-side events appear synchronized
+3. Each request to your sGTM endpoint shows: which client claimed it, what Event Model was built, which triggers fired, which tags executed, and the outbound request each tag made
+
+Mastering this dual-Preview workflow is the most valuable sGTM debugging skill. Every complex issue eventually comes back to inspecting the Event Model in Preview to see what data a tag actually received.
+
+## Common mistakes
+
+**Skipping the custom domain.** Sending traffic to the default `*.a.run.app` Cloud Run URL defeats the first-party benefits of sGTM. The custom subdomain is not optional — it is the mechanism by which you gain first-party cookie access.
+
+**Modifying server-side before updating client-side.** Nothing changes until you update `server_container_url` in your client-side GA4 tag. Configuring server-side tags while the client still sends to Google directly means your server receives no traffic to process.
+
+**Assuming all GA4 data flows through sGTM automatically.** Only data from tags explicitly configured to send to your endpoint reaches sGTM. A GA4 tag still pointing at Google's endpoint bypasses your server entirely.
+
+**Treating sGTM as fire-and-forget infrastructure.** Tags get added, client templates get outdated, cost spikes appear from misconfigured scaling. sGTM requires the same governance discipline as your client-side container — regular audits, version control, and monitoring.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Why Server-Side?"
+    description="The honest case for investing in server-side infrastructure — benefits, costs, and when to skip it."
+    href="/server-side/fundamentals/why-server-side/"
+  />
+  <LinkCard
+    title="What Are Clients?"
+    description="Deep dive on the Client component — claiming, Event Model construction, and custom client patterns."
+    href="/server-side/clients/what-are-clients/"
+  />
+  <LinkCard
+    title="GCP Setup"
+    description="Step-by-step deployment of sGTM on Google Cloud Platform using Cloud Run."
+    href="/server-side/setup/gcp-setup/"
+  />
+  <LinkCard
+    title="Debugging sGTM"
+    description="Preview mode, Cloud Logging, and systematic debugging for server-side issues."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+</CardGrid>

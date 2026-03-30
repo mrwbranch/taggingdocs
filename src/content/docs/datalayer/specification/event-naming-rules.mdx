@@ -1,6 +1,250 @@
 ---
 title: "Event Naming Rules"
-description: "Rules and patterns for naming dataLayer events."
+description: "When to use GA4 recommended events vs. custom events, the 40-character limit, event hierarchy design, and naming anti-patterns to avoid."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Event naming is where analytics implementations go wrong most often. The wrong name means broken reports, lost history when you correct it, and a growing taxonomy that nobody fully understands. The right name — especially one that aligns with GA4's recommended event list — means pre-built reports, automatic categorization, and a schema that new team members can read without a decoder ring.
+
+This page covers the decision framework for event naming: when to use GA4's recommended events, when to create custom events, and how to structure both.
+
+## Use GA4 recommended events whenever they fit
+
+GA4 ships with a list of recommended events — named events that GA4 knows about and pre-configures reports for. When your tracking need fits a recommended event, use it exactly. Don't add prefixes, don't rename it to fit your internal vocabulary, and don't create a parallel custom event for the same action.
+
+The complete list of GA4 recommended events includes:
+
+**Ecommerce events:**
+- `view_item_list`, `select_item`
+- `view_item`
+- `add_to_cart`, `remove_from_cart`, `view_cart`
+- `begin_checkout`, `add_shipping_info`, `add_payment_info`
+- `purchase`, `refund`
+- `view_promotion`, `select_promotion`
+- `add_to_wishlist`
+
+**General events:**
+- `login`, `sign_up`
+- `search`
+- `share`
+- `generate_lead`
+- `tutorial_begin`, `tutorial_complete`
+- `unlock_achievement`
+
+**Content events:**
+- `select_content`
+- `post_score`
+
+If your action maps to one of these — use it. If it only partially maps to one — still use it and add custom parameters for the extra context you need.
+
+```javascript
+// User completes a lead form
+// ✅ Use GA4 recommended generate_lead with extra parameters
+dataLayer.push({
+  event: 'generate_lead',
+  lead_form_name: 'product_demo_request',
+  lead_source: 'pricing_page',
+  estimated_deal_value: 'enterprise'
+});
+
+// ❌ Don't invent a custom event for something GA4 already has
+dataLayer.push({
+  event: 'form_lead_submitted'   // loses GA4 pre-built reporting
+});
+```
+
+## The 40-character limit
+
+GA4 enforces a strict 40-character limit for event names. Names longer than 40 characters are silently truncated, which means two different long event names can collide into the same truncated name.
+
+```javascript
+// ✅ Under 40 characters (count carefully)
+event: 'view_item'                    // 9 chars
+event: 'content_article_read'         // 20 chars
+event: 'user_subscription_upgraded'   // 30 chars
+
+// ❌ Over 40 characters — will be truncated
+event: 'user_newsletter_subscription_confirmed'  // 41 chars — truncated
+event: 'product_recommendation_widget_clicked'   // 40 chars — fine, just
+```
+
+Count characters before registering an event name. Keep a spreadsheet of all event names and their character counts as part of your tracking specification.
+
+<Aside type="caution">
+The 500 distinct event names per GA4 property limit is the other hard cap you need to know about. Implementing a large site? An event-per-click or event-per-element approach will hit 500 fast. Design your taxonomy so that event variety comes from parameters, not from proliferating event names.
+</Aside>
+
+## Events vs. parameters: the core decision
+
+The most common taxonomy mistake is creating too many event names when you should be using one event with descriptive parameters.
+
+**Create a new event when:**
+- The action is fundamentally different (a click vs. a form submission vs. a purchase)
+- You want to trigger a different tag or conversion in GTM based on this specific action
+- You want to build a specific funnel or path report in GA4 for this action
+- The event has parameters that don't make sense on any existing event
+
+**Add a parameter to an existing event when:**
+- The action is the same type of thing, with variation
+- You want to filter or segment the action in reports, but not track it as a separate funnel step
+- The extra information contextualizes but doesn't fundamentally change the interaction
+
+```javascript
+// ❌ Too many event names for what are really the same action
+event: 'hero_banner_click'
+event: 'sidebar_promo_click'
+event: 'featured_collection_click'
+event: 'homepage_module_click'
+
+// ✅ One event with a parameter for the context
+dataLayer.push({
+  event: 'select_promotion',
+  ecommerce: {
+    items: [...],
+    promotions: [{
+      promotion_id: 'HERO_SUMMER24',
+      promotion_name: 'Summer Sale 2024',
+      creative_name: 'hero_banner',
+      creative_slot: 'homepage_hero'
+    }]
+  }
+});
+```
+
+## Event hierarchy: grouping related events
+
+Use a prefix convention to group related events in the GA4 event list. Because GA4 sorts events alphabetically, a well-chosen prefix keeps related events adjacent.
+
+```
+content_article_read
+content_article_share
+content_video_pause
+content_video_play
+content_video_complete
+
+form_error
+form_start
+form_step_complete
+form_submit
+
+error_api_failure
+error_404_page_view
+error_validation
+```
+
+This grouping pays off when you're scanning 50+ event names in GA4 Events reports. Events with the same prefix cluster together, making patterns visible immediately.
+
+## Custom event naming checklist
+
+Before creating a new custom event, answer these questions:
+
+1. **Does GA4 have a recommended event that fits?** If yes, use it.
+2. **Is this a new action type, or context on an existing action?** If context, use a parameter instead.
+3. **Is the name under 40 characters?** Count the characters.
+4. **Is it in snake_case?** No camelCase, no hyphens.
+5. **Does it use a reserved prefix?** Check for `gtm.`, `ga_`, `google_`.
+6. **Will this name still make sense to someone reading it in two years?** Avoid jargon, use full words.
+7. **Does your team have fewer than 500 total event names across all properties?** Track this count.
+8. **Is this name documented in your tracking specification?** If not, document it before implementing.
+
+## Anti-patterns to avoid
+
+### Event names as data carriers
+
+```javascript
+// ❌ Using event names to carry data — creates hundreds of event names
+event: 'click_buy_button_blue_medium_jacket'
+event: 'view_product_SKU-12345'
+event: 'category_page_mens_shoes_size_10'
+
+// ✅ Event name describes the action, parameters carry the data
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    items: [{
+      item_id: 'SKU-12345',
+      item_variant: 'Blue / Medium',
+      item_category: 'Jackets'
+    }]
+  }
+});
+```
+
+### Tracking every click as a unique event
+
+```javascript
+// ❌ One event per UI element — burns through your 500 event name limit
+event: 'click_header_logo'
+event: 'click_nav_menu_women'
+event: 'click_nav_menu_men'
+event: 'click_nav_menu_sale'
+event: 'click_cart_icon'
+
+// ✅ One navigation event with parameters
+dataLayer.push({
+  event: 'navigation_click',
+  nav_element: 'header_main_menu',
+  nav_label: 'Women'
+});
+```
+
+### Mixing tenses and parts of speech
+
+```javascript
+// ❌ Inconsistent grammar makes the event list hard to scan
+event: 'add_to_cart'        // verb_to_noun
+event: 'cart_view'          // noun_verb
+event: 'checkout_started'   // noun_past_tense
+event: 'purchasing'         // present participle
+
+// ✅ Consistent verb_object or verb_noun pattern
+event: 'add_to_cart'
+event: 'view_cart'
+event: 'begin_checkout'
+event: 'complete_purchase'
+```
+
+### Redundant event names for the same action in different contexts
+
+```javascript
+// ❌ Same action, different contexts as separate events
+event: 'add_to_cart_from_pdp'
+event: 'add_to_cart_from_list'
+event: 'add_to_cart_from_wishlist'
+event: 'add_to_cart_from_cart_suggestion'
+
+// ✅ One event, context in a parameter
+dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: {
+    items: [{
+      item_id: 'SKU-001',
+      item_list_name: 'Product Detail Page'  // or 'Search Results', 'Wishlist', etc.
+    }]
+  }
+});
+```
+
+<CardGrid>
+  <LinkCard
+    title="Parameter Naming Rules"
+    description="How to name event parameters — GA4 limits, reserved names, reuse strategies."
+    href="/datalayer/specification/parameter-naming-rules/"
+  />
+  <LinkCard
+    title="Naming Conventions"
+    description="The complete naming convention reference for events and parameters."
+    href="/datalayer/specification/naming-conventions/"
+  />
+  <LinkCard
+    title="Designing Custom Events"
+    description="Full framework for creating new events — decision tree, documentation template, review process."
+    href="/datalayer/specification/designing-custom-events/"
+  />
+  <LinkCard
+    title="Ecommerce Overview"
+    description="How all the GA4 ecommerce events connect in the funnel."
+    href="/datalayer/ecommerce/ecommerce-overview/"
+  />
+</CardGrid>

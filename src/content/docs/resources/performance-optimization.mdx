@@ -1,6 +1,350 @@
 ---
-title: "Performance Optimization"
-description: "Optimizing GTM container performance and page load impact."
+title: "GTM Performance Optimization"
+description: "Measuring and reducing the performance impact of your GTM implementation — container size audits, tag firing optimization, lazy-loading strategies, and building an analytics performance budget."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+GTM adds real overhead to your pages. The container script loads, the container JSON downloads, tags execute, and third-party scripts make network requests. On a fast connection with a fast device, the impact is small. On a 3G connection or a mid-range Android phone, it can be the difference between a site that passes Core Web Vitals and one that fails them.
+
+This article covers how to measure the actual impact of your GTM container, where the overhead comes from, and the specific techniques to reduce it without compromising measurement quality.
+
+<Aside type="note">
+This article focuses on **client-side GTM performance**. Server-side GTM can dramatically reduce client-side script load, but that is covered separately in the server-side GTM section.
+</Aside>
+
+---
+
+## Measuring the impact first
+
+The cardinal rule of performance optimization: measure before you change anything. Without a baseline, you cannot know whether your changes helped, hurt, or made no difference.
+
+### Setting up measurements
+
+**WebPageTest** is the most thorough tool for measuring GTM impact. It shows the full waterfall — when the container loads, when each tag fires, how much CPU time they consume.
+
+Run two tests: one with GTM enabled, one with the GTM snippet removed (or blocked via uBlock Origin). Compare:
+- Time to First Byte (should be identical — GTM is client-side only)
+- Largest Contentful Paint (LCP) — GTM can delay LCP by loading render-blocking resources
+- Total Blocking Time (TBT) — the most GTM-sensitive Core Web Vital; tag execution runs on the main thread
+- Total page size
+- Number of network requests
+
+```
+# Test URLs to bookmark:
+# WebPageTest: https://www.webpagetest.org/
+# CrUX (real-user data): https://crux.run/
+# PageSpeed Insights: https://pagespeed.web.dev/
+```
+
+### Using Chrome DevTools to isolate GTM
+
+In Chrome DevTools → Performance tab, record a page load and look for:
+- The `gtm.js` file download (typically 60-120KB uncompressed)
+- The container file download (size varies by container complexity)
+- Long tasks (>50ms) attributed to GTM code execution
+- Network requests initiated by GTM-loaded scripts
+
+The **Coverage tab** in DevTools shows how much of loaded JavaScript is actually executed. If a tag loads a 200KB library but only uses 10% of it, that is a significant optimization opportunity.
+
+### Container size check
+
+GTM shows container size in Tag Assistant and in the container overview. The key number is the compressed container size:
+
+- Under 50KB: healthy
+- 50-100KB: review what is driving size
+- Over 100KB: investigate and reduce
+
+Container bloat usually comes from:
+1. Custom HTML tags with large embedded scripts
+2. Lookup tables with hundreds of rows
+3. Multiple versions of similar scripts (A/B test remnants)
+4. Deprecated tags that were never removed
+
+---
+
+## Container size optimization
+
+### Audit what is actually in your container
+
+Export your container JSON and search it for large strings. The container JSON is available in GTM → Admin → Export Container.
+
+```bash
+# Check total container file size
+wc -c < container.json
+# Or with human-readable output:
+du -h container.json
+
+# Find the largest tags by searching the exported JSON
+# (Using jq if available)
+cat container.json | jq '.containerVersion.tag[] | {name: .name, type: .type}' | head -50
+```
+
+### Remove unused tags, triggers, and variables
+
+The fastest win. Every item in your container adds to download and processing time, even if it never fires.
+
+Use Tag Manager's built-in "Unused" filter: in Variables, look for variables with zero references. In Triggers, look for triggers with no associated tags. In Tags, look for paused tags that have been paused for more than 30 days — these should be deleted, not paused.
+
+### Move large scripts out of Custom HTML tags
+
+The worst thing you can do for GTM container size is paste a full third-party library into a Custom HTML tag. The script gets embedded in your container JSON and downloads on every page load.
+
+<Comparison leftTitle="Embedded Script (Slow)" rightTitle="External Script Load (Fast)" leftType="bad" rightType="good">
+  <Fragment slot="left">
+    ```html
+    <!-- Custom HTML tag with embedded 200KB library -->
+    <script>
+    /* ! Moment.js v2.29.4 ... */
+    /* 3,000 lines of minified code */
+    (function(global,factory){
+      typeof exports === 'object' ...
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```html
+    <!-- Custom HTML tag loads from CDN instead -->
+    <script>
+      var script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js';
+      script.async = true;
+      document.head.appendChild(script);
+    </script>
+    ```
+  </Fragment>
+</Comparison>
+
+Better still: use proper tag types where they exist. For Google Analytics, use the GA4 tag type. For Meta Pixel, use the Meta Pixel community template. These are maintained, optimized implementations — do not reinvent them in Custom HTML.
+
+---
+
+## Tag firing optimization
+
+### Reduce unnecessary tag fires
+
+Every tag fire has a cost — JavaScript execution, potential network requests. Minimize how often tags fire by making your triggers precise.
+
+**Bad pattern**: A custom click trigger fires on All Elements, then the tag uses a JavaScript variable to check if it was the right element. The trigger still evaluates on every click — including the 95% of clicks that do not match.
+
+**Good pattern**: The trigger uses CSS selectors or element-specific conditions so GTM only evaluates the tag for the relevant clicks.
+
+```
+// GTM Click trigger — using element-specific conditions:
+// Trigger type: Click - All Elements
+// Enable: Some Clicks
+// Condition: Click Classes → contains → "btn-add-to-cart"
+//
+// This fires the trigger only when clicks match the button,
+// not on every click on the page.
+```
+
+### Use the right trigger type
+
+| Scenario | Avoid | Use Instead |
+|----------|-------|-------------|
+| Button click tracking | All Elements with JS filter | Click trigger with CSS class condition |
+| Form submission | Click on submit button | Form Submission trigger |
+| Custom actions | DOM-scraping via timer | dataLayer.push() with Custom Event trigger |
+| Scroll depth | JavaScript interval checking | Scroll Depth trigger |
+
+The Custom Event trigger (listening for `dataLayer.push({ event: 'my_event' })`) is the most efficient pattern for any interaction your developers can instrument. It fires exactly once, on demand, with precise data — no DOM scraping, no polling.
+
+### Consolidate overlapping tags
+
+If you have five GA4 Event tags that all fire on the same trigger with the same parameters, consolidate them. Use GTM's tag configuration to send a single tag that captures all the data, rather than five separate network requests.
+
+For high-frequency events (scroll depth, video progress, mousemove), be especially careful. A tag that fires 20 times per page with a network request each time is 20x more expensive than a tag that fires once.
+
+---
+
+## Lazy loading non-critical tags
+
+Not every tag needs to fire on page load. Marketing pixels, heatmap tools, and chat widgets can load after the page is interactive without affecting measurement quality.
+
+### Using DOM Ready trigger
+
+Tags set to fire on DOM Ready fire after the HTML is parsed but before images and iframes load. This is appropriate for most analytics tags.
+
+Tags set to fire on Window Loaded fire after everything (images, iframes, third-party scripts) has loaded. This is appropriate for non-critical third-party widgets.
+
+### Custom lazy loading with Intersection Observer
+
+For below-the-fold content tracking, use Intersection Observer to avoid loading scripts until they are needed:
+
+```html
+<!-- Custom HTML tag: load chat widget only when user scrolls near footer -->
+<script>
+(function() {
+  var chatLoadObserver = new IntersectionObserver(function(entries) {
+    if (entries[0].isIntersecting) {
+      chatLoadObserver.disconnect();
+
+      // Load the chat script
+      var script = document.createElement('script');
+      script.src = 'https://chat.example.com/widget.js';
+      script.async = true;
+      document.head.appendChild(script);
+    }
+  }, { rootMargin: '200px' }); // Start loading 200px before element is visible
+
+  var footer = document.querySelector('footer');
+  if (footer) {
+    chatLoadObserver.observe(footer);
+  }
+})();
+</script>
+```
+
+Use this pattern for chat widgets, heatmap tools, and A/B testing scripts that do not need to be present above the fold.
+
+### Deferring non-critical tracking
+
+For events that are important to record but not time-sensitive, defer the network request:
+
+```javascript
+// Instead of firing immediately on page load
+window.dataLayer.push({ event: 'page_engaged' });
+
+// Defer until after the browser is idle (when main thread is free)
+if ('requestIdleCallback' in window) {
+  requestIdleCallback(function() {
+    window.dataLayer.push({ event: 'page_engaged' });
+  });
+} else {
+  // Fallback for browsers without requestIdleCallback
+  setTimeout(function() {
+    window.dataLayer.push({ event: 'page_engaged' });
+  }, 2000);
+}
+```
+
+<Aside type="caution">
+Do not defer critical conversion events like `purchase`. The business cost of missing a conversion is higher than any performance benefit from deferral. Defer engagement events, not conversion events.
+</Aside>
+
+---
+
+## Third-party script management
+
+Third-party scripts loaded through GTM are often the biggest performance offenders. They add network requests, run JavaScript on your main thread, and are outside your control.
+
+### Audit what third-party scripts are loading
+
+Use WebPageTest's "Third-party Breakdown" view to see every domain making requests from your pages. Common GTM-loaded scripts and their typical sizes:
+
+| Script | Typical Size | Notes |
+|--------|-------------|-------|
+| GA4 (`gtag.js`) | ~40KB | Shared with other Google products, often cached |
+| Meta Pixel | ~70KB | Includes fbevents.js |
+| HotJar | ~100-200KB | Grows with session recording enabled |
+| Intercom/Zendesk chat | ~500KB+ | Largest category; consider lazy loading |
+| LinkedIn Insight Tag | ~20KB | Relatively small |
+| TikTok Pixel | ~60KB | |
+
+### Tag sequencing for dependent scripts
+
+When Tag B depends on Tag A (e.g., a conversion event depends on the base pixel loading first), use GTM's Tag Sequencing (formerly Setup and Cleanup tags) to enforce the order. This prevents Tags from firing before their dependencies are ready.
+
+```
+GA4 Config tag (fires first)
+↓ Setup tag for:
+GA4 Purchase Event tag (fires second, only after Config tag fires)
+```
+
+### Resource hints to pre-warm third-party connections
+
+Add resource hints to your HTML to reduce the connection time for third-party domains. These can go in your GTM container via a Custom HTML tag or directly in the `<head>`:
+
+```html
+<!-- Preconnect to GA4 and GTM domains -->
+<link rel="preconnect" href="https://www.googletagmanager.com">
+<link rel="preconnect" href="https://www.google-analytics.com">
+<link rel="dns-prefetch" href="https://stats.g.doubleclick.net">
+<!-- Add preconnect for your other critical third-party domains -->
+```
+
+This does not reduce the amount of data transferred, but it eliminates DNS lookup and TCP handshake time for these connections — typically saving 100-300ms on first load.
+
+---
+
+## The performance budget approach
+
+A performance budget is a commitment: "Our GTM container will not exceed X milliseconds of Total Blocking Time." Setting this as a team agreement prevents the container from slowly accumulating overhead over time.
+
+### Setting your budget
+
+Start with measurement. Run 10 WebPageTest runs with GTM active and record the median Total Blocking Time. This is your current baseline.
+
+A reasonable target for GTM's contribution to TBT:
+- **Strict**: under 100ms TBT contribution on desktop
+- **Balanced**: under 250ms TBT on desktop, under 500ms on a simulated 3G connection
+- **Permissive**: under 500ms on desktop (for content-heavy sites where analytics richness outweighs strict performance)
+
+### Enforcing the budget
+
+Add a Lighthouse CI check to your deployment pipeline that fails if TBT exceeds your threshold:
+
+```yaml
+# .github/workflows/lighthouse.yml
+name: Lighthouse CI
+
+on: [pull_request]
+
+jobs:
+  lighthouse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm run build
+      - name: Run Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v11
+        with:
+          urls: |
+            https://staging.yoursite.com/
+            https://staging.yoursite.com/products/sample-product/
+          budgetPath: ./lighthouse-budget.json
+          uploadArtifacts: true
+
+# lighthouse-budget.json
+# [
+#   {
+#     "path": "/*",
+#     "timings": [
+#       {"metric": "total-blocking-time", "budget": 300}
+#     ]
+#   }
+# ]
+```
+
+### When container size grows
+
+When the container size increases after a publish, investigate the delta. GTM's version history shows exactly what changed. If a new tag added 30KB to the container, that is a conversation to have before the next publish.
+
+---
+
+## Quick wins checklist
+
+Apply these in order — the early items have the highest impact-to-effort ratio:
+
+- [ ] Audit and delete unused tags, triggers, and variables
+- [ ] Remove Custom HTML tags that embed large third-party scripts — load them externally
+- [ ] Move non-critical tags (chat widgets, heatmaps) to Window Loaded trigger
+- [ ] Replace All Elements click triggers with more specific CSS-selector-based triggers
+- [ ] Add `<link rel="preconnect">` hints for GA4 and GTM domains
+- [ ] Check if any third-party scripts are loading synchronously and fix to async
+- [ ] Review lookup tables for unnecessary size — a 500-row lookup table adds KB to your container
+- [ ] Ensure every tag has a meaningful trigger condition, not "All Pages" by default
+- [ ] Set a container size limit and review before every publish
+
+---
+
+## Related Resources
+
+- [GTM & GA4 Audit Checklist](/resources/audit-checklist/) — Performance section of the audit checklist
+- [Analytics Testing Framework](/resources/testing-framework/) — CI/CD integration patterns to enforce performance budgets automatically
+- [When Not to Use GTM](/foundations/when-not-to-use-gtm/) — Performance considerations for deciding whether GTM is the right tool

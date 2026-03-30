@@ -1,6 +1,272 @@
 ---
 title: "GCP Setup"
-description: "Deploying server-side GTM on Google Cloud Platform."
+description: "Step-by-step guide to deploying server-side GTM on Google Cloud Platform using Cloud Run."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Google Cloud Platform is the official hosting environment for server-side GTM. Google designed sGTM to run on Cloud Run — a managed container platform that autoscales and charges only for compute time actually used. This guide walks through a production-ready deployment from account setup to a verified first hit.
+
+<Aside type="note">
+You need: a GCP account with billing enabled, a GTM account with a server container created, and DNS access to the domain where your sGTM server will live. Budget 30–60 minutes if all prerequisites are in place.
+</Aside>
+
+## Prerequisites: create your GTM server container
+
+Before provisioning infrastructure, create the server container in GTM:
+
+1. In your GTM account, click **Create Container**
+2. Set container type to **Server**
+3. At the setup wizard, choose **Manually provision tagging server** — this gives full control over the Cloud Run configuration
+4. GTM generates a **Container Config** string: a long base64-encoded value starting with something like `aWQ9R1RNLUtYWFhY...`
+5. Copy this string — you will use it as a Cloud Run environment variable
+
+## Step 1: Create a GCP project
+
+<Steps>
+1. Navigate to [console.cloud.google.com](https://console.cloud.google.com) and sign in.
+
+2. Click the project selector at the top → **New Project**. Name it clearly: `yoursite-sgtm-prod`.
+
+3. Enable required APIs. In the search bar, find and enable:
+   - **Cloud Run API**
+   - **Secret Manager API** (recommended for securing your container config)
+
+4. Link a billing account under **Billing**. Cloud Run cannot deploy without active billing configured.
+</Steps>
+
+## Step 2: Deploy the sGTM container to Cloud Run
+
+<Tabs>
+  <TabItem label="GCP Console">
+
+<Steps>
+1. Navigate to **Cloud Run** → **Create Service**.
+
+2. Choose **Deploy one revision from an existing container image**.
+
+3. Enter the container image URL:
+   ```
+   gcr.io/cloud-tagging-10302018/gtm-cloud-image:stable
+   ```
+
+4. Configure the service:
+   - **Service name**: `sgtm-production`
+   - **Region**: `europe-west1` for EU, `us-central1` for US, `asia-northeast1` for Asia-Pacific
+   - **Authentication**: Allow unauthenticated invocations
+
+5. Expand **Container, Variables & Secrets** and add an environment variable:
+   - Name: `CONTAINER_CONFIG`
+   - Value: the container config string from your GTM server container
+
+6. Set resources and scaling:
+   - **CPU**: 1 vCPU
+   - **Memory**: 512 MiB
+   - **Request timeout**: 60 seconds
+   - **Maximum concurrent requests per instance**: 80
+   - **Minimum instances**: 1 (critical — prevents cold starts)
+   - **Maximum instances**: 10
+
+7. Click **Create**. Deployment takes 1–3 minutes.
+</Steps>
+
+  </TabItem>
+  <TabItem label="gcloud CLI">
+
+```bash
+# Authenticate and set your project
+gcloud auth login
+gcloud config set project YOUR_PROJECT_ID
+
+# Deploy the sGTM container
+gcloud run deploy sgtm-production \
+  --image gcr.io/cloud-tagging-10302018/gtm-cloud-image:stable \
+  --platform managed \
+  --region europe-west1 \
+  --allow-unauthenticated \
+  --set-env-vars CONTAINER_CONFIG="YOUR_CONTAINER_CONFIG_STRING" \
+  --memory 512Mi \
+  --cpu 1 \
+  --min-instances 1 \
+  --max-instances 10 \
+  --timeout 60 \
+  --concurrency 80
+```
+
+Replace `YOUR_PROJECT_ID` and `YOUR_CONTAINER_CONFIG_STRING` with your values.
+
+  </TabItem>
+</Tabs>
+
+After deployment, Cloud Run provides a default URL: `https://sgtm-production-xxxxxxxxxx.a.run.app`
+
+Verify the server is healthy:
+```bash
+curl https://sgtm-production-xxxxxxxxxx.a.run.app/healthz
+# Expected: ok
+```
+
+## Step 3: Configure a custom domain
+
+The default `.a.run.app` URL is functional but does not provide first-party context. You need a subdomain on your own domain for first-party cookie benefits.
+
+**Choose your subdomain.** Good options:
+- `collect.yoursite.com`
+- `metrics.yoursite.com`
+- `data.yoursite.com`
+
+Avoid names that appear on common ad-block filter lists like `analytics`, `tracker`, `pixel`, or `stats`.
+
+<Steps>
+1. In GCP Console → **Cloud Run** → your service → **Manage Custom Domains**.
+
+2. Click **Add Mapping**, select your service, enter your subdomain.
+
+3. GCP displays a DNS record to create — typically a `CNAME`:
+   ```
+   collect.yoursite.com  CNAME  ghs.googlehosted.com
+   ```
+
+4. Add this record in your DNS provider (Cloudflare, Route 53, Namecheap, etc.).
+   **Important for Cloudflare users**: set the record to **DNS Only** (grey cloud). Do not proxy through Cloudflare.
+
+5. DNS propagation takes 5 minutes to 24 hours. GCP auto-provisions an SSL certificate once DNS resolves. No manual certificate management required.
+
+6. Verify the custom domain works:
+   ```bash
+   curl https://collect.yoursite.com/healthz
+   # Expected: ok
+   ```
+</Steps>
+
+<Aside type="caution">
+Do not put any CDN in front of your sGTM endpoint. CDNs can cache responses and interfere with `Set-Cookie` headers that your server needs to write. This breaks first-party cookie functionality. DNS-only mode only.
+</Aside>
+
+## Step 4: Connect your client-side GA4 tag
+
+In your **client-side** GTM container, update your GA4 Configuration tag (or Google Tag):
+
+1. Open the GA4 tag settings
+2. Find **Tagging Server URL** (sometimes called **Transport URL**)
+3. Set the value to your custom domain:
+   ```
+   https://collect.yoursite.com
+   ```
+4. Save, then **Preview** the change
+
+In GTM Preview, trigger a pageview on your site. In the browser network tab, you should now see GA4 requests going to `collect.yoursite.com/g/collect` instead of `www.google-analytics.com`.
+
+## Step 5: Add the GA4 server tag
+
+In your server-side GTM container:
+
+1. **New Tag** → **Google Analytics: GA4**
+2. The default configuration reads from the Event Model automatically — no Measurement ID needed for basic forwarding
+3. Set trigger to **All Events**
+4. Save, then click **Preview**
+
+With both client-side and server-side Preview active simultaneously, trigger a pageview on your site. The sGTM Preview should show the incoming request, the Event Model built by the GA4 client, and the GA4 server tag firing. Verify the data looks correct, then publish the sGTM container.
+
+## Production hardening
+
+### Minimum instances: always set to 1
+
+Cold container starts on Cloud Run take 2–5 seconds. Without minimum instances, your first request after any idle period hits this penalty — enough to drop events on mobile connections with short timeouts. Setting min instances to 1 costs approximately $15–20/month idle compute. Worth it.
+
+### CPU allocation policy
+
+In Cloud Run settings, set **CPU allocation** to **CPU is always allocated**. Without this, the CPU is throttled between requests on the same instance, causing inconsistent latency.
+
+### Secret Manager for container config
+
+Storing the container config as a plain environment variable works, but Secret Manager is safer:
+
+```bash
+# Store the config as a secret
+printf '%s' "YOUR_CONTAINER_CONFIG" | \
+  gcloud secrets create sgtm-container-config --data-file=-
+
+# Grant Cloud Run service account access
+gcloud secrets add-iam-policy-binding sgtm-container-config \
+  --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+
+# Redeploy with secret reference (removes plain env var)
+gcloud run services update sgtm-production \
+  --remove-env-vars CONTAINER_CONFIG \
+  --update-secrets CONTAINER_CONFIG=sgtm-container-config:latest \
+  --region europe-west1
+```
+
+### Memory sizing
+
+- **512 MiB**: GA4 forwarding, basic tag configuration
+- **1 GiB**: Add Firestore enrichment lookups or multiple concurrent tags
+- **2 GiB**: Complex enrichment pipelines with multiple API calls per request
+
+## Cost estimation
+
+| Monthly requests | Approx. cost (1 vCPU, 512 MiB, min 1 instance) |
+|---|---|
+| 500,000 | $15–25 |
+| 2,000,000 | $35–60 |
+| 10,000,000 | $120–200 |
+| 50,000,000 | $500–900 |
+
+Set a **Budget Alert** in GCP Billing: Billing → Budgets & Alerts → Create Budget. Configure an email notification at 80% of your expected monthly spend. Runaway autoscaling from traffic spikes generates unexpected bills without this.
+
+## Monitoring setup
+
+Create an uptime check immediately after deployment:
+
+1. **Cloud Monitoring** → **Uptime Checks** → **Create Check**
+2. Protocol: HTTPS, Hostname: `collect.yoursite.com`, Path: `/healthz`
+3. Check interval: 1 minute
+4. Alert policy: email when check fails for 2+ consecutive periods
+
+For log access:
+```bash
+# Stream recent logs from your sGTM service
+gcloud logging read \
+  "resource.type=cloud_run_revision \
+   AND resource.labels.service_name=sgtm-production" \
+  --limit 50 \
+  --freshness 1h \
+  --format "table(timestamp, textPayload)"
+```
+
+## Common mistakes
+
+**Missing `--allow-unauthenticated`.** Without this, Cloud Run requires authentication headers on every request. Browsers cannot provide these headers, so all real traffic returns 403. If your server deployed but receives no data, check this setting first.
+
+**Using the default `*.a.run.app` URL.** Technically functional, but no first-party cookie benefits. Always configure a custom domain before directing production traffic.
+
+**Minimum instances at 0.** Cold starts intermittently cause 2–5 second latency spikes and will drop events on mobile connections with short request timeouts. Set to 1.
+
+**Not verifying `/healthz` before switching the client-side tag.** A broken endpoint URL in your GA4 tag means all event data goes nowhere. Always confirm the endpoint is healthy before switching production traffic.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Domain Setup"
+    description="Detailed guide to subdomain choice, DNS records, and SSL provisioning."
+    href="/server-side/setup/custom-domain-setup/"
+  />
+  <LinkCard
+    title="Cloud Run Scaling"
+    description="Autoscaling configuration, concurrency settings, and cost optimization."
+    href="/server-side/setup/cloud-run-scaling/"
+  />
+  <LinkCard
+    title="Stape Setup"
+    description="Managed hosting alternative — no GCP management required."
+    href="/server-side/setup/stape-setup/"
+  />
+  <LinkCard
+    title="Debugging sGTM"
+    description="Preview mode, Cloud Logging, and diagnosing production issues."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+</CardGrid>

@@ -1,6 +1,373 @@
 ---
 title: "CSS Selectors for GTM"
-description: "Complete CSS selector reference for GTM trigger conditions and DOM element variables."
+description: "Complete CSS selector reference for GTM trigger conditions and DOM element variables — with practical patterns for click tracking, form tracking, and data extraction."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+CSS selectors appear throughout GTM — in click trigger conditions (`Click Element matches CSS selector`), in DOM Element Variables, and in Custom JavaScript Variables that use `document.querySelector()`. Writing effective selectors is the difference between tracking that works reliably and tracking that breaks on the next UI update.
+
+This guide covers selector syntax with a practical focus: the patterns you will actually use in GTM, common pitfalls, and a reliable testing workflow before you deploy anything.
+
+## The golden rule: always test selectors first
+
+Before adding any CSS selector to GTM, verify it works in your browser's DevTools console:
+
+```javascript
+// Check if it finds the element
+document.querySelector('.add-to-cart');
+
+// Check how many elements it matches
+document.querySelectorAll('.add-to-cart').length;
+
+// Check what the element looks like
+console.log(document.querySelector('[data-product-id]').outerHTML);
+```
+
+If the selector returns `null` or a different element than expected, fix it in DevTools before touching GTM.
+
+## Basic selectors
+
+### Element selector
+Matches all elements of a given HTML tag type.
+
+```css
+button    /* All <button> elements */
+a         /* All <a> elements */
+input     /* All <input> elements */
+form      /* All <form> elements */
+```
+
+Almost never use these alone in GTM — too broad. They become useful as part of more specific selectors.
+
+### Class selector
+Matches elements with a specific CSS class.
+
+```css
+.add-to-cart
+.btn-primary
+.product-card
+```
+
+**Warning:** Class names are CSS — they change with redesigns. Avoid using class-based selectors for tracking unless the classes are explicitly semantic and stable (like `.js-track-click`, a pattern some dev teams use intentionally for tracking hooks).
+
+### ID selector
+Matches the element with a specific `id` attribute.
+
+```css
+#checkout-button
+#newsletter-form
+#cart-total
+```
+
+IDs are faster and more unique than class selectors. When an element has a stable, unique ID, prefer it. But IDs on dynamically rendered content (product cards, search results) are often auto-generated and not stable.
+
+### Attribute selector
+Matches elements based on their attributes. This is the most powerful and stable selector category for GTM.
+
+```css
+[data-product-id]           /* Has the attribute at all */
+[data-action="add-to-cart"] /* Exact attribute value */
+[href^="/products"]         /* href starts with /products */
+[href$=".pdf"]              /* href ends with .pdf */
+[href*="checkout"]          /* href contains checkout */
+```
+
+**The `data-*` attribute pattern** is the most reliable approach for GTM tracking. Ask your developers to add `data-tracking-*` or `data-gtm-*` attributes to elements you need to track — these attributes are invisible to users, survive CSS changes, and communicate analytical intent directly.
+
+```html
+<!-- Add these attributes to elements that need tracking -->
+<button data-gtm-event="add_to_cart" data-product-id="SKU-12345">
+  Add to Cart
+</button>
+```
+
+```css
+[data-gtm-event="add_to_cart"]   /* Matches click trigger */
+[data-gtm-event]                  /* Matches any element with tracking data */
+```
+
+## Attribute selector operators
+
+| Operator | Meaning | Example |
+|----------|---------|---------|
+| `[attr]` | Has attribute | `[data-product-id]` |
+| `[attr="val"]` | Exact value | `[data-action="purchase"]` |
+| `[attr^="val"]` | Starts with | `[href^="https://"]` |
+| `[attr$="val"]` | Ends with | `[href$=".pdf"]` |
+| `[attr*="val"]` | Contains | `[href*="youtube.com"]` |
+| `[attr~="val"]` | Contains word | `[class~="active"]` |
+
+## Combinators
+
+### Descendant (space)
+Matches elements that are descendants of another:
+
+```css
+.product-card [data-product-id]   /* [data-product-id] anywhere inside .product-card */
+nav a                              /* Links anywhere inside nav */
+form [type="submit"]               /* Submit inputs inside forms */
+```
+
+### Child combinator (`>`)
+Matches direct children only:
+
+```css
+.product-card > .price   /* .price that is a direct child of .product-card */
+ul > li                   /* Direct list item children of a ul */
+```
+
+Use child combinator when you want to avoid matching deeply nested elements that also match your selector.
+
+### Adjacent sibling (`+`)
+Matches the element immediately following another:
+
+```css
+.product-title + .price   /* .price immediately following .product-title */
+```
+
+### General sibling (`~`)
+Matches all following siblings:
+
+```css
+.product-title ~ .price   /* Any .price sibling that comes after .product-title */
+```
+
+## Pseudo-classes
+
+### `:not(selector)`
+Exclude elements matching the inner selector:
+
+```css
+a:not([href^="mailto:"])          /* Links that are not email links */
+button:not([disabled])            /* Enabled buttons only */
+.product-card:not(.out-of-stock)  /* Available products */
+```
+
+Use `:not()` in click trigger conditions to exclude certain elements from a broadly-matched trigger.
+
+### `:checked`
+Matches checked inputs (checkboxes and radio buttons):
+
+```css
+input[type="checkbox"]:checked   /* Checked checkboxes */
+input[type="radio"]:checked      /* Selected radio buttons */
+```
+
+### `:first-child` and `:last-child`
+```css
+li:first-child   /* First list item */
+li:last-child    /* Last list item */
+```
+
+### `:nth-child(n)`
+```css
+li:nth-child(2)     /* The second list item */
+li:nth-child(odd)   /* Odd-numbered list items */
+tr:nth-child(even)  /* Even table rows */
+```
+
+## The descendant wildcard pattern for click triggers
+
+This is the most important GTM-specific CSS selector pattern. When you use a click trigger with a CSS selector condition, GTM checks whether `{{Click Element}} matches CSS selector`. But `{{Click Element}}` is the deepest element in the DOM tree that was clicked — which might be an icon, a `<span>`, or an `<img>` inside your button, not the button itself.
+
+The problem:
+
+```html
+<button class="add-to-cart" data-product-id="SKU-001">
+  <svg class="cart-icon">...</svg>  <!-- User clicks this -->
+  <span>Add to Cart</span>
+</button>
+```
+
+When the user clicks the cart icon, `{{Click Element}}` is the `<svg>`, not the `<button>`. A trigger condition of `Click Element matches CSS selector: button[data-product-id]` will NOT fire, because the SVG does not match.
+
+The fix: include a descendant wildcard selector:
+
+```css
+/* Match either the button itself OR any child of the button */
+button[data-product-id], button[data-product-id] *
+```
+
+The `, ` separates two selectors. The first matches the button when clicked directly on its background. The second (`button[data-product-id] *`) matches any descendant element (the SVG, the span, etc.) that lives inside a matching button.
+
+**This pattern applies to every click trigger condition.** Always include `[selector], [selector] *`:
+
+```css
+/* Button tracking */
+[data-gtm-event="add_to_cart"], [data-gtm-event="add_to_cart"] *
+
+/* Link tracking */
+a[href^="/checkout"], a[href^="/checkout"] *
+
+/* Card click tracking */
+.product-card, .product-card *
+```
+
+<Aside type="caution">
+The only time you do NOT want the wildcard descendant pattern is when you intentionally want to fire only when the exact element is clicked, not its children. This is rare — but if you are tracking the background area of a card and not the interactive elements inside it, you might want the exact match.
+</Aside>
+
+## Practical GTM selector patterns
+
+### File download links
+```css
+a[href$=".pdf"],
+a[href$=".docx"],
+a[href$=".xlsx"],
+a[href$=".zip"],
+a[href$=".pptx"]
+```
+
+Or combined with descendant pattern:
+```css
+a[href$=".pdf"], a[href$=".pdf"] *,
+a[href$=".docx"], a[href$=".docx"] *
+```
+
+### Outbound links
+```css
+a[href^="http"]:not([href*="example.com"])
+```
+
+Links starting with `http` that do not contain your domain. Always customize for your domain.
+
+### Email links
+```css
+a[href^="mailto:"], a[href^="mailto:"] *
+```
+
+### Phone links
+```css
+a[href^="tel:"], a[href^="tel:"] *
+```
+
+### Form submit buttons
+```css
+[type="submit"], [type="submit"] *
+button[form], button[form] *
+```
+
+### Elements with data tracking attributes
+```css
+[data-track], [data-track] *
+[data-gtm-click], [data-gtm-click] *
+[data-analytics-event], [data-analytics-event] *
+```
+
+### Navigation links
+```css
+nav a, nav a *
+[role="navigation"] a, [role="navigation"] a *
+```
+
+### Social share buttons
+```css
+a[href*="facebook.com/sharer"], a[href*="facebook.com/sharer"] *,
+a[href*="twitter.com/intent/tweet"], a[href*="twitter.com/intent/tweet"] *,
+a[href*="linkedin.com/shareArticle"], a[href*="linkedin.com/shareArticle"] *
+```
+
+### Video elements
+```css
+video, video *
+[data-video-id], [data-video-id] *
+.video-player, .video-player *
+```
+
+## Using `matches()` and `closest()` in Custom JavaScript Variables
+
+For complex element identification that CSS selectors cannot handle directly, use these DOM methods in Custom JavaScript Variables:
+
+**`element.matches(selector)`** — returns `true` if the element matches the selector:
+```javascript
+function() {
+  var el = {{Click Element}};
+  if (!el) return false;
+  // True if clicked element or any ancestor is a product card
+  return el.matches('.product-card') || !!el.closest('.product-card');
+}
+```
+
+**`element.closest(selector)`** — walks up the DOM tree and returns the first ancestor matching the selector:
+```javascript
+function() {
+  var el = {{Click Element}};
+  if (!el) return null;
+  // Get the product card containing whatever was clicked
+  var card = el.closest('[data-product-id]');
+  if (!card) return null;
+  return card.getAttribute('data-product-id');
+}
+```
+
+`closest()` is the solution to the problem of clicking a nested element and needing data from its parent. It reliably walks up the DOM regardless of how deeply the clicked element is nested.
+
+## Testing workflow
+
+1. **Open DevTools** (F12 or right-click → Inspect) on the page where the element exists.
+
+2. **Test in the Console:**
+```javascript
+// Does it find the right element?
+document.querySelector('[data-product-id]')
+
+// How many elements match?
+document.querySelectorAll('[data-product-id]').length
+
+// Does the wildcard pattern work?
+document.querySelectorAll('[data-gtm-event="add_to_cart"], [data-gtm-event="add_to_cart"] *').length
+```
+
+3. **Test the interaction in GTM Preview mode.** Click the element and check the Variables panel — see what `{{Click Element}}` and `{{Click Classes}}` return. Use those values to refine your selector.
+
+4. **Check edge cases:** Click the icon inside the button, the text label, the disabled state. Make sure your selector handles all interaction points.
+
+## Common mistakes
+
+### Not including the descendant wildcard
+
+This is the single most common reason a click trigger does not fire. Add `, [selector] *` to every selector used in click trigger conditions.
+
+### Using class names that change with redesigns
+
+```css
+/* Fragile — CSS-driven class changes break this */
+.btn-primary-v2-new
+
+/* Stable — semantic data attribute */
+[data-action="submit"]
+```
+
+### Forgetting to escape special characters
+
+CSS selectors in GTM trigger conditions do not need escaping, but if you are using `matches()` in JavaScript, some characters need escaping. Colons in attribute values, for instance: `document.querySelector('[href^="tel:"]')` is fine — the colon is inside the attribute value string.
+
+### Selecting too broadly and catching unintended elements
+
+`button` matches every button on the page. `a` matches every link. Always scope your selectors with sufficient specificity to match only the intended elements.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DOM Element Variables"
+    description="Using CSS selectors to read data directly from DOM elements."
+    href="/client-side/variables/dom-element-variables/"
+  />
+  <LinkCard
+    title="Click Triggers"
+    description="How click triggers use CSS selectors in their conditions — and how to configure them correctly."
+    href="/client-side/triggers/click-triggers/"
+  />
+  <LinkCard
+    title="JavaScript Variables"
+    description="Using matches() and closest() in Custom JavaScript Variables for complex element identification."
+    href="/client-side/variables/javascript-variables/"
+  />
+  <LinkCard
+    title="Regex Tables"
+    description="When you need pattern matching for values rather than DOM element selection."
+    href="/client-side/variables/regex-tables/"
+  />
+</CardGrid>

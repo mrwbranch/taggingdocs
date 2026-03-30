@@ -3,4 +3,378 @@ title: "SPA Setup"
 description: "Handling GTM in single-page applications — React, Next.js, Vue, and beyond."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+GTM was designed in an era when every page navigation caused a full browser reload. Single-page applications broke that assumption. When a user navigates from `/products` to `/products/leather-jacket` in a React app, the URL changes but the browser never reloads — GTM's initial `gtm.js` event fires once and never again. Without deliberate configuration, your GA4 will show every user landing on your home page, spending five minutes there, and then leaving.
+
+This is not a minor edge case. Every modern SPA has this problem, and every serious GTM implementation in an SPA requires a solution.
+
+## Why the default doesn't work
+
+When GTM loads on the initial page visit, it fires three internal events in sequence: `gtm.js` (container loaded), `gtm.dom` (DOM parsed), and `gtm.load` (all resources loaded). Your Page View trigger, typically set to fire on `gtm.js`, fires once.
+
+After that, when the user clicks a link handled by React Router or Vue Router, the JavaScript framework updates the URL and renders a new component — but the browser never unloads the page. GTM is still loaded, still running, but nothing tells it that a new "page" has happened. No new `gtm.js`, no new `gtm.dom`. Just silence.
+
+You need to explicitly tell GTM when a virtual page transition occurs.
+
+## Two approaches: History Change vs. custom events
+
+GTM provides a built-in **History Change trigger** that listens for `pushState`, `replaceState`, and `popstate` events on the browser history API. Most SPA routers use these APIs internally, so History Change often fires automatically.
+
+Here is the honest assessment of when to use each:
+
+| Scenario | Recommendation |
+|----------|---------------|
+| Simple informational site with React or Vue | History Change trigger is fine |
+| Ecommerce site where page-level data (product name, category) must be in GA4 | Custom dataLayer events — essential |
+| Next.js App Router | Custom events — History Change fires too early |
+| Multi-step forms or wizards | Custom events — you need to control timing |
+| Any site where page-level variables differ between pages | Custom events |
+
+The problem with the History Change trigger is timing: it fires when the URL changes, which in React happens before the new component has rendered. If your GA4 pageview tag reads `document.title`, it gets the old page's title. If it reads a dataLayer variable for `page_type`, it gets the previous page's value.
+
+Custom events, pushed by your application code after the new page has rendered, give you control. The data is accurate because you push it once the state is correct.
+
+## Custom dataLayer pageview events (recommended)
+
+The pattern is straightforward: push a `page_view` event to the dataLayer every time your application navigates to a new route. Push it after the new page has mounted — not on route change start.
+
+### The dataLayer push structure
+
+```javascript
+window.dataLayer = window.dataLayer || [];
+
+// Called after the new route has rendered
+function trackPageView(pageData) {
+  window.dataLayer.push({
+    event: 'page_view',
+    page_title: document.title,
+    page_path: window.location.pathname,
+    page_search: window.location.search,
+    // Include any page-level data relevant to your business
+    page_type: pageData.type,       // 'product', 'category', 'article'
+    page_category: pageData.category
+  });
+}
+```
+
+<Aside type="caution">
+Clear stale dataLayer data before pushing a new pageview. If you push `product_id: 'ABC123'` on a product page, that value persists in GTM's internal model. The next pageview (a category page with no product) will still have `product_id: 'ABC123'` unless you explicitly clear it. Push `undefined` or `null` for any variables that don't apply on the new page:
+
+```javascript
+dataLayer.push({
+  event: 'page_view',
+  page_type: 'category',
+  // Explicitly clear product-specific data
+  product_id: undefined,
+  product_name: undefined
+});
+```
+</Aside>
+
+### GTM configuration for custom pageview events
+
+Create a Custom Event trigger that listens for your `page_view` event:
+
+<TagConfig
+  name="GA4 - Config - Page View"
+  type="Google Analytics: GA4 Configuration"
+  trigger="CE - page_view"
+  variables={['DLV - page_title', 'DLV - page_path', 'DLV - page_type']}
+/>
+
+Set the trigger to fire on the custom event named `page_view` (exact match). Your GA4 Configuration tag — or if you are using GA4 Event tags for each pageview — attaches to this trigger.
+
+## Framework integration examples
+
+<Tabs>
+<TabItem label="React Router v6">
+
+Create a component that tracks route changes and renders it at the top of your router:
+
+```tsx
+// hooks/usePageTracking.ts
+import { useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
+
+interface PageData {
+  pageType?: string;
+  pageCategory?: string;
+}
+
+export function usePageTracking(getPageData?: () => PageData) {
+  const location = useLocation();
+
+  useEffect(() => {
+    // useEffect fires after render, so document.title is current
+    const pageData = getPageData?.() ?? {};
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'page_view',
+      page_title: document.title,
+      page_path: location.pathname,
+      page_search: location.search,
+      ...pageData
+    });
+  }, [location.pathname, location.search]);
+}
+```
+
+Use the hook in your root layout component:
+
+```tsx
+// components/Layout.tsx
+import { usePageTracking } from '../hooks/usePageTracking';
+
+export function Layout({ children }: { children: React.ReactNode }) {
+  usePageTracking();
+
+  return (
+    <div>
+      <Header />
+      <main>{children}</main>
+      <Footer />
+    </div>
+  );
+}
+```
+
+For page-specific data (like product type on a product page), individual page components can push supplementary data before or alongside the pageview:
+
+```tsx
+// pages/ProductPage.tsx
+export function ProductPage({ product }: { product: Product }) {
+  usePageTracking(() => ({
+    pageType: 'product',
+    pageCategory: product.category
+  }));
+
+  // ...
+}
+```
+
+</TabItem>
+<TabItem label="Next.js App Router">
+
+In the App Router, route changes are handled by server components and client navigation. Use a Client Component in your root layout that listens for pathname changes:
+
+```tsx
+// components/Analytics.tsx
+'use client';
+
+import { useEffect } from 'react';
+import { usePathname, useSearchParams } from 'next/navigation';
+
+export function Analytics() {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    // This fires after the new route has rendered on the client
+    const url = pathname + (searchParams.toString() ? `?${searchParams.toString()}` : '');
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'page_view',
+      page_title: document.title,
+      page_path: pathname,
+      page_url: url
+    });
+  }, [pathname, searchParams]);
+
+  return null;
+}
+```
+
+Add it to your root layout:
+
+```tsx
+// app/layout.tsx
+import { Suspense } from 'react';
+import { Analytics } from '../components/Analytics';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <Suspense fallback={null}>
+          <Analytics />
+        </Suspense>
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+The `Suspense` wrapper is required because `useSearchParams` can suspend. Without it, Next.js will warn you during build.
+
+<Aside type="tip">
+The initial page load will trigger both GTM's built-in `gtm.js` event AND your custom `page_view` event. This means GA4 will record two pageviews for the first page. Handle this by configuring your GA4 tag to fire on the custom `page_view` event only — not on the built-in Page View trigger. Your custom event becomes the single source of truth for all pageviews, including the first one.
+</Aside>
+
+</TabItem>
+<TabItem label="Vue Router">
+
+Vue Router's `afterEach` guard runs after each route navigation has been confirmed and rendered:
+
+```typescript
+// router/index.ts
+import { createRouter, createWebHistory } from 'vue-router';
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes: [
+    // your routes
+  ]
+});
+
+router.afterEach((to, from) => {
+  // afterEach fires after the new component is mounted
+  // so document.title reflects the new page
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'page_view',
+    page_title: document.title,
+    page_path: to.path,
+    page_name: to.name as string,
+    // Access route meta for page-level data
+    page_type: to.meta.pageType as string ?? undefined
+  });
+});
+
+export default router;
+```
+
+Define page-level data in route meta:
+
+```typescript
+const routes = [
+  {
+    path: '/products/:id',
+    component: ProductView,
+    meta: {
+      pageType: 'product'
+    }
+  },
+  {
+    path: '/category/:slug',
+    component: CategoryView,
+    meta: {
+      pageType: 'category'
+    }
+  }
+];
+```
+
+</TabItem>
+<TabItem label="Nuxt.js">
+
+Nuxt provides a plugin system for global side effects. Create a plugin that fires on route changes:
+
+```typescript
+// plugins/analytics.client.ts
+export default defineNuxtPlugin(() => {
+  const router = useRouter();
+
+  router.afterEach((to) => {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'page_view',
+      page_title: document.title,
+      page_path: to.path,
+      page_type: to.meta.pageType as string ?? undefined
+    });
+  });
+});
+```
+
+The `.client.ts` suffix ensures the plugin only runs in the browser, not during server-side rendering.
+
+</TabItem>
+</Tabs>
+
+## Handling the double pageview problem
+
+When GTM first loads, it fires `gtm.js`. If you have a GA4 Configuration tag set to fire on the built-in Page View trigger (which listens for `gtm.js`), it fires once. Then your SPA framework mounts and calls your tracking code, which pushes a custom `page_view` event. Now GA4 has two pageviews for the first page.
+
+The solution is to use your custom event as the single source of truth:
+
+<Steps>
+1. Remove any GA4 Configuration or GA4 Event tags from the built-in Page View trigger.
+2. Change all pageview-related tags to fire on your custom `page_view` event trigger.
+3. Ensure your custom event fires on initial load — i.e., your tracking hook runs on mount, not just on navigation.
+4. Verify in GTM Preview that you see exactly one `page_view` event per page, including the first.
+</Steps>
+
+This means your initial page load is tracked by your SPA code pushing `page_view`, not by GTM's built-in page load event. You now have one consistent mechanism for all pageviews.
+
+## DataLayer cleanup between virtual pageviews
+
+The GTM dataLayer persists state across virtual pageviews. Values you pushed on page A are still there when the user reaches page B, unless you explicitly clear them. This causes subtle bugs where, for example, a product category from an earlier pageview appears in events on a completely unrelated page.
+
+A defensive cleanup pattern:
+
+```javascript
+function trackPageView({ pageType, productId, productName, pageCategory } = {}) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'page_view',
+    page_title: document.title,
+    page_path: window.location.pathname,
+    page_type: pageType ?? undefined,
+    // Explicitly clear all page-scoped variables with every push
+    // Use undefined to remove from GTM's internal model
+    product_id: productId ?? undefined,
+    product_name: productName ?? undefined,
+    page_category: pageCategory ?? undefined
+  });
+}
+```
+
+By always including every page-level variable in your `page_view` push — even when setting them to `undefined` — you ensure stale data from a previous page never bleeds into the current one.
+
+## Common mistakes
+
+### Pushing pageview on route change start instead of after mount
+
+React Router's `useNavigate` and Vue Router's `beforeEach` fire before the new component renders. At that point, `document.title` still reflects the old page. Always use `useEffect` (React) or `afterEach` (Vue Router) to push pageview data after the component has mounted.
+
+### Relying on History Change trigger for data accuracy
+
+The History Change trigger fires at URL change time, not at component mount time. If your GA4 tags rely on dataLayer variables that are set by the new page's component, those variables will not be set yet when History Change fires. Custom events pushed from `useEffect` or `afterEach` are always accurate.
+
+### Not tracking the initial page load
+
+A common oversight is setting up tracking only for route changes, forgetting that the first page load also needs a pageview event. If you are using custom `page_view` events, make sure your tracking code fires on component mount (not just on navigation change) so the initial page is included.
+
+### Forgetting ecommerce clearing
+
+If you are pushing ecommerce data alongside pageviews on product pages, you must push `ecommerce: null` before every ecommerce push. Otherwise, ecommerce data from the previous product page persists in GTM's data model and can contaminate events on the next page.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="History Change Triggers"
+    description="How the built-in History Change trigger works and when it is appropriate for SPA navigation."
+    href="/client-side/triggers/history-change-triggers/"
+  />
+  <LinkCard
+    title="Custom Event Triggers"
+    description="The trigger type you will use for custom page_view events in your SPA setup."
+    href="/client-side/triggers/custom-event-triggers/"
+  />
+  <LinkCard
+    title="Container Installation"
+    description="Getting GTM installed correctly in your Next.js or React application."
+    href="/client-side/setup/container-installation/"
+  />
+  <LinkCard
+    title="DataLayer Deep Dive"
+    description="Understanding the sticky merge behavior that makes dataLayer cleanup between pageviews so important."
+    href="/foundations/datalayer-deep-dive/"
+  />
+</CardGrid>

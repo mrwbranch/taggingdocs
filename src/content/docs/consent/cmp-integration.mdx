@@ -1,6 +1,291 @@
 ---
-title: "CMP Integration"
-description: "Connecting your Consent Management Platform to GTM."
+title: "CMP Integration with Consent Mode"
+description: "Connecting Cookiebot, OneTrust, Usercentrics, CookieYes, and Iubenda to Google Consent Mode v2 via GTM — integration patterns, callbacks, and verification."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+A Consent Management Platform (CMP) does three things: shows users a consent banner, records their choices, and provides a mechanism to communicate those choices to your tags. The last part — communicating choices to GTM — is what CMP integration means in practice.
+
+This article covers the integration patterns for the most common CMPs and how to verify the connection is working correctly.
+
+<Aside type="caution">
+CMP integration is where most consent implementations break. The technical setup may look correct but the timing of the consent update relative to tag firing determines whether you are actually operating in compliance. Read this carefully and test thoroughly.
+</Aside>
+
+## What a CMP integration actually does
+
+When a user interacts with a consent banner, the CMP needs to:
+
+1. Record the user's choice (in a cookie, localStorage, or server-side)
+2. Call `gtag('consent', 'update', {...})` with the appropriate consent types
+3. This update propagates through GTM to all tags that check consent state
+
+The CMP integration is responsible for step 2. Without it, GTM never learns about the user's consent choice and tags either fire without consent (if defaults are `granted`) or never fire (if defaults are `denied`).
+
+## Integration approach 1: Community Template Gallery
+
+Most major CMPs publish official GTM templates to the Community Template Gallery. This is the recommended approach for most implementations because:
+- Templates handle the consent update automatically
+- The integration is maintained by the CMP vendor
+- You don't need to write custom JavaScript
+- Updates are versioned and can be pulled when the CMP updates its API
+
+To install a CMP template:
+1. In GTM, go to Templates → Search Gallery
+2. Search for your CMP name
+3. Add the template to your workspace
+4. Create a tag using the template, configure your CMP account ID
+5. Set the trigger to **Consent Initialization — All Pages**
+
+<Aside type="tip">
+Always set CMP integration tags to fire on **Consent Initialization**, not **All Pages** or **Page View**. Consent Initialization fires before any other tags, ensuring consent state is established before GA4 or Ads tags evaluate.
+</Aside>
+
+## Integration approach 2: CMP callback in custom code
+
+For CMPs without a Gallery template, or when you need custom control, call the consent update from your CMP's JavaScript callback. The general pattern:
+
+```javascript
+// Generic CMP callback pattern
+// Replace with your CMP's actual callback mechanism
+myCMP.onConsentUpdate(function(consentObject) {
+  gtag('consent', 'update', {
+    'analytics_storage': consentObject.analytics ? 'granted' : 'denied',
+    'ad_storage': consentObject.advertising ? 'granted' : 'denied',
+    'ad_user_data': consentObject.advertising ? 'granted' : 'denied',
+    'ad_personalization': consentObject.advertising ? 'granted' : 'denied',
+    'functionality_storage': consentObject.functional ? 'granted' : 'denied',
+    'personalization_storage': consentObject.personalization ? 'granted' : 'denied'
+  });
+});
+```
+
+## CMP-specific integrations
+
+<Tabs>
+  <TabItem label="Cookiebot">
+
+**Cookiebot** (now Usercentrics Cookiebot) integrates via its official GTM template or via the `CookiebotOnAccept` / `CookiebotOnDecline` callback functions.
+
+**Via Gallery template:**
+1. Search Gallery for "Cookiebot" (published by Usercentrics)
+2. Install and create a tag with your Cookiebot Domain Group ID
+3. Fire on Consent Initialization — All Pages
+
+**Via JavaScript callback:**
+```javascript
+// Add to your page (or a Custom HTML tag on Consent Initialization)
+window.addEventListener('CookiebotOnLoad', function() {
+  gtag('consent', 'update', {
+    'analytics_storage': Cookiebot.consent.statistics ? 'granted' : 'denied',
+    'ad_storage': Cookiebot.consent.marketing ? 'granted' : 'denied',
+    'ad_user_data': Cookiebot.consent.marketing ? 'granted' : 'denied',
+    'ad_personalization': Cookiebot.consent.marketing ? 'granted' : 'denied',
+    'functionality_storage': Cookiebot.consent.preferences ? 'granted' : 'denied'
+  });
+});
+
+window.addEventListener('CookiebotOnAccept', function() {
+  gtag('consent', 'update', {
+    'analytics_storage': Cookiebot.consent.statistics ? 'granted' : 'denied',
+    'ad_storage': Cookiebot.consent.marketing ? 'granted' : 'denied',
+    'ad_user_data': Cookiebot.consent.marketing ? 'granted' : 'denied',
+    'ad_personalization': Cookiebot.consent.marketing ? 'granted' : 'denied',
+    'functionality_storage': Cookiebot.consent.preferences ? 'granted' : 'denied'
+  });
+});
+
+window.addEventListener('CookiebotOnDecline', function() {
+  gtag('consent', 'update', {
+    'analytics_storage': 'denied',
+    'ad_storage': 'denied',
+    'ad_user_data': 'denied',
+    'ad_personalization': 'denied',
+    'functionality_storage': 'denied'
+  });
+});
+```
+
+Cookiebot categories: `statistics` → analytics_storage, `marketing` → ad_storage/ad_user_data/ad_personalization, `preferences` → functionality_storage.
+
+  </TabItem>
+  <TabItem label="OneTrust">
+
+**OneTrust** provides a GTM integration via its OptanonWrapper callback and the `OneTrust.GetDomainData()` API. OneTrust also has an official GTM template.
+
+**Via OptanonWrapper callback:**
+```javascript
+// OneTrust fires OptanonWrapper when consent is ready/updated
+function OptanonWrapper() {
+  // OneTrust consent groups:
+  // C0001 = Strictly Necessary
+  // C0002 = Performance/Analytics
+  // C0003 = Functional
+  // C0004 = Targeting/Advertising
+
+  var activeGroups = window.OptanonActiveGroups || '';
+
+  gtag('consent', 'update', {
+    'analytics_storage': activeGroups.includes('C0002') ? 'granted' : 'denied',
+    'ad_storage': activeGroups.includes('C0004') ? 'granted' : 'denied',
+    'ad_user_data': activeGroups.includes('C0004') ? 'granted' : 'denied',
+    'ad_personalization': activeGroups.includes('C0004') ? 'granted' : 'denied',
+    'functionality_storage': activeGroups.includes('C0003') ? 'granted' : 'denied'
+  });
+}
+```
+
+Note: `OptanonActiveGroups` is a comma-delimited string of active group IDs. Your group IDs may differ from the C0001-C0004 defaults — verify in your OneTrust configuration.
+
+  </TabItem>
+  <TabItem label="Usercentrics">
+
+**Usercentrics** exposes a `UC_UI` JavaScript API and fires custom events on consent updates.
+
+```javascript
+// Usercentrics consent update handler
+window.addEventListener('UC_UI_CMP_EVENT', function(event) {
+  if (event.detail.type === 'CMP_SHOWN' ||
+      event.detail.type === 'SAVE_CC' ||
+      event.detail.type === 'ACCEPT_ALL' ||
+      event.detail.type === 'DENY_ALL') {
+
+    var ucData = window.UC_UI ? window.UC_UI.getServicesBaseInfo() : null;
+
+    if (!ucData) return;
+
+    // Map Usercentrics categories to Consent Mode types
+    // Adjust service names to match your Usercentrics configuration
+    var analyticsConsented = ucData
+      .filter(s => s.categorySlug === 'analytics')
+      .some(s => s.consent.status === true);
+
+    var advertisingConsented = ucData
+      .filter(s => s.categorySlug === 'marketing')
+      .some(s => s.consent.status === true);
+
+    gtag('consent', 'update', {
+      'analytics_storage': analyticsConsented ? 'granted' : 'denied',
+      'ad_storage': advertisingConsented ? 'granted' : 'denied',
+      'ad_user_data': advertisingConsented ? 'granted' : 'denied',
+      'ad_personalization': advertisingConsented ? 'granted' : 'denied'
+    });
+  }
+});
+```
+
+  </TabItem>
+  <TabItem label="CookieYes">
+
+**CookieYes** fires a custom event `cookieyes_consent_update` on the document.
+
+```javascript
+document.addEventListener('cookieyes_consent_update', function(evt) {
+  var accepted = evt.detail.accepted || [];
+
+  gtag('consent', 'update', {
+    'analytics_storage': accepted.includes('analytics') ? 'granted' : 'denied',
+    'ad_storage': accepted.includes('advertisement') ? 'granted' : 'denied',
+    'ad_user_data': accepted.includes('advertisement') ? 'granted' : 'denied',
+    'ad_personalization': accepted.includes('advertisement') ? 'granted' : 'denied',
+    'functionality_storage': accepted.includes('functional') ? 'granted' : 'denied'
+  });
+});
+```
+
+CookieYes also fires `cookieyes_banner_load` on page load for returning visitors where consent was already recorded:
+
+```javascript
+document.addEventListener('cookieyes_banner_load', function(evt) {
+  // evt.detail contains the stored consent state
+  var accepted = evt.detail.accepted || [];
+  gtag('consent', 'update', {
+    'analytics_storage': accepted.includes('analytics') ? 'granted' : 'denied',
+    'ad_storage': accepted.includes('advertisement') ? 'granted' : 'denied',
+    'ad_user_data': accepted.includes('advertisement') ? 'granted' : 'denied',
+    'ad_personalization': accepted.includes('advertisement') ? 'granted' : 'denied'
+  });
+});
+```
+
+  </TabItem>
+  <TabItem label="Iubenda">
+
+**Iubenda** uses its Cookie Solution JavaScript API. Consent state is available via `_iub.cs.api.getPreferences()`.
+
+```javascript
+// Iubenda consent ready callback
+// Add to Custom HTML tag on Consent Initialization
+var _iubCallback = _iubCallback || [];
+_iubCallback.push(function() {
+  _iub.cs.api.on('consent', function(consent) {
+    var purposes = consent.purposes || {};
+
+    gtag('consent', 'update', {
+      // Iubenda purpose IDs (customize for your configuration)
+      // 1 = Necessary, 2 = Basic interactions, 3 = Experience enhancement,
+      // 4 = Measurement, 5 = Targeting
+      'analytics_storage': purposes[4] ? 'granted' : 'denied',
+      'ad_storage': purposes[5] ? 'granted' : 'denied',
+      'ad_user_data': purposes[5] ? 'granted' : 'denied',
+      'ad_personalization': purposes[5] ? 'granted' : 'denied',
+      'functionality_storage': purposes[3] ? 'granted' : 'denied'
+    });
+  });
+});
+```
+
+  </TabItem>
+</Tabs>
+
+## Handling returning visitors
+
+Returning visitors already have a consent choice stored. The CMP should fire its callback immediately on page load to restore the previous consent state — before the `wait_for_update` timeout expires.
+
+Verify this works:
+1. Grant consent on a test page
+2. Close the browser tab
+3. Reopen the same URL
+4. Check GTM Preview mode — the consent update should appear near the beginning of the event stream, before your GA4 or Ads tags fire
+
+If returning visitors hit the timeout instead, your CMP is reading its cookie too slowly. Check whether the CMP loads synchronously or asynchronously and whether there is a race condition with the cookie read.
+
+## Verifying the integration
+
+**Browser cookie check:**
+After granting consent, open DevTools → Application → Cookies. You should see:
+- `_ga` and `_ga_XXXX` cookies: analytics consent granted
+- `_gcl_au` cookie: ad_storage granted
+- Your CMP's own consent cookie (e.g., `CookieConsent` for Cookiebot)
+
+**GTM Preview mode:**
+Open the Consent tab on any event after the consent update fires. All required types should show `granted`.
+
+**Network tab:**
+After granting consent, check for requests to `www.google-analytics.com/g/collect`. With `analytics_storage: denied`, the request URL will include `&gcs=G100` (consent denied signal). With granted, it will include `&gcs=G111`.
+
+**Console verification:**
+```javascript
+// Run in browser console to see current consent state
+window.google_tag_data?.ics?.entries
+```
+
+## Common mistakes
+
+**CMP fires its callback asynchronously after a script loads.** Many CMPs load their script asynchronously, meaning the callback doesn't fire until after the DOM is ready or a network request completes. If the `wait_for_update` timeout fires before the CMP callback, tags fire with the default denied state. Increase `wait_for_update` or switch to the inline consent default approach.
+
+**Mismatching category names.** CMP consent categories have different names across platforms. Always map CMP categories to Consent Mode types carefully. A typo like `analytics` vs `Analytics` can mean consent is never granted.
+
+**Not handling the "consent restored from cookie" case.** Many implementations only handle `onAccept` and `onDecline` but not the page-load restoration case. Returning visitors may never trigger a consent update, leaving tags in their default state.
+
+**Testing in the same browser session that already has consent.** Always test consent flows in an incognito window or after clearing cookies.
+
+---
+
+<CardGrid>
+  <LinkCard title="Consent Mode v2 Explained" href="/consent/consent-mode-v2/" description="The seven consent types and why the default state must come before GTM." />
+  <LinkCard title="Consent Mode GTM Setup" href="/consent/consent-mode-gtm-setup/" description="Triggers, tags, and consent settings configuration in GTM." />
+  <LinkCard title="Testing Consent" href="/consent/testing-consent/" description="A complete testing protocol including network verification and Preview mode checks." />
+</CardGrid>

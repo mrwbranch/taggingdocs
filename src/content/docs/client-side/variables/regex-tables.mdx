@@ -1,6 +1,244 @@
 ---
 title: "Regex Tables"
-description: "Pattern matching with regular expressions for flexible value mapping."
+description: "Pattern-based value mapping using regular expressions — how to categorize URLs, extract IDs, and classify content without writing JavaScript."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Regex Tables are Lookup Tables with superpowers. Instead of matching exact values, they match patterns. Instead of just returning a fixed output, they can extract and reuse portions of the matched value. For URL categorization, content classification, and ID extraction, Regex Tables are often the cleanest tool available.
+
+If you find yourself writing a Custom JavaScript Variable with a series of `if (path.match(/^\/products/))` statements, a Regex Table is almost certainly the right replacement.
+
+## How Regex Tables differ from Lookup Tables
+
+A Lookup Table matches the input exactly. A Regex Table treats each row's Input as a regular expression and tests it against the input variable's value.
+
+| Feature | Lookup Table | Regex Table |
+|---------|-------------|-------------|
+| Matching | Exact match only | Regex pattern |
+| Capture groups | No | Yes ($1, $2, ...) |
+| Case sensitivity | Case-sensitive by default | Configurable |
+| Full match only | Always | Configurable |
+| Use when | Input space is enumerable | Patterns needed |
+
+Both use first-match-wins evaluation.
+
+## Creating a Regex Table Variable
+
+<Steps>
+1. Go to **Variables** in GTM and click **New** under User-Defined Variables.
+2. Select **RegEx Table** as the variable type.
+3. Choose the **Input Variable** — typically `{{Page Path}}`, `{{Page URL}}`, or a Data Layer Variable.
+4. Add rows with **Pattern** (regex) and **Output** values.
+5. Configure the **match options** per row:
+   - **Ignore Case**: Makes the match case-insensitive
+   - **Full Match**: The regex must match the entire string, not just a substring
+6. Set a **Default Value** for when no pattern matches.
+7. Name it with convention: `RGX - description`.
+</Steps>
+
+## Match options explained
+
+### Ignore Case
+
+When checked, the pattern `/products/` matches both `/Products/` and `/PRODUCTS/`. Use this when your URL structure or input values might vary in case.
+
+### Full Match
+
+This is the most important and most misunderstood option.
+
+- **Full Match OFF** (default): The regex must match *somewhere* in the input string. `/products/` matches `/products/jackets/leather-jacket`.
+- **Full Match ON**: The regex must match the *entire* input string. `/products/` only matches when the input is exactly `/products/`.
+
+With Full Match OFF, you can use simpler patterns but risk over-matching. With Full Match ON, you need explicit anchors (`^` and `$`) or your pattern needs to describe the entire value.
+
+**Recommendation:** Leave Full Match OFF and use explicit `^` anchors to control where your pattern starts. This gives you predictable matching without needing to describe the entire URL.
+
+## Practical patterns
+
+### Page URL categorization
+
+**Input Variable:** `{{Page Path}}`
+
+| Pattern | Output | Ignore Case | Full Match |
+|---------|--------|-------------|------------|
+| `^/$` | `home` | OFF | OFF |
+| `^/products/category/` | `category_page` | OFF | OFF |
+| `^/products/[^/]+$` | `product_detail` | OFF | OFF |
+| `^/products` | `products` | OFF | OFF |
+| `^/checkout/confirmation` | `order_confirmation` | OFF | OFF |
+| `^/checkout` | `checkout` | OFF | OFF |
+| `^/blog/[0-9]{4}/` | `blog_post` | OFF | OFF |
+| `^/blog` | `blog_index` | OFF | OFF |
+
+**Default Value:** `other`
+
+Order matters here. More specific patterns come before broader ones. `/products/[^/]+$` (single segment after /products/) is more specific than `/products` (anything starting with /products), so it goes first. If you reversed them, every product detail page would match the broader pattern and return `products` instead of `product_detail`.
+
+### Extracting IDs from URL paths
+
+This is where Regex Tables shine beyond what Lookup Tables can do — capture groups let you extract portions of the matched string.
+
+**Input Variable:** `{{Page Path}}`
+
+| Pattern | Output | Notes |
+|---------|--------|-------|
+| `^/products/([a-zA-Z0-9-]+)/([0-9]+)$` | `$2` | Extracts numeric product ID from path like `/products/leather-jacket/12345` |
+| `^/order/([A-Z0-9]+)$` | `$1` | Extracts order number from `/order/ORD-56789` |
+| `^/category/([^/]+)` | `$1` | Extracts first path segment after /category/ |
+
+`$1` refers to the first capture group (first pair of parentheses), `$2` to the second, and so on. The output value is replaced with the captured portion of the matched string.
+
+```
+Input: /products/leather-jacket/12345
+Pattern: ^/products/([a-zA-Z0-9-]+)/([0-9]+)$
+Output: $2
+Result: 12345
+```
+
+### Content type classification by URL
+
+**Input Variable:** `{{Page URL}}`
+
+| Pattern | Output |
+|---------|--------|
+| `\.(pdf|doc|docx|xlsx)(\?|$)` | `document_download` |
+| `\.(jpg|jpeg|png|gif|webp)(\?|$)` | `image` |
+| `youtube\.com/watch` | `video_youtube` |
+| `vimeo\.com/[0-9]+` | `video_vimeo` |
+| `/download/` | `download` |
+
+**Default Value:** `page`
+
+### Outbound link categorization
+
+**Input Variable:** `{{Click URL}}`
+
+| Pattern | Output |
+|---------|--------|
+| `^https?://(www\.)?example\.com` | `internal` |
+| `^https?://(www\.)?partner-site\.com` | `partner` |
+| `^https?://(www\.)?facebook\.com` | `social_facebook` |
+| `^https?://(www\.)?linkedin\.com` | `social_linkedin` |
+| `^mailto:` | `email` |
+| `^tel:` | `phone` |
+| `^https?://` | `external` |
+
+### UTM source normalization
+
+**Input Variable:** `{{Page URL}}` (or a URL variable extracting `utm_source`)
+
+| Pattern | Output |
+|---------|--------|
+| `google` | `google` |
+| `(facebook|instagram|fb)` | `meta` |
+| `(twitter|t\.co)` | `twitter_x` |
+| `linkedin` | `linkedin` |
+| `(newsletter|email|mailchimp)` | `email` |
+
+**Default Value:** `other`
+
+## Regex syntax quick reference
+
+These are the patterns you will use in the majority of GTM Regex Table rows:
+
+| Pattern | Meaning | Example |
+|---------|---------|---------|
+| `^` | Start of string | `^/products` matches paths beginning with /products |
+| `$` | End of string | `/confirmation$` matches paths ending with /confirmation |
+| `.` | Any single character | `order.001` matches `order-001`, `order_001` |
+| `.*` | Zero or more of any character | `^/products/.*` matches any sub-path under /products/ |
+| `[abc]` | One of: a, b, or c | `[0-9]` matches any digit |
+| `[^abc]` | Not one of: a, b, or c | `[^/]+` matches one or more non-slash characters |
+| `+` | One or more of previous | `[0-9]+` matches one or more digits |
+| `*` | Zero or more of previous | `colou*r` matches `color` and `colour` |
+| `?` | Zero or one of previous | `colou?r` matches `color` and `colour` |
+| `(abc)` | Capture group | `([0-9]+)` captures the matched digits for use as `$1` |
+| `(a|b)` | Either a or b | `(facebook|instagram)` matches either |
+| `\d` | Any digit | Same as `[0-9]` |
+| `\w` | Word character | Same as `[a-zA-Z0-9_]` |
+| `\.` | Literal dot | `example\.com` (unescaped `.` matches any character) |
+
+## Testing your patterns before deploying
+
+Never add a regex pattern to a Regex Table without testing it first.
+
+**In the browser console:**
+```javascript
+// Test your pattern against a sample input
+var pattern = /^\/products\/([a-zA-Z0-9-]+)\/([0-9]+)$/;
+var input = '/products/leather-jacket/12345';
+var match = input.match(pattern);
+console.log(match); // ['/products/leather-jacket/12345', 'leather-jacket', '12345']
+console.log(match[2]); // '12345' — the $2 capture group
+```
+
+**Using GTM Preview mode:**
+After saving the variable, use Preview mode to check what value the variable returns on different pages. Look at the Variables tab in the Tag Assistant panel to see resolved values.
+
+<Aside type="caution">
+GTM uses JavaScript's `RegExp` engine for pattern matching, but with a quirk: the patterns you enter in Regex Table rows do not use forward-slash delimiters. Enter the pattern directly without wrapping slashes: `^/products/` not `/^\/products\//`.
+</Aside>
+
+## Performance considerations
+
+Regex evaluation is computationally more expensive than exact string matching. On a page that triggers dozens of GTM events, a Regex Table with 20 patterns evaluated on every event is not free. Keep your patterns efficient:
+
+- **Anchored patterns evaluate faster**: `^/products` is faster than `/products` because anchoring stops the engine from trying to match at every position in the string.
+- **Avoid greedy `.*` at the start**: `.*\/products` has to backtrack through the entire string. Use `^[^?]*\/products` or just `\/products` depending on what you need.
+- **Fewer rows is better**: If you can get from 20 rows to 10 by making patterns more general, do it.
+
+For high-frequency events (every click on a busy page), consider whether the Regex Table variable is actually needed in the trigger condition or tag — or whether it could be computed once at page load by a Custom HTML tag and stored in a constant.
+
+## Common mistakes
+
+### Row order errors
+
+The most common bug with Regex Tables is having a broad pattern before a specific one:
+
+```
+// WRONG ORDER — /blog matches /blog/post too
+Pattern 1: /blog    → 'blog'
+Pattern 2: /blog/([^/]+)  → $1
+
+// CORRECT ORDER
+Pattern 1: /blog/([^/]+)  → $1  (specific first)
+Pattern 2: /blog    → 'blog'  (broad second)
+```
+
+Always put more specific patterns above broader ones.
+
+### Unescaped dots in domain patterns
+
+`example.com` as a regex matches `example-com`, `exampleXcom`, etc. because `.` matches any character. Use `example\.com` to match a literal dot.
+
+### Forgetting capture groups return undefined on non-matches
+
+If you use `$1` as an output and the pattern does not match, the row simply does not match — you fall through to the next row or the default. That is fine. But if a pattern matches but your capture group did not capture anything (because the group is inside an alternation that did not participate), you may get an unexpected result.
+
+Test thoroughly.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Lookup Tables"
+    description="Exact-match value mapping — simpler than Regex Tables when you know all possible inputs."
+    href="/client-side/variables/lookup-tables/"
+  />
+  <LinkCard
+    title="CSS Selectors for GTM"
+    description="Selector syntax reference for trigger conditions and DOM variables."
+    href="/client-side/variables/css-selectors-for-gtm/"
+  />
+  <LinkCard
+    title="JavaScript Variables"
+    description="For complex transformation logic that Regex Tables cannot express."
+    href="/client-side/variables/javascript-variables/"
+  />
+  <LinkCard
+    title="Click Triggers"
+    description="Use Regex Tables as variables in click trigger conditions to categorize what was clicked."
+    href="/client-side/triggers/click-triggers/"
+  />
+</CardGrid>

@@ -1,6 +1,190 @@
 ---
 title: "File Download Tracking"
-description: "Tracking PDF, document, and file downloads."
+description: "Track file downloads in GA4 via GTM — click triggers, enhanced measurement, and patterns for authenticated or dynamically generated files."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+File download tracking is beginner territory in GTM, but there are enough edge cases — authenticated downloads, blob URLs, single-page apps — that it's worth covering every scenario. Start with the simplest approach and escalate to the dataLayer pattern only when you need it.
+
+## GA4 enhanced measurement (the free version)
+
+GA4 automatically tracks `file_download` events when enhanced measurement is enabled and the user clicks a link ending in a file extension GA4 recognizes. You get this without any GTM configuration.
+
+GA4 enhanced measurement tracks clicks on links ending in: `.pdf`, `.xls`, `.xlsx`, `.xlsm`, `.xltx`, `.xltm`, `.doc`, `.docx`, `.dotx`, `.csv`, `.zip`, `.rar`, `.7z`, `.exe`, `.js` (as of the current implementation, the list changes).
+
+**The limitation:** Enhanced measurement only fires `file_download` if:
+- The file is linked with a standard `<a href>` tag
+- The link is directly clickable (not behind JavaScript)
+- The file is not loaded in a new context that blocks the GA4 collection
+
+If you need custom parameters, want to track additional file types, or have authenticated downloads, you need GTM.
+
+## GTM click trigger approach
+
+The standard GTM method is a Click trigger with a condition matching file extension patterns in the link URL.
+
+<Steps>
+1. **Enable click built-in variables.** GTM Variables → Configure → enable Click URL, Click Text, Click Element.
+
+2. **Create a Link Click trigger:**
+   - Trigger type: Click — Just Links
+   - This trigger fires on: Some Link Clicks
+   - Condition: Click URL — matches RegEx (ignore case): `\.(pdf|xlsx?|docx?|csv|zip|rar|7z|pptx?|txt|mp3|mp4|mov)$`
+   - Enable "Wait for Tags": ON (ensures the tag fires before the browser starts the download)
+   - Enable "Check Validation": ON
+
+3. **Create a GA4 Event tag:**
+   - Event Name: `file_download`
+   - Parameters: `file_name` (from Click URL via regex extraction or URL variable), `file_extension`, `link_url`
+</Steps>
+
+<TagConfig
+  name="GA4 - Event - File Download"
+  type="Google Analytics: GA4 Event"
+  trigger="Click - File Download Links"
+  variables={['Click URL', 'Click Text', 'DLV - file_extension']}
+/>
+
+### Extracting the file name from the URL
+
+Create a Custom JavaScript variable to extract the file name from the click URL:
+
+```javascript
+// Custom JS Variable: "CJS - File Name from Click URL"
+function() {
+  var url = {{Click URL}};
+  if (!url) return '';
+  // Get everything after the last slash, before any query string
+  var path = url.split('?')[0];
+  return path.substring(path.lastIndexOf('/') + 1);
+}
+```
+
+Create a second Custom JavaScript variable for the extension:
+
+```javascript
+// Custom JS Variable: "CJS - File Extension from Click URL"
+function() {
+  var url = {{Click URL}};
+  if (!url) return '';
+  var path = url.split('?')[0].split('#')[0];
+  var lastDot = path.lastIndexOf('.');
+  if (lastDot === -1) return '';
+  return path.substring(lastDot + 1).toLowerCase();
+}
+```
+
+## Authenticated file downloads (dataLayer approach)
+
+When files are served behind authentication — download links that require a logged-in session, presigned S3 URLs, or routes that validate a token — the click trigger won't give you meaningful data. The URL might be something opaque like `/api/download/resource/8472`.
+
+Use the dataLayer approach: push when the user initiates the download, with the metadata you have from your application state:
+
+```javascript
+// In your download handler
+function initiateDownload(fileId, fileName, fileType, fileSize) {
+  // Start the actual download
+  window.location.href = `/api/download/${fileId}`;
+
+  // Push to dataLayer with meaningful metadata
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'file_download',
+    file_id: fileId,
+    file_name: fileName,
+    file_extension: fileType,
+    file_size_kb: Math.round(fileSize / 1024),
+    download_location: 'resource_library'
+  });
+}
+```
+
+In GTM, use a Custom Event trigger for `file_download` and read the parameters via Data Layer Variables.
+
+## Tracking dynamically generated files (blob URLs)
+
+If your application generates files client-side (CSV exports, reports, generated PDFs) and delivers them as `blob://` URLs, there's nothing in the URL to match. These downloads are invisible to click triggers.
+
+The only reliable approach is a dataLayer push before or after the download is triggered:
+
+```javascript
+// Example: CSV export button handler
+document.getElementById('export-csv').addEventListener('click', function() {
+  generateAndDownloadCSV(); // Your existing download logic
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'file_download',
+    file_name: 'order_export_' + new Date().toISOString().split('T')[0] + '.csv',
+    file_extension: 'csv',
+    download_source: 'order_management',
+    record_count: window.currentExportRecordCount || 0
+  });
+});
+```
+
+## Handling downloads that open in new tabs
+
+Files that open in `target="_blank"` have a timing challenge: the browser opens a new tab before your GTM tag fires. Enable "Wait for Tags" on your Link Click trigger to give GTM time to fire the tag before the browser responds to the click.
+
+<Aside type="tip">
+"Wait for Tags" holds the click response for up to 2000ms (configurable). For most download tracking, 500ms is plenty. Increase it only if your tags are consistently not firing.
+</Aside>
+
+## GA4 event structure
+
+Align your file download events with GA4's recommended parameter set:
+
+```javascript
+window.dataLayer.push({
+  event: 'file_download',
+  // GA4 recommended parameters
+  file_extension: 'pdf',    // lowercase extension without the dot
+  file_name: 'q4-report.pdf',
+  link_url: 'https://example.com/reports/q4-report.pdf',
+  link_text: 'Download Q4 Report',
+  // Custom parameters for your reporting
+  document_category: 'financial_reports',
+  document_year: '2024'
+});
+```
+
+## Common mistakes
+
+### Not enabling Wait for Tags on link click triggers
+
+If "Wait for Tags" is off, the browser navigates (or starts the download) before GTM fires. Your event appears in GA4, but only for fast connections. On slow connections, the tag doesn't fire at all.
+
+### Regex that matches non-download URLs
+
+A poorly written regex like `\.pdf` would match URLs like `/update-profile-settings` if someone adds a parameter called `pdf_type`. Use proper end-of-string anchors or put the extension check at the end of the URL path: `[^?]*\.(pdf|docx)([?#]|$)`.
+
+### Missing the extension in the file_extension parameter
+
+Some implementations send the full file name (`q4-report.pdf`) as the `file_extension` parameter. GA4 expects just the extension (`pdf`). Use the extraction variable approach above.
+
+### Relying solely on enhanced measurement
+
+Enhanced measurement only captures clicks on visible anchor tags with recognized extensions. It misses authenticated downloads, dynamically generated files, and downloads triggered by JavaScript. Always verify with Preview mode that your download events appear correctly.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Click Triggers"
+    description="Complete guide to All Clicks and Link Click triggers — how they work and when to use each."
+    href="/client-side/triggers/click-triggers/"
+  />
+  <LinkCard
+    title="Outbound Link Tracking"
+    description="Tracking clicks to external sites — uses the same Click trigger mechanism."
+    href="/client-side/tracking/outbound-link-tracking/"
+  />
+  <LinkCard
+    title="Comprehensive Link Tracking"
+    description="Building a single system that categorizes all link types including downloads."
+    href="/client-side/tracking/comprehensive-link-tracking/"
+  />
+</CardGrid>

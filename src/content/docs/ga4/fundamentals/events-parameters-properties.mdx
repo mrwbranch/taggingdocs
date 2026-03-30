@@ -1,6 +1,289 @@
 ---
-title: "Events, Parameters & Properties"
-description: "The building blocks of GA4 data collection."
+title: "Events, Parameters, and User Properties"
+description: "The three building blocks of GA4 data collection — how they work, their limits, and how to implement them correctly."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+GA4 collects three types of data: events, event parameters, and user properties. Everything you can analyze in GA4 — every metric, dimension, segment, and report — is derived from these three building blocks. Understanding each one clearly prevents the most common implementation mistakes.
+
+## Events
+
+An event is a user interaction or occurrence that you want to track. Page views, button clicks, form submissions, purchases, video plays — all events.
+
+An event has:
+- A **name** (required) — up to 40 characters, alphanumeric plus underscores, must start with a letter
+- **Parameters** (optional) — additional data attached to this specific occurrence
+- A **timestamp** — when the event occurred
+- **Session context** — automatically attached by the SDK
+
+Event names are case-sensitive. `add_to_cart` and `Add_To_Cart` are different events. Use `snake_case` to match GA4's own naming conventions and avoid confusion.
+
+### Sending events
+
+<Tabs>
+  <TabItem label="gtag.js">
+```javascript
+// Basic event
+gtag('event', 'login', {
+  method: 'google'
+});
+
+// Ecommerce event
+gtag('event', 'purchase', {
+  transaction_id: 'T-12345',
+  value: 49.99,
+  currency: 'USD',
+  items: [{
+    item_id: 'P-001',
+    item_name: 'Widget Pro',
+    price: 49.99,
+    quantity: 1
+  }]
+});
+```
+  </TabItem>
+  <TabItem label="dataLayer (GTM)">
+```javascript
+// Basic event
+window.dataLayer = window.dataLayer || [];
+dataLayer.push({
+  event: 'login',
+  method: 'google'
+});
+
+// Ecommerce event
+dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: 'T-12345',
+    value: 49.99,
+    currency: 'USD',
+    items: [{
+      item_id: 'P-001',
+      item_name: 'Widget Pro',
+      price: 49.99,
+      quantity: 1
+    }]
+  }
+});
+```
+  </TabItem>
+</Tabs>
+
+### Event categories
+
+**Automatically collected events** require no implementation:
+- `page_view`, `first_visit`, `session_start`, `user_engagement`
+- App lifecycle events on mobile
+
+**Enhanced Measurement events** fire when enabled in stream settings:
+- `scroll`, `click`, `view_search_results`, `video_start`, `video_progress`, `video_complete`, `file_download`
+
+**Recommended events** have pre-defined names that GA4 uses to populate standard reports:
+- Ecommerce: `purchase`, `add_to_cart`, `begin_checkout`, `view_item`
+- Engagement: `login`, `sign_up`, `search`, `share`
+- Content: `select_content`, `generate_lead`
+
+**Custom events** are anything you define. They are collected but do not populate standard reports automatically.
+
+### Limits
+
+| Limit | Value |
+|-------|-------|
+| Unique event names per property | 500 |
+| Event name length | 40 characters |
+| Parameters per event | 25 |
+| Parameter name length | 40 characters |
+| Parameter string value length | 100 characters |
+
+The 500 unique event name limit fills up faster than expected when implementations use granular per-element event names. Prefer fewer names differentiated by parameters.
+
+## Event parameters
+
+Parameters are the key-value data attached to an individual event. They make events meaningful for analysis.
+
+```javascript
+// Without parameters: you know someone searched — nothing else
+gtag('event', 'search');
+
+// With parameters: term, result count, and filters applied
+gtag('event', 'search', {
+  search_term: 'wireless headphones',
+  results_count: 47,
+  filters_applied: 'brand:sony,price:50-200'
+});
+```
+
+### Parameter value types
+
+Parameters accept four value types:
+- **String** — up to 100 characters
+- **Number** — integer or float: `42`, `99.99`
+- **Boolean** — stored as integer: `true` → `1`, `false` → `0`
+- **Object/Array** — only for the `items` parameter in ecommerce events
+
+### Reserved parameter names
+
+These cannot be used for custom parameters:
+`firebase_conversion`, `firebase_event_origin`, `ga_session_id`, `ga_session_number`, `session_engaged`, `term`.
+
+Any parameter name starting with `firebase_`, `google_`, or `ga_` is reserved.
+
+### Making parameters available in reports
+
+Pushing a parameter does not automatically make it filterable in GA4 reports. You must register it as a custom dimension in **Admin → Custom definitions**.
+
+Until registered:
+- The parameter is **collected** and stored in BigQuery
+- The parameter is **visible in DebugView**
+- The parameter is **not available** in standard reports or explorations
+
+<Aside type="tip">
+Register custom dimensions early. GA4 does not backfill historical data when you register a new dimension — it only starts appearing in reports from the registration date forward. The data exists in BigQuery regardless.
+</Aside>
+
+### Event-scoped vs. item-scoped parameters
+
+**Event-scoped parameters** describe the event itself:
+```javascript
+gtag('event', 'purchase', {
+  transaction_id: 'T-12345',  // event-scoped
+  value: 89.99,               // event-scoped
+  currency: 'USD',            // event-scoped
+  items: [...]
+});
+```
+
+**Item-scoped parameters** are nested inside the `items` array:
+```javascript
+items: [{
+  item_id: 'SKU-001',          // item-scoped
+  item_name: 'Leather Wallet', // item-scoped
+  item_category: 'Accessories',// item-scoped
+  price: 89.99,                // item-scoped
+  quantity: 1                  // item-scoped
+}]
+```
+
+Item-scoped parameters appear in product-level reports. Event-scoped parameters appear at the transaction level. Do not put item data at the event scope — it will not populate item reports.
+
+## User properties
+
+User properties describe the user rather than any specific event. They persist across sessions until explicitly updated.
+
+**Good use cases for user properties:**
+- Subscription tier: `free`, `pro`, `enterprise`
+- User role: `admin`, `editor`, `viewer`
+- Account type: `individual`, `business`
+- Test group membership: `variant_a`, `control`
+
+**Bad use cases:**
+- Anything that changes frequently (use event parameters)
+- Anything PII — email, name, phone
+
+<Tabs>
+  <TabItem label="gtag.js">
+```javascript
+// Set after login
+gtag('set', 'user_properties', {
+  subscription_tier: 'pro',
+  account_age_days: 180
+});
+```
+  </TabItem>
+  <TabItem label="Firebase SDK">
+```swift
+// iOS
+Analytics.setUserProperty("pro", forName: "subscription_tier")
+```
+
+```kotlin
+// Android
+Firebase.analytics.setUserProperty("subscription_tier", "pro")
+```
+  </TabItem>
+</Tabs>
+
+### User property limits
+
+| Limit | Value |
+|-------|-------|
+| User properties per property | 25 |
+| Property name length | 24 characters |
+| Property value length | 36 characters |
+
+The 25 user property limit is tight. Audit regularly — stale, unused properties count against the limit.
+
+### User properties in BigQuery
+
+User properties are stored as an `ARRAY<STRUCT>` in `user_properties`:
+
+```sql
+SELECT
+  user_pseudo_id,
+  (SELECT value.string_value
+   FROM UNNEST(user_properties)
+   WHERE key = 'subscription_tier') AS subscription_tier
+FROM `project.dataset.events_*`
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+```
+
+<Aside type="caution">
+User properties in BigQuery reflect the value at the time the event fired — not the current value. If a user upgrades from `free` to `pro`, events before the upgrade still show `free`. This is expected and correct.
+</Aside>
+
+## Common mistakes
+
+### Sending PII in parameters
+
+Never include personally identifiable information in event parameters: email, full name, phone, IP address. GA4's terms prohibit this and it creates GDPR/CCPA liability. Use pseudonymous user IDs.
+
+### Setting user properties on every page view
+
+User properties do not need to be resent on every event. Set them once at login or when they change. Resending on every page view creates unnecessary data volume.
+
+### Using nested objects in custom parameters
+
+```javascript
+// ❌ Nested objects are not supported in custom parameters
+gtag('event', 'purchase', {
+  customer: { id: '12345', tier: 'premium' }
+});
+
+// ✅ Flatten the data
+gtag('event', 'purchase', {
+  customer_id: '12345',
+  customer_tier: 'premium'
+});
+```
+
+### Truncated string values
+
+Parameter string values are truncated at 100 characters. URLs and long identifiers will be cut off. Pass a short identifier and use BigQuery for the full value if needed.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Dimensions"
+    description="Register parameters as custom dimensions so they appear in GA4 reports."
+    href="/ga4/configuration/custom-dimensions/"
+  />
+  <LinkCard
+    title="Custom Metrics"
+    description="Register numeric parameters as custom metrics for aggregation."
+    href="/ga4/configuration/custom-metrics/"
+  />
+  <LinkCard
+    title="Data Limits and Cardinality"
+    description="The full list of GA4 limits and how to work within them."
+    href="/ga4/configuration/data-limits-cardinality/"
+  />
+  <LinkCard
+    title="Unnesting Patterns"
+    description="Query nested event parameters and user properties in BigQuery."
+    href="/ga4/bigquery/unnesting-patterns/"
+  />
+</CardGrid>

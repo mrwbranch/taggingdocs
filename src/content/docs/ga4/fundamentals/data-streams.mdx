@@ -1,6 +1,226 @@
 ---
 title: "Data Streams"
-description: "Configuring web and app data streams in GA4."
+description: "Configuring web, iOS, and Android data streams in GA4 — measurement IDs, Enhanced Measurement, cross-platform considerations, and stream-level settings."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+A data stream is a source of data flowing into a GA4 property. Every GA4 property needs at least one stream, and most need exactly one per platform: one web stream, one iOS stream, one Android stream.
+
+Unlike Universal Analytics where tracking IDs (`UA-XXXXXXXX-X`) were tied to the property, GA4 separates the property from the stream. Your property has a property ID (a number like `123456789`) and each stream has its own measurement ID (`G-XXXXXXXXXX` for web) or Firebase app ID for mobile.
+
+## Stream types
+
+**Web stream** — collects data from browsers via gtag.js or Google Tag Manager. Identified by a measurement ID in the format `G-XXXXXXXXXX`.
+
+**iOS app stream** — collects data from iOS apps via the Firebase SDK. Identified by a Firebase App ID.
+
+**Android app stream** — collects data from Android apps via the Firebase SDK.
+
+A GA4 property can have up to 50 data streams. You can combine web and app streams in the same property — GA4 is designed for cross-platform measurement, and having a single property for all platforms is the recommended approach.
+
+## Creating a web stream
+
+<Steps>
+1. Go to **Admin → Data Streams → Add stream → Web**.
+
+2. Enter your website URL. GA4 will verify this during setup.
+
+3. Enter a stream name — something descriptive like "Website - Production" or "[Brand] - Web".
+
+4. Toggle Enhanced Measurement on or off. You can change this later and configure individual events independently.
+
+5. Click **Create stream**.
+</Steps>
+
+After creation, you will see:
+- **Measurement ID** — the `G-XXXXXXXXXX` ID you add to your site tag or GTM
+- **Stream ID** — a numeric identifier used in the API
+- **Enhanced Measurement settings** — toggle individual auto-tracking events
+
+### Stream-level settings
+
+From the stream details page:
+
+**Tag settings** — Additional configuration for the gtag that deploys this stream, including:
+- Session timeout (default: 30 minutes)
+- Engaged session timeout (default: 10 seconds)
+- Default values for cross-domain tracking, cookie settings, and consent mode
+
+**Measurement Protocol API secrets** — Required for sending data to GA4 via the Measurement Protocol. Each secret is a string added as the `api_secret` parameter in server-side calls.
+
+**Connected site tags** — Link other tag IDs (UA or other GA4 property IDs) so a single gtag fires multiple properties.
+
+## Enhanced Measurement configuration
+
+Enhanced Measurement auto-collects additional events beyond the base `page_view`. Toggle individual events in **Admin → Data Streams → [stream] → Enhanced Measurement (gear icon)**.
+
+| Event | What it tracks | Default |
+|-------|----------------|---------|
+| Page views | `page_view` on each navigation | On |
+| Scrolls | `scroll` at 90% page depth | On |
+| Outbound clicks | `click` on external links | On |
+| Site search | `view_search_results` on query param URLs | On |
+| Video engagement | YouTube embedded video events | On |
+| File downloads | `file_download` on file link clicks | On |
+| Form interactions | `form_start`, `form_submit` (beta) | Off |
+
+<Aside type="caution">
+Enhanced Measurement events come with significant caveats. Scroll only fires at 90% — you cannot get 25/50/75% granularity without custom implementation. Outbound clicks fire on any link to a different domain, including your own subdomains if you have not configured cross-domain tracking. Before relying on these events, read [Enhanced Measurement Pitfalls](/ga4/configuration/enhanced-measurement-pitfalls/).
+</Aside>
+
+### Page view measurement in SPAs
+
+For Single Page Applications (React, Vue, Angular, etc.), Enhanced Measurement cannot detect route changes automatically. A route change in a SPA does not fire a new page load — the browser URL changes but no HTTP request is made.
+
+Configure your framework's router to push a history change or fire `page_view` manually:
+
+```javascript
+// After a route change in your SPA
+gtag('event', 'page_view', {
+  page_title: document.title,
+  page_location: window.location.href,
+  page_path: window.location.pathname
+});
+```
+
+In GTM, use the History Change trigger and attach a GA4 Configuration or GA4 Event tag to it.
+
+## Cross-domain tracking
+
+When users navigate between domains (e.g., from `shop.example.com` to `checkout.example.com`), GA4 treats each domain as a separate origin by default. The `client_id` cookie does not transfer, which breaks the session and creates a `(direct)` referral.
+
+Configure cross-domain tracking at **Admin → Data Streams → [stream] → Configure tag settings → Configure your domains**.
+
+Add all domains that should be treated as part of the same property:
+- `example.com`
+- `shop.example.com`
+- `checkout.example.com`
+
+GA4 will automatically add a `_gl` parameter to links between these domains, carrying the `client_id` across the transition.
+
+<Aside type="tip">
+Cross-domain tracking must be configured on every stream and domain in the relationship. If `shop.example.com` knows to link to `checkout.example.com` but `checkout.example.com` does not know to accept the parameter, the linking will not work.
+</Aside>
+
+## iOS and Android app streams
+
+For mobile apps, create separate streams for each platform. Each stream is linked to a Firebase project and app.
+
+<Steps>
+1. Go to **Admin → Data Streams → Add stream → iOS app** (or Android).
+
+2. Enter the app bundle ID (iOS: `com.company.app`) or package name (Android: `com.company.app`).
+
+3. Enter the app name.
+
+4. Click **Register app**.
+
+5. Download the `GoogleService-Info.plist` (iOS) or `google-services.json` (Android) configuration file.
+
+6. Add the Firebase SDK and configuration file to your app.
+</Steps>
+
+### Firebase SDK integration
+
+The GA4 mobile SDK ships as part of Firebase Analytics. Add it to your app:
+
+<Tabs>
+  <TabItem label="iOS (Swift)">
+```swift
+// In AppDelegate or App struct
+import FirebaseAnalytics
+
+// Log an event
+Analytics.logEvent(AnalyticsEventPurchase, parameters: [
+  AnalyticsParameterTransactionID: "T-12345",
+  AnalyticsParameterValue: 49.99,
+  AnalyticsParameterCurrency: "USD"
+])
+```
+  </TabItem>
+  <TabItem label="Android (Kotlin)">
+```kotlin
+import com.google.firebase.analytics.FirebaseAnalytics
+import com.google.firebase.analytics.ktx.analytics
+import com.google.firebase.analytics.ktx.logEvent
+import com.google.firebase.ktx.Firebase
+
+// Log an event
+Firebase.analytics.logEvent(FirebaseAnalytics.Event.PURCHASE) {
+  param(FirebaseAnalytics.Param.TRANSACTION_ID, "T-12345")
+  param(FirebaseAnalytics.Param.VALUE, 49.99)
+  param(FirebaseAnalytics.Param.CURRENCY, "USD")
+}
+```
+  </TabItem>
+</Tabs>
+
+## Multiple streams vs. multiple properties
+
+**Use multiple streams in one property** when:
+- You want unified cross-platform reporting (web + iOS + Android for the same product)
+- Your web and app serve the same users and you want to analyze their behavior together
+- You want a single BigQuery export with all platforms
+
+**Use separate properties** when:
+- You have genuinely different products or brands that should be reported separately
+- Different teams own different platforms and need separate access controls
+- You have different data retention or compliance requirements per platform
+
+<Aside type="tip">
+For most businesses with a website and a mobile app serving the same product, one property with multiple streams is the right architecture. You get cross-platform user counts and unified funnels without data joins.
+</Aside>
+
+## Measurement ID vs. Property ID
+
+These are two different identifiers that are often confused:
+
+**Property ID** — a numeric ID like `123456789`. Used in the Admin API and for identifying the property in Google's systems.
+
+**Measurement ID** — a string like `G-XXXXXXXXXX`. This is what goes in your gtag.js or GTM GA4 Configuration tag. Only exists for web streams.
+
+**Stream ID** — a numeric ID specific to the stream. Used in the Measurement Protocol API endpoint.
+
+If you are adding GA4 to your site, you need the Measurement ID (`G-XXXXXXXXXX`), not the property ID.
+
+## Common mistakes
+
+### Using one property for staging and production
+
+Do not mix staging and production data in the same GA4 property. Create a separate property for your staging environment. Production data contaminated with test data is difficult to clean up retroactively, and GA4 has no view-level filtering like Universal Analytics did.
+
+Use a GA4 Data Filter to exclude developer traffic in your production property as a secondary protection, but the primary isolation should be separate properties.
+
+### Not configuring stream domains for cross-domain sites
+
+If your checkout is on a separate domain from your marketing site, forgetting to configure cross-domain tracking will cause most of your checkout sessions to appear as direct traffic and your conversion rate to appear much lower than it actually is.
+
+### Missing the Measurement ID when using GTM
+
+In GTM, the GA4 Configuration tag requires the Measurement ID (`G-XXXXXXXXXX`). It is easy to accidentally enter the property ID (a plain number) or the old UA format instead. Double-check the format — it must start with `G-`.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Enhanced Measurement Pitfalls"
+    description="The specific problems with each Enhanced Measurement event and how to fix them."
+    href="/ga4/configuration/enhanced-measurement-pitfalls/"
+  />
+  <LinkCard
+    title="Property Setup"
+    description="Property-level configuration including time zone, currency, and BigQuery linking."
+    href="/ga4/configuration/property-setup/"
+  />
+  <LinkCard
+    title="Internal Traffic Filtering"
+    description="Use Data Filters to exclude developer and internal traffic from reports."
+    href="/ga4/troubleshooting/internal-traffic-filtering/"
+  />
+  <LinkCard
+    title="Measurement Protocol"
+    description="Send server-side events to a GA4 stream using the Measurement Protocol."
+    href="/ga4/fundamentals/measurement-protocol/"
+  />
+</CardGrid>

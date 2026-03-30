@@ -1,6 +1,262 @@
 ---
 title: "GA4"
-description: "Google Analytics 4 configuration, reporting, BigQuery, and troubleshooting."
+description: "Complete guides for Google Analytics 4 — fundamentals, configuration, reporting, BigQuery, troubleshooting, and APIs."
 ---
 
-This section is under development. Check back soon for the complete guides.
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Google Analytics 4 is a fundamentally different analytics product from Universal Analytics. It is event-based rather than session-based, built for privacy constraints from the start, and designed with BigQuery integration as a first-class feature. If you are coming from Universal Analytics, expect to relearn most of your assumptions about how data is structured and how reports work.
+
+This section covers everything from initial property setup to writing complex SQL queries against your BigQuery export.
+
+## Fundamentals
+
+Start here if you are new to GA4 or need to understand how the data model works before configuring anything.
+
+<CardGrid>
+  <LinkCard
+    title="Data Model"
+    description="How GA4's event-based model works — events, parameters, and why this is different from session-based analytics."
+    href="/ga4/fundamentals/data-model/"
+  />
+  <LinkCard
+    title="Events, Parameters, and User Properties"
+    description="The three building blocks of GA4 data collection and how they map to the interface."
+    href="/ga4/fundamentals/events-parameters-properties/"
+  />
+  <LinkCard
+    title="Sessions and Attribution"
+    description="How GA4 defines sessions, applies attribution, and why your numbers differ from UA."
+    href="/ga4/fundamentals/sessions-and-attribution/"
+  />
+  <LinkCard
+    title="Data Streams"
+    description="Web, iOS, and Android streams — configuration, measurement IDs, and cross-platform considerations."
+    href="/ga4/fundamentals/data-streams/"
+  />
+  <LinkCard
+    title="Measurement Protocol"
+    description="Send events directly to GA4 from servers, IoT devices, or any environment without a browser."
+    href="/ga4/fundamentals/measurement-protocol/"
+  />
+  <LinkCard
+    title="Measurement Protocol Debugging"
+    description="Validate Measurement Protocol hits and diagnose why server-side events are not appearing."
+    href="/ga4/fundamentals/measurement-protocol-debugging/"
+  />
+</CardGrid>
+
+## Configuration
+
+Property-level settings that determine what gets collected, how it is classified, and what reports surface.
+
+<CardGrid>
+  <LinkCard
+    title="Property Setup"
+    description="Creating and configuring a GA4 property from scratch — the non-obvious settings that matter."
+    href="/ga4/configuration/property-setup/"
+  />
+  <LinkCard
+    title="Custom Dimensions"
+    description="Extend GA4's data model with your own event and user-scoped dimensions."
+    href="/ga4/configuration/custom-dimensions/"
+  />
+  <LinkCard
+    title="Custom Metrics"
+    description="Track numeric values that GA4 doesn't collect natively — revenue variants, engagement scores, counts."
+    href="/ga4/configuration/custom-metrics/"
+  />
+  <LinkCard
+    title="Audiences"
+    description="Build remarketing and reporting audiences from GA4 events and conditions."
+    href="/ga4/configuration/audiences/"
+  />
+  <LinkCard
+    title="Conversions"
+    description="Mark events as conversions and understand how GA4 counts them differently from goals."
+    href="/ga4/configuration/conversions/"
+  />
+  <LinkCard
+    title="Data Filters"
+    description="Exclude developer traffic, internal users, and testing sessions from your GA4 data."
+    href="/ga4/configuration/data-filters/"
+  />
+  <LinkCard
+    title="Channel Groupings"
+    description="Customize how GA4 classifies traffic sources — fix misclassified channels and add custom rules."
+    href="/ga4/configuration/channel-groupings/"
+  />
+  <LinkCard
+    title="Attribution Settings"
+    description="Data-driven vs. last-click attribution and how model changes affect historical data."
+    href="/ga4/configuration/attribution-settings/"
+  />
+  <LinkCard
+    title="Enhanced Measurement Pitfalls"
+    description="The auto-tracking features that cause double-counting, missed events, and bad data."
+    href="/ga4/configuration/enhanced-measurement-pitfalls/"
+  />
+  <LinkCard
+    title="Data Limits and Cardinality"
+    description="The hard limits that will bite you — custom dimension quotas, (other) rows, and cardinality thresholds."
+    href="/ga4/configuration/data-limits-cardinality/"
+  />
+  <LinkCard
+    title="Calculated Metrics"
+    description="Create derived metrics in GA4 without touching BigQuery — revenue per user, conversion rates, ratios."
+    href="/ga4/configuration/calculated-metrics/"
+  />
+</CardGrid>
+
+## Reporting
+
+How to use GA4's built-in reports and explorations to answer real business questions.
+
+<CardGrid>
+  <LinkCard
+    title="Standard Reports"
+    description="Navigation, customization, and what each standard report actually measures."
+    href="/ga4/reporting/standard-reports/"
+  />
+  <LinkCard
+    title="Explore Reports"
+    description="Free-form analysis — when to use explorations over standard reports and how to build them."
+    href="/ga4/reporting/explore-reports/"
+  />
+  <LinkCard
+    title="Funnel Exploration"
+    description="Visualize drop-off through multi-step funnels with open and closed funnel modes."
+    href="/ga4/reporting/funnel-exploration/"
+  />
+  <LinkCard
+    title="Path Exploration"
+    description="Understand user journeys forwards and backwards from any event."
+    href="/ga4/reporting/path-exploration/"
+  />
+  <LinkCard
+    title="Segment Overlap"
+    description="Identify users who belong to multiple segments and analyze cross-segment behavior."
+    href="/ga4/reporting/segment-overlap/"
+  />
+</CardGrid>
+
+## BigQuery
+
+Raw access to your GA4 data — no sampling, no cardinality limits, full SQL power.
+
+<CardGrid>
+  <LinkCard
+    title="Export Setup"
+    description="Link GA4 to BigQuery and configure daily vs. streaming export."
+    href="/ga4/bigquery/export-setup/"
+  />
+  <LinkCard
+    title="Schema Reference"
+    description="Complete field reference for the GA4 BigQuery export schema."
+    href="/ga4/bigquery/schema-reference/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="Ready-to-use SQL for the most frequent GA4 BigQuery analysis tasks."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Session Reconstruction"
+    description="Rebuild sessions from raw event data in BigQuery — the canonical approach."
+    href="/ga4/bigquery/session-reconstruction/"
+  />
+  <LinkCard
+    title="Funnel Analysis in SQL"
+    description="Build flexible, unsampled funnels in BigQuery that go beyond GA4's built-in funnel tool."
+    href="/ga4/bigquery/funnel-analysis-sql/"
+  />
+  <LinkCard
+    title="Cost Optimization"
+    description="Keep BigQuery costs under control with partitioning, clustering, and query best practices."
+    href="/ga4/bigquery/cost-optimization/"
+  />
+  <LinkCard
+    title="Unnesting Patterns"
+    description="Work with GA4's nested ARRAY and STRUCT fields — the patterns you'll use in every query."
+    href="/ga4/bigquery/unnesting-patterns/"
+  />
+  <LinkCard
+    title="Custom Channel Grouping"
+    description="Replicate and extend GA4's channel grouping logic in BigQuery SQL."
+    href="/ga4/bigquery/custom-channel-grouping/"
+  />
+  <LinkCard
+    title="Attribution Queries"
+    description="Implement first-touch, last-touch, and linear attribution models in BigQuery."
+    href="/ga4/bigquery/attribution-queries/"
+  />
+  <LinkCard
+    title="Dataform Workflows"
+    description="Build modular, tested, incrementally-updated GA4 data models with Dataform."
+    href="/ga4/bigquery/dataform-workflows/"
+  />
+  <LinkCard
+    title="Looker Studio Patterns"
+    description="Connect GA4 BigQuery data to Looker Studio — custom queries, blending, and performance."
+    href="/ga4/bigquery/looker-studio-patterns/"
+  />
+</CardGrid>
+
+## Troubleshooting
+
+Diagnose and fix data quality issues before they become reporting problems.
+
+<CardGrid>
+  <LinkCard
+    title="Data Discrepancies"
+    description="Why GA4 numbers don't match your other tools and how to determine which source is correct."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+  <LinkCard
+    title="Missing Data"
+    description="Diagnose why events, conversions, or dimensions are absent from your reports."
+    href="/ga4/troubleshooting/missing-data/"
+  />
+  <LinkCard
+    title="DebugView"
+    description="Use GA4's real-time debug mode to validate your implementation event-by-event."
+    href="/ga4/troubleshooting/debugview/"
+  />
+  <LinkCard
+    title="Realtime Validation"
+    description="Use the Realtime report and DebugView together for pre-launch implementation checks."
+    href="/ga4/troubleshooting/realtime-validation/"
+  />
+  <LinkCard
+    title="Common Mistakes"
+    description="The implementation errors that show up in nearly every GA4 setup and how to fix them."
+    href="/ga4/troubleshooting/common-mistakes/"
+  />
+  <LinkCard
+    title="Internal Traffic Filtering"
+    description="Exclude your own team's traffic from GA4 reports using IP-based and developer filters."
+    href="/ga4/troubleshooting/internal-traffic-filtering/"
+  />
+</CardGrid>
+
+## APIs
+
+Programmatic access to GA4 data and configuration.
+
+<CardGrid>
+  <LinkCard
+    title="Data API"
+    description="Query GA4 reports programmatically with Python and Node.js — the same data as the UI, via code."
+    href="/ga4/apis/data-api/"
+  />
+  <LinkCard
+    title="Admin API"
+    description="Manage GA4 properties, streams, and custom dimensions programmatically."
+    href="/ga4/apis/admin-api/"
+  />
+  <LinkCard
+    title="User Deletion API"
+    description="Delete user data from GA4 for GDPR compliance and right-to-erasure requests."
+    href="/ga4/apis/user-deletion-api/"
+  />
+</CardGrid>

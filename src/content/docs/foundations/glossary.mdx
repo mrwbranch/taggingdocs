@@ -3,4 +3,290 @@ title: "Glossary"
 description: "Quick-reference glossary of GTM and GA4 terms with links to deep-dive articles."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Quick definitions for every major term you will encounter across this documentation. Each entry links to the relevant deep-dive article where more detail is available. Terms are in alphabetical order.
+
+---
+
+## A
+
+**Abstract Data Model**
+GTM's internal state machine that processes and stores dataLayer values. It is distinct from the `window.dataLayer` array — the array is a message queue, while the Abstract Data Model is the merged state that results from processing all those messages. Understanding the difference is critical for debugging sticky variable behavior. See [How GTM Works](/foundations/how-gtm-works/).
+
+**Ad Storage** (`ad_storage`)
+A Google Consent Mode consent type that controls whether cookies and identifiers can be used for advertising purposes. When denied, Google Ads tags switch to cookieless pings. See [Google Consent Mode](/client-side/setup/google-consent-mode/).
+
+**Ad User Data** (`ad_user_data`)
+A Google Consent Mode v2 consent type that controls whether user data can be sent to Google for advertising purposes. Required for EU users under the Google EU User Consent Policy. See [Google Consent Mode](/client-side/setup/google-consent-mode/).
+
+**Analytics Storage** (`analytics_storage`)
+A Google Consent Mode consent type that controls whether cookies can be used for analytics (GA4). When denied, GA4 still sends cookieless pings to enable behavioral modeling. See [Google Consent Mode](/client-side/setup/google-consent-mode/).
+
+**Audience** (GA4)
+A segment of users defined by behavior, demographics, or custom conditions, usable for remarketing in Google Ads and Floodlight, and as a basis for comparisons in GA4 reports. Audiences are evaluated against historical data and update as users qualify or disqualify. See [Audiences](/ga4/configuration/audiences/).
+
+---
+
+## B
+
+**Behavioral Modeling**
+A GA4 feature that uses machine learning to fill in data gaps created by Consent Mode. When users deny analytics consent, GA4 uses consenting users' behavior to model what unconsenting users likely did. Requires a minimum volume of consenting users to activate. See [Google Consent Mode](/client-side/setup/google-consent-mode/).
+
+**BigQuery Export**
+GA4's raw data export to Google BigQuery. Unlike sampled GA4 reports, BigQuery export contains unaggregated, hit-level event data with no sampling. Essential for custom funnels, cohort analysis, and data that predates GA4's report expiry window. See [BigQuery Export Setup](/ga4/bigquery/export-setup/).
+
+**Blocking Tag**
+A tag that prevents other tags from executing until it completes. Implemented via tag sequencing — a "setup tag" must fire successfully before the dependent tag fires. Used for consent management, data enrichment before sending, or sequential execution requirements. See [Tag Sequencing](/client-side/tags/tag-sequencing/).
+
+**Blocking Trigger** (also: Exception Trigger)
+A trigger added to a tag as an exception — it prevents the tag from firing even when the primary trigger matches. Common use: block all-pages tags from firing on thank-you pages or admin URLs. See [Tags, Triggers & Variables](/foundations/tags-triggers-variables/).
+
+**Built-in Variable**
+Pre-built variables in GTM that you enable with a checkbox rather than configuring from scratch. Examples: `{{Page URL}}`, `{{Click URL}}`, `{{Scroll Depth Threshold}}`, `{{Video Title}}`. These are disabled by default to reduce overhead — enable only the ones you use. See [Built-in Variables](/client-side/variables/built-in-variables/).
+
+---
+
+## C
+
+**Claim** (sGTM)
+In server-side GTM, the action a client takes to accept responsibility for processing an incoming request. Only one client can claim a request — the first matching client to claim it handles that request. Unclaimed requests receive a 200 response with no processing. See the server-side GTM documentation for details.
+
+**Client** (sGTM)
+A server-side GTM component that receives incoming HTTP requests, transforms them into the sGTM event model, and makes them available for server-side tags and triggers. The GA4 client, for example, receives GA4 collection requests and parses them into events the server container can process.
+
+**CLS** (Cumulative Layout Shift)
+A Core Web Vital measuring the visual stability of a page — how much content unexpectedly shifts position during load. Score of < 0.1 is good. GTM and its tags (especially late-loading scripts that inject content) can negatively impact CLS. See [Browser APIs for Tracking](/foundations/browser-apis-for-tracking/).
+
+**CMP** (Consent Management Platform)
+A third-party service that manages cookie consent dialogs, stores consent choices, and provides an API for querying consent state. Examples: Cookiebot, CookieYes, OneTrust, Didomi, Usercentrics. CMPs integrate with GTM's Consent Mode to block or unblock tags based on user choices. See [CMP Integration](/consent/cmp-integration/).
+
+**Consent Mode**
+Google's framework for adjusting tag behavior based on user consent state. Tags can be configured to fire without cookies (cookieless mode) when consent is denied, or to not fire at all. Consent Mode v2 added `ad_user_data` and `ad_personalization` signals. See [Google Consent Mode](/client-side/setup/google-consent-mode/).
+
+**Container**
+The deployable GTM unit. A container contains all your tags, triggers, variables, and configuration. Each container has a unique ID (`GTM-XXXXXX`) and is installed on a website or app via a snippet. A container compiles down to a JavaScript file served from Google's CDN. See [GTM Account Structure](/foundations/gtm-account-structure/).
+
+**Container Snippet**
+The two-part HTML code you install on your site to load GTM. The `<script>` tag in `<head>` loads the container asynchronously; the `<noscript>` tag after `<body>` provides an iframe fallback for non-JS environments. See [Container Installation](/client-side/setup/container-installation/).
+
+**Conversion** (GA4)
+An event marked as a conversion in GA4. Any event can be marked as a conversion in Admin → Events. Conversions appear in standard reports, can be imported into Google Ads, and are used for attribution. See [Conversions](/ga4/configuration/conversions/).
+
+**Core Web Vitals (CWV)**
+Three Google-defined page experience metrics: LCP (Largest Contentful Paint), INP (Interaction to Next Paint), and CLS (Cumulative Layout Shift). Used as ranking signals in Google Search and as indicators of real user experience. See [Browser APIs for Tracking](/foundations/browser-apis-for-tracking/).
+
+**Custom Dimension** (GA4)
+A user-defined attribute that GA4 collects and makes available in reports. Can be event-scoped (attached to individual events) or user-scoped (attached to users across sessions). Must be registered in GA4 Admin before it appears in reports. See [Custom Dimensions](/ga4/configuration/custom-dimensions/).
+
+**Custom Event** (GTM trigger type)
+A trigger that fires when a specific event name appears in the dataLayer via `dataLayer.push({event: 'your-event-name'})`. The most reliable trigger type for developer-controlled tracking — you know exactly when it fires because you wrote the code that fires it. See [Custom Event Triggers](/client-side/triggers/custom-event-triggers/).
+
+**Custom HTML Tag**
+A GTM tag that executes arbitrary HTML and JavaScript. The most flexible tag type — you can do anything in a Custom HTML tag that you can do in JavaScript. Also the most dangerous: errors in Custom HTML tags can break your site, and they are not subject to GTM's sandbox restrictions. See [Custom HTML Tags](/client-side/tags/custom-html-tags/).
+
+**Custom Metric** (GA4)
+A user-defined numeric measurement collected on events. Examples: scroll depth percentage, video percentage watched, product price. Must be registered in GA4 Admin before appearing in reports. See [Custom Metrics](/ga4/configuration/custom-metrics/).
+
+---
+
+## D
+
+**Data Layer Variable** (GTM variable type)
+A GTM variable that reads a value from GTM's internal Abstract Data Model by key name. Use dot notation for nested values: `ecommerce.transaction_id` reads the `transaction_id` from inside the `ecommerce` object. This is the primary way tags access data pushed via `dataLayer.push()`. See [Data Layer Variables](/client-side/variables/datalayer-variables/).
+
+**Data Stream** (GA4)
+A source of data flowing into a GA4 property. Each website, iOS app, or Android app requires its own data stream. The Measurement ID (`G-XXXXXXXXXX`) belongs to a data stream, not to the property. See [Data Streams](/ga4/fundamentals/data-streams/).
+
+**dataLayer**
+A JavaScript array on `window` that acts as a communication bus between your website and GTM. Code on your site pushes structured event objects into the array; GTM processes them and fires tags accordingly. The dataLayer persists across the page session and GTM merges its contents into an internal state model. See [DataLayer Deep Dive](/foundations/datalayer-deep-dive/).
+
+**Debug View** (GA4)
+A real-time event stream in GA4 that shows events as they arrive from a device in debug mode. Activated by the `debug_mode` parameter or the Google Analytics Debugger Chrome extension. Essential for validating GA4 event implementations. See [DebugView](/ga4/troubleshooting/debugview/).
+
+---
+
+## E
+
+**Ecommerce** (dataLayer)
+The standardized data structure in the dataLayer for ecommerce events, following Google's Enhanced Ecommerce specification. Contains an `items` array with product details and event-level fields like `value`, `currency`, and `transaction_id`. The `ecommerce` object should be cleared (`ecommerce: null`) before every new push. See [DataLayer Deep Dive](/foundations/datalayer-deep-dive/).
+
+**Environment** (GTM)
+A named deployment target that serves a specific container version. The built-in environments are Live (published), Latest (most recent version), and Now Editing (current workspace). Custom environments let you serve specific versions to staging or QA servers. See [Environments](/client-side/management/environments/).
+
+**Event** (GA4)
+The primary data unit in GA4. Everything is an event — page views, purchases, clicks, errors. Events have a name (up to 40 characters) and up to 25 parameters. Some event names are reserved by Google (`page_view`, `purchase`, `session_start`) and collect automatically in certain configurations. See [Events, Parameters & Properties](/ga4/fundamentals/events-parameters-properties/).
+
+**Event Parameter** (GA4)
+A key-value pair attached to a specific event. For example, a `purchase` event might have parameters `transaction_id`, `value`, `currency`, and `items`. Parameters are distinct from user properties — parameters describe the event, user properties describe the user. See [Custom Dimensions](/ga4/configuration/custom-dimensions/).
+
+**Exception Trigger**
+See *Blocking Trigger*.
+
+---
+
+## F
+
+**First-Party Cookie**
+A cookie set on the same domain as the website the user is visiting, as opposed to a third-party cookie set by an external domain. GA4 and sGTM deployments can be configured to use first-party cookies, which are less affected by browser ITP/ETP restrictions. See [Cross-Domain Tracking](/client-side/tracking/cross-domain-tracking/).
+
+**Folder** (GTM)
+An organizational container within GTM for grouping related tags, triggers, or variables. Folders do not affect firing behavior — they are purely organizational. Use them to group by platform, feature, or status. See [Folder Organization](/client-side/management/folder-organization/).
+
+---
+
+## G
+
+**GA4** (Google Analytics 4)
+Google's current analytics platform, successor to Universal Analytics. GA4 uses an event-based data model (everything is an event), natively integrates with BigQuery, and is designed for a privacy-centric, cookieless future. See [GA4 section](/ga4/).
+
+**GTM ID** (also: Container ID)
+The unique identifier for a GTM container, in the format `GTM-XXXXXXX`. Used in the container snippet URL, in workspaces and version references, and to reference the container in the browser console (`google_tag_manager['GTM-XXXXXXX']`).
+
+**gtm.dom**
+The built-in GTM event that fires when the DOM has finished parsing (equivalent to `DOMContentLoaded`). This is the event associated with the "DOM Ready" trigger type. Tags on DOM Ready triggers receive this event.
+
+**gtm.js**
+The built-in GTM event that fires first — when GTM itself loads. This is pushed by the container snippet with the `gtm.start` timestamp. Tags on the earliest "Page View" trigger type respond to this event.
+
+**gtm.load**
+The built-in GTM event that fires when the window `load` event fires (all resources including images and iframes have loaded). Corresponds to the "Window Loaded" trigger type.
+
+---
+
+## H
+
+**History Change**
+A GTM trigger type that fires when the browser's URL changes without a full page load — the pattern used by SPAs (React, Vue, Angular applications). Responds to `pushState`, `replaceState`, and `hashchange` events. See [History Change Triggers](/client-side/triggers/history-change-triggers/).
+
+---
+
+## I
+
+**INP** (Interaction to Next Paint)
+The Core Web Vital that replaced FID (First Input Delay) in March 2024. INP measures the responsiveness of a page to all user interactions (clicks, taps, keyboard inputs) throughout the page's lifecycle, not just the first one. A score under 200ms is good. Heavy GTM tag execution can degrade INP.
+
+---
+
+## L
+
+**LCP** (Largest Contentful Paint)
+A Core Web Vital that measures when the largest image or text block in the viewport becomes visible. A score under 2.5 seconds is good. Large images loaded by GTM tags (tracking pixels, banner scripts) can delay LCP if they block render. See [Browser APIs for Tracking](/foundations/browser-apis-for-tracking/).
+
+**Lookup Table** (GTM variable type)
+A GTM variable that maps input values to output values. Provide an input variable and a table of input → output pairs. Useful for mapping page paths to section names, product IDs to category names, or any other enumerated mapping. See [Lookup Tables](/client-side/variables/lookup-tables/).
+
+---
+
+## M
+
+**Measurement ID**
+The identifier for a GA4 data stream, in the format `G-XXXXXXXXXX`. Used in GTM's GA4 Configuration tag and in hardcoded `gtag()` implementations. One property can have multiple Measurement IDs (one per data stream).
+
+**Measurement Protocol** (GA4)
+An HTTP API that lets you send events directly to GA4 from any environment — server, IoT device, or offline queue — without a browser. Used for server-side event deduplication, backend events (refunds, subscription cancellations), and offline conversion import.
+
+**MutationObserver**
+A browser API that watches for DOM changes (added nodes, removed nodes, attribute changes). Useful in GTM Custom HTML tags for detecting dynamically loaded content that standard triggers would miss. See [Browser APIs for Tracking](/foundations/browser-apis-for-tracking/).
+
+---
+
+## P
+
+**Page View** (trigger type)
+GTM's earliest-firing built-in trigger type. Fires when GTM loads, before DOM Ready and Window Loaded. Page View triggers are appropriate for tags that need to fire as early as possible and do not depend on the DOM being available.
+
+**Preview Mode**
+GTM's built-in debugging environment. Activated via the "Preview" button, it connects Tag Assistant to your site and shows every event, trigger evaluation, and tag fire in real time — visible only in your browser session, not to real users. See [Preview Mode](/client-side/debugging/preview-mode/).
+
+**Priority** (tag firing priority)
+A numeric value (default 0) that determines tag execution order when multiple tags fire on the same trigger. Higher priority numbers fire first. Use priority carefully — it creates implicit dependencies that are hard to trace. See [Tag Firing Priority](/client-side/tags/tag-firing-priority/).
+
+---
+
+## R
+
+**Regex Table** (GTM variable type)
+Like a Lookup Table, but uses regular expressions as the input conditions. Useful for extracting category names from dynamic URL patterns, matching multiple URL variants to a single label, or any case where exact string matching is insufficient. See [Regex Tables](/client-side/variables/regex-tables/).
+
+---
+
+## S
+
+**sendBeacon**
+A browser API (`navigator.sendBeacon()`) that sends a small HTTP POST request asynchronously and reliably during page unload, without blocking navigation. Used for exit tracking, engagement reporting, and any data that needs to be delivered when the user is leaving the page. See [Browser APIs for Tracking](/foundations/browser-apis-for-tracking/).
+
+**Server-Side GTM** (sGTM)
+A GTM deployment that runs on a server you control rather than in the browser. Client-side GTM sends data to the sGTM endpoint; sGTM routes it to third-party platforms from the server. Advantages: better performance, first-party cookie control, data enrichment, reduced client-side JavaScript.
+
+**Session** (GA4)
+A period of user activity on your site or app. A new session begins when a user arrives, or after 30 minutes of inactivity, or when a new campaign parameter is detected (even in the same browser session). Sessions are reconstructed from events rather than server-side session objects. See [Sessions and Attribution](/ga4/fundamentals/sessions-and-attribution/).
+
+**Stale Variable**
+A dataLayer value that persists in GTM's internal model from a previous event and is read incorrectly on a subsequent event. Particularly common in SPAs where page transitions do not clear the dataLayer. The fix is explicitly pushing `null` or the new value on each route change. See [DataLayer Deep Dive](/foundations/datalayer-deep-dive/).
+
+---
+
+## T
+
+**Tag**
+A unit of code that executes in GTM when triggered. Tags send data to third-party platforms (GA4, Meta, Google Ads), set cookies, execute JavaScript, or load external scripts. Tags are passive — they wait for a trigger to fire them. See [Tags, Triggers & Variables](/foundations/tags-triggers-variables/).
+
+**Tag Assistant**
+Google's Chrome extension and web-based tool for debugging GTM implementations. In connected Preview mode, it shows every GTM event and which tags fired. Also provides standalone validation for GA4 and Google Ads tags. See [Tag Assistant](/client-side/debugging/tag-assistant/).
+
+**Tag Sequencing**
+A GTM feature that enforces firing order between tags. A tag can specify a "setup tag" (must fire before) and/or a "teardown tag" (fires after). Used for consent enforcement, data enrichment, or cleanup. See [Tag Sequencing](/client-side/tags/tag-sequencing/).
+
+**Trigger**
+An event listener with filter conditions. When an event occurs in the browser, GTM evaluates all triggers registered for that event type. Triggers whose conditions are met fire their associated tags. See [Tags, Triggers & Variables](/foundations/tags-triggers-variables/).
+
+**Trigger Group**
+A GTM feature that fires tags only when multiple triggers have all fired (AND logic across triggers). Useful for tags that should only fire after several conditions have all been satisfied — for example, after a user has scrolled 50%, spent 30 seconds on the page, and visited at least 3 pages. See [Trigger Groups](/client-side/triggers/trigger-groups/).
+
+---
+
+## U
+
+**User Property** (GA4)
+An attribute describing a user that persists across sessions, rather than being attached to a single event. Examples: `user_type` (free/premium), `account_tier`, `preferred_language`. User properties are set via `gtag('set', 'user_properties', {...})` or via the GA4 Configuration tag in GTM. See [Events, Parameters & Properties](/ga4/fundamentals/events-parameters-properties/).
+
+---
+
+## V
+
+**Variable**
+A named slot in GTM that resolves to a value at evaluation time. Variables make triggers and tags dynamic — instead of hardcoding a page path or button label, you reference a variable that reads the actual value at the moment the event fires. See [Tags, Triggers & Variables](/foundations/tags-triggers-variables/).
+
+**Version** (GTM)
+A snapshot of the container's full configuration at a given point in time, created when you publish a workspace. Versions are numbered sequentially and stored permanently. You can roll back to any version instantly from the Versions list. See [Version Control](/client-side/management/version-control/).
+
+**Virtual Pageview**
+An analytics hit that represents a page view in a single-page application, where no actual page reload occurred. Implemented by pushing a `page_view` event to the dataLayer after a client-side route change. See [SPA Setup](/client-side/setup/spa-setup/).
+
+---
+
+## W
+
+**Workspace**
+A draft environment inside a GTM container where you make configuration changes before publishing. Changes in a workspace are invisible to users until you submit (publish) the workspace. Multiple workspaces can exist simultaneously for parallel work. See [Workspaces](/client-side/management/workspaces/).
+
+---
+
+<CardGrid>
+  <LinkCard
+    title="How GTM Works"
+    description="The execution model behind the terms — how GTM actually processes events and fires tags."
+    href="/foundations/how-gtm-works/"
+  />
+  <LinkCard
+    title="Tags, Triggers & Variables"
+    description="Deep dive into the core GTM abstractions."
+    href="/foundations/tags-triggers-variables/"
+  />
+  <LinkCard
+    title="DataLayer Deep Dive"
+    description="Everything about the dataLayer — the message bus at the center of every GTM implementation."
+    href="/foundations/datalayer-deep-dive/"
+  />
+</CardGrid>

@@ -1,6 +1,152 @@
 ---
 title: "Track 404 Errors"
-description: "Capturing 404 page views for broken link detection."
+description: "Capture 404 page visits in GA4 via GTM, including the requested URL and referrer — so you can find and fix broken links."
+sidebar:
+  badge:
+    text: Beginner
+    variant: success
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+404 errors are broken links, changed URLs, or mistyped addresses — all of which hurt user experience and SEO. Tracking them in GA4 lets you find the highest-volume 404s and fix them. The key is capturing not just that a 404 happened, but which URL was requested and how the user got there.
+
+## The recommended approach: dataLayer push on the 404 template
+
+The most reliable method is to add a dataLayer push directly to your 404 page template. Every CMS and framework has a 404 template — this is the right place to set up the signal.
+
+<DataLayerExample event="page_not_found" description="Add this to your 404 page template, before the GTM snippet if possible, or in the page body.">
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'page_not_found',
+    page_type: '404',
+    requested_url: window.location.href,
+    referrer: document.referrer || 'direct'
+  });
+</script>
+```
+</DataLayerExample>
+
+If you have access to server-side data, include it:
+
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'page_not_found',
+    page_type: '404',
+    requested_url: window.location.href,
+    referrer: document.referrer || 'direct',
+    // If your server passes these as template variables:
+    error_code: '404',
+    server_path: '{{ request.path }}'  // Replace with your template syntax
+  });
+</script>
+```
+
+<Steps>
+1. **Add the dataLayer push** to your 404 template, before the closing `</head>` tag. If your framework uses `_document.js` (Next.js), `404.vue`, or a CMS error page — that is the right file.
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `page_not_found`
+
+3. **Create Data Layer Variables**
+
+   - `DLV - requested_url` → Data Layer Variable name: `requested_url`
+   - `DLV - referrer` → Data Layer Variable name: `referrer`
+
+4. **Create a GA4 Event Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `page_not_found`
+   - Parameters:
+     - `requested_url` → `{{DLV - requested_url}}`
+     - `referrer` → `{{DLV - referrer}}`
+     - `page_type` → `404`
+   - Trigger: the Custom Event trigger
+
+5. **Register `requested_url` as a custom dimension in GA4**
+
+   Go to **GA4 → Admin → Custom Definitions → Custom Dimensions** and register:
+   - Dimension name: Requested URL
+   - Scope: Event
+   - Event parameter: `requested_url`
+
+   This makes the parameter available in reports.
+</Steps>
+
+<TagConfig
+  name="GA4 - page_not_found"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - page_not_found"
+  variables={["DLV - requested_url", "DLV - referrer"]}
+/>
+
+## GTM fallback: Page Path trigger
+
+If you cannot modify the 404 template, use a GTM Page Path trigger. This is less precise but works without code access.
+
+<Steps>
+1. **Create a GA4 Event Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `page_not_found`
+   - Parameters:
+     - `requested_url` → `{{Page URL}}`
+     - `referrer` → `{{Referrer}}`
+
+2. **Create a Page View Trigger**
+
+   - Trigger type: **Page View**
+   - Fire on: **Some Page Views**
+   - Condition: depends on how your CMS serves 404s:
+     - If 404 pages have a consistent path: `Page Path` **matches RegEx** `^/404`
+     - If 404 pages have the original URL with a 404 template: `Page Title` **contains** `404` or `Page Not Found`
+
+   <Aside type="caution">
+   The `Page Title` approach is unreliable if your site's title format is inconsistent. Prefer the dataLayer approach whenever possible.
+   </Aside>
+</Steps>
+
+## Analysing 404 data in GA4
+
+Once you have data flowing, create an Exploration report:
+
+1. Go to **Explore → Blank Exploration**
+2. Add segment: `Event name = page_not_found`
+3. Dimensions: `Requested URL`, `Session source / medium`, `Page referrer`
+4. Metrics: `Event count`
+
+The `Requested URL` dimension shows you which broken URLs get the most traffic. The `Page referrer` shows you which pages on your own site link to broken URLs.
+
+**Priority fix order:**
+1. High-traffic 404s with internal referrers → fix the internal link
+2. High-traffic 404s with external referrers → set up a 301 redirect
+3. High-traffic 404s with no referrer (direct) → likely a bookmarked old URL → redirect
+
+## Test it
+
+1. Open GTM Preview
+2. Navigate directly to a URL on your site that returns a 404 (try `/this-page-does-not-exist`)
+3. The `page_not_found` event should appear in the Summary pane
+4. Verify `requested_url` shows the full URL you requested
+5. In GA4 DebugView, verify the event appears
+
+## Common gotchas
+
+**Site serves soft 404s.** Some CMSs return a 200 status code for missing pages but display a "not found" message. GTM cannot detect HTTP status codes. The dataLayer approach on the 404 template is the only reliable solution.
+
+**URL includes sensitive data.** Some URLs contain form field data or tokens in query parameters. Strip these before pushing to the dataLayer: `window.location.pathname + window.location.search.replace(/token=[^&]+/, 'token=REDACTED')`.
+
+**Referrer is blank for internal links.** If the user navigated from an HTTPS page to an HTTPS 404, the referrer should be populated. If it is blank, the user may have typed the URL directly or used a bookmark.
+
+<CardGrid>
+  <LinkCard title="Track Internal Search" href="/recipes/track-internal-search/" description="Another zero-code-required event with URL parameter reading." />
+  <LinkCard title="PII Detection & Removal" href="/recipes/pii-detection-removal/" description="Strip sensitive data from URLs before they reach GA4." />
+</CardGrid>

@@ -1,6 +1,252 @@
 ---
 title: "Error Tracking"
-description: "Capturing JavaScript errors and application exceptions."
+description: "Track JavaScript errors, unhandled promise rejections, and application-level errors through GTM and send them to GA4 for monitoring."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Your analytics data only tells you what users did. Error tracking tells you what went wrong when they were trying to do it. JavaScript errors, API failures, and 404 pages are invisible to most analytics setups — but they explain the sudden drop in conversion rates, the high bounce rate on a specific page, and the user who abandoned checkout.
+
+## JavaScript Error trigger (built-in)
+
+GTM has a built-in JavaScript Error trigger that listens to `window.onerror`. When an uncaught JavaScript error occurs, this trigger fires and GTM populates three built-in variables:
+
+- **Error Message** — The error description (`Uncaught TypeError: Cannot read properties of undefined`)
+- **Error URL** — The script file where the error occurred
+- **Error Line** — The line number in the script
+
+<Steps>
+1. **Enable Error built-in variables.** GTM Variables → Configure → enable: Error Message, Error URL, Error Line.
+
+2. **Create a JavaScript Error trigger:**
+   - Trigger type: JavaScript Error
+   - This trigger fires on: All JavaScript Errors (or filter by condition)
+
+3. **Create a GA4 Event tag** for the error event.
+</Steps>
+
+<TagConfig
+  name="GA4 - Event - JavaScript Error"
+  type="Google Analytics: GA4 Event"
+  trigger="JavaScript Error"
+  variables={['Error Message', 'Error URL', 'Error Line', 'Page URL']}
+/>
+
+Set event parameters:
+- `error_message` → `{{Error Message}}`
+- `error_url` → `{{Error URL}}`
+- `error_line` → `{{Error Line}}`
+
+<Aside type="caution">
+The built-in JavaScript Error trigger uses `window.onerror`. It **does not** catch unhandled promise rejections (`window.unhandledrejection`). Modern applications rely heavily on async/await and Promises — you'll miss those errors without the additional setup below.
+</Aside>
+
+## Catching unhandled promise rejections
+
+```html
+<!-- Custom HTML tag, fires on DOM Ready -->
+<script>
+window.addEventListener('unhandledrejection', function(event) {
+  var reason = event.reason;
+  var message = '';
+
+  if (reason instanceof Error) {
+    message = reason.message;
+  } else if (typeof reason === 'string') {
+    message = reason;
+  } else {
+    message = JSON.stringify(reason) || 'Unknown promise rejection';
+  }
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'js_error',
+    error_type: 'unhandled_promise_rejection',
+    error_message: message.substring(0, 200), // GA4 has 100-char parameter limit, truncate safely
+    error_url: window.location.href
+  });
+});
+</script>
+```
+
+## Application-level error tracking
+
+Beyond JavaScript errors, you want to track business-logic errors: API failures, form validation server errors, and checkout failures. These should be pushed explicitly from your application:
+
+```javascript
+// API error tracking
+async function fetchUserData(userId) {
+  try {
+    const response = await fetch(`/api/users/${userId}`);
+    if (!response.ok) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'api_error',
+        error_type: 'api_failure',
+        error_status_code: response.status,
+        error_endpoint: '/api/users',
+        error_context: 'user_profile_load'
+      });
+      return null;
+    }
+    return response.json();
+  } catch (error) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'api_error',
+      error_type: 'network_failure',
+      error_message: error.message,
+      error_context: 'user_profile_load'
+    });
+    return null;
+  }
+}
+```
+
+```javascript
+// Checkout error tracking
+function handleCheckoutError(errorCode, errorMessage, step) {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'checkout_error',
+    error_code: errorCode,
+    error_message: errorMessage,
+    checkout_step: step,
+    page_path: window.location.pathname
+  });
+}
+
+// Usage
+handleCheckoutError('PAYMENT_DECLINED', 'Card was declined', 'payment');
+handleCheckoutError('ADDRESS_INVALID', 'Address could not be validated', 'shipping');
+```
+
+## 404 page tracking
+
+Most analytics setups already track 404 pages as page views (which is useful), but adding a dedicated `404_page` event makes it easier to find them and understand their source:
+
+```javascript
+// Push on your 404 template/page component
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  event: '404_error',
+  page_path: window.location.pathname,
+  referrer: document.referrer || 'direct'
+});
+```
+
+In GTM, fire this on the 404 page by using a Page View trigger with a URL condition:
+- Page Path — equals — `/404`
+- Or: Page Path — matches RegEx — `/not-found|/error/404`
+
+If your 404 page doesn't have a predictable URL, push the event from your server-side rendering when a 404 response is generated.
+
+## Filtering error noise
+
+Not all errors are actionable. Browser extensions, third-party scripts, and known cross-origin errors will flood your error data if you track everything.
+
+Apply filter conditions to your JavaScript Error trigger:
+
+```
+// Condition: Error Message does not contain "Script error."
+// (cross-origin script errors have no useful details — filter them)
+
+// Condition: Error URL does not contain "chrome-extension://"
+// (browser extensions cause many errors that aren't yours)
+
+// Condition: Error URL does not contain "moz-extension://"
+```
+
+Or use a Custom JavaScript variable to score error relevance:
+
+```javascript
+// Custom JS Variable: "CJS - Is Trackable Error"
+function() {
+  var msg = {{Error Message}};
+  var url = {{Error URL}};
+
+  if (!msg || msg === 'Script error.') return false;
+  if (url && (url.indexOf('chrome-extension') !== -1 || url.indexOf('moz-extension') !== -1)) return false;
+  if (url && url.indexOf('gtm.js') !== -1) return false; // Don't track GTM's own errors
+
+  // Only track errors from your own domain
+  if (url && url.indexOf('yourdomain.com') === -1) return false;
+
+  return true;
+}
+```
+
+Add trigger condition: `CJS - Is Trackable Error` equals `true`.
+
+## Error grouping in GA4
+
+GA4 won't automatically group similar errors. A `TypeError: Cannot read properties of undefined (reading 'map')` appearing 500 times a day from different users is the same underlying bug — you want one row in your report, not 500.
+
+Do this at the collection layer by normalizing error messages before pushing:
+
+```javascript
+// Custom JS Variable: "CJS - Normalized Error Message"
+function() {
+  var msg = {{Error Message}};
+  if (!msg) return 'unknown_error';
+
+  // Normalize common patterns
+  if (msg.indexOf('Cannot read') !== -1) return 'null_reference_error';
+  if (msg.indexOf('is not a function') !== -1) return 'not_a_function_error';
+  if (msg.indexOf('is not defined') !== -1) return 'undefined_variable_error';
+  if (msg.indexOf('Failed to fetch') !== -1) return 'network_fetch_error';
+  if (msg.indexOf('ChunkLoadError') !== -1) return 'chunk_load_error';
+
+  // Return first 60 characters as fallback
+  return msg.substring(0, 60);
+}
+```
+
+## GA4 event structure for errors
+
+```javascript
+// Unified error event structure
+window.dataLayer.push({
+  event: 'js_error',              // Single event name for all JS errors
+  error_type: 'runtime_error',   // Categorize: runtime, network, validation, auth
+  error_message: 'message text', // Normalized message (max 100 chars)
+  error_url: window.location.href,
+  error_component: 'checkout',   // Which part of the app
+  error_severity: 'high'         // critical, high, medium, low
+});
+```
+
+## Common mistakes
+
+### Tracking every single error without filtering
+
+Cross-origin errors, browser extension errors, and third-party script errors will outnumber your real application errors 10:1 on most sites. Always filter for errors from your own domain.
+
+### Letting error data go to the default GA4 Custom Events report
+
+Error events in GA4 aren't in any default report. Create a Looker Studio dashboard or an Exploration specifically for error monitoring. Set up GA4 custom alerts for when `js_error` event count spikes.
+
+### Using too-long error messages as parameters
+
+GA4 truncates event parameter values at 100 characters. An untruncated stack trace as `error_message` will be cut off mid-sentence. Truncate to 100 characters and send the full trace to a proper error monitoring tool (Sentry, Datadog) if you need the full context.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DataLayer Deep Dive"
+    description="How dataLayer.push() works — essential for understanding the error tracking patterns above."
+    href="/foundations/datalayer-deep-dive/"
+  />
+  <LinkCard
+    title="Console Debugging"
+    description="Browser console commands for inspecting what your error tracking is actually capturing."
+    href="/client-side/debugging/console-debugging/"
+  />
+  <LinkCard
+    title="Common Errors"
+    description="GTM-specific errors — the implementation mistakes rather than JavaScript errors on your site."
+    href="/client-side/debugging/common-errors/"
+  />
+</CardGrid>

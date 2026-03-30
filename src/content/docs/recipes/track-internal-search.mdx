@@ -1,6 +1,160 @@
 ---
 title: "Track Internal Search"
-description: "Site search tracking recipe."
+description: "Track site search queries in GA4 — URL parameter reading, dataLayer approach, and zero-results tracking."
+sidebar:
+  badge:
+    text: Beginner
+    variant: success
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../components/TagConfig.astro';
+import DataLayerExample from '../../../components/DataLayerExample.astro';
+
+Internal site search reveals what users are looking for that they could not find through navigation. It is one of the highest-signal events you can track: search queries show intent, zero-results searches show content gaps, and repeated searches show friction.
+
+## How most sites handle search results
+
+Before implementing, identify how your search results page works:
+
+1. **URL parameter** — most common: `/search?q=term`, `/results?query=pricing`, `/search?s=term`
+2. **dataLayer push from the search results template** — best when you control the CMS
+3. **Hash-based or SPA routing** — `/search#term` or dynamic route
+
+## Option A — URL parameter reading (no code required)
+
+If your search results appear at a URL like `/search?q=your+query`, GTM can read the query from the URL using a built-in URL variable.
+
+<Steps>
+1. **Create a URL Variable for the Search Query**
+
+   In GTM → **Variables → New**:
+   - Variable type: **URL**
+   - Component type: **Query**
+   - Query key: `q` (replace with your site's actual search parameter — check the URL in your browser)
+   - Name: `URL - Search Query`
+
+2. **Create a Page View Trigger for Search Results**
+
+   - Trigger type: **Page View**
+   - Fire on: **Some Page Views**
+   - Condition: `Page Path` **contains** `/search` (adjust to match your search URL pattern)
+   - Add a second condition: `{{URL - Search Query}}` **does not equal** `` (empty string)
+
+3. **Create a GA4 Event Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `search`
+   - Parameters:
+     - `search_term` → `{{URL - Search Query}}`
+     - `page_path` → `{{Page Path}}`
+   - Trigger: the Page View trigger above
+
+4. **Test in Preview Mode**
+
+   Perform a search on your site. Verify the URL contains your parameter, then check the Summary pane for the `search` event with the correct `search_term` value.
+</Steps>
+
+<TagConfig
+  name="GA4 - search"
+  type="Google Analytics: GA4 Event"
+  trigger="Page View - search results page"
+  variables={["URL - Search Query", "Page Path"]}
+/>
+
+<Aside type="tip">
+GA4's Enhanced Measurement also tracks internal search if it detects the `q`, `s`, `search`, `query`, or `keyword` URL parameters. Check **GA4 → Admin → Data Streams → Enhanced Measurement → Site Search** to see which parameters it monitors. If your parameter is in that list, you may already be tracking search — but you will not have full control over the event parameters or zero-results tracking.
+</Aside>
+
+## Option B — dataLayer push (recommended for full control)
+
+Push from your search results template for zero-results tracking and result count metadata.
+
+<DataLayerExample event="search" description="Push this on your search results page after results are loaded.">
+```javascript
+// Add this to your search results page template
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  event: 'search',
+  search_term: 'your-term-from-server',  // Replace with server-side template variable
+  search_results_count: 42,              // Replace with actual count from server
+  search_has_results: true,              // false if 0 results
+  search_category: 'all'                // if your search has category filtering
+});
+```
+</DataLayerExample>
+
+In a Next.js or similar SSR application:
+
+```javascript
+// In your search results page component
+useEffect(() => {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'search',
+    search_term: router.query.q,
+    search_results_count: results.total,
+    search_has_results: results.total > 0
+  });
+}, [results]);
+```
+
+<Steps>
+1. **Add the dataLayer push** to your search results template. Push after results are loaded, not on page load.
+
+2. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `search`
+
+3. **Create Data Layer Variables**
+
+   - `DLV - search_term` → `search_term`
+   - `DLV - search_results_count` → `search_results_count`
+   - `DLV - search_has_results` → `search_has_results`
+
+4. **Create a GA4 Event Tag**
+
+   - Event name: `search`
+   - Parameters:
+     - `search_term` → `{{DLV - search_term}}`
+     - `search_results_count` → `{{DLV - search_results_count}}`
+     - `search_has_results` → `{{DLV - search_has_results}}`
+   - Trigger: the Custom Event trigger
+
+5. **Test in Preview Mode**
+
+   Perform searches with and without results. Each should fire a `search` event with the correct `search_term` and `search_results_count`.
+</Steps>
+
+## Tracking zero-results searches
+
+Zero-results searches are content gaps. Create a separate GA4 conversion event or audience for them:
+
+In GA4 → **Admin → Events → Mark as Key Event**: create a filtered event for searches where `search_has_results = false`.
+
+Or use a Custom Audience in GA4: users who triggered `search` with parameter `search_has_results = false`.
+
+Export these queries to a spreadsheet weekly and review them with your content team.
+
+## Test it
+
+1. Open GTM Preview and perform a search on your site
+2. Check the Summary pane for the `search` event
+3. Verify `search_term` matches what you searched
+4. If using the dataLayer approach, verify `search_results_count` is correct
+5. Perform a search that returns no results and verify `search_has_results` is `false`
+6. Check GA4 DebugView for the `search` event with parameters
+
+## Common gotchas
+
+**URL parameter is different per search integration.** WordPress uses `s=`, Algolia uses `query=`, Elasticsearch uses various parameters. Check your search URL before configuring the URL variable.
+
+**Search query contains PII.** If users search for their own email addresses or account numbers, those values flow into GA4. Consider scrubbing PII patterns from `search_term` before pushing. See the [PII Detection recipe](/recipes/pii-detection-removal/).
+
+**Autocomplete results never load a search page.** If your search uses live autocomplete without a results page navigation, the Page View trigger will not fire. Use a custom event from your autocomplete component's `onSelect` handler.
+
+<CardGrid>
+  <LinkCard title="Track 404 Errors" href="/recipes/track-404-errors/" description="Another server-side signal that benefits from the dataLayer approach." />
+  <LinkCard title="PII Detection & Removal" href="/recipes/pii-detection-removal/" description="Strip sensitive data from tracking events before they leave the browser." />
+</CardGrid>

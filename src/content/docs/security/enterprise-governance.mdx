@@ -1,6 +1,181 @@
 ---
 title: "Enterprise Governance"
-description: "GTM governance for large organizations — permissions, workflows, and compliance."
+description: "GTM governance for large organizations — permission tiers, change management processes, GTM 360 features, access reviews, and documentation requirements."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Governance is what happens when more than three people have GTM access and things start going wrong. Tags appear that nobody remembers adding. An agency publishes something on Friday afternoon without telling anyone. A developer adds a debugging tag during an incident and never removes it.
+
+The solution is not more restriction — it is clear processes, documented responsibilities, and structured access. This article gives you the framework.
+
+## Permission tier design
+
+GTM has four permission levels: View, Edit, Approve, and Publish (plus Account-level Admin). Most organizations use all four, but map them to roles in a way that does not reflect actual responsibilities.
+
+Here is the correct mapping:
+
+| Permission | Who gets it | What they can do |
+|---|---|---|
+| View | Analysts, stakeholders, QA reviewers | Read container configuration, view reports, no changes |
+| Edit | Implementers, junior developers, agency implementers | Create and modify tags, triggers, variables — but cannot publish |
+| Approve (GTM 360 only) | Senior analysts, tech leads | Review and approve workspace changes for publish |
+| Publish | Senior implementers, analytics leads | Publish approved changes to the live container |
+| Admin | Analytics manager, security owner (max 2 people) | Manage users, create containers, account-level settings |
+
+**The principle of least privilege:** Every user should have exactly the access they need to do their job — no more. An analyst who only reads container configuration should not have Edit access. An implementer who builds tags should not have Publish access unless they are also responsible for releasing those changes.
+
+**Publish access is the critical boundary.** The ability to push code to production is what separates "configuring tags" from "deploying code." Treat Publish access with the same seriousness as production deployment access in your engineering systems.
+
+<Aside type="danger">
+In most organizations, far too many people have Publish access. Before reading further, go to your GTM account and count how many people can publish. If the number is greater than 5 for a single container, you have a governance problem. If any agency accounts have Publish access, verify that is intentional and documented.
+</Aside>
+
+## Change management process
+
+A change management process is just a documented workflow for how changes move from "someone wants this" to "it is live on the site." The specific steps matter less than the fact that they are written down, consistently followed, and enforced.
+
+A practical process for mid-size organizations:
+
+<Steps>
+1. **Request.** The requester (marketing, product, analytics) submits a request with: what tag/event/data is needed, why it is needed, which pages/events it should fire on, and the deadline. A Jira ticket or Linear issue works fine. What matters is that it is written down before anyone opens GTM.
+
+2. **Specification.** An analytics implementer reviews the request and writes a technical specification: the dataLayer push (if needed), the tag configuration, the trigger conditions, the expected output. The requester approves the specification before any GTM work starts.
+
+3. **Implementation.** The implementer builds the configuration in a named GTM workspace. The workspace name matches the ticket number or request name.
+
+4. **Review.** Before publishing, a second person reviews the implementation. They verify: the tag matches the specification, no unexpected changes were made to unrelated tags, the triggers are correctly scoped (do not fire on more pages than needed), no Custom HTML contains unexpected code.
+
+5. **Test.** Preview mode verification that the tag fires correctly. For conversion tags: test on staging with real events. Document the test results.
+
+6. **Publish.** After review and testing sign-off, publish with a descriptive version note: "Added LinkedIn Insight Tag for campaign retargeting — approved by [name] on [date]."
+
+7. **Notify.** Send a brief note to the requester and relevant stakeholders: what was published, when it went live, how to verify it is working.
+</Steps>
+
+This process takes more time than "add the tag and publish." It also catches configuration errors, scope creep, and unauthorized additions before they reach production. For organizations that have experienced a GTM security incident, this kind of process is non-negotiable.
+
+## GTM 360: approval workflows and Zones
+
+GTM 360 is the enterprise tier with two governance-specific features that free GTM does not have.
+
+### Approval workflows
+
+In GTM 360, you can require that workspace changes be approved before they can be published. This creates a mandatory review gate: an Edit-access user can build a workspace and request publish, but a user with Approve permission must review and approve it before anyone can publish.
+
+This enforces the review step in the change management process technically — it is no longer dependent on humans following the process voluntarily.
+
+To configure approval workflows in GTM 360:
+1. Go to Container Settings
+2. Enable "Require approval before publishing"
+3. Assign the Approve permission to designated reviewers
+
+Every publish attempt will now require an explicit approval from an authorized reviewer. Unapproved workspaces cannot be published regardless of the requester's permission level.
+
+### Zones
+
+Zones allow you to segment a single container into isolated sections, each with its own access controls. This is particularly useful for organizations where different teams own different parts of the analytics implementation.
+
+**Common Zone configurations:**
+
+- **Marketing Zone:** All ad platform pixels and campaign tracking. Agency has Edit access to this Zone only — they cannot see or modify the core analytics configuration.
+- **Analytics Zone:** GA4 configuration, ecommerce tracking, core events. Only the analytics team has access.
+- **Data Layer Zone:** Variables and triggers that read from the dataLayer. Developer team access.
+- **Consent Zone:** Consent management platform integration. Only privacy/legal team and senior analytics leads.
+
+Zones prevent the "one agency has access to everything" problem. The marketing agency can manage their tracking without being able to touch the GA4 purchase event configuration or the CMP integration.
+
+## Centralized vs. decentralized management
+
+Organizations with multiple brands, regions, or product lines face a structural choice: one container or many, and who controls each.
+
+**Centralized model:** One container (or a small number) managed by a central analytics team. Regional teams and product teams submit requests through the change management process. Benefits: consistency, security, clear ownership. Downside: bottleneck.
+
+**Decentralized model:** Each team or brand manages their own container. Central team sets standards and audits periodically. Benefits: speed, autonomy. Downside: inconsistency, duplicated work, harder to enforce security standards.
+
+**Most enterprises end up with a hybrid:** A core container managed centrally, plus team-specific containers for isolated use cases. The central container handles cross-site tracking, consent management, and core analytics. Team containers handle campaign-specific or product-specific needs. GTM Zones formalize this if you have GTM 360.
+
+The important thing is to document which model you use and why. Undocumented hybrid models — where some things are in the main container and some are in separate containers with no clear policy — are a governance nightmare.
+
+## Training requirements for new GTM users
+
+Anyone who gets Edit access to a GTM container should be able to answer these questions before they are granted access:
+
+1. What is the difference between a tag, a trigger, and a variable?
+2. Why does publishing a GTM container require the same care as deploying code?
+3. What is a Custom HTML tag allowed to do? What are the security implications?
+4. What is the correct way to document a change in a version note?
+5. Who do you notify before publishing a significant change?
+6. What should you do if you see a tag you do not recognize?
+
+Anyone who gets Publish access should also understand:
+- How to read a container diff and identify risky changes
+- What Base64-encoded strings in Custom HTML look like and why they are a red flag
+- How to run a network audit on a checkout page
+- What the CSP policy covers and what it is protecting against
+
+Training is not a one-time event. Run a brief (30-minute) security refresher annually, covering recent incidents in the broader GTM ecosystem and any issues discovered in your own audits.
+
+## Quarterly access reviews
+
+At the end of every quarter, review the complete list of GTM users across all containers. For each user, verify:
+
+1. **Still employed or contracted:** Has this person left the organization? Has the agency relationship ended?
+2. **Correct permission level:** Does their current role still justify their current access? Has their role changed?
+3. **Active use:** When did they last access GTM? A user who has not logged in for 6 months probably does not need the access they have.
+4. **Documented justification:** Is there a record of why this person has this level of access?
+
+For departing employees and contractors: revoke access on the day they leave. Not the week after, not after IT processes the offboarding ticket — the same day. GTM Publish access is high-value access, and a disgruntled ex-employee with an active GTM account is a serious risk.
+
+## Documentation requirements
+
+Every entity in the container should be documented:
+
+**Tags:** Tag name should include the vendor name and event name (`Meta Pixel — Purchase`). Every tag should have a note in its settings explaining what it does, who requested it, when it was added, and when it should be reviewed.
+
+**Triggers:** Trigger name should describe when it fires (`Purchase Confirmation Page — Any User`) not what tags use it. Tags using the trigger can change; the trigger's behavior should not.
+
+**Variables:** Variable name should describe the data it returns (`Ecommerce — Transaction ID` not `Variable 12`). Custom JavaScript variables should include a comment at the top explaining their purpose.
+
+**Version notes:** Every published version should have a note describing what changed and why. "March cleanup" is not acceptable. "Removed Meta Pixel ViewContent tag (campaign ended 2024-01-15) and Pinterest checkout event (duplicate of server-side implementation)" is.
+
+A container where every entity is documented is a container where security audits take 30 minutes instead of 3 hours, and where a new team member can understand the implementation in days instead of weeks.
+
+## Common mistakes
+
+### Treating GTM governance as optional until after an incident
+
+Organizations implement governance frameworks after security incidents, not before them. The ones that implement it before are the ones that avoid incidents. If your current answer to "who reviews GTM publishes?" is "nobody formally," that is a process gap that needs closing today.
+
+### Using a shared login for GTM access
+
+Shared Google accounts for GTM access mean you cannot audit who made which change. Every human being who accesses GTM should use their own Google account. No shared credentials, ever. This is both a security requirement and an audit trail requirement.
+
+### Not removing access from departing vendors immediately
+
+Agency relationships end, vendor contracts expire, and consultants complete their work. Every one of these events should trigger an immediate access review. An ex-agency with GTM Publish access is a breach waiting to happen — both through compromised credentials and through deliberate misuse.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GTM Account Structure"
+    description="How to organize accounts, containers, and workspaces to support the governance model."
+    href="/foundations/gtm-account-structure/"
+  />
+  <LinkCard
+    title="Version-Controlled Publishing"
+    description="The technical workflow that enforces the change management process."
+    href="/security/version-controlled-publishing/"
+  />
+  <LinkCard
+    title="Tag Auditing"
+    description="Regular audit processes that verify the governance model is working."
+    href="/security/tag-auditing/"
+  />
+  <LinkCard
+    title="GTM Attack Vectors"
+    description="What good governance is protecting against."
+    href="/security/gtm-attack-vectors/"
+  />
+</CardGrid>

@@ -1,6 +1,220 @@
 ---
 title: "Ecommerce Overview"
-description: "Complete guide to GA4 ecommerce dataLayer events and the shopping funnel."
+description: "The complete GA4 ecommerce event funnel — event flow, the items array structure, currency handling, and the ecommerce null clear pattern."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import EventSchema from '../../../../components/EventSchema.astro';
+
+GA4's ecommerce event specification describes a complete shopping funnel from product discovery to purchase. Each event represents a stage in that funnel. They share a common data structure — the `items` array — and a set of conventions around currency, value, and the ecommerce null clear pattern.
+
+Implement these events in funnel order. Each event's data prepares the context for the next one. The `item_list_name` set on `view_item_list` should carry through to `select_item`. The cart contents pushed on `begin_checkout` should match what appeared on `view_cart`. Consistency across the funnel is what makes GA4's ecommerce reports — funnel analysis, shopping behavior, product performance — actually trustworthy.
+
+## The ecommerce funnel
+
+```
+view_item_list      → Product is visible to the user in a list
+select_item         → User clicks on the product
+view_item           → User views the product detail page
+add_to_cart         → User adds the product to their cart
+view_cart           → User views the cart
+begin_checkout      → User initiates checkout
+add_shipping_info   → User completes the shipping step
+add_payment_info    → User completes the payment step
+purchase            → Order is confirmed
+```
+
+You don't need to implement every event. A minimal implementation that gives you meaningful funnel data is: `view_item` → `add_to_cart` → `begin_checkout` → `purchase`. Add the others when you need the granularity.
+
+For refunds and internal promotion tracking, GA4 also specifies:
+- `refund` — full or partial order refunds
+- `view_promotion` and `select_promotion` — internal banner and promotion impressions
+
+## The items array: the common data structure
+
+Every ecommerce event uses the same `items` array structure. The array contains one object per product, and each object has a standardized set of fields.
+
+```javascript
+items: [
+  {
+    // Required — at least one of these
+    item_id: 'SKU-001-BLK',           // string — your product SKU or ID
+    item_name: 'Classic Leather Jacket', // string — human-readable product name
+
+    // Recommended
+    item_brand: 'Heritage Co.',
+    item_category: 'Apparel',         // up to 5 levels: item_category through item_category5
+    item_category2: 'Outerwear',
+    item_category3: 'Jackets',
+    item_variant: 'Black / Large',    // color, size, style
+    price: 89.99,                     // number — unit price, NOT line total
+    quantity: 1,                      // number — defaults to 1 if omitted
+
+    // Contextual (depends on event)
+    item_list_id: 'mens_jackets',     // which list the item appeared in
+    item_list_name: "Men's Jackets",  // human-readable list name
+    index: 0,                         // position in the list (0-based)
+    affiliation: 'Online Store',      // store or seller affiliation
+
+    // Promotional
+    coupon: 'SUMMER15',               // item-level coupon
+    discount: 13.50,                  // monetary discount applied
+  }
+]
+```
+
+<Aside type="note">
+GA4 technically requires either `item_id` or `item_name` per item — not both. In practice, always include both. Reports that group by `item_name` are useless without `item_id` for debugging, and vice versa. The cost of sending both is negligible.
+</Aside>
+
+### Category hierarchy
+
+GA4 supports up to five levels of category nesting using numbered suffixes:
+
+```javascript
+item_category: 'Apparel',      // top level
+item_category2: 'Outerwear',   // second level
+item_category3: 'Jackets',     // third level
+item_category4: 'Leather',     // fourth level
+item_category5: 'Premium',     // fifth level
+```
+
+Use as many levels as your catalog has. Most sites use two to three levels. Don't invent levels that don't exist in your catalog just to fill the fields.
+
+## The ecommerce null clear: non-negotiable
+
+Every ecommerce push must be preceded by `dataLayer.push({ ecommerce: null })`.
+
+```javascript
+// Always clear first
+dataLayer.push({ ecommerce: null });
+
+// Then push the event
+dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    value: 89.99,
+    items: [...]
+  }
+});
+```
+
+GTM maintains an internal data model that accumulates values from every `dataLayer.push()`. When you push `{ ecommerce: { currency: 'USD', items: [...] } }`, GTM merges the `ecommerce` object into its model. When you push the next ecommerce event, GTM merges again — but the previous event's fields are still there.
+
+Without clearing, a `begin_checkout` event's items can bleed into a `purchase` event. A `view_item` with a single item can contaminate a later `add_to_cart` with three items. `dataLayer.push({ ecommerce: null })` tells GTM to set the `ecommerce` key to `null` in its model, effectively wiping it clean before you build the next ecommerce event.
+
+On single-page applications this is especially critical because the dataLayer array never resets between "page" navigations.
+
+## Currency and value handling
+
+### The currency parameter
+
+`currency` is required on every ecommerce event that includes a `value` parameter. It must be an ISO 4217 three-letter currency code.
+
+```javascript
+currency: 'USD'   // US Dollar
+currency: 'EUR'   // Euro
+currency: 'GBP'   // British Pound
+currency: 'SEK'   // Swedish Krona
+```
+
+Without `currency`, GA4 cannot attribute revenue to the event. Your ecommerce reports will show event counts but zero revenue.
+
+### The value parameter
+
+`value` represents the monetary value of the event. What "value" means depends on the event:
+
+| Event | What value represents |
+|-------|-----------------------|
+| `view_item` | Price of the item being viewed |
+| `add_to_cart` | Total value of items added (price × quantity for each item) |
+| `begin_checkout` | Total cart value |
+| `purchase` | Total revenue (after discounts, before or after tax depending on your convention) |
+
+Be consistent. If `value` on `purchase` is post-discount, pre-tax revenue — then `value` on `begin_checkout` should also be post-discount, pre-tax. Mixed conventions make your funnel analysis meaningless.
+
+### Price is unit price, not line total
+
+The `price` field in an item object is always the unit price per item. GA4 calculates the line total internally as `price × quantity`.
+
+```javascript
+// ✅ Correct
+{
+  item_id: 'SKU-047',
+  item_name: 'Cotton T-Shirt',
+  price: 24.99,    // unit price
+  quantity: 2      // GA4 calculates 49.98 for this line
+}
+
+// ❌ Wrong — passing line total
+{
+  item_id: 'SKU-047',
+  item_name: 'Cotton T-Shirt',
+  price: 49.98,    // line total — GA4 will calculate 99.96 with quantity: 2
+  quantity: 2
+}
+```
+
+## The complete items reference
+
+<EventSchema
+  event="GA4 Ecommerce Item"
+  parameters={[
+    { name: 'item_id', type: 'string', required: true, description: 'SKU or unique product identifier. Either item_id or item_name is required.' },
+    { name: 'item_name', type: 'string', required: true, description: 'Product name. Either item_id or item_name is required — include both.' },
+    { name: 'item_brand', type: 'string', required: false, description: 'Brand or manufacturer name.' },
+    { name: 'item_category', type: 'string', required: false, description: 'Primary product category.' },
+    { name: 'item_category2', type: 'string', required: false, description: 'Second-level category.' },
+    { name: 'item_category3', type: 'string', required: false, description: 'Third-level category.' },
+    { name: 'item_category4', type: 'string', required: false, description: 'Fourth-level category.' },
+    { name: 'item_category5', type: 'string', required: false, description: 'Fifth-level category.' },
+    { name: 'item_variant', type: 'string', required: false, description: 'Variant such as color, size, or style. Combine multiple attributes into one string.' },
+    { name: 'price', type: 'number', required: false, description: 'Unit price. Must be a number, not a formatted string. This is the price per unit, not the line total.' },
+    { name: 'quantity', type: 'number', required: false, description: 'Number of units. Defaults to 1 if omitted.' },
+    { name: 'index', type: 'number', required: false, description: 'Position of the item in a list (0-based). Include when item came from a list context.' },
+    { name: 'item_list_id', type: 'string', required: false, description: 'ID of the list the item appeared in (e.g., mens_jackets, search_results).' },
+    { name: 'item_list_name', type: 'string', required: false, description: 'Human-readable name of the list the item appeared in.' },
+    { name: 'affiliation', type: 'string', required: false, description: 'Store or seller affiliation. Useful for marketplaces.' },
+    { name: 'coupon', type: 'string', required: false, description: 'Item-level coupon code.' },
+    { name: 'discount', type: 'number', required: false, description: 'Monetary discount applied to this item.' },
+    { name: 'creative_name', type: 'string', required: false, description: 'Name of the creative asset for promotion events.' },
+    { name: 'creative_slot', type: 'string', required: false, description: 'Slot name for the creative. Used in promotion events.' },
+    { name: 'promotion_id', type: 'string', required: false, description: 'ID of the promotion. Used in promotion events.' },
+    { name: 'promotion_name', type: 'string', required: false, description: 'Name of the promotion. Used in promotion events.' },
+  ]}
+/>
+
+## GTM configuration overview
+
+All ecommerce events follow the same GTM pattern:
+
+1. **Custom Event trigger**: one trigger per event name (`CE - view_item`, `CE - add_to_cart`, etc.)
+2. **Data Layer Variables**: one variable per ecommerce field you need to send to GA4
+3. **GA4 Event tag**: configured with the event name and mapped parameters
+4. **Send Ecommerce data**: enable this checkbox in the GA4 tag to automatically pass the `ecommerce.items` array
+
+The "Send Ecommerce data" checkbox deserves special attention. When enabled on a GA4 Event tag, GTM reads the `ecommerce` object from the dataLayer and automatically maps it to the GA4 ecommerce payload. You do not need to manually add `items` as an event parameter — doing so alongside the checkbox will cause duplicate or malformed item data.
+
+<CardGrid>
+  <LinkCard
+    title="view_item_list"
+    description="Product list impressions — category pages, search results, recommendation widgets."
+    href="/datalayer/ecommerce/view-item-list/"
+  />
+  <LinkCard
+    title="add_to_cart"
+    description="Adding products to the cart — quantity handling and quick-add patterns."
+    href="/datalayer/ecommerce/add-to-cart/"
+  />
+  <LinkCard
+    title="purchase"
+    description="Order confirmation — the most critical event with deduplication and validation."
+    href="/datalayer/ecommerce/purchase/"
+  />
+  <LinkCard
+    title="Data Types"
+    description="Why price must be a number, not a string — and all other type conventions."
+    href="/datalayer/specification/data-types/"
+  />
+</CardGrid>

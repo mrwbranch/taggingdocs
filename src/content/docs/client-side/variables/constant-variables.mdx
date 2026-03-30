@@ -1,6 +1,174 @@
 ---
 title: "Constant Variables"
-description: "Reusable constant values for IDs, keys, and configuration."
+description: "Reusable static values in GTM — why every GA4 Measurement ID, Ads Conversion ID, and environment configuration should be a Constant Variable."
 ---
 
-This article is under development. Check back soon for the complete guide.
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+A Constant Variable stores a single, static value that you reference across multiple tags, triggers, and other variables. It has one purpose: avoid hardcoding the same string in ten different places.
+
+The concept is trivially simple, but the practice is often overlooked. Every GTM container has configuration values that appear in multiple tags — Measurement IDs, Conversion IDs, API keys, environment identifiers. When those values are hardcoded directly in each tag, updating them means opening every tag individually. When they are stored in Constant Variables, you change one value and every tag picks it up immediately.
+
+## Creating a Constant Variable
+
+<Steps>
+1. Go to **Variables** in GTM and click **New** under User-Defined Variables.
+2. Select **Constant** as the variable type.
+3. Enter your static value in the **Value** field.
+4. Name the variable clearly — use a prefix like `CONST - GA4 Measurement ID` or `CONFIG - Measurement ID`.
+5. Save and reference it in your tags using double-brace syntax: `{{CONST - GA4 Measurement ID}}`.
+</Steps>
+
+## The GA4 Measurement ID pattern
+
+This is the canonical use case for Constant Variables. Your GA4 Measurement ID (`G-XXXXXXXXXX`) belongs in a Constant Variable — not hardcoded in the Google Tag.
+
+**Why this matters:**
+
+1. **When you migrate to a new GA4 property**, you change one variable and every tag that uses it updates automatically — including your Google Tag and any GA4 Event tags that reference the configuration.
+
+2. **In multi-environment setups**, you can replace the Constant Variable with a Lookup Table keyed to hostname, pointing to different Measurement IDs for production and staging. All tags still reference the same variable name.
+
+3. **In code reviews and audits**, reviewing a tag that says `Measurement ID: {{CONFIG - GA4 Measurement ID}}` is clearer than one with `G-XK4J7M9P2Q` hardcoded.
+
+```
+Variable Name: CONFIG - GA4 Measurement ID
+Variable Type: Constant
+Value: G-XXXXXXXXXX
+```
+
+Reference in the Google Tag:
+```
+Measurement ID: {{CONFIG - GA4 Measurement ID}}
+```
+
+<Aside type="tip">
+Name the variable something generic like `CONFIG - GA4 Measurement ID` rather than including the actual ID in the name. When you eventually change the ID (property migration, environment switch), the variable name stays accurate.
+</Aside>
+
+## What belongs in Constant Variables
+
+**Definitely use Constant Variables for:**
+
+- GA4 Measurement IDs (`G-XXXXXXXXXX`)
+- Google Ads Conversion IDs (the number before the `/` in your conversion tag)
+- Google Ads Conversion Labels
+- Facebook/Meta Pixel IDs
+- Any vendor tag's account or property identifier
+- API endpoints used in Custom HTML tags
+- Environment names (`production`, `staging`, `development`)
+
+**Also useful for:**
+- Cookie names that appear in multiple tags
+- Custom dimension names that must be consistent across tags
+- Version numbers for your tracking specification
+
+## Constant Variables for Google Ads
+
+Google Ads conversion tags require two values: a Conversion ID and a Conversion Label. Both should be Constant Variables:
+
+```
+CONFIG - Google Ads Conversion ID
+Value: AW-123456789
+
+CONFIG - Google Ads Lead Label
+Value: abc123DEFghi
+
+CONFIG - Google Ads Purchase Label
+Value: xyz789IJKlmn
+```
+
+Having separate Constant Variables for each label makes it easy to see, in the tag configuration, which conversion action is being tracked.
+
+## Upgrading a Constant to a Lookup Table
+
+The real power of Constant Variables is that they serve as a single reference point. When you need to extend from "one value" to "one value per environment," you do not need to update every tag — you just replace the Constant Variable with a Lookup Table using the same variable name.
+
+**Before (single environment):**
+```
+Variable: CONFIG - GA4 Measurement ID
+Type: Constant
+Value: G-PROD12345
+```
+
+**After (multi-environment):**
+```
+Variable: CONFIG - GA4 Measurement ID
+Type: Lookup Table
+Input Variable: {{Page Hostname}}
+Rows:
+  example.com → G-PROD12345
+  staging.example.com → G-STG67890
+Default Value: G-DEV11111
+```
+
+Every tag in your container that was using `{{CONFIG - GA4 Measurement ID}}` continues working without modification. The value each tag receives now depends on the hostname.
+
+This is the migration path that makes GTM containers genuinely environment-aware without duplicating tags.
+
+## Naming conventions
+
+A consistent naming prefix helps organize variables in a large container. Two common approaches:
+
+**By type:**
+- `CONST - value description`
+
+**By category:**
+- `CONFIG - GA4 Measurement ID`
+- `CONFIG - Ads Conversion ID`
+- `CONFIG - Environment`
+
+Pick one and stick with it. The goal is that anyone looking at a tag configuration can immediately understand that `{{CONFIG - GA4 Measurement ID}}` is a stable, centrally-managed configuration value — not a computed or dynamic value.
+
+## Common mistakes
+
+### Hardcoding IDs directly in tags
+
+```
+// Tag configuration — BAD
+Measurement ID: G-XK4J7M9P2Q  ← hardcoded
+
+// Tag configuration — GOOD
+Measurement ID: {{CONFIG - GA4 Measurement ID}}  ← Constant Variable
+```
+
+When you have 8 tags that all hardcode the same Measurement ID and you need to change it, you will update 7 and miss one. The tag you missed will silently continue sending to the old property.
+
+### Creating one Constant per tag instead of sharing
+
+If you have a `CONST - GA4 ID for Google Tag` and a separate `CONST - GA4 ID for Event Tags`, both with the same value, you have defeated the purpose. One Constant Variable, referenced by all tags that need it.
+
+### Not replacing Constants with Lookup Tables when environments differ
+
+Running GTM Preview mode on your staging site and having it send data to your production GA4 property is a real and common problem. The fix is a Lookup Table replacing your Constant Variables, keyed to hostname. Do this before you launch, not after you discover staging data in production reports.
+
+## The JavaScript Variable type as an alternative
+
+For values that already exist in JavaScript on the page — a `window.CONFIG.measurementId` set by your application — use the **JavaScript Variable** type instead of a Constant. It reads the value from the page at runtime rather than storing it in GTM.
+
+This is even better than a Constant when your application already manages environment-specific configuration, because it means GTM automatically gets the right value without any GTM-side environment configuration.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GA4 Configuration Tag"
+    description="Where you use the GA4 Measurement ID Constant Variable — setting up the Google Tag correctly."
+    href="/client-side/tags/ga4-configuration-tag/"
+  />
+  <LinkCard
+    title="Lookup Tables"
+    description="The natural upgrade from a Constant Variable when you need environment-specific values."
+    href="/client-side/variables/lookup-tables/"
+  />
+  <LinkCard
+    title="User-Defined Variables Overview"
+    description="Quick reference to all variable types and when to use each one."
+    href="/client-side/variables/user-defined-variables/"
+  />
+  <LinkCard
+    title="Conversion Linker"
+    description="The Google Ads setup that works alongside your Constant Variable for Conversion IDs."
+    href="/client-side/tags/conversion-linker/"
+  />
+</CardGrid>
