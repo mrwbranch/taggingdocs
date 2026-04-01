@@ -121,6 +121,11 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Analytics Alternatives',
+          collapsed: true,
+          autogenerate: { directory: 'analytics-alternatives' },
+        },
+        {
           label: 'Consent & Privacy',
           collapsed: true,
           autogenerate: { directory: 'consent' },
@@ -159,6 +164,13 @@ export default defineConfig({
           label: 'Resources',
           collapsed: true,
           autogenerate: { directory: 'resources' },
+        },
+        {
+          label: 'About',
+          items: [
+            { label: 'About TaggingDocs', link: '/about/' },
+            { label: 'Support the Project', link: '/support/' },
+          ],
         },
       ],
     }),

@@ -1,0 +1,206 @@
+---
+title: "Choosing an Analytics Platform"
+description: "Side-by-side comparison of GA4, Plausible, Fathom, Simple Analytics, Matomo, and Piwik Pro — features, pricing, privacy, and GTM compatibility."
+sidebar:
+  order: 1
+  label: "Comparison Guide"
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid, Card } from '@astrojs/starlight/components';
+
+Here is how the major alternatives compare across the dimensions that matter for your decision.
+
+## At a glance
+
+| Feature | GA4 | Plausible | Fathom | Simple | Matomo | Piwik Pro |
+|---------|-----|-----------|--------|--------|--------|-----------|
+| **Free tier** | Yes | 30-day trial | 100k events/mo | 5k events/mo | Yes (self-hosted) | No |
+| **Cookie usage** | Yes (persistent) | No | No | No | Yes (configurable) | Yes (configurable) |
+| **Consent required** | Yes (EU) | No | No | No | Sometimes* | Sometimes* |
+| **GDPR compliant by design** | No | Yes | Yes | Yes | Yes (if configured) | Yes |
+| **Self-hosting option** | No | Community Edition | No | No | Yes | Yes |
+| **GTM native support** | Yes | No | No | No | Community template | No |
+| **Data import/BigQuery export** | Yes | No | No | No | API access | API access |
+| **Ecommerce tracking** | Full featured | Basic (as events) | Basic (as events) | No | Full featured | Full featured |
+| **Custom events** | Unlimited | Limited | Limited | Limited | Unlimited | Unlimited |
+| **User-level data** | Yes | No (session-based) | No (session-based) | No (session-based) | Yes | Yes |
+| **Real-time dashboard** | Yes | Yes | Yes | Yes | Yes | Yes |
+| **API access** | Yes | Limited | Limited | Limited | Full | Full |
+| **Learning curve** | Steep | Minimal | Minimal | Minimal | Moderate | Moderate |
+| **Data in EU servers** | No | Yes | Yes | Yes | Self-hosted | Yes |
+
+*Matomo and Piwik Pro can be configured to not require consent if data is truly anonymized.
+
+## Privacy compliance
+
+This is where alternatives differentiate most.
+
+**GA4** — Uses persistent cookies by default. Technically compliant with GDPR if users consent and you have a privacy policy explaining the tracking. In practice, most EU regulators expect a consent banner for analytics using Google's cookies and servers. GA4 can be configured to not use cookies (client-side mode), but this loses some functionality.
+
+**Plausible** — Cookieless. No persistent tracking. Cannot create user profiles across sessions. Data is aggregated immediately. No consent banner needed under most GDPR interpretations. This is the entire value proposition.
+
+**Fathom** — Cookieless. No user tracking. Session-based only. No consent banner. Similar model to Plausible but with better real-time reporting.
+
+**Simple Analytics** — Cookieless. No tracking. Just counts page views. Requires no consent. Most minimal compliance burden of any platform.
+
+**Matomo** — Uses cookies by default but can be configured as cookieless. With proper anonymization (IP masking, no user IDs), does not require consent. Self-hosted means you control data flow and can prove compliance.
+
+**Piwik Pro** — Cookies by default but with built-in compliance modes. Has a "Web Analytics" product specifically designed for GDPR compliance (no consent required if configured correctly). European-hosted.
+
+**Decision rule** — If you want zero concern about consent and a complaint-free GDPR experience, Plausible, Fathom, or Simple Analytics are the answer. If you need deeper tracking, Matomo (self-hosted) with privacy configuration or Piwik Pro's Web Analytics product.
+
+## Features vs. simplicity
+
+This is the core trade-off.
+
+**GA4 and Matomo and Piwik Pro** have nearly identical feature sets: custom events, custom dimensions, segmentation, funnels, audience building, conversion tracking, ecommerce tracking. The difference is implementation complexity.
+
+**Plausible, Fathom, Simple Analytics** trade depth for simplicity. No custom events. No user-level segmentation. No audience building. Just pages, sources, referrers, and bounce rates. If that covers your needs, they win on speed and mental load.
+
+**Simple Analytics** is the most minimal. It does not track event data at all. Just page views and traffic sources. If you only need "how many people visited each page," it is the answer.
+
+**Matomo** is GA4's closest alternative. You get the same tracking depth, custom events, ecommerce parameters, and audience features. The trade-off is self-hosting complexity (unless you use a managed provider).
+
+**Piwik Pro** is enterprise Matomo. Same features, better UI, hosted infrastructure, compliance tooling, and customer support. Worth it only if you have budget and compliance requirements.
+
+**Decision rule** — For content sites: Plausible or Fathom. For anything needing custom events: Matomo or Piwik Pro. For truly minimal tracking: Simple Analytics.
+
+## GTM compatibility
+
+This matters if you use Google Tag Manager.
+
+**GA4** — Native integration. GTM has a built-in GA4 tag type. Variables, custom events, and audiences sync naturally. Setting up GA4 in GTM is the recommended approach.
+
+**Plausible, Fathom, Simple Analytics** — Do not require GTM. They want you to deploy a single script tag. Using GTM adds unnecessary complexity. If you already run GTM for other tags, you can deploy their script through GTM's custom HTML tag, but this is not the intended workflow.
+
+**Matomo** — No native GTM tag, but has community templates. You can deploy via custom JavaScript in GTM, but setup is manual.
+
+**Piwik Pro** — No native GTM tag. Deploy via script tag or custom JavaScript.
+
+**Decision rule** — If you are already running GTM for other purposes, GA4 requires no extra effort. For alternatives, GTM deployment works but is not the natural path. Simpler to just add the script tag.
+
+## Data ownership and export
+
+**GA4** — Google owns and hosts data. You can export to BigQuery, but it stays in Google's ecosystem.
+
+**Plausible** — Cloud-hosted by Plausible. You can export CSV reports but not raw data. No BigQuery export. Plausible Community Edition (open source) can be self-hosted if you want full control.
+
+**Fathom** — Cloud-hosted. No self-hosting option. No raw data export. Limited API access.
+
+**Simple Analytics** — Cloud-hosted. No self-hosting option. No raw data export.
+
+**Matomo** — Full data ownership if you self-host. You control the servers, the data, the backups. Export via API or direct database access. This is the compliance advantage.
+
+**Piwik Pro** — Cloud-hosted on EU servers. You own your data but Piwik Pro hosts it. API access for export. Not the same control as self-hosted Matomo but better than GA4.
+
+**Decision rule** — If data residency or full control is required, Matomo self-hosted is the only option. If you want privacy without self-hosting, Piwik Pro is the managed alternative.
+
+## Ecommerce tracking
+
+**GA4** — Purpose-built. Track purchases, refunds, carts, product impressions, clicks, details. 50+ ecommerce parameters. Multi-currency. Tax and shipping parameters. Subscription handling. This is the most comprehensive ecommerce solution.
+
+**Plausible, Fathom, Simple Analytics** — No native ecommerce tracking. You can fire custom events for purchases and calculate revenue, but no structured product tracking. Revenue as a single number. Enough for basic conversion tracking, not enough for product-level analysis.
+
+**Matomo** — Full ecommerce tracking comparable to GA4. Structured product data, cart abandonment, multi-currency. Near feature parity with GA4.
+
+**Piwik Pro** — Same as Matomo. Full ecommerce tracking.
+
+**Decision rule** — If ecommerce analytics matter (product performance, category analysis, customer value), GA4, Matomo, or Piwik Pro. If you just need "conversion count = revenue," alternatives work.
+
+## Pricing
+
+**GA4** — Free (with limits). Paid features in 4 Suite products (Analytics 360, Ads, Merchant Center integration).
+
+**Plausible** — $9/month (up to 10k monthly visitors). $20/month (up to 100k). Annual pricing is 33% cheaper.
+
+**Fathom** — $14/month (100k events). $25/month (500k events). Or $165/year for one site.
+
+**Simple Analytics** — Free tier: 5k events. Paid starts at $20/month.
+
+**Matomo** — Free (self-hosted). Managed hosting runs $19-99/month depending on traffic. Enterprise pricing available.
+
+**Piwik Pro** — No free tier. Starts at ~$500/month for small setups. Enterprise pricing on request.
+
+**Decision rule** — For cost-conscious teams: GA4 free tier or Plausible/Fathom ($9-14/mo). For full features with budget: Piwik Pro or managed Matomo.
+
+## Real-world decision framework
+
+### You use Google Ads
+
+**Choose: GA4**
+
+GA4 is native to Google Ads. Conversion tracking, audience sync, ROAS reporting. No alternative does this. Switching costs are prohibitive unless Google Ads is not core to your business.
+
+### You run a content site (blog, docs, news)
+
+**Choose: Plausible or Fathom**
+
+You need page views, traffic sources, top pages, referrers. Both platforms give you that in a dashboard that loads in 2 seconds. Plausible is slightly more feature-rich. Fathom is slightly faster and simpler.
+
+Deploy script tag → 5 minutes → done. No GTM needed. No consent banner. $9/month.
+
+### You run ecommerce
+
+**Choose: GA4, Matomo, or Piwik Pro**
+
+You need product-level analytics. Revenue per product, category performance, customer value. GA4 is the obvious choice if you use Google Ads. Matomo if you want data ownership. Piwik Pro if you have compliance and support needs.
+
+### You are EU-based and consent-averse
+
+**Choose: Plausible (privacy tool) + GA4 (marketing tool)**
+
+This is increasingly common. Plausible (or Fathom) for public-facing page analytics. No consent needed. Fast dashboards. GA4 for your team's conversion tracking (consent banner required but only your team sees the dashboard). You get privacy for visitors and data depth for your team.
+
+Cost: ~$10/month (Plausible) + GA4 free. One script tag + one GTM container. Effort: 2 hours setup.
+
+### You want full data ownership
+
+**Choose: Matomo (self-hosted)**
+
+You run your own Matomo instance. GA4-like features. Full control. Privacy by default. No consent needed if configured right. Compliance auditable.
+
+Cost: $0 (self-hosted) or $19-99/month (managed hosting). Effort: significant (self-hosting) or minimal (managed).
+
+### You have regulatory compliance requirements
+
+**Choose: Piwik Pro or Matomo (self-hosted)**
+
+Piwik Pro is built for compliance-first organizations. Built-in consent modes, audit logs, EU data residency, customer support. Matomo self-hosted if you want maximum control.
+
+Cost: $500+/month (Piwik Pro) or self-hosted cost. Effort: moderate.
+
+### You want to drop GA4 but are not sure why
+
+**Choose: Nothing yet**
+
+If GA4 is working for you and you are just curious about alternatives, stay put. Switching has real costs (data disruption, team retraining, integration rebuilding). Only switch if you have a specific pain point (complexity, compliance, consent burden, data residency).
+
+## Migration considerations
+
+If you do decide to switch, plan for:
+
+**Data loss** — You will lose historical GA4 data. Do not expect a clean handoff. Export what you need before leaving.
+
+**Integration rebuilding** — Google Ads, Looker Studio, Zapier integrations need to be reconfigured with new tool.
+
+**Team retraining** — Your team learns a new platform. Dashboard layout is different. Report building is different.
+
+**Time investment** — Expect 40-80 hours to fully migrate, test, and validate.
+
+**Parallel running** — Best practice: run both systems for 2-4 weeks to validate numbers match and everyone is comfortable with the new tool.
+
+Only worth it if the pain of GA4 is bigger than the pain of migration.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard title="Plausible Analytics" description="Setup, tracking plan, and when to use Plausible." href="/docs/analytics-alternatives/plausible/" />
+  <LinkCard title="Fathom Analytics" description="Setup, real-time dashboards, and privacy features." href="/docs/analytics-alternatives/fathom/" />
+  <LinkCard title="Simple Analytics" description="Minimal tracking for content-first sites." href="/docs/analytics-alternatives/simple-analytics/" />
+  <LinkCard title="Matomo" description="Self-hosted GA4 alternative with full data ownership." href="/docs/analytics-alternatives/matomo/" />
+  <LinkCard title="Piwik Pro" description="Enterprise analytics with compliance built-in." href="/docs/analytics-alternatives/piwik-pro/" />
+</CardGrid>
+
+<Aside type="note">
+These platforms are worth considering. They are not worth switching to just because you are tired of GA4. Switching has real costs. Only switch if an alternative actually solves a problem you have.
+</Aside>

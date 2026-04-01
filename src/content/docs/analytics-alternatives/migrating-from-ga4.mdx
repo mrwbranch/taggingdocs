@@ -1,0 +1,350 @@
+---
+title: "Migrating from GA4"
+description: "How to migrate from Google Analytics 4 to an alternative analytics platform — concept mapping, parallel running, and what to expect."
+sidebar:
+  order: 7
+  label: "Migrating from GA4"
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Migrating analytics platforms is not trivial. You lose historical data, your dashboards break, and your team loses institutional knowledge of GA4's quirks. Before you migrate, ask yourself: **am I migrating for the right reason?**
+
+## Before You Migrate: The Hard Questions
+
+**"GA4 is confusing."** Not a good reason. GA4 is complex, but alternatives are too. You'll just have different confusion.
+
+**"GA4 sends data to Google."** Valid if you have data residency requirements or philosophical objections. Not valid if you just have a vague privacy concern but still run Google Ads.
+
+**"I need Google Ads integration to work differently."** Also not a reason to leave GA4. GA4's Ads integration is GA4's best feature.
+
+**"I need data I don't have."** Now we're talking. If GA4 doesn't give you ecommerce detail, or if you need cookieless tracking, or if you want 5+ years of data without a 14-month rolling window, then migration might be justified.
+
+<Aside type="caution">
+The most common reason to migrate is "GA4 is hard." But every analytics tool is hard. Migrating won't fix that. You'll just be hard at a different tool.
+</Aside>
+
+## The Reality of Migration
+
+You will lose:
+- Google Ads integration (audiences and conversions)
+- Historical GA4 data (you can export, but you can't backfill the new tool)
+- Team expertise in GA4
+- Audience building for ad platforms (without a CDP)
+
+You will gain:
+- A tool that might fit your use case better (if you picked right)
+- Simplified dashboards (if you picked a lightweight tool)
+- Data ownership (if you picked Matomo or Piwik Pro)
+- Faster page loads (if you picked Plausible or Fathom)
+
+**The honest take**: Most organizations should run GA4 + an alternative in parallel, not migrate.
+
+## Concept Mapping: GA4 to Alternatives
+
+Use this table to understand what you're trading away. Every GA4 concept maps to something, but the quality of the mapping varies.
+
+| GA4 Concept | Plausible/Fathom | Matomo | Piwik Pro | Trade-off |
+|---|---|---|---|---|
+| Event | Goal/custom event | Event | Event | Near 1:1, simpler in lightweight tools |
+| Custom dimension | Event property (limited) | Custom dimension | Custom dimension | Limited in lightweight tools |
+| Audience | Not available | Segment | Segment + CDP | Biggest loss: no audience building |
+| Conversion | Goal | Goal/conversion | Goal | Direct mapping |
+| Ecommerce event | Revenue event (simple) | Full ecommerce module | Full ecommerce | GA4 flexible, alternatives more structured |
+| User-ID | Not available | Visitor/user ID | User segment | Limited cross-device tracking in alternatives |
+| BigQuery export | API/CSV download | Raw database/API | Data export API | Matomo easier (direct DB access) |
+| Consent mode | Not applicable | Supported | Supported | Lightweight tools less consent-aware |
+| Predictive audience | ML-driven | Not available | Not available | Unique to GA4 |
+
+The gap widens for advanced use cases. Simple site analytics? Alternatives are solid. Complex ecommerce with Google Ads? GA4 is still better.
+
+## The Parallel Running Approach (Recommended)
+
+Don't migrate. Run both for 2-4 weeks and see if the alternative tells you what you need.
+
+<Steps>
+1. **Install the alternative** alongside GA4. Both fire simultaneously.
+2. **Configure equivalent goals/events** in the alternative to match GA4's key conversions.
+3. **Run for 2-4 weeks minimum**. Collect a full business cycle of data (a weekend, a weekday cycle).
+4. **Compare metrics**:
+   - Sessions/pageviews (expect 5-15% variance)
+   - Traffic sources (biggest discrepancies here)
+   - Top pages (should align closely)
+   - Conversions (should track similarly)
+5. **Investigate differences**. Where do they diverge and why? (Bot filtering, sampling, cookieless counting, etc.)
+6. **Evaluate if the alternative answers your questions**. Does it show you what you need to know?
+7. **Make a decision**: Remove GA4, keep both, or go back to GA4.
+</Steps>
+
+### Why Metrics Will Differ
+
+Expect 5-20% variance between GA4 and alternatives. Here's why:
+
+| Difference | GA4 | Alternative | Impact |
+|---|---|---|---|
+| Bot filtering | Yes (Server-side) | Sometimes (configurable) | GA4 often lower |
+| Sampling | Yes (at high traffic) | No (usually) | Alternative may be higher |
+| Cookie vs cookieless | First-party + cross-domain | First-party only | Alternatives lower on repeat visits |
+| Session timeout | 30 min default | Varies | Can differ significantly |
+| Data processing delay | Real-time | Real-time | Usually same |
+| Referrer handling | GA4 specific | Standard | Nuanced differences |
+
+The alternative isn't "wrong" — it's just different. Both numbers are defensible.
+
+## Implementation Steps
+
+Once you've decided to migrate (not just parallel-run), follow this sequence.
+
+<Tabs>
+<TabItem label="Week 1: Prep">
+**Day 1-2: Audit GA4 config**
+- List all custom events you track
+- Document all custom dimensions and metrics
+- Audit ecommerce properties (if applicable)
+- List all custom audiences you've built
+- Export historical data you might need
+
+**Day 3-5: Install alternative**
+- Set up account in your chosen tool
+- Configure equivalent goals/events
+- Create custom dimensions
+- Set up ecommerce tracking (if needed)
+- Run both tools to verify both are tracking
+
+**Day 6-7: Plan the cutover**
+- Decide on a cutover date (end of month is cleanest)
+- Communicate to stakeholders: "We're switching analytics tools"
+- Archive GA4 reports (document the last reports)
+</TabItem>
+<TabItem label="Week 2-3: Parallel">
+**Week 2: Both tools running**
+- Monitor both dashboards daily
+- Compare session counts, pageviews, top pages
+- Check that custom events are firing in both
+- Document metric differences
+
+**Week 3: Team training**
+- Show team the alternative's dashboard
+- Walk through key reports
+- Explain where to find what they used in GA4
+- Collect questions and feedback
+
+**Adjust as needed**:
+- If ecommerce data is off, debug the event mappings
+- If traffic sources differ wildly, check bot filtering settings
+- If you find blockers, escalate them now (not after cutover)
+</TabItem>
+<TabItem label="Week 4+: Cutover">
+**Day 1: Remove GA4**
+- Stop firing GA4 events (comment out GA4 tag in GTM/analytics code)
+- Keep the alternative running
+- Announce to team: "Cutover complete. All analytics now in [tool]."
+
+**Days 2-7: Monitor**
+- Watch for anomalies
+- Check that events still fire
+- Alert if something breaks
+- Have a rollback plan (keep GA4 code commented, not deleted)
+
+**Week 2-4: Rebuild dashboards**
+- Recreate key GA4 reports in the alternative
+- Adjust for any data modeling differences
+- Share with stakeholders
+- Document how to read the new dashboard
+
+**Month 1-3: Settle in**
+- Answer questions as they arise
+- Refine your event tracking if gaps emerge
+- Optimize custom dimensions based on what matters
+- Update any downstream integrations (Slack alerts, etc.)
+</TabItem>
+</Tabs>
+
+## What You Will Lose
+
+Be brutally honest with your team about what's gone.
+
+### 1. Google Ads Integration (Critical for paid search)
+
+GA4 can:
+- Send conversions back to Google Ads automatically
+- Build audiences in GA4, share them to Google Ads
+- Optimize Google Ads campaigns based on GA4 value
+
+Alternatives **cannot** do this. If you run Google Ads:
+- You'll need to manually track conversions via conversion tracking in Google Ads (event-based or click-based)
+- You can't sync audiences from the alternative to Google Ads
+- You'll rely on GA4/Ads native setup, not your analytics tool
+
+This is why many organizations keep GA4 even if they use Matomo or Piwik Pro as their primary tool.
+
+<Aside type="caution">
+**If you spend >$1K/month on Google Ads, don't migrate away from GA4.** Keep it for Ads integration alone.
+</Aside>
+
+### 2. Audience Sharing to Other Platforms
+
+GA4 can share audiences to:
+- Google Ads
+- DV360
+- SA360
+- Facebook (via Google Conversions API)
+- LinkedIn (via conversion sync)
+
+Alternatives require a separate CDP or manual export. If you need audience activation:
+- Piwik Pro has built-in CDP (basic)
+- Matomo requires Segment/Tealium
+- Plausible/Fathom require manual export
+
+### 3. BigQuery Export
+
+GA4 exports to BigQuery with a click. Alternatives:
+- **Matomo**: Direct database access (better than BigQuery)
+- **Piwik Pro**: Manual data export or API
+- **Plausible/Fathom**: API or CSV export
+
+If you do advanced analysis in BigQuery, switching to Matomo is easier (you get the raw database). Switching to a lightweight tool requires learning their API.
+
+### 4. Predictive Audiences & ML Features
+
+GA4 has:
+- Predicted churn (customers likely to stop visiting)
+- Predicted purchase value (LTV estimate)
+- Automatic anomaly detection
+
+**No alternative has this.** If you rely on GA4's predictions, you'll lose them. You'd need a CDP or ML-focused tool like Mixpanel.
+
+### 5. Cross-Device Tracking
+
+GA4 (with User-ID) can track:
+- Same user across devices (phone → desktop → tablet)
+- User journey across devices
+
+Alternatives can't do this reliably. If you need cross-device tracking, you're stuck with GA4 or a premium CDP.
+
+## What You Will Gain
+
+### 1. No Data Sampling (Matomo, Piwik Pro)
+
+GA4 samples at 10M+ events/month. Alternatives don't.
+
+If you have high traffic and need accurate data on every segment:
+- Matomo self-hosted: 100% data, you own it
+- Piwik Pro: 100% data, they own it
+- Plausible/Fathom: 100% data, lightweight
+
+### 2. Full Data Ownership (Matomo)
+
+Your data is 100% yours. You can:
+- Query it directly (MySQL)
+- Export it to your data warehouse
+- Sell it or use it however you want
+- Keep it forever (no 14-month window)
+
+GA4 keeps data on Google's servers with a 14-month rolling window.
+
+### 3. Simpler Dashboards (Plausible/Fathom)
+
+Lightweight tools have 1/10th the features of GA4 but 10x the clarity. If you just care about:
+- How many visitors today?
+- What are my top pages?
+- Where's my traffic coming from?
+
+Then Plausible or Fathom's simplicity is a feature, not a limitation.
+
+### 4. Cookieless Tracking Without Consent (Matomo, Piwik Pro)
+
+Matomo's cookieless mode:
+- No consent banner needed
+- Fingerprint-based visitor tracking
+- Less accurate but GDPR-compliant
+
+GA4 requires cookies (consent) to do similar tracking.
+
+### 5. Faster Page Loads
+
+Lightweight tools (Plausible, Fathom) have ~1KB scripts. GA4's ~80KB. If you're obsessed with Core Web Vitals:
+- Switching to a lightweight tool gives you a 0.1s LCP improvement
+- Not huge, but measurable
+
+## When Migration is the Wrong Answer
+
+**Keep GA4 if:**
+
+<Tabs>
+<TabItem label="You run Google Ads">
+GA4 → Ads conversion import and audience sharing is GA4's killer feature. Don't lose it for an alternative.
+</TabItem>
+<TabItem label="Your team knows GA4">
+You have expertise invested in GA4 scripting, custom events, audience logic, and dashboards. Switching costs are high.
+</TabItem>
+<TabItem label="You use BigQuery">
+GA4 → BigQuery is seamless. Alternatives require more work. Unless you're switching to Matomo (raw DB access is better).
+</TabItem>
+<TabItem label="You need predictive features">
+GA4's ML features are unique. No alternative has them. If they matter, stay.
+</TabItem>
+<TabItem label="You need cross-device tracking">
+GA4's User-ID feature is still the best. Alternatives can't match it without a CDP.
+</TabItem>
+</Tabs>
+
+**Instead of migrating: Run GA4 + an alternative in parallel.**
+
+Keep GA4 for Google Ads integration and historical data. Use the alternative for what GA4 doesn't give you (data ownership, simplicity, cookieless tracking, etc.).
+
+## Comparing Alternatives During Migration Evaluation
+
+| Tool | Best For | Hardest Transition |
+|---|---|---|
+| **Plausible** | Simplicity, privacy-first, EU | Losing custom dimensions |
+| **Fathom** | Easiest onboarding, fastest load | No ecommerce module |
+| **Matomo** | GA4-feature parity, data ownership | Self-hosting maintenance |
+| **Piwik Pro** | Regulated industries, all-in-one stack | Enterprise pricing, steeper learning curve |
+
+## Post-Migration: What Breaks
+
+Expect to fix:
+
+1. **Slack alerts** — If you had GA4 → Slack integrations, set them up in the new tool or via Zapier
+2. **Downstream dashboards** — Looker Studio, Tableau, etc. connected to GA4 will break. Rebuild them.
+3. **Custom reports** — Custom GA4 reports you'd saved need rebuilding
+4. **Team questions** — "Where do I find [metric]?" Answer 50 times a week
+5. **Historical analysis** — You can't compare year-over-year with the old tool (unless you ran parallel long enough to backfill)
+
+Plan for this. Don't surprise your team.
+
+## Recommended Path Forward
+
+**If GA4 is working**: Keep it. Add an alternative if you need something specific (data ownership, simplicity, etc.). Run both.
+
+**If GA4 is broken**: Fix it first (custom events, consent mode, etc.). Migration won't fix broken GA4 implementations.
+
+**If your use case doesn't fit GA4** (data residency, regulated industry, philosophically anti-Google): Migrate to Matomo or Piwik Pro, but keep GA4 for Google Ads integration if you run ads.
+
+**If GA4 is simple overill** (small site, basic analytics): Migrate to Plausible or Fathom. Simpler tool, simpler life.
+
+---
+
+<CardGrid>
+  <LinkCard
+    title="GA4 to Matomo Concept Map"
+    description="Detailed event and dimension mapping"
+    href="#"
+  />
+  <LinkCard
+    title="Parallel Analytics Setup in GTM"
+    description="How to fire multiple analytics tools simultaneously"
+    href="#"
+  />
+  <LinkCard
+    title="Piwik Pro vs Matomo"
+    description="Which alternative fits your use case"
+    href="#"
+  />
+  <LinkCard
+    title="Consent Management During Migration"
+    description="Keeping consent consistent across multiple tools"
+    href="#"
+  />
+</CardGrid>

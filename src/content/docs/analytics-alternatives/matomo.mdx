@@ -1,0 +1,275 @@
+---
+title: "Matomo (Self-Hosted)"
+description: "Matomo analytics setup, GTM integration, self-hosted vs cloud, ecommerce tracking, and when to choose it over GA4."
+sidebar:
+  order: 5
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Matomo is the closest feature-equivalent to GA4 in the analytics space that prioritizes data ownership. It's open-source (GPL), self-hostable, and formerly known as Piwik. If you need GA4-level features without sending data to Google, Matomo is the answer.
+
+## Self-Hosted vs Matomo Cloud
+
+Matomo comes in two flavors. Choose based on your infrastructure capacity, not feature needs — both are functionally identical.
+
+<Tabs>
+<TabItem label="Self-Hosted">
+- **Cost**: Free (you pay for server)
+- **Data ownership**: 100% — your server, your data
+- **Infrastructure**: PHP 7.2+ and MySQL 5.7+ (or MariaDB)
+- **Maintenance**: You handle updates, backups, scaling
+- **Latency**: Depends on your server
+- **Best for**: Teams with DevOps capacity, strict data residency requirements, enterprises
+
+Self-hosting requires ongoing work. You need to patch security updates, monitor disk space, handle backups, and scale the database as traffic grows. If this sounds like a burden, use Cloud.
+</TabItem>
+<TabItem label="Matomo Cloud">
+- **Cost**: ~$23/month for Pro (includes unlimited sites, users, and users)
+- **Data ownership**: Matomo servers, EU-hosted
+- **Infrastructure**: Managed by Matomo
+- **Maintenance**: Matomo handles updates and backups
+- **Latency**: Fast (Matomo's infrastructure)
+- **Best for**: Teams without DevOps, lighter compliance needs, small to medium orgs
+
+You get a managed service without the headache. Less control, but less responsibility.
+</TabItem>
+</Tabs>
+
+<Aside type="tip">
+**Recommendation**: Self-host if you have someone on your team who can SSH into a server and write a backup script. Otherwise, use Cloud.
+</Aside>
+
+## GTM Integration
+
+Matomo integrates with GTM in two ways. The direct JavaScript approach is simpler.
+
+### Method 1: GTM Template (Community)
+
+Matomo has a community-contributed template in GTM's template gallery.
+
+<Steps>
+1. In GTM, go **Templates** → **Tag Templates** → click the search icon
+2. Search for "Matomo" — look for the community template
+3. Add to your workspace
+4. Create a new Tag using the Matomo template
+5. Enter your Matomo site URL and Site ID
+6. Add an **All Pages** trigger
+7. Test with Preview/Debug
+</Steps>
+
+**Pros**: Abstraction layer, variables for Site ID, built-in error handling
+**Cons**: Depends on community maintenance, one extra abstraction
+
+### Method 2: Direct JavaScript (Simpler)
+
+Skip the template. Load Matomo directly via GTM Custom HTML.
+
+```html
+<!-- Matomo -->
+<script>
+  var _paq = window._paq = window._paq || [];
+  _paq.push(['trackPageView']);
+  _paq.push(['enableLinkTracking']);
+  (function() {
+    var u="https://your-matomo-domain.com/";
+    _paq.push(['setTrackerUrl', u+'matomo.php']);
+    _paq.push(['setSiteId', '1']); // Replace with your Site ID
+    var d=document, g=d.createElement('script'), s=d.getElementsByTagName('script')[0];
+    g.async=true; g.src=u+'matomo.js'; s.parentNode.insertBefore(g,s);
+  })();
+</script>
+```
+
+Add this via **Tags** → **New** → **Custom HTML**, trigger on All Pages.
+
+**Pros**: Simple, no template dependency, full control
+**Cons**: Raw JavaScript, no GTM variable abstraction
+
+<Aside>
+**Pro tip**: If you're running server-side tagging, you can send events directly to Matomo's HTTP Tracking API instead of client-side. Skip both approaches above and use your server.
+</Aside>
+
+## Key Features That Match GA4
+
+| Feature | GA4 | Matomo |
+|---------|-----|--------|
+| Custom dimensions | Yes | Yes (called "Custom Dimensions") |
+| Custom events | Yes | Yes (called "Goals" or custom events) |
+| Ecommerce tracking | Yes | Yes (full product/order tracking) |
+| Funnels | Yes | Yes |
+| Segments | Yes | Yes |
+| Cohorts | Limited | Yes (called "Segments") |
+| User journeys | Limited | Yes (User Flow) |
+| Session recordings | Via GA4 + Clarity | Via plugins (heatmaps.com integration) |
+| API access | Yes (Reporting API) | Yes (API for raw data) |
+
+Both are feature-complete for ecommerce and content analytics. Matomo's reporting is more flexible because you own the database.
+
+## What Matomo Does BETTER Than GA4
+
+1. **No data sampling**: Matomo never samples. 100% of hits counted, always. GA4 samples at high traffic volumes (>10M events/month).
+
+2. **Full data ownership**: Your data lives on your server or Matomo's. Not Google's servers, no data sharing with other Google products.
+
+3. **Raw data access without BigQuery**: Direct database queries or API calls. No need for BigQuery export and learning SQL.
+
+4. **Cookieless tracking without consent**: Matomo can use fingerprint-free tracking. Analytics works without a consent banner (though GDPR still applies to the tracking itself).
+
+5. **Visitor log**: Individual visit details. You can browse someone's session including every page, click, and event. GA4 removed this (you need an add-on like Clarity).
+
+6. **No data deletion**: By default, Matomo keeps all historical data. GA4 has a 14-month rolling window then deletes.
+
+7. **Custom reports from raw data**: Write ad-hoc queries. No UI limitations.
+
+## What Matomo Does WORSE Than GA4
+
+1. **No native Google Ads integration**: Can't send Matomo audiences to Google Ads, can't import Google Ads conversion data back into Matomo automatically.
+
+2. **No audience sharing**: Can't sync audiences to Facebook, LinkedIn, DV360, etc. You'd need a CDP in front.
+
+3. **No BigQuery export shortcut**: You can export via API/MySQL, but it's not a one-click like GA4 → BigQuery.
+
+4. **No predictive metrics**: GA4 has predictive churn, purchase probability, etc. Matomo doesn't (you'd add a CDP for this).
+
+5. **No machine learning features**: No automatic anomaly detection, no AI-driven insights like GA4 has.
+
+6. **Smaller community**: Fewer tutorials, plugins, and integrations compared to GA4. Stack Overflow answers are sparse.
+
+7. **Self-hosted maintenance**: If you self-host, you own the operational burden.
+
+## Server-Side Tracking
+
+Matomo supports server-to-server tracking via the HTTP Tracking API. This is useful for tracking conversions from your backend, offline orders, or server-side CRM events.
+
+```bash
+curl -X POST "https://your-matomo-domain.com/matomo.php" \
+  -d "module=API" \
+  -d "method=Tracking.trackAction" \
+  -d "idsite=1" \
+  -d "rec=1" \
+  -d "token_auth=YOUR_TOKEN" \
+  -d "url=https://yoursite.com/order-confirmed" \
+  -d "action_name=Purchase" \
+  -d "e_c=Ecommerce" \
+  -d "e_a=Order" \
+  -d "e_v=99.99"
+```
+
+Full docs: [Matomo Tracking API](https://matomo.org/docs/tracking-api/)
+
+This is how you track:
+- Completed transactions from your backend
+- Offline orders synced from your CRM
+- Server-side conversions that don't happen in the browser
+
+## Ecommerce Tracking
+
+Matomo's ecommerce module tracks the full customer journey: product views → cart → purchase.
+
+### Client-Side Events
+
+```javascript
+// Product view
+_paq.push(['setEcommerceView', '12345', 'Blue Shoe', 'Footwear', 49.99]);
+_paq.push(['trackPageView']);
+
+// Add to cart
+_paq.push(['addEcommerceItem',
+  '12345', // Product SKU
+  'Blue Shoe', // Product name
+  'Footwear', // Category
+  49.99, // Price
+  2 // Quantity
+]);
+_paq.push(['trackEvent', 'Ecommerce', 'Add to Cart']);
+
+// Purchase
+_paq.push(['addEcommerceItem', '12345', 'Blue Shoe', 'Footwear', 49.99, 2]);
+_paq.push(['trackEcommerceOrder',
+  'ORDER-123', // Order ID
+  99.98, // Grand total (with discount applied)
+  49.99, // Subtotal (before tax/shipping)
+  0, // Tax
+  20.00, // Shipping
+  'US' // Country
+]);
+_paq.push(['trackPageView']);
+```
+
+### Compare to GA4
+
+GA4 uses event-based ecommerce (no dedicated ecommerce tracking API). You fire events like:
+
+```javascript
+gtag('event', 'view_item', {
+  items: [{
+    item_id: '12345',
+    item_name: 'Blue Shoe',
+    price: 49.99
+  }]
+});
+```
+
+**Matomo's approach**: Purpose-built ecommerce tracking with a clear API.
+**GA4's approach**: Generic events with ecommerce parameters.
+
+Both work. Matomo feels more ecommerce-native; GA4 is more flexible but requires more mental mapping.
+
+## Cookieless Tracking Mode
+
+Matomo can run analytics without cookies using fingerprinting. The privacy trade-off:
+
+- **Pros**: No cookie consent needed, GDPR-compliant, lighter on users
+- **Cons**: Less accurate session detection, no cross-device tracking, fingerprints can be spoofed
+
+Enable in **Settings** → **Websites** → **Disable Cookies**. Matomo switches to IP + User-Agent fingerprinting.
+
+This is useful if you:
+- Want analytics without a consent banner
+- Target EU users with strict privacy policies
+- Prefer simplicity over precision
+
+<Aside type="caution">
+Cookieless mode is *less* accurate. You'll undercount returning visitors and sessions. Only use if privacy is worth the accuracy trade-off.
+</Aside>
+
+## When to Choose Matomo
+
+Choose Matomo if:
+
+- **Data residency is mandatory**: Your data must stay in your country/region (EU GDPR, Japan, etc.)
+- **You want GA4-level features without Google**: Full custom dimensions, ecommerce, funnels, all owned by you
+- **You have DevOps capacity**: Self-hosting is fine because you can maintain it
+- **You don't need Google Ads integration**: Your conversions don't feed Google Ads campaigns
+- **You want to avoid consent complexity**: Cookieless mode works for you
+- **Historical data access matters**: You want 5+ years of data without UI limitations
+
+## When NOT to Choose Matomo
+
+Don't choose Matomo if:
+
+- **Google Ads is core to your marketing**: You need conversion imports and audience sharing
+- **You have no DevOps team**: Cloud option exists, but costs add up
+- **You need predictive audiences**: GA4's churn/purchase prediction adds value for you
+- **BigQuery is part of your workflow**: Matomo's raw data access is good, but not as integrated
+
+---
+
+<CardGrid>
+  <LinkCard
+    title="Matomo Setup Guide"
+    description="Self-hosted installation and initial config"
+    href="https://matomo.org/docs/installation/"
+  />
+  <LinkCard
+    title="Matomo vs Piwik Pro"
+    description="How they differ after the Piwik fork"
+    href="#"
+  />
+  <LinkCard
+    title="GA4 to Matomo Migration"
+    description="Concept mapping and parallel running"
+    href="#"
+  />
+</CardGrid>

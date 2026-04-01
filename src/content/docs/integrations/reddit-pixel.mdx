@@ -1,0 +1,317 @@
+---
+title: "Reddit Conversion Pixel"
+description: "Reddit conversion pixel setup via GTM — base code, standard events, custom events, and Click ID tracking."
+sidebar:
+  order: 8
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The Reddit Conversion Pixel tracks user actions on your website for users who click Reddit ads, enabling conversion measurement, audience building, and campaign optimization. Reddit's implementation is lighter than Meta or TikTok—fewer standard events, less mature server-side support, and limited documentation.
+
+Reddit advertising works best for B2B tech companies, gaming studios, crypto projects, and niche communities where subreddit-targeted campaigns have proven ROI. If your audience lives on Reddit, the pixel is worth implementing. If not, skip it.
+
+## Prerequisites
+
+- Reddit Ads account with at least one active or paused campaign
+- Conversion Pixel ID (found in Reddit Ads Manager → Assets → Conversions)
+- A website where you can inject tracking code via GTM or directly
+
+## Setting up the Reddit Pixel via GTM
+
+Reddit does not have a widely available official GTM template. You'll implement it as a Custom HTML tag.
+
+<Steps>
+1. Log into your GTM container
+2. Go to **Tags → New**
+3. Choose **Custom HTML** as the tag type
+4. Paste the Reddit base pixel code (see below)
+5. Create a trigger for **All Pages**
+6. Save and publish
+</Steps>
+
+### Base Pixel Code (Custom HTML)
+
+```html
+<script>
+(function() {
+  window.rdt = window.rdt || function() {
+    (window.rdt.callQueue = window.rdt.callQueue || []).push(arguments);
+  };
+  window.rdt('consent', 'all');
+  window.rdt('track', 'PageVisit');
+
+  var s = document.createElement('script');
+  s.src = 'https://www.redditpixel.com/cm/{{Reddit Pixel ID}}.js';
+  s.async = true;
+  document.head.appendChild(s);
+})();
+</script>
+```
+
+Replace `{{Reddit Pixel ID}}` with a GTM variable that holds your Conversion Pixel ID (a UUID format).
+
+**What happens:**
+- `window.rdt('track', 'PageVisit')` fires on every page load
+- The pixel is loaded asynchronously to avoid render blocking
+- `window.rdt('consent', 'all')` pre-sets consent (you'll gate this with your Consent Mode logic in production—see Consent section below)
+
+<Aside type="caution">
+Do not set `consent` to `'all'` unless you have explicit user consent. Replace this with dynamic consent checks based on your Consent Mode implementation.
+</Aside>
+
+## Standard Events
+
+Reddit supports fewer standard events than Meta or TikTok. The most useful ones for conversion tracking:
+
+### PageVisit
+
+Fires automatically on page load via the base pixel. Every page triggers this event. No additional tag needed.
+
+### Purchase
+
+Fire on purchase confirmation page or order submission.
+
+```javascript
+window.rdt('track', 'Purchase', {
+  'transactionId': '{{Transaction ID}}',
+  'value': {{Order Value}},
+  'currency': '{{Currency}}'
+});
+```
+
+Create a Custom HTML tag with the above code. Trigger on a Custom Event like `purchase` or `gtag.event.purchase` from GA4.
+
+**Parameters:**
+- `transactionId` — unique order ID (string)
+- `value` — order total (number, e.g., `49.99`)
+- `currency` — ISO 4217 code (e.g., `'USD'`)
+
+### Signup
+
+Fire when a user completes registration or account creation.
+
+```javascript
+window.rdt('track', 'Signup', {
+  'email': '{{Hashed Email}}'  // Optional, pre-hash as SHA-256
+});
+```
+
+Trigger: Custom Event `signup`
+
+### ViewContent
+
+Fire on product pages or article detail pages.
+
+```javascript
+window.rdt('track', 'ViewContent', {
+  'item': {{Product ID}},
+  'itemType': 'product'  // or 'article', 'listing', etc.
+});
+```
+
+Trigger: Custom Event `view_item` or pageview with custom matching
+
+### AddToCart
+
+```javascript
+window.rdt('track', 'AddToCart', {
+  'item': {{Product ID}},
+  'itemCount': {{Quantity}},
+  'value': {{Item Price}}
+});
+```
+
+Trigger: Custom Event `add_to_cart`
+
+### Lead
+
+For form submissions, trials, consultations, etc.
+
+```javascript
+window.rdt('track', 'Lead', {
+  'leadId': '{{Lead ID}}',  // Optional
+  'leadValue': {{Value}}    // Optional, in cents
+});
+```
+
+Trigger: Custom Event `lead` or `form_submit`
+
+### Search
+
+For search queries on your site.
+
+```javascript
+window.rdt('track', 'Search', {
+  'query': '{{Search Term}}'
+});
+```
+
+<Aside type="tip">
+Reddit's event taxonomy is minimal by design. Most campaigns optimize on Purchase, Signup, and Lead. Don't over-engineer event tracking—focus on the 3-5 events that matter for your business.
+</Aside>
+
+## Custom Events
+
+You can define custom event names beyond Reddit's standard list. This is useful for niche actions like "Downloaded Report" or "Watched Demo Video."
+
+```javascript
+window.rdt('track', 'CustomEvent', {
+  'customName': 'video_watched',
+  'value': 1
+});
+```
+
+Custom events fire but may have limited optimization potential on Reddit's campaign manager (Reddit ads don't optimize bidding on custom events the way Meta does). Use custom events primarily for audience segmentation and remarketing, not primary conversion goals.
+
+## Click ID (rdt_cid) Tracking
+
+When users click a Reddit ad, Reddit appends a click ID parameter to the landing URL:
+
+```
+https://yoursite.com/landing?rdt_cid=<click_id>
+```
+
+Reddit uses this click ID to map off-site conversions back to the ad click. You need to capture and store it in a first-party cookie, then send it back with conversion events.
+
+### Capture the Click ID
+
+Create a Custom HTML tag that fires on All Pages:
+
+```javascript
+<script>
+(function() {
+  // Extract rdt_cid from URL
+  const urlParams = new URLSearchParams(window.location.search);
+  const rdtCid = urlParams.get('rdt_cid');
+
+  if (rdtCid) {
+    // Store in first-party cookie (expires in 30 days)
+    document.cookie = 'rdt_cid=' + encodeURIComponent(rdtCid) +
+                      '; path=/; max-age=' + (30 * 24 * 60 * 60) +
+                      '; SameSite=Lax; Secure';
+
+    // Push to dataLayer for use in conversion tags
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      'rdt_cid': rdtCid
+    });
+  }
+})();
+</script>
+```
+
+### Create a GTM Variable for the Click ID
+
+In GTM:
+1. Go to **Variables → User-Defined Variables → New**
+2. Choose **1st Party Cookie**
+3. Cookie Name: `rdt_cid`
+4. Save as "DL - Reddit Click ID"
+
+### Use Click ID in Conversion Events
+
+Update your Purchase (and other conversion) tags to include the click ID:
+
+```javascript
+window.rdt('track', 'Purchase', {
+  'transactionId': '{{Transaction ID}}',
+  'value': {{Order Value}},
+  'currency': '{{Currency}}',
+  'externalId': '{{DL - Reddit Click ID}}'  // Pass the rdt_cid
+});
+```
+
+Reddit matches the `externalId` to the original click to close the attribution loop.
+
+<Aside type="caution">
+The click ID expires after 30 days per Reddit's documentation. If your conversion window is longer (e.g., users purchase 45 days after clicking the ad), the rdt_cid will be stale and attribution will fail. Reddit's attribution window is typically 30 days, so this is a hard limit.
+</Aside>
+
+## Reddit Conversions API (Server-Side)
+
+Reddit offers a server-side Conversions API, but support is less mature than Meta or TikTok. It's an option if you have a server-side GTM (sGTM) setup.
+
+**Key points:**
+- Conversions API provides offline conversion import and server-to-server event sending
+- Requires generating an access token in Reddit Ads Manager
+- Less widely documented; community templates are limited
+- Deduplication uses the `externalId` parameter (same as the click ID mechanism)
+
+If you have sGTM running, consider adding a Reddit CAPI tag for critical events like Purchase or Lead. The setup mirrors the client-side flow: capture click ID, pass in events, Reddit deduplicates on match.
+
+**For most sites**, the client-side pixel alone is sufficient. Add server-side only if you have high-value conversions that need extra redundancy.
+
+## Consent Mode
+
+Reddit Pixel is an advertising/marketing tool. Gate it behind `ad_storage` consent.
+
+The simplest approach: set your Reddit pixel tag to use a **Consent initialization** trigger that requires `ad_storage` consent, instead of All Pages. All conversion event tags should also fire only when `ad_storage === 'granted'`.
+
+Alternatively, check consent manually in your Custom HTML tag:
+
+```javascript
+// Only initialize if ad_storage is granted
+if (window.dataLayer && window.gtag) {
+  gtag('consent', 'get', {
+    'callback': function(consent_status) {
+      if (consent_status['ad_storage'] === 'granted') {
+        window.rdt = window.rdt || function() {
+          (window.rdt.callQueue = window.rdt.callQueue || []).push(arguments);
+        };
+        window.rdt('track', 'PageVisit');
+        var s = document.createElement('script');
+        s.src = 'https://www.redditpixel.com/cm/{{Reddit Pixel ID}}.js';
+        s.async = true;
+        document.head.appendChild(s);
+      }
+    }
+  });
+}
+```
+
+## When to Implement Reddit Pixel
+
+**Worth it if:**
+- You run Reddit advertising campaigns (especially subreddit-targeted campaigns)
+- Your target audience actively uses Reddit (B2B tech, crypto, gaming, niche software)
+- You have meaningful ad spend and can measure conversion volume
+- You want audience building (lookalike audiences from converters)
+
+**Not worth it if:**
+- You have minimal Reddit ad spend or run only brand awareness campaigns
+- Your audience is not active on Reddit
+- You need pixel-perfect attribution (Reddit's is good but not at Meta's level)
+- Your conversion window is >30 days (Reddit's click ID expires)
+
+Reddit is growing as an advertising platform, but it's still niche. Implementation effort is moderate (lighter than Meta CAPI setup), so the bar to implement is lower—but only if you're actually spending on Reddit ads.
+
+## Troubleshooting
+
+**Pixel not firing:** Check the Network tab in DevTools for requests to `redditpixel.com`. If absent, check that your GTM tag is firing and that consent gates are not blocking it.
+
+**Events not appearing in Ads Manager:** Verify event names are exact matches (case-sensitive). Check the **Conversions** tab in Reddit Ads Manager → Assets → Conversions to see live event data.
+
+**Click ID not captured:** Ensure the `rdt_cid` query parameter is present in your landing URL (it's appended by Reddit automatically). If missing, the Reddit ad may not have been served by Reddit's system (could be a third-party tracker issue or campaign misconfiguration).
+
+**Double conversions:** If you see duplicates in Reddit Ads Manager, it's likely both the client-side pixel and server-side CAPI are firing without deduplication. Pass the same `externalId` / `rdt_cid` on both to deduplicate, or disable one method.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Meta Pixel (Client-Side)"
+    description="A more mature client-side pixel implementation with full event taxonomy."
+    href="/integrations/meta-pixel-client-side/"
+  />
+  <LinkCard
+    title="TikTok Pixel & Events API"
+    description="Another platform with dual client/server implementation and click ID tracking."
+    href="/integrations/tiktok-pixel-and-api/"
+  />
+  <LinkCard
+    title="Consent Mode & Gating"
+    description="Framework for gating pixels and APIs behind user consent."
+    href="/consent/"
+  />
+</CardGrid>

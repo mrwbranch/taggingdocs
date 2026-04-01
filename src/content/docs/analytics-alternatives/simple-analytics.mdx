@@ -1,0 +1,238 @@
+---
+title: "Simple Analytics"
+description: "Simple Analytics setup and features — the most minimal privacy-first analytics tool, no cookies, no consent, no complexity."
+sidebar:
+  order: 4
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+## What Simple Analytics Is
+
+Simple Analytics is the minimalist option. Dutch company. Zero cookies, zero personal data collected whatsoever. Not "anonymized" — literally no individual tracking at all.
+
+- **Script size**: ~1.3KB (gzipped)
+- **Data collection**: Aggregated only (page, referrer, device type, country)
+- **Consent needed**: No, anywhere (not just EU)
+- **Founded**: 2018, bootstrapped, profitable
+- **Philosophy**: "No filler, no bloat"
+
+## Key Features
+
+<Aside type="note">
+Simple Analytics is deliberately minimal. That is the entire product. If you need reporting depth, pick Plausible or Fathom. If you just want to know "how many people visited", this is it.
+</Aside>
+
+**What you get**:
+- Pageview count (with daily/weekly/monthly breakdown)
+- Top pages
+- Traffic source (referrer)
+- UTM parameter parsing
+- Device type (desktop, mobile, tablet)
+- Country/language
+- Event goals (simple, no properties)
+- Email reports
+
+**What you don't get**:
+- Custom event properties
+- User segments
+- Filtering beyond basic dimensions
+- Historical data export
+- API access (limited)
+
+## Implementation
+
+<Steps>
+
+1. **Direct script embed**
+
+   ```html
+   <script async src="https://scripts.simpleanalyticscdn.com/latest.js"></script>
+   <noscript><img src="https://queue.simpleanalyticscdn.com/noscript.gif" alt="" referrerpolicy="no-referrer-when-downgrade" /></noscript>
+   ```
+
+   That's it. Add to your `<head>`. No configuration needed.
+
+2. **Verify it's working**
+
+   Open your site, check the browser DevTools Network tab. You should see requests to `queue.simpleanalyticscdn.com`.
+
+3. **Via GTM (not recommended)**
+
+   You *can* load Simple Analytics through GTM, but it defeats the purpose. The advantage of Simple Analytics is that it can't be blocked. Loading through GTM changes that.
+
+4. **Subdomain proxy for ad blockers**
+
+   If ad blockers are impacting traffic:
+
+   ```html
+   <script async src="https://yourdomain.com/stats/latest.js"></script>
+   ```
+
+   Configure the proxy in Simple Analytics settings. It acts as a transparent forward to their servers.
+
+</Steps>
+
+## Custom Events
+
+Simple Analytics event tracking is minimal by design:
+
+```javascript
+// Basic event
+sa_event('signup');
+
+// Event with callback
+sa_event('download', {
+  callback: () => console.log('event tracked')
+});
+
+// Form submission
+document.querySelector('form').addEventListener('submit', () => {
+  sa_event('form_submitted');
+});
+
+// Button click
+document.querySelector('.cta').addEventListener('click', () => {
+  sa_event('cta_clicked');
+});
+
+// Purchase/conversion (value in cents)
+sa_event('purchase', {
+  callback: () => window.location.href = '/thank-you'
+});
+```
+
+**Important**: Simple Analytics events don't support custom properties. You're tracking that an event happened, not the details. If you need to know *which* product was purchased, you need a different tool.
+
+## UTM Tracking
+
+Simple Analytics automatically captures:
+- `utm_source` — Traffic source
+- `utm_medium` — Campaign medium
+- `utm_campaign` — Campaign name
+- `utm_content` — Creative/content identifier
+- `utm_term` — Search term
+
+Filter by UTM in the dashboard. No manual setup required.
+
+## What You Give Up vs GA4 (and Plausible)
+
+Simple Analytics has narrower scope than Plausible, which has narrower scope than GA4:
+
+| Capability | GA4 | Plausible | Fathom | Simple Analytics |
+|------------|-----|-----------|--------|------------------|
+| Event properties | Yes | Yes | Yes | No |
+| Segments | Yes | No | No | No |
+| Filtering | Advanced | Basic | Moderate | Very basic |
+| Custom dimensions | Yes | No | No | No |
+| BigQuery export | Yes | No | No | No |
+| API | Yes | Paid | No | Very limited |
+| Funnel analysis | Yes | No | No | No |
+| Revenue tracking | Yes | Basic | Basic | No properties |
+
+**When Simple Analytics breaks down**:
+- Need to know which product sold → Not available
+- Need to segment users → Not possible
+- Need to filter by multiple dimensions → Very limited
+- Need historical data export → Not available
+- Need audience building → Not possible
+
+## Pricing
+
+- **Up to 100K pageviews/month**: $9
+- **Up to 500K pageviews/month**: $24
+- **Up to 2M pageviews/month**: $99
+- **Custom**: Anything larger
+
+Better value at scale than Plausible. No free tier.
+
+## When to Choose Simple Analytics
+
+✅ **Good fit**:
+- Blogs and content sites (just want traffic count)
+- Personal projects
+- Teams that want absolute simplicity
+- Sites where "how many visitors" is the only metric
+- Strict privacy positioning (zero data collection is a selling point)
+- Early-stage startups (cheap, no config overhead)
+
+❌ **Bad fit**:
+- Any need for event properties
+- Segmentation required
+- Complex dashboards
+- Revenue/ecommerce tracking
+- Teams that want API access
+- Historical reporting
+
+## Features That Make Simple Analytics Unique
+
+### Tweet Viewer
+Simple Analytics has a quirky feature: shows tweets linking to your pages. Useful for content/media sites to see social traction without integration complexity.
+
+### AI Insights
+Newer feature: "Fathom-style" automated insights. Highlights anomalies and trends. Still basic compared to GA4.
+
+### Annual Reports
+Generate an annual performance report automatically. Good for year-end sharing.
+
+## Simple Analytics vs Plausible vs Fathom
+
+| Need | Best Choice |
+|------|-------------|
+| Absolute minimum, just pageviews | Simple Analytics |
+| Pageviews + events + props | Plausible |
+| Pageviews + events + reporting automation | Fathom |
+| Complex analysis, BigQuery export | GA4 |
+
+## When Simple Analytics Feels Like Too Much
+
+If even Simple Analytics feels feature-heavy, consider:
+
+- **Pagecounts** (pagecounts.io): ~500 bytes. Literally just pageview count.
+- **Minimal Analytics** (m.a.at.gl): Simple pageview counter. Free.
+- **Cabin** (cabin.app): Similar to Simple Analytics, slightly more features.
+
+But honestly, at that point you're not getting analytics — you're just getting a traffic counter.
+
+## Migration from GA4 to Simple Analytics
+
+**What you'll lose**:
+- All user-level insights
+- All event properties
+- All custom dimensions
+- Conversion tracking depth
+- Historical data
+
+**What you'll gain**:
+- Zero compliance overhead
+- No consent banners
+- Unblockable tracking
+- Sub-100ms page load impact
+- $9/month vs GA4's infrastructure cost
+
+Worth it if you don't need the depth.
+
+## Related Resources
+
+<CardGrid>
+  <LinkCard
+    title="Privacy-First Analytics Comparison"
+    description="Simple vs Plausible vs Fathom vs GA4"
+    href="/analytics-alternatives/comparison"
+  />
+  <LinkCard
+    title="GDPR and Analytics Tools"
+    description="Why cookie-free matters and how it changes compliance"
+    href="/guides/gdpr-analytics"
+  />
+  <LinkCard
+    title="Plausible Analytics"
+    description="More features, similar philosophy"
+    href="/analytics-alternatives/plausible"
+  />
+  <LinkCard
+    title="Fathom Analytics"
+    description="Similar to Plausible with email reporting"
+    href="/analytics-alternatives/fathom"
+  />
+</CardGrid>

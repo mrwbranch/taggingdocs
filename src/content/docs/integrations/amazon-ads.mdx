@@ -1,0 +1,239 @@
+---
+title: "Amazon Attribution & Ads Pixel"
+description: "Amazon Attribution tag and Amazon Ads pixel setup via GTM for measuring off-Amazon traffic and DSP campaigns."
+sidebar:
+  order: 9
+---
+
+import { Aside, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Amazon's advertising ecosystem is a walled garden. Unlike Meta or TikTok, Amazon doesn't offer a unified pixel + API framework. Instead, you get two separate tools: **Amazon Attribution** (for measuring off-site traffic that leads to Amazon purchases) and **Amazon DSP Pixel** (for measuring conversions from Amazon's demand-side platform display campaigns).
+
+Both are niche. Implement only if you're actively running campaigns on Amazon's platforms and need to measure external traffic impact.
+
+## Two Tools, Two Scenarios
+
+### Amazon Attribution
+**Use case:** You sell products on Amazon. You run ads elsewhere (Google, Facebook, your own site) and want to know: "Did this external traffic influence my Amazon sales?"
+
+Attribution tracks user journeys from external channels (your landing pages, ads) to Amazon purchase pages. The tag reports back to Amazon's dashboard—attribution data stays within Amazon's ecosystem and does not connect to GA4 or other analytics platforms.
+
+### Amazon DSP Pixel
+**Use case:** You're running display campaigns via Amazon DSP (Demand-Side Platform). You need to measure conversions, build audiences, and remarket to users who saw your ads.
+
+DSP pixel tracks standard events (View, Add to Cart, Purchase) from visitors who clicked or were exposed to your DSP campaigns.
+
+---
+
+## Amazon Attribution Tag (For Sellers)
+
+If you sell on Amazon and want to measure the impact of external traffic on your Amazon sales, implement the Attribution tag.
+
+### Step 1: Get your Attribution Tag
+
+1. Log into **Amazon Seller Central** or **Amazon Advertising Console**
+2. Go to **Advertising → Attribution**
+3. Create a new Attribution tag or copy an existing one
+4. Amazon provides a snippet in one of two formats:
+   - **Image pixel** (older, simpler)
+   - **JavaScript snippet** (newer, more flexible)
+
+Copy the tag ID (a UUID or alphanumeric code).
+
+### Step 2: Install via GTM (Custom HTML)
+
+In GTM, create a **New Tag → Custom HTML**. You have two format options:
+
+**Option A: Image Pixel approach (simpler)**
+
+```html
+<img src="https://aax-us-west.amazon-adsystem.com/x/uds/v1/{{Amazon Attribution ID}}/pixel.gif" alt="" style="display:none;" />
+```
+
+Replace `{{Amazon Attribution ID}}` with a GTM variable holding your Attribution tag ID. Set trigger to **All Pages**, save and publish.
+
+**Option B: JavaScript approach (more control)**
+
+```html
+<script>
+(function() {
+  var amznAds = amznAds || {};
+  amznAds.AttributionId = '{{Amazon Attribution ID}}';
+  amznAds.pageType = 'general';  // or 'product', 'cart', 'purchase' — optional
+
+  var s = document.createElement('script');
+  s.src = 'https://c.amazon-adsystem.com/aax2/apstag.js';
+  s.async = true;
+  document.head.appendChild(s);
+})();
+</script>
+```
+
+For **page-type specific** tracking, create separate tags with different `pageType` values:
+- `pageType: 'product'` on product pages
+- `pageType: 'cart'` on cart/checkout pages
+- `pageType: 'purchase'` on thank-you pages (optional, Amazon can infer this)
+
+Set triggers accordingly (pageview with URL matching, custom events, etc.).
+
+<Aside type="caution">
+Amazon Attribution is **not a standard event tracker**. It doesn't fire discrete events like "Purchase" or "AddToCart." Instead, it places a user identifier on your site and Amazon correlates that to Amazon purchase events in their backend. The tag is passive—it just sits there and observes user behavior.
+
+You don't get event-level data back. Attribution data is accessed through Amazon's Attribution dashboard, not your analytics platform.
+</Aside>
+
+---
+
+## Amazon DSP Pixel (For DSP Campaigns)
+
+If you're running Amazon DSP display campaigns, Amazon provides a conversion pixel to measure campaign performance.
+
+### Step 1: Get your DSP Pixel ID
+
+1. Log into **Amazon Advertising Console**
+2. Go to **Display Ads** or **Demand-Side Platform (DSP)**
+3. Navigate to **Pixels** or **Audience Manager**
+4. Create a new pixel or copy an existing one
+5. Amazon provides:
+   - **Pixel ID** (alphanumeric code)
+   - **Snippet code** (either image or JavaScript)
+
+### Step 2: Install via GTM
+
+In GTM, create a **New Tag → Custom HTML** for the base pixel:
+
+```html
+<img src="https://c.amazon-adsystem.com/dsp/v1/{{DSP Pixel ID}}/pixel.gif" alt="" style="display:none;" />
+```
+
+For conversion tracking, create separate tags for each event type:
+
+**Purchase conversion:**
+
+```html
+<img src="https://c.amazon-adsystem.com/dsp/v1/{{DSP Pixel ID}}/pixels/purchase?value={{Order Value}}&currency={{Currency}}" alt="" style="display:none;" />
+```
+
+Query parameters: `value` (purchase amount as number), `currency` (ISO 4217 code, e.g. `USD`).
+
+**Add to Cart conversion:**
+
+```html
+<img src="https://c.amazon-adsystem.com/dsp/v1/{{DSP Pixel ID}}/pixels/addtocart?value={{Item Price}}" alt="" style="display:none;" />
+```
+
+**View conversion (page view):**
+
+```html
+<img src="https://c.amazon-adsystem.com/dsp/v1/{{DSP Pixel ID}}/pixels/view" alt="" style="display:none;" />
+```
+
+Set appropriate triggers: All Pages for view, Custom Event `purchase` for purchases, etc. Save and publish.
+
+<Aside type="tip">
+DSP pixel is simpler than a full event framework. It primarily tracks Purchases, Add to Cart, and Views. No advanced matching (email hashing, user IDs, etc.). It's bare-bones but functional.
+</Aside>
+
+---
+
+## Building Audiences with Amazon DSP Pixel
+
+DSP pixel data can be used to build remarketing audiences in Amazon's ecosystem.
+
+**Common audience types:**
+- **Converters:** Users who completed a purchase
+- **Browsers:** Users who viewed your site but didn't convert
+- **Abandoned Cart:** Users who added items but didn't purchase
+
+Create these audiences in Amazon Advertising Console → Audience Manager, then use them to:
+- Retarget with display campaigns
+- Exclude converters from acquisition campaigns
+- Build lookalike audiences
+
+---
+
+## Why Amazon Attribution/DSP Integration is Limited
+
+Amazon's approach differs fundamentally from Meta or TikTok:
+
+1. **No unified API:** Amazon doesn't offer a conversion API. Data flows one way—pixels phone home, but you don't get structured event data back.
+
+2. **No event parameters:** You can't pass SKU, category, or user data in the same flexible way as Meta or TikTok. Simple query string parameters for purchase value/currency, that's it.
+
+3. **No first-party data import:** Unlike Meta, you can't upload customer lists or CRM data back to Amazon for matching. Attribution is cookie-based only.
+
+4. **Ecosystem silo:** Attribution data lives in Amazon's dashboard. No webhooks, no API export, no real-time sync to your CDP or data warehouse.
+
+5. **Conversion window:** Amazon Attribution uses a 30-day click window, similar to other platforms, but windows are not customizable.
+
+This maturity gap reflects Amazon's position: they sell advertising, but they're not yet positioned as a primary marketing attribution platform like Google or Meta. For them, advertising is a secondary business to marketplace/AWS.
+
+---
+
+## Consent Mode
+
+Both tags track user behavior for advertising purposes and should be gated behind `ad_storage` consent.
+
+The simplest approach: create your Amazon tags with a **Consent initialization** trigger that requires `ad_storage` consent, instead of an All Pages trigger. GTM will only fire the tag when the user has granted marketing consent.
+
+Alternatively, wrap tags in a manual consent check:
+
+```html
+<script>
+if (window.gtag && window.dataLayer) {
+  gtag('consent', 'get', {
+    'callback': function(consent_status) {
+      if (consent_status['ad_storage'] === 'granted') {
+        var img = document.createElement('img');
+        img.src = 'https://aax-us-west.amazon-adsystem.com/x/uds/v1/{{ID}}/pixel.gif';
+        img.style.display = 'none';
+        document.body.appendChild(img);
+      }
+    }
+  });
+}
+</script>
+```
+
+---
+
+## When to Implement Amazon Tracking
+
+**Implement Amazon Attribution if:**
+- You actively sell on Amazon
+- You run external advertising (Google, Facebook, email, content) and want to correlate it to Amazon sales
+- You have non-trivial external traffic volumes
+- You're willing to access Attribution data only in Amazon's dashboard (not a centralized analytics platform)
+
+**Implement Amazon DSP Pixel if:**
+- You run Amazon DSP display campaigns
+- You want to measure conversions from those campaigns and build audiences
+- You're okay with simple event tracking (no advanced event parameters)
+
+**Skip both if:**
+- You don't sell on Amazon
+- You don't run Amazon DSP campaigns
+- Your audience is not reachable via Amazon's platforms
+- You need pixel-perfect attribution data in your analytics platform (won't happen with Amazon)
+
+---
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Meta Pixel (Client-Side)"
+    description="A more mature, API-rich pixel implementation for comparison."
+    href="/integrations/meta-pixel-client-side/"
+  />
+  <LinkCard
+    title="Consent Mode & Gating"
+    description="Framework for gating pixels behind user consent."
+    href="/consent/"
+  />
+  <LinkCard
+    title="Google Ads Pixel (Floodlight)"
+    description="Google's parallel pixel system for display and search campaigns."
+    href="/integrations/google-ads-floodlight/"
+  />
+</CardGrid>

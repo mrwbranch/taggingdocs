@@ -1,0 +1,241 @@
+---
+title: "Fathom Analytics"
+description: "Fathom Analytics setup, features, and when to choose it — privacy-first analytics with EU isolation and intelligent bot filtering."
+sidebar:
+  order: 3
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+## What Fathom Is
+
+Fathom is privacy-first analytics positioned directly against Plausible. Canadian company, profitable, growing. Similar market pitch: lightweight, cookie-free, no consent banner needed (EU). But with some meaningful differentiators.
+
+- **Script size**: ~2.5KB (gzipped) — slightly heavier than Plausible
+- **Infrastructure**: Cloud-hosted with EU data isolation option
+- **Founded**: 2019, same vintage as Plausible
+- **Reporting**: Email reporting built in
+
+## Key Differences from Plausible
+
+| Aspect | Fathom | Plausible |
+|--------|--------|-----------|
+| Bot filtering | Intelligent (aggressive) | Basic |
+| EU isolation | Optional EU servers | Default EU-only |
+| Email reports | Unlimited | Not available |
+| Dashboard filtering | More granular | More basic |
+| Self-hosting | No | Yes (CE) |
+| Pricing entry | $15/month | $9/month |
+| Script size | ~2.5KB | ~1KB |
+| Pageview limits | More generous | More conservative |
+
+**Bottom line**: Fathom is Plausible with better reporting automation and bot filtering. Trade-off: $6/month more, no self-hosting option.
+
+## Implementation
+
+<Steps>
+
+1. **Direct script embed (recommended)**
+
+   Add this to your site's `<head>`:
+
+   ```html
+   <script src="https://cdn.usefathom.com/script.js" data-site="XXXXX" defer></script>
+   ```
+
+   Replace `XXXXX` with your site ID from Fathom dashboard.
+
+2. **Custom domain for script serving**
+
+   Unlike Plausible, Fathom includes a built-in feature to serve the script through your own domain. This improves ad blocker avoidance without additional proxy setup:
+
+   ```html
+   <script src="https://yourdomain.com/fathom.js" data-site="XXXXX" defer></script>
+   ```
+
+   Configure this in Fathom's settings. The script is automatically available at your custom domain after setup.
+
+3. **Via GTM (not recommended)**
+
+   You can load Fathom through Google Tag Manager, but same caveats apply as Plausible:
+   - GTM is more aggressively blocked than direct script loads
+   - You lose the lightweight advantage
+   - If using GTM anyway, consider GA4 instead
+
+4. **Content Security Policy (CSP)**
+
+   If you have CSP headers, allow Fathom:
+
+   ```
+   script-src 'self' https://cdn.usefathom.com https://yourdomain.com;
+   connect-src 'self' https://api.usefathom.com;
+   ```
+
+</Steps>
+
+## Custom Events
+
+Fathom's event API is simpler than Plausible's:
+
+```javascript
+// Basic event
+window.fathom.trackEvent('Signup');
+
+// Event with value (in cents)
+window.fathom.trackEvent('Purchase', {
+  value: 9999 // $99.99
+});
+
+// Event with custom properties
+window.fathom.trackEvent('Form Submission', {
+  value: 5000,
+  custom: {
+    form_type: 'contact',
+    plan: 'premium'
+  }
+});
+
+// Form tracking
+document.querySelector('#signup-form').addEventListener('submit', (e) => {
+  window.fathom.trackEvent('Newsletter Signup', {
+    custom: {
+      email_captured: 'yes'
+    }
+  });
+});
+
+// Button click tracking
+document.querySelector('.cta-button').addEventListener('click', () => {
+  window.fathom.trackEvent('CTA Click', {
+    custom: {
+      button_text: 'Get Started'
+    }
+  });
+});
+```
+
+<Aside type="tip">
+Fathom automatically tracks UTM parameters and referrer information. You don't need to manually capture these — they're available in the dashboard filtered by source.
+</Aside>
+
+## UTM and Referrer Tracking
+
+Fathom automatically parses:
+- **UTM parameters**: `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term`
+- **Referrer sources**: Direct, organic, referral (broken down by domain)
+- **Device categorization**: Desktop, mobile, tablet
+- **Browser and OS**: Automatically detected
+
+No custom configuration needed. Filter your dashboard by any of these dimensions.
+
+## Bot Filtering
+
+Fathom's bot filtering is more aggressive than Plausible's. It filters out:
+- Identified bots and crawlers
+- Devices without user agents
+- Suspicious traffic patterns
+- Known bot networks
+
+If you see a significant traffic drop after switching from GA4 (20-40% is normal), much of this is bot traffic that GA4 was counting.
+
+## What You Give Up vs GA4
+
+Same fundamental trade-offs as Plausible, but slightly different emphasis:
+
+- **No funnel analysis** — Can't visualize multi-step drop-off
+- **No path exploration** — Can't map user journeys
+- **No ecommerce item-level data** — Revenue only, no SKU-level tracking
+- **No custom dimensions** — Properties on events only
+- **No segments** — Can't split data by user attributes
+- **No BigQuery export** — API and CSV export only
+- **No cross-device tracking** — Mobile and desktop separate
+
+If you need any of these capabilities, GA4 or a hybrid approach is better.
+
+## Pricing
+
+- **100K pageviews/month**: $15
+- **500K pageviews/month**: $35
+- **1M+ pageviews/month**: Custom
+
+More generous pageview limits than Plausible at equivalent price points. No free tier.
+
+## Email Reports
+
+Fathom's real advantage over Plausible: automated reporting.
+
+- **Weekly reports**: Automatic email with key metrics (visitors, pageviews, top pages)
+- **Monthly reports**: Comprehensive performance overview
+- **Custom frequency**: Configure reporting cadence per site
+- **Shareable links**: Send read-only dashboard links to stakeholders
+
+This is valuable for teams that need executive visibility without requiring dashboard access.
+
+## EU Data Isolation
+
+If data residency is a strict requirement (GDPR, SCHREMS II, data localization laws), Fathom offers EU isolation:
+
+- All data processed within EU infrastructure
+- No transfer to US servers
+- GDPR compliant by default
+
+Toggle this in your site settings. No performance impact.
+
+## When to Choose Fathom
+
+✅ **Good fit**:
+- Content/marketing sites that need email reporting
+- Teams valuing EU data isolation
+- Aggressive bot filtering important (high spam traffic)
+- Need slightly more granular filtering than Plausible
+- Want custom domain script serving without proxy complexity
+
+❌ **Bad fit**:
+- Budget-conscious (Plausible is cheaper)
+- Self-hosting required (not available)
+- Need Plausible's open-source ecosystem
+- Lightweight script size critical (Plausible is ~60% smaller)
+
+## Fathom vs Plausible: When to Choose Each
+
+**Pick Fathom if**:
+- Email reporting is important
+- EU data isolation is mandatory
+- Bot traffic is a significant problem
+- You prefer cloud-only (no self-hosting considerations)
+
+**Pick Plausible if**:
+- Budget is tight ($9 vs $15/month matters at scale)
+- You want self-hosting option
+- You want the lightest possible script
+- Complexity is a feature (Plausible's dashboard is even simpler)
+
+## Related Resources
+
+<CardGrid>
+  <LinkCard
+    title="Fathom vs Plausible: Deep Comparison"
+    description="Side-by-side feature comparison and decision matrix"
+    href="/analytics-alternatives/comparison"
+  />
+  <LinkCard
+    title="Privacy-First Analytics Guide"
+    description="Why cookie-free analytics matter for compliance"
+    href="/guides/privacy-analytics"
+  />
+  <LinkCard
+    title="Migrating from GA4 to Fathom"
+    description="Setup, configuration, and data mapping"
+    href="/guides/ga4-to-fathom"
+  />
+  <LinkCard
+    title="Plausible Analytics"
+    description="Fathom's primary competitor with self-hosting"
+    href="/analytics-alternatives/plausible"
+  />
+  <LinkCard
+    title="Simple Analytics"
+    description="Even more minimal alternative"
+    href="/analytics-alternatives/simple-analytics"
+  />
+</CardGrid>

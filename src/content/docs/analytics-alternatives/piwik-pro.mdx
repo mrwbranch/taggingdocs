@@ -1,0 +1,269 @@
+---
+title: "Piwik Pro"
+description: "Piwik Pro analytics platform — enterprise-grade privacy analytics with built-in consent management, tag manager, and customer data platform."
+sidebar:
+  order: 6
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Piwik Pro is enterprise-grade analytics built from the ground up for regulated industries. It's a completely separate product from Matomo (originally forked, now independent). If you need an all-in-one stack — analytics, tag manager, consent manager, CDP — Piwik Pro consolidates all of it.
+
+## What Piwik Pro Is
+
+A Polish company's enterprise take on privacy analytics. Four integrated modules:
+
+- **Analytics**: The analytics engine (core product)
+- **Tag Manager**: Built-in TMS (competes with GTM, Adobe Launch)
+- **Consent Manager**: Built-in CMP (competes with Cookiebot, OneTrust)
+- **Customer Data Platform**: Audience building and activation
+
+All four are integrated. One dashboard. One data flow. One vendor.
+
+## The Integrated Suite
+
+The key difference from Matomo: Piwik Pro is all-in-one.
+
+### You Probably Don't Need GTM
+
+If you're evaluating Piwik Pro, you might not need Google Tag Manager. Piwik Pro's Tag Manager handles:
+- Event tagging without client-side code changes
+- Consent-aware firing (respects user consent state)
+- Built-in integrations (Facebook Pixel, Google Ads, etc.)
+- Version control and rollback
+
+This simplifies your stack: **Piwik Pro Tag Manager + Piwik Pro Analytics** vs. **GTM + GA4 + separate CMP**.
+
+### If You Keep GTM
+
+If you choose to run GTM alongside Piwik Pro, integrate it like Matomo:
+
+```html
+<!-- Piwik Pro custom HTML tag in GTM -->
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('consent', 'default', {
+    'analytics_storage': 'denied'
+  });
+  // Piwik Pro tracker code
+  var ppTrackerSettings = {"token":"YOUR_TOKEN"};
+  (function() {
+    var d = document, g = d.createElement('script'), s = d.getElementsByTagName('script')[0];
+    g.type = 'text/javascript'; g.async = true; g.src = 'https://YOUR_DOMAIN.piwik.pro/ppms.js';
+    s.parentNode.insertBefore(g, s);
+  })();
+</script>
+```
+
+But honestly: if you're choosing Piwik Pro, **use their Tag Manager instead**. You're paying for the integration anyway.
+
+## Key Features
+
+### Analytics Module
+
+Piwik Pro analytics covers everything GA4 does:
+
+| Feature | Piwik Pro |
+|---------|-----------|
+| Custom reports | Yes |
+| Funnels | Yes |
+| User flows | Yes |
+| Ecommerce tracking | Yes (full) |
+| Custom dimensions | Yes |
+| Custom metrics | Yes |
+| Sessions & user data | Yes (100% — no sampling) |
+| Segments & cohorts | Yes |
+| Heatmaps | Via plugins |
+| Session recordings | Via plugins |
+| Raw data export | Yes (API + custom exports) |
+
+### Built-In Consent Manager
+
+This is the differentiator. Instead of bolting on a separate CMP like Cookiebot:
+
+- One consent interface managed in Piwik Pro
+- Consent states automatically control which data analytics collects
+- TCF v2.2 compliant (EU consent framework)
+- No integration overhead — it just works
+
+When a user denies analytics consent in Piwik Pro's CMP, the analytics tag won't fire. No GTM conditional logic needed. No second CMP sync needed.
+
+### Tag Manager (Piwik Pro's Own)
+
+**Should you use it instead of GTM?**
+
+**Use Piwik Pro's TM if**:
+- You're buying Piwik Pro anyway (no additional cost)
+- You want consent handling built-in (no separate CMP)
+- You want a simpler tag management experience
+- Your team doesn't already know GTM
+
+**Stick with GTM if**:
+- Your team knows GTM deeply
+- You have 20+ other data destinations (GTM integrates with more)
+- You need Google's template library and community support
+- You run multiple properties in GTM (easier multi-site management)
+
+Piwik Pro's TM is not as mature as GTM, but it's sufficient for most analytics setups.
+
+### Customer Data Platform
+
+Segment audiences in Piwik Pro and activate them:
+- Sync audiences to Google Ads (like GA4 does)
+- Export to Segment, Tealium, or webhooks
+- Use for on-site personalization via API
+
+Basic CDP features. Not enterprise-grade like Segment or Tealium, but useful if you have simple activation needs.
+
+## Pricing
+
+- **Free**: Up to 500K actions/month. Includes all modules (full-featured free tier)
+- **Pro**: €100/month for unlimited actions
+- **Enterprise**: Custom pricing for on-premises, private cloud, dedicated support
+
+The free tier is generous. Pro is reasonable. Enterprise is for regulated industries (healthcare, gov) that need on-premises.
+
+<Aside type="tip">
+Start free, upgrade to Pro only when you exceed 500K actions/month. No feature gating — you get everything at every tier.
+</Aside>
+
+## When to Choose Piwik Pro
+
+Choose Piwik Pro if:
+
+1. **You're in a regulated industry**: Healthcare, finance, government, EU public sector. Piwik Pro's compliance and on-premises options are built-in.
+
+2. **You want one vendor for analytics + TMS + CMP**: Simplify your stack. One dashboard, one data flow, one support contact.
+
+3. **Your policy is "no Google products"**: Organizations that explicitly avoid Google (sometimes for competitive, sometimes for privacy reasons).
+
+4. **You want consent management built-in**: No integration headaches between GTM, Cookiebot, and GA4. One system handles it all.
+
+5. **You need an all-in-one upgrade from GA4**: GA4 + GTM + OneTrust/Cookiebot is three vendors. Piwik Pro is one.
+
+6. **Data residency is strict**: EU hosting, private cloud, on-premises options all available.
+
+## When NOT to Choose Piwik Pro
+
+Don't choose Piwik Pro if:
+
+1. **Google Ads conversion import is critical**: Piwik Pro can send audiences to Ads, but doesn't import conversions back. GA4's two-way sync is tighter.
+
+2. **Your team loves GA4**: If GA4 meets your needs and your team is expert in it, switching costs are high.
+
+3. **You run multiple GTM properties**: GTM's multi-container setup is powerful. Piwik Pro's TM is single-property focused.
+
+4. **You need predictive audiences**: GA4's churn/purchase probability. Piwik Pro doesn't have this.
+
+5. **BigQuery is part of your stack**: GA4 → BigQuery is seamless. Piwik Pro data export is manual.
+
+6. **You're a small team on a tight budget**: Free tier is good, but Pro pricing adds up. GA4 is free and covers 90% of needs.
+
+## Concept Mapping: Piwik Pro vs GA4
+
+| GA4 | Piwik Pro |
+|-----|-----------|
+| Event | Event (same concept) |
+| Custom dimension | Custom dimension (same) |
+| Audience | Segment (more capable) |
+| Custom metric | Metric (same) |
+| Conversion | Goal (same concept) |
+| Ecommerce event | Ecommerce item (more structured) |
+| User ID | Custom user dimension |
+| Session | Session (auto-tracked) |
+
+Conceptually, they're nearly identical. Piwik Pro is more structured for ecommerce. GA4 is more flexible for custom events.
+
+## GTM + Piwik Pro: Should You Run Both?
+
+**Running GTM alongside Piwik Pro's TM**:
+
+<Tabs>
+<TabItem label="Why You Might">
+- Your team knows GTM
+- You use GTM for other vendors (Facebook, LinkedIn, etc.)
+- GTM's template library has tools Piwik Pro TM doesn't
+- You want to keep GA4 running parallel for comparison
+</TabItem>
+<TabItem label="Why You Shouldn't">
+- Redundant tag management (GTM + Piwik Pro TM)
+- Consent handling is split (GTM + Piwik Pro CMP = complexity)
+- Overkill for most organizations
+- Costs time and attention
+</TabItem>
+</Tabs>
+
+**Recommendation**: If you're choosing Piwik Pro, commit to their full stack. Use Piwik Pro TM + Piwik Pro CMP + Piwik Pro Analytics. It's built to work together. Don't add GTM unless you have other non-analytics vendors that require it.
+
+## Ecommerce Tracking
+
+Piwik Pro has structured ecommerce tracking:
+
+```javascript
+// Track product view
+ppms.push(['ecommerceProductView', {
+  productName: 'Blue Shoe',
+  productSKU: '12345',
+  category: 'Footwear',
+  price: 49.99
+}]);
+
+// Track add to cart
+ppms.push(['ecommerceAddToCart', {
+  productName: 'Blue Shoe',
+  productSKU: '12345',
+  category: 'Footwear',
+  price: 49.99,
+  quantity: 2
+}]);
+
+// Track purchase
+ppms.push(['ecommerceOrder', {
+  orderID: 'ORDER-123',
+  grandTotal: 99.98,
+  subTotal: 49.99,
+  tax: 0,
+  shipping: 20.00,
+  country: 'US'
+}]);
+```
+
+Clean and purpose-built. GA4's event-based approach is more flexible but requires mapping.
+
+## Compliance & Data Residency
+
+Piwik Pro's core selling point:
+
+- **EU hosting default**: Data doesn't leave Europe (GDPR native)
+- **Private cloud**: Deploy Piwik Pro on your own infrastructure
+- **On-premises**: Full control, full compliance
+- **Data Processing Agreements**: DPA template ready to go
+- **SOC 2 Type II**: Enterprise compliance certifications
+
+This is why regulated industries choose Piwik Pro. Not because the analytics is better, but because the compliance is transparent and built-in.
+
+## Related Resources
+
+<CardGrid>
+  <LinkCard
+    title="Piwik Pro Official Docs"
+    description="Full product documentation and setup guides"
+    href="https://help.piwik.pro/"
+  />
+  <LinkCard
+    title="Piwik Pro vs Matomo"
+    description="Differences between the two forked products"
+    href="#"
+  />
+  <LinkCard
+    title="Migrating from GA4 to Piwik Pro"
+    description="Step-by-step guide and metric mapping"
+    href="#"
+  />
+  <LinkCard
+    title="Consent Management Deep Dive"
+    description="How Piwik Pro's CMP works without extra tools"
+    href="#"
+  />
+</CardGrid>

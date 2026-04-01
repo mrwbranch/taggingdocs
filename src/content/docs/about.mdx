@@ -1,0 +1,60 @@
+---
+title: "About TaggingDocs"
+description: "Who builds TaggingDocs, why it exists, and how it stays independent."
+sidebar:
+  order: 0
+---
+
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+TaggingDocs is a free, open-source reference for Google Tag Manager and Google Analytics 4. It exists because Google's official documentation is comprehensive but not opinionated — and practitioners need practical guidance, not a list of every possible option.
+
+## Why this exists
+
+If you have ever searched "how to set up cross-domain tracking in GTM" and landed on a page that explains what cross-domain tracking is without telling you how to actually do it, you understand the problem.
+
+Google's documentation covers features. TaggingDocs covers implementations. Every page is written to help you do something — with real code, real configurations, and real-world gotchas that only surface when you are debugging at 2am.
+
+## Editorial philosophy
+
+TaggingDocs is **opinionated by design**.
+
+When there are five ways to implement something, we tell you which one works and why. We do not document every option for completeness — we recommend the best approach based on years of production experience.
+
+This means:
+- We recommend specific naming conventions, not "choose whatever works for your team"
+- We tell you when a feature is not worth using, even if Google promotes it
+- We include the edge cases and failure modes that official docs skip
+- We say "do not do this" when something is a bad idea
+
+## Independence
+
+TaggingDocs is not sponsored by any analytics vendor, tag management platform, or consulting firm. There are no affiliate links, no paid placements, and no content influenced by commercial relationships.
+
+When we recommend a tool or approach, it is because we believe it is the best option — not because someone paid for the recommendation.
+
+## Who builds this
+
+TaggingDocs is built and maintained by practitioners who work with GTM and GA4 daily. The content comes from real implementation experience across hundreds of websites, from small marketing sites to enterprise ecommerce platforms.
+
+## Contributing
+
+Every page on TaggingDocs has an "Edit page" link that takes you directly to the source file on GitHub. If you spot an error, have a better approach, or want to add coverage for something we have missed, contributions are welcome.
+
+**Ways to contribute:**
+- **Fix errors** — Typos, outdated information, broken examples
+- **Improve articles** — Better explanations, additional edge cases, updated screenshots
+- **Add new content** — Topics we have not covered yet
+- **Report issues** — Open a GitHub issue if something is wrong or missing
+
+<Aside type="tip">
+You do not need to be an expert to contribute. Some of the most valuable contributions are from people who just struggled through an implementation and can explain what the docs should have said.
+</Aside>
+
+## Get in touch
+
+The best way to reach us is through [GitHub Issues](https://github.com/taggingdocs/taggingdocs/issues). Whether you have a question, found a bug, or want to suggest a topic, open an issue and we will respond.
+
+## Support the project
+
+TaggingDocs is free and will stay free. If the site has saved you time, consider [supporting the project](/support/) to help keep it maintained and independent.

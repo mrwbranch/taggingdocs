@@ -1,0 +1,102 @@
+---
+title: "Analytics Alternatives"
+description: "Privacy-focused alternatives to Google Analytics 4 — when to consider them, what you gain, and what you give up."
+sidebar:
+  order: 0
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid, Card } from '@astrojs/starlight/components';
+
+GA4 is powerful. It is also complex, requires consent banners in the EU, hits sampling limits at scale, sends data to Google's servers, and has a steep learning curve. For some teams, those trade-offs are worth it. For others, a simpler, more privacy-focused tool is the better choice.
+
+This section is not here to convince you to abandon GA4. It is here to help you decide whether an alternative makes sense for your specific situation — and if so, which one.
+
+## Why consider alternatives at all?
+
+GA4 optimizes for depth and integration. It gives you:
+- Complex event tracking with user-level data
+- Audience building and remarketing
+- Native Google Ads integration
+- BigQuery export for custom analysis
+- Ecommerce tracking with 50+ parameters
+- Cross-domain and cross-device tracking
+
+But that power comes with real costs:
+
+**Complexity** — GA4 requires setting up a data layer, writing custom events, configuring audiences, and learning GTM or server-side tagging. Most teams never fully optimize it.
+
+**Privacy friction** — In the EU, analytics typically require user consent (with exceptions for truly anonymized data). GA4 uses cookies by default, which means consent banners for every visitor.
+
+**Data sampling** — GA4 samples data at scale. Free tier samples above 10 million events. The data you see is estimated, not actual.
+
+**Data residency** — Your analytics data goes to Google's servers. If you have strict data residency requirements (some EU regulations, some industries), that is a blocker.
+
+**Vendor lock-in** — GA4 integrations work best with Google products. If you use non-Google tools, you are usually exporting data manually or building custom integrations.
+
+**Learning curve** — GA4 is fundamentally different from Universal Analytics. New users often struggle for months before setting it up correctly.
+
+None of these are showstoppers for most organizations. But if several of these apply to your situation, an alternative might actually save you time and complexity.
+
+## The trade-off triangle
+
+Every analytics platform makes three choices: Privacy, Features, Simplicity. You can optimize for two, but rarely all three.
+
+- **GA4** optimizes for Features + Simplicity (once you learn it). Privacy is negotiable.
+- **Plausible** and **Fathom** optimize for Privacy + Simplicity. You sacrifice depth.
+- **Matomo** and **Piwik Pro** optimize for Privacy + Features. You sacrifice simplicity.
+- **Simple Analytics** is the most minimal — it sacrifices features for privacy + simplicity.
+
+Which corner of the triangle you need depends on your business:
+
+**Content sites** (blogs, news, docs) need simplicity and privacy. Page views, traffic sources, and bounce rates. They do not need user-level tracking.
+
+**SaaS and ecommerce** need features and simplicity. Conversion tracking, funnel analysis, and segmentation. Privacy is important but secondary to understanding user behavior.
+
+**Enterprise with compliance requirements** need privacy and features. Full tracking with data ownership and regulatory compliance. Simplicity does not matter if you have the budget.
+
+## When GA4 is still the right choice
+
+Be honest about this before considering alternatives.
+
+**You need Google Ads integration** — GA4 is the only option that works seamlessly with Google Ads. If conversion tracking, audience building, and ROAS reporting are central to your business, switching costs are high. Alternatives can track conversions but cannot build audiences or show ROAS.
+
+**You run complex ecommerce** — If you track 20+ ecommerce events, multiple currencies, subscriptions, or product variants, GA4 is purpose-built. Other tools can track revenue but not the details.
+
+**You need BigQuery export** — If you export data to BigQuery for custom BI, modeling, or attribution analysis, GA4 is one of few options that does this natively.
+
+**You use Google marketing ecosystem** — Google Ads, YouTube, Google Merchant Center, Google Data Studio. GA4 is the central nervous system for all of it.
+
+**You have internal GA expertise** — If your team already knows GA4, switching costs time and momentum. Stick with what you know unless something is fundamentally broken.
+
+If any of these apply, alternatives are not worth the effort. GA4 is the right tool, and the trade-offs are acceptable.
+
+## When alternatives make sense
+
+**You run a content site** — If you are a blog, documentation, news site, or content-first marketing site, you do not need deep user-level tracking. You need to know which pages drive traffic and where visitors come from. Plausible or Fathom give you that in a dashboard that loads in 2 seconds. No GTM setup, no GA4 learning curve, no consent banner.
+
+**You want to avoid consent banners** — If being truly cookieless is part of your brand or if you are tired of managing consent, Plausible, Fathom, and Simple Analytics do not use cookies. No consent banner needed (in most EU interpretations). This is worth thousands in reduced friction and GDPR complexity.
+
+**You need data residency compliance** — Some regulations require analytics data to stay within a specific country or region. Matomo (self-hosted) or Piwik Pro (EU-hosted) give you that option. GA4 and cloud-only tools do not.
+
+**You want data ownership** — If owning your analytics data is non-negotiable, self-hosted Matomo is the only option that gives you full control. You run the servers, you own the data.
+
+**You are privacy-first by brand** — Some SaaS companies and services make privacy a core value prop. Running GA4 contradicts that positioning. A privacy-first analytics tool is worth the reduced feature set.
+
+**You want to simplify your stack** — GA4 + GTM is overhead. If you can deploy a simple script tag, verify it works, and move on, the mental load reduction is real.
+
+**Your team has no GTM experience** — GA4 requires GTM (or server-side tagging) to work well. If your team is small and GTM is not in your wheelhouse, Plausible or Fathom get you running in 30 minutes. GA4 takes months to set up correctly.
+
+## What this section covers
+
+<CardGrid>
+  <LinkCard title="Choosing an Analytics Platform" description="Side-by-side comparison of GA4, Plausible, Fathom, Simple Analytics, Matomo, and Piwik Pro." href="/docs/analytics-alternatives/comparison/" />
+  <LinkCard title="Plausible Analytics" description="Simple, GDPR-compliant, cookieless page analytics." href="/docs/analytics-alternatives/plausible/" />
+  <LinkCard title="Fathom Analytics" description="Cookieless analytics built for speed and privacy." href="/docs/analytics-alternatives/fathom/" />
+  <LinkCard title="Simple Analytics" description="The minimal analytics platform — just page views and traffic." href="/docs/analytics-alternatives/simple-analytics/" />
+  <LinkCard title="Matomo" description="GA4-like features with full data ownership." href="/docs/analytics-alternatives/matomo/" />
+  <LinkCard title="Piwik Pro" description="Enterprise privacy analytics with built-in compliance." href="/docs/analytics-alternatives/piwik-pro/" />
+</CardGrid>
+
+<Aside>
+Not ready to switch? That is fine. Most teams should stay with GA4. This section is for teams where an alternative actually solves a real problem.
+</Aside>

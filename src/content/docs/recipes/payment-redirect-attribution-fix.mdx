@@ -63,8 +63,6 @@ The stored client ID approach is the production-grade solution.
 
 The robust fix captures the GA4 client ID before checkout and uses it to reconnect the purchase event to the original session.
 
-<Steps>
-
 ### Store attribution data before checkout (Client-side GTM)
 
 Create a **Custom HTML tag** that fires on the `begin_checkout` event:
@@ -210,8 +208,6 @@ Add a **Custom HTML debug tag** to your client-side container (trigger: purchase
 4. Return to your site → Check dataLayer for `purchase_enhanced` event
 5. Open GA4 DebugView → Verify purchase event fires with correct client_id
 6. GA4 Real-time report → Confirm attribution appears from original source, not payment provider
-
-</Steps>
 
 ## BigQuery Validation Query
 

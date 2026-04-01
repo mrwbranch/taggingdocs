@@ -1,0 +1,440 @@
+---
+title: "Google Ads Conversion Tracking"
+description: "Complete Google Ads conversion tracking via GTM — Conversion Linker, conversion tags, Enhanced Conversions, dynamic remarketing, and server-side setup."
+sidebar:
+  order: 1
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Google Ads conversion tracking measures the actions users take after clicking your ads — purchases, leads, signups, phone calls, and more. The tracking works via a combination of tags: the **Conversion Linker** (stores the GCLID), the **Google Ads Conversion tag** (sends the conversion), and optionally **Enhanced Conversions** (adds first-party user data for better matching).
+
+This article covers the complete GTM setup for all conversion types, including e-commerce, leads, Enhanced Conversions, and dynamic remarketing.
+
+## Before you start
+
+You need:
+- A Google Ads account with conversion actions already created
+- Google Ads linked to your GA4 property (Admin → Data Sources and Data Collection → Google Ads)
+- Conversion ID and Conversion Label(s) from Google Ads (found in Conversion Tracking → Conversions)
+- GTM with the Conversion Linker tag already firing on all pages
+- A dataLayer push structure set up on your website (not DOM scraping)
+
+## The Conversion Linker tag
+
+The Conversion Linker stores the GCLID (Google Click ID) in a first-party cookie. Without it, conversions cannot be attributed back to the ad click.
+
+**Critical rule:** The Conversion Linker must fire on every page of your site, not just landing pages. Many implementations incorrectly restrict it to paid traffic pages, causing lost attribution for users who land on a different page than the one hosting the conversion event.
+
+<Steps>
+1. In GTM, create a new Tag
+2. Choose Tag Type: **Conversion Linker**
+3. Enable "Set cookie for all domains" if you have multiple subdomains
+4. Create Trigger: **All Pages** (or at minimum, all pages that could receive paid traffic)
+5. Save and publish — the tag fires automatically and requires no additional configuration
+</Steps>
+
+<Aside type="caution">
+If the Conversion Linker doesn't fire on all pages, conversions on pages without the GCLID cookie will show as "direct" traffic in Google Ads, destroying attribution for a portion of your conversions. Test this by navigating your site and checking that `_gclid` cookie exists on every page.
+</Aside>
+
+## Google Ads Conversion tag setup
+
+The conversion tag sends the conversion event to Google Ads. It requires the Conversion ID and Conversion Label from your Google Ads account.
+
+### Finding your Conversion ID and Label
+
+1. In Google Ads, go to **Tools & Settings** → **Conversions** → **Conversions**
+2. Click the conversion action you want to track (e.g., "Purchase" or "Lead Signup")
+3. Click **Edit settings** → **Install tag yourself**
+4. Copy the **Conversion ID** (10-digit number) and **Conversion Label** (alphanumeric, like `abcd1234_EfGhIjKlMnOp`)
+
+### Purchase conversion with dynamic value
+
+The most common conversion type. Requires a numeric revenue value (not a string).
+
+<Steps>
+1. Create a new Tag: **Google Ads Conversion Tracking**
+2. Set **Conversion ID** to your Conversion ID
+3. Set **Conversion Label** to the Conversion Label for "Purchase"
+4. Enable **"Track local inventory ads"** only if you run Local Services Ads; otherwise disable
+5. In **Conversion Value**, enter `{{DL - Purchase Value}}`
+   - This is a dataLayer variable, not a DOM selector
+   - The value must be a number (e.g., `99.99`), never a string
+6. In **Conversion Currency**, enter `{{DL - Currency Code}}` or hardcode `USD`
+7. Add **Transaction ID**: `{{DL - Transaction ID}}`
+   - Use the same transaction ID every time a conversion for this order is sent
+   - Prevents double-counting if the event fires multiple times
+8. Create Trigger: **Custom Event** — `purchase` (or whatever your dataLayer event name is)
+9. Save and publish
+</Steps>
+
+<Aside type="tip">
+Always pass the transaction ID. Google Ads uses it to deduplicate conversions with the same ID fired from multiple sources (client-side tag + server-side API, for example). Without it, you will double-count.
+</Aside>
+
+### Lead and signup conversions
+
+Leads and signups don't require a monetary value.
+
+<Steps>
+1. Create a new Tag: **Google Ads Conversion Tracking**
+2. Set **Conversion ID** and **Conversion Label** (for Lead or Signup)
+3. Leave **Conversion Value** empty (no monetary value for leads)
+4. Add **Transaction ID**: `{{DL - Lead ID}}` or `{{DL - Form Submission ID}}`
+   - This ensures deduplication if the lead conversion fires multiple times
+5. Create Trigger: **Custom Event** — `lead` or `signup`
+6. Save and publish
+</Steps>
+
+### Conversion value and currency requirements
+
+- **Conversion Value:** Must be a number (123.45), never a string ("123.45"). If it's a string, Google Ads will not record the value.
+- **Currency:** Must be a 3-letter ISO currency code (USD, EUR, GBP) and must match the currency of your Google Ads account. If they don't match, Google Ads will not record the conversion.
+
+<Aside type="danger">
+Test currency and value handling before going live. Create a test conversion in Google Ads with a test label, fire it through GTM, and check that the value and currency appear correctly in your conversion details.
+</Aside>
+
+## Enhanced Conversions
+
+Enhanced Conversions add first-party hashed user data to conversion events, improving Google's ability to match conversions to Google user accounts. This increases your conversion data's signal quality by 5–15% (depending on your site's data collection).
+
+### What to send
+
+Enhanced Conversions use these fields (all hashed):
+- `email`
+- `phone` (E.164 format: +15551234567)
+- `first_name`
+- `last_name`
+- `city`
+- `state`
+- `postal_code`
+- `country` (ISO 2-letter code)
+
+You do **not** send credit card or full address data.
+
+### Automatic vs. manual hashing
+
+**You do not need to hash the data yourself if using GTM.** Google Ads Conversion tag automatically hashes user data fields when you pass them. However, be explicit — wrap the user data in the `user_data` object.
+
+### Implementation: dataLayer approach
+
+Push user data to the dataLayer at the time of conversion:
+
+```javascript
+// On your purchase confirmation page or lead form submission
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    value: 99.99,
+    currency: 'USD',
+    transaction_id: 'txn_12345'
+  },
+  // Enhanced Conversions user data (plaintext, Google will hash)
+  user_data: {
+    email: 'customer@example.com',
+    phone: '+15551234567',  // E.164 format with +
+    first_name: 'John',
+    last_name: 'Doe',
+    city: 'San Francisco',
+    state: 'CA',
+    postal_code: '94102',
+    country: 'US'  // ISO 2-letter
+  }
+});
+```
+
+### Configuring in GTM
+
+In your Google Ads Conversion tag:
+
+1. Scroll to **User Data** section
+2. Enable "Use Enhanced Conversions"
+3. Map each field to its dataLayer variable:
+   - Email: `{{DL - User Email}}`
+   - Phone: `{{DL - User Phone}}`
+   - First Name: `{{DL - First Name}}`
+   - Last Name: `{{DL - Last Name}}`
+   - etc.
+
+<Aside type="danger">
+Do **not** pre-hash the user data before sending it to Google. Google Ads tag expects plaintext data and hashes it internally. If you send a hash of a hash, the matching will fail.
+
+The only exception: if you're using the Google Ads API or server-side conversion uploads, you must pre-hash using SHA-256.
+</Aside>
+
+### Data quality tips
+
+- **Email:** Trim whitespace, lowercase before pushing to dataLayer
+- **Phone:** Use E.164 format (+[country code][number]). Never format with spaces or dashes.
+- **Names:** Trim and lowercase
+- **City:** Lowercase, no spaces (SanFrancisco, not San Francisco)
+- **State:** US states as 2-letter lowercase codes (ca, ny, tx)
+- **Country:** ISO 2-letter code (US, GB, FR)
+
+Send what you have. If a user hasn't provided their phone number, don't make it up or send a placeholder. Send only the fields you have.
+
+## Dynamic remarketing
+
+Dynamic remarketing shows ads featuring the exact products a user viewed on your site. It requires the **Google Ads Remarketing tag** with custom parameters.
+
+### Remarketing tag setup
+
+<Steps>
+1. In GTM, create a new Tag: **Google Ads Remarketing**
+2. Set **Conversion ID** to your Google Ads Conversion ID
+3. Save and publish — the tag loads the remarketing library and only needs to fire once per page
+</Steps>
+
+### Custom parameters for product tracking
+
+#### Product page
+
+```javascript
+// Push to dataLayer on product page
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    items: [{
+      item_id: 'SKU-12345',  // Product ID (must match Merchant Center feed)
+      item_name: 'Blue T-Shirt',
+      price: 29.99,
+      item_category: 'Apparel > Clothing > Shirts'
+    }]
+  }
+});
+```
+
+#### Category page
+
+```javascript
+// Push to dataLayer on category page
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  event: 'view_item_list',
+  ecommerce: {
+    item_category: 'Apparel > Clothing > Shirts'
+  }
+});
+```
+
+#### Cart page
+
+```javascript
+// Push to dataLayer on cart page
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  event: 'view_cart',
+  ecommerce: {
+    value: 149.97,
+    currency: 'USD',
+    items: [
+      {
+        item_id: 'SKU-12345',
+        item_name: 'Blue T-Shirt',
+        quantity: 1,
+        price: 29.99
+      },
+      {
+        item_id: 'SKU-67890',
+        item_name: 'Black Jeans',
+        quantity: 1,
+        price: 119.98
+      }
+    ]
+  }
+});
+```
+
+#### Purchase (with dynamic parameters)
+
+```javascript
+// Push on order confirmation page
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    value: 149.97,
+    currency: 'USD',
+    transaction_id: 'txn_12345',
+    items: [
+      {
+        item_id: 'SKU-12345',
+        item_name: 'Blue T-Shirt',
+        quantity: 1,
+        price: 29.99
+      },
+      {
+        item_id: 'SKU-67890',
+        item_name: 'Black Jeans',
+        quantity: 1,
+        price: 119.98
+      }
+    ]
+  }
+});
+```
+
+### Critical: Product IDs must match Merchant Center
+
+Dynamic remarketing works by showing ads with the exact product the user viewed. For this to work, your product IDs (`item_id` in the dataLayer) **must exactly match** the product IDs in your Google Merchant Center feed.
+
+If your site uses SKU-12345 but Merchant Center has ID 12345, dynamic remarketing will fail because Google cannot match the products.
+
+<Aside type="caution">
+Before enabling dynamic remarketing, audit your product IDs. Export your Merchant Center feed and verify that the IDs you're pushing to the dataLayer match exactly (case-sensitive).
+</Aside>
+
+## Value-based bidding
+
+Google Ads can optimize bids based on conversion value (purchase amount, lead value, etc.). To use this:
+
+1. In your purchase/conversion Google Ads tag, ensure **Conversion Value** is always a number
+2. The currency must match your Google Ads account currency
+3. For Performance Max campaigns, you can also send cart-level data:
+
+```javascript
+// Performance Max: send cart contents
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    value: 299.98,
+    currency: 'USD',
+    transaction_id: 'txn_99999',
+    items: [
+      {
+        item_id: 'SKU-001',
+        quantity: 2,
+        price: 149.99
+      }
+    ]
+  }
+});
+```
+
+## Phone call tracking
+
+If you want to track phone calls as conversions:
+
+**Google Ads forwarding numbers:** Set up a forwarding phone number in Google Ads. Calls to this number are automatically tracked as conversions (no GTM tag needed).
+
+**Website call conversions:** If users call a number on your website:
+
+1. Create a **"Phone calls from website"** conversion action in Google Ads
+2. In GTM, use a click tracking tag that captures clicks on phone links:
+
+```javascript
+// Trigger a custom event when phone link is clicked
+document.addEventListener('click', function(e) {
+  if (e.target.href && e.target.href.startsWith('tel:')) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'phone_call',
+      phone_number: e.target.href.replace('tel:', '')
+    });
+  }
+});
+```
+
+Then fire a Google Ads conversion tag on the `phone_call` custom event.
+
+## Consent Mode integration
+
+Google Ads Conversion tags respect GTM Consent Mode's `ad_storage` and `ad_user_data` consent states.
+
+**Configuration:**
+
+In your Google Ads tag, Consent settings are typically automatic if you've set up GTM Consent Mode. However, explicitly define consent behavior:
+
+1. Go to the Google Ads tag
+2. Under **Advanced settings**, find **Consent Settings**
+3. Set **Ad Storage:** requires `ad_storage` consent
+4. Set **Ad User Data:** requires `ad_user_data` consent (for Enhanced Conversions)
+
+When a user denies `ad_storage` consent, the conversion tag will still fire, but Google Ads will not store the GCLID or conversion data. This respects the user's privacy while still allowing Google to receive aggregate signals via Consent Mode.
+
+<Aside type="tip">
+Always test your consent flow. Grant consent, trigger a conversion, verify it appears in Google Ads. Then deny consent, trigger another conversion, and verify that the tag fires (in Network tab) but the conversion is not stored in Google Ads.
+</Aside>
+
+## Troubleshooting
+
+### Conversions show "Unverified" in Google Ads
+
+**Cause:** The conversion tag is firing, but Google cannot verify it's legitimate.
+
+**Fix:**
+1. Go to Google Ads → Tools & Settings → Conversions → [Your Conversion Action]
+2. Click **Edit settings** → **Conversion tracking**
+3. Change status from "Secondary" to "Primary" (if appropriate)
+4. Ensure the Conversion Linker tag is firing on all pages (verify `_gclid` cookie exists)
+5. Wait 24 hours for verification
+
+### Conversion Linker not firing on all pages
+
+**Cause:** The tag's trigger is restricted to specific pages or conditions.
+
+**Fix:**
+1. In GTM, check the Conversion Linker tag's trigger
+2. It should be **All Pages** or at minimum all pages that receive paid traffic
+3. If you have a trigger that restricts it (e.g., "Page contains /landing-page"), remove it
+4. Publish and test on every page of your site
+
+### Enhanced Conversions not matching
+
+**Cause:** User data is malformed or hashed incorrectly.
+
+**Fix:**
+1. Email must be lowercase and trimmed of whitespace
+2. Phone must be E.164 format: `+15551234567` (not 555-123-7654)
+3. Do **not** pre-hash — send plaintext to GTM, Google will hash
+4. Open DevTools → Network tab, find the gtag() request, verify the user_data object is present and formatted correctly
+
+### Double-counting conversions
+
+**Cause:** The conversion tag fires multiple times for the same purchase.
+
+**Fix:**
+1. Always send a **Transaction ID**
+2. Ensure the transaction ID is the same every time the conversion fires (same tag, same trigger)
+3. Google Ads deduplicates on transaction ID + Conversion ID + Conversion Label + timestamp
+4. If you're running both client-side and server-side conversion tags, use the same transaction ID in both
+
+### Conversion value showing as zero in Google Ads
+
+**Cause:** Conversion value is a string (e.g., "99.99") instead of a number, or currency doesn't match.
+
+**Fix:**
+1. Open DevTools → Network, find the gtag() request
+2. Check the conversion_value field — should be a number: `100.50`, not `"100.50"`
+3. Check currency — should match your Google Ads account (e.g., USD, EUR)
+4. In GTM, verify your Conversion Value variable returns a number, not a string
+
+## Related resources
+
+<CardGrid>
+  <LinkCard
+    title="Server-Side Google Ads Conversion Tracking"
+    description="Firing Google Ads conversions from your server for better reliability and privacy."
+    href="/server-side/tags/google-ads-conversions/"
+  />
+  <LinkCard
+    title="Google Ads Troubleshooting Guide"
+    description="Deep dive into debugging Google Ads tracking issues, GCLID problems, and attribution."
+    href="/client-side/tags/google-ads-troubleshooting/"
+  />
+  <LinkCard
+    title="Enhanced Conversions Setup Recipe"
+    description="Complete dataLayer structure and GTM configuration for Enhanced Conversions."
+    href="/recipes/enhanced-conversions-setup/"
+  />
+  <LinkCard
+    title="Consent Mode Configuration"
+    description="Properly gating Google Ads conversion tracking on user consent."
+    href="/consent/"
+  />
+</CardGrid>

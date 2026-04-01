@@ -1,0 +1,430 @@
+---
+title: "Twitter/X Pixel"
+description: "Twitter/X pixel setup via GTM — base code, standard events, Click ID handling, and the Conversions API."
+sidebar:
+  order: 7
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The Twitter/X Pixel tracks website activity for users who click Twitter/X ads. It enables conversion optimization, audience building, and attribution for X ads campaigns. X rebranded from Twitter in 2023, but the pixel is still called "Twitter Pixel" in the ads interface—this won't change.
+
+**Be honest upfront:** X's advertising platform has a smaller market share than Meta, Google, TikTok, and LinkedIn. If you have meaningful X ad spend, implement this. If not, deprioritize it. X's tracking infrastructure is less mature than competitors and has experienced outages in the Conversions API. Start with client-side setup; add server-side only if you're running sGTM for other platforms.
+
+## Prerequisites
+
+- X Ads account with active campaigns
+- Pixel ID from X Ads Manager → Conversions → Pixels (looks like `o7g7r` or similar alphanumeric code)
+- For Conversions API: OAuth access token and authentication bearer token from X
+
+## Base pixel installation via GTM
+
+<Steps>
+1. In GTM, Tags → New
+2. **Recommended:** Search Community Template Gallery for "Twitter Pixel" or "X Pixel"
+3. If a template exists and is maintained, use it. If not, follow the Custom HTML approach below.
+4. Configure the base tag:
+   - **Pixel ID:** your X Pixel ID
+   - **Fire on:** All Pages trigger
+
+5. Publish
+</Steps>
+
+**Custom HTML installation (reliable backup):**
+
+Since X's template support is inconsistent, here's the native implementation:
+
+```html
+<script>
+!function(e,t,n,s,u,a){e.twq||(s=e.twq=function(){s.exe?s.exe.apply(s,arguments):s.queue.push(arguments)},
+s.version='1.1',s.queue=[],u=t.createElement(n),u.async=!0,u.src='https://static.ads.twitter.com/uwt.js',
+a=t.getElementsByTagName(n)[0],a.parentNode.insertBefore(u,a))}(window,document,'script');
+
+twq('config', '{{Pixel ID}}');
+</script>
+```
+
+Replace `{{Pixel ID}}` with a GTM variable containing your X Pixel ID.
+
+**Important:** This base code must fire on every page. Do not gate it behind consent checks on first load—X uses cookies and first-party data to track sessions, and the initialization must occur for subsequent events to fire correctly. (Consent gating happens at event level, not initialization.)
+
+## Standard events
+
+X supports the following standard event names:
+
+### PageView
+
+Fires automatically with the base pixel code (`twq('config', ...)` initialization). No additional tag needed.
+
+### Purchase
+
+The most critical event for conversion optimization.
+
+```
+Event: tw-purchase
+Parameters:
+  value: {{DL - Revenue}}              // number
+  currency: {{DL - Currency}}          // ISO 4217 (e.g., "USD")
+  content_ids: [{{DL - Item IDs}}]     // array of product IDs
+  content_name: {{DL - Product Name}}
+  content_type: "product"
+  num_items: {{DL - Item Count}}
+```
+
+**Custom HTML tag approach:**
+
+```javascript
+twq('track', 'Purchase', {
+  value: {{DL - Revenue}},
+  currency: '{{DL - Currency}}',
+  content_ids: {{DL - Product IDs as Array}},
+  content_type: 'product',
+  num_items: {{DL - Item Count}}
+});
+```
+
+Trigger: Custom Event — `purchase`
+
+### AddToCart
+
+```javascript
+twq('track', 'AddToCart', {
+  value: {{DL - Price}},
+  currency: '{{DL - Currency}}',
+  content_ids: [{{DL - Product ID}}],
+  content_type: 'product',
+  num_items: {{DL - Quantity}}
+});
+```
+
+Trigger: Custom Event — `add_to_cart`
+
+### Checkout (Begin Checkout)
+
+```javascript
+twq('track', 'Checkout', {
+  value: {{DL - Cart Value}},
+  currency: '{{DL - Currency}}',
+  content_ids: {{DL - Product IDs}},
+  num_items: {{DL - Item Count}}
+});
+```
+
+Trigger: Custom Event — `begin_checkout`
+
+### Lead / SignUp
+
+```javascript
+twq('track', 'SignUp', {
+  value: {{DL - Lead Value or Fixed}},
+  currency: '{{DL - Currency}}'
+});
+```
+
+Or for explicit lead forms:
+
+```javascript
+twq('track', 'Lead', {
+  value: {{DL - Lead Value}},
+  currency: '{{DL - Currency}}'
+});
+```
+
+Trigger: Custom Event — `signup` or `lead`
+
+### ViewContent
+
+Fire on product detail pages to build website visitor audiences.
+
+```javascript
+twq('track', 'ViewContent', {
+  content_ids: [{{DL - Product ID}}],
+  content_name: '{{DL - Product Name}}',
+  content_type: 'product',
+  value: {{DL - Price}},
+  currency: '{{DL - Currency}}'
+});
+```
+
+Trigger: Custom Event — `view_item`
+
+### Search
+
+```javascript
+twq('track', 'Search', {
+  search_query: '{{DL - Search Term}}'
+});
+```
+
+Trigger: Custom Event — `search`
+
+### Additional events
+
+X also supports: `AddToWishlist`, `Download`, `CompleteRegistration`. These are less common but follow the same pattern—check X Ads Manager → Pixels → Event Details for full parameter lists.
+
+<Aside type="caution">
+Do **not** pass parameters X doesn't recognize. Unknown keys will cause the entire event to be dropped silently. Test each event in the Ads Manager before relying on it for optimization.
+</Aside>
+
+## Click ID (twclid) handling
+
+X appends a `twclid` URL parameter to all ad clicks (similar to `fbclid` for Meta). Capturing and storing this enables proper attribution.
+
+### Capture and store twclid
+
+**Step 1: Custom JavaScript Variable to read the parameter**
+
+In GTM, create a new Custom JavaScript Variable:
+
+```javascript
+function() {
+  var url = new URL(window.location);
+  var twclid = url.searchParams.get('twclid');
+  return twclid || undefined;
+}
+```
+
+Name it `JS - Get twclid from URL`
+
+**Step 2: Store in a first-party cookie**
+
+Create a Custom HTML tag to persist twclid in a cookie for the session:
+
+```javascript
+<script>
+(function() {
+  var url = new URL(window.location);
+  var twclid = url.searchParams.get('twclid');
+
+  if (twclid) {
+    // Store twclid in a first-party cookie for 30 days
+    var d = new Date();
+    d.setTime(d.getTime() + (30 * 24 * 60 * 60 * 1000));
+    var expires = 'expires=' + d.toUTCString();
+    document.cookie = '_twclid=' + twclid + '; ' + expires + '; path=/; Secure';
+  }
+})();
+</script>
+```
+
+Trigger: All Pages (high priority, before other tags)
+
+**Step 3: Read the stored cookie in GTM**
+
+Create a Cookie Variable named `_twclid` to retrieve it for CAPI deduplication or custom reporting.
+
+### Why this matters
+
+X uses twclid for first-party attribution. If a user clicks an X ad (twclid parameter present) but their conversion fires client-side only, X can match the click. If you're also using sGTM + Conversions API, storing twclid ensures you can pass it server-side for additional matching.
+
+<Aside type="tip">
+Unlike Meta (`fbclid`), X does not automatically consume twclid from the URL. You must explicitly capture and store it. Without this, X relies solely on cookies and campaign-level aggregation for attribution, which is less accurate.
+</Aside>
+
+## Conversions API (server-side)
+
+X's Conversions API (still newer and less stable than Meta's) allows server-to-server event transmission. It's useful for:
+- Deduplicating client-side and server-side events
+- Recovering events blocked by browser restrictions
+- Improving match rates with server-side hashed user data
+
+**Setup overview:**
+
+1. **OAuth:** Generate a long-lived access token in X Ads Manager → Apps → Conversions API
+2. **sGTM container:** Create a tag using a community template (if available) or Custom JavaScript
+3. **Event mapping:** Consume GA4 events and translate to X event names (e.g., `purchase` → `Purchase`)
+4. **Deduplication:** Include `event_id` on both client-side pixel and server-side API calls
+
+**sGTM tag template (custom JavaScript approach):**
+
+```javascript
+const makeRequest = require('makeRequest');
+const crypto = require('crypto');
+const getAllEventData = require('getAllEventData');
+
+let eventData = getAllEventData();
+
+// Map GA4 event name to X event name
+const eventMap = {
+  'purchase': 'Purchase',
+  'add_to_cart': 'AddToCart',
+  'begin_checkout': 'Checkout',
+  'view_item': 'ViewContent',
+  'lead': 'Lead'
+};
+
+let xEventName = eventMap[eventData.event_name] || null;
+if (!xEventName) {
+  return data.gtmOnFailure();
+}
+
+// Read parameters
+let payload = {
+  event: xEventName,
+  event_id: eventData.event_id,  // For deduplication
+  timestamp_millis: eventData.timestamp_millis
+};
+
+// Add conversion value if present
+if (eventData.value) {
+  payload.value_micros = Math.round(eventData.value * 1000000);
+}
+
+if (eventData.currency) {
+  payload.currency = eventData.currency;
+}
+
+// Add user data (if available and hashed)
+if (eventData.user_data) {
+  payload.user_data = {};
+  if (eventData.user_data.hashed_email) {
+    payload.user_data.em = eventData.user_data.hashed_email;
+  }
+}
+
+// Add twclid if available
+if (eventData.twclid) {
+  payload.twclid = eventData.twclid;
+}
+
+// Send to X Conversions API
+const headers = {
+  'Authorization': 'Bearer {{X API Token}}',  // Store securely in GTM
+  'Content-Type': 'application/json'
+};
+
+makeRequest(
+  {
+    url: 'https://analytics.twitter.com/1.1/conversion/track',
+    method: 'POST',
+    headers: headers,
+    payload: JSON.stringify(payload)
+  },
+  function(statusCode) {
+    if (statusCode >= 200 && statusCode < 400) {
+      data.gtmOnSuccess();
+    } else {
+      data.gtmOnFailure();
+    }
+  }
+);
+```
+
+**Key notes:**
+- Replace `{{X API Token}}` with a GTM Variable containing your X Conversions API bearer token
+- Include `event_id` for deduplication (X will match client + server events with the same ID)
+- Value is sent in micros (`value * 1000000`), not as a decimal
+- `twclid` from the stored cookie helps X match the click to the conversion
+
+**Deduplication behavior:** If you send the same `event_id` from both client-side pixel and Conversions API, X counts it once. Omit `event_id` if you want both to be counted separately (not recommended for Purchase events).
+
+<Aside type="note">
+X's Conversions API is less mature than Meta's. It has experienced outages and inconsistent behavior. If you're already running sGTM for another platform (Meta, TikTok), adding X is low effort. If sGTM is new infrastructure for you, start with client-side only.
+</Aside>
+
+## Consent Mode
+
+Gate the pixel on `ad_storage` consent using GTM's Consent Mode or a custom consent check.
+
+```javascript
+<script>
+// Pseudo-code: check if ad_storage is granted before initializing
+if (window.gtag && window.gtag.getConsent) {
+  var consentData = window.gtag.getConsent();
+  if (consentData.ad_storage !== 'granted') {
+    // Skip initialization
+    return;
+  }
+}
+
+// If ad_storage is granted, initialize:
+twq('config', '{{Pixel ID}}');
+</script>
+```
+
+Alternatively, in the base GTM tag configuration:
+- Check "Require consent for tag to fire"
+- Select `ad_storage` consent type
+
+This prevents the pixel from firing until users grant ad_storage consent (typically via a CMP banner).
+
+<Aside type="caution">
+The initialization (`twq('config', ...)`) happens fast, before most consent banners appear. Best practice: delay all pixel firing (both config and events) until after user consent is confirmed, using GTM's Consent Mode or a custom consent listener.
+</Aside>
+
+## Troubleshooting
+
+### Verify events in X Ads Manager
+
+1. Go to X Ads Manager → Conversions → Pixels → your Pixel
+2. Click "Test Conversion" (or similar option depending on UI version)
+3. Enter your website URL
+4. Trigger a conversion on your site (view a product, add to cart, make a purchase)
+5. Check the Ads Manager—events should appear within 1–2 minutes
+
+### X Pixel Helper Chrome extension
+
+X provides an official **X Pixel Helper** extension:
+1. Install from Chrome Web Store
+2. Open DevTools (right-click → Inspect → find the X Pixel Helper panel)
+3. Load your website—the extension shows events fired, parameters, and errors
+
+### Common issues
+
+**Pixel not firing at all:**
+- Verify Pixel ID is correct in your GTM tag
+- Check GTM tag has "All Pages" trigger
+- Verify ad blocker is not blocking `static.ads.twitter.com`
+
+**Events showing in Ads Manager but not attributed to campaigns:**
+- Verify twclid is being captured from ad clicks
+- Check `currency` is a valid ISO 4217 code (e.g., "USD", not "US")
+- Ensure `value` is a number, not a string
+
+**High event volume but low attribution:**
+- X attributes conservatively; clicks without matching conversions are dropped silently
+- Verify users are actually clicking your X ads (test with a small budget)
+- Cross-check that impressions in the campaign are generating clicks
+
+**Conversions API failures (server-side):**
+- Verify API token is valid and not expired
+- Check API endpoint is correct: `https://analytics.twitter.com/1.1/conversion/track`
+- Monitor sGTM logs for HTTP errors (401 = auth failure, 400 = bad payload)
+
+<Aside type="caution">
+X's Conversions API has a **low request rate limit**. If you're sending high volume (>100 events/second), you may hit rate limits. Batch events server-side if possible, or contact X support for higher limits.
+</Aside>
+
+## When to bother with X Pixel
+
+- **Do implement** if you have active, profitable X advertising campaigns
+- **Do implement** if your audience skews heavily toward tech professionals or developers (where X has stronger engagement)
+- **Skip if** X spend is less than 5% of your total paid ad budget — focus on Meta, Google, TikTok first
+- **Skip if** you have no X ad campaigns running—don't implement for future use
+
+X's platform is smaller and its tracking infrastructure is not as battle-tested as competitors. Build your foundation with Meta and Google, then add X if ROI justifies the implementation effort.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="All Ad Platforms"
+    description="Overview and comparison of pixel setup across Meta, Google, TikTok, Pinterest, and more."
+    href="/integrations/"
+  />
+  <LinkCard
+    title="Meta Pixel (Client-Side)"
+    description="The most mature pixel implementation—use as a template for X setup."
+    href="/integrations/meta-pixel-client-side/"
+  />
+  <LinkCard
+    title="Server-Side GTM Overview"
+    description="Set up sGTM before attempting X Conversions API."
+    href="/server-side/"
+  />
+  <LinkCard
+    title="Consent Mode"
+    description="Gate all pixels on ad_storage consent properly."
+    href="/consent/"
+  />
+</CardGrid>

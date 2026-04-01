@@ -1,0 +1,227 @@
+---
+title: "Plausible Analytics"
+description: "Plausible Analytics setup, features, limitations, and when to choose it over GA4 — lightweight, cookie-free, open-source analytics."
+sidebar:
+  order: 2
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+## What Plausible Is
+
+Plausible is lightweight, open-source, cookie-free web analytics. Think of it as the antithesis of GA4's complexity.
+
+- **Script size**: ~1KB (gzipped) vs GA4's ~45KB
+- **Infrastructure**: EU-hosted on Hetzner servers in Germany
+- **Founded**: 2019, profitable, bootstrapped
+- **Data ownership**: You own it. No third-party data sales. Open-source codebase.
+
+## Key Differences from GA4
+
+| Aspect | Plausible | GA4 |
+|--------|-----------|-----|
+| Cookies | None | Required |
+| Consent banner | Not needed (EU legal) | Required |
+| User-level tracking | No | Yes |
+| BigQuery export | No | Yes |
+| Audience building | No | Yes |
+| Dashboard complexity | 1 page | Requires learning |
+| Custom dimensions | Event properties only | Dimensions + metrics |
+| Ecommerce tracking | Basic | Detailed item-level |
+| Funnel analysis | No | Yes |
+
+**Real talk**: Plausible trades depth for simplicity. You'll see pages, referrers, countries, devices. You won't see individual user journeys. This is a feature, not a limitation.
+
+## Implementation
+
+<Steps>
+
+1. **Direct script embed (recommended)**
+
+   Add this to your site's `<head>`:
+
+   ```html
+   <script defer data-domain="yourdomain.com" src="https://plausible.io/js/script.js"></script>
+   ```
+
+   That's it. Pageviews auto-track. No configuration needed.
+
+2. **Why not GTM?**
+
+   You *can* load Plausible via Google Tag Manager, but you shouldn't. Here's why:
+   - Plausible's entire value proposition is being lightweight and unblocked
+   - Ad blockers block GTM more aggressively than direct script loads
+   - If you're using GTM, you might as well use GA4
+
+   If you need GTM for other tags, load Plausible directly. Don't tunnel it through GTM.
+
+3. **Self-hosted via Plausible Community Edition**
+
+   Want data residency control? Deploy Plausible CE yourself:
+
+   ```bash
+   git clone https://github.com/plausible/analytics
+   cd analytics
+   # Configure env variables
+   docker-compose up
+   ```
+
+   Requires Docker, PostgreSQL, ClickHouse. Good for teams with strict data residency requirements. Free forever.
+
+</Steps>
+
+## Custom Events
+
+Plausible supports event goals via JavaScript API:
+
+```javascript
+// Basic event
+plausible('Signup');
+
+// Event with properties (max 30 properties per event)
+plausible('Purchase', {
+  props: {
+    plan: 'premium',
+    price: '99',
+    currency: 'USD'
+  }
+});
+
+// Form submission
+document.querySelector('form').addEventListener('submit', (e) => {
+  plausible('Form Submission', {
+    props: {
+      form_name: e.target.name,
+      form_type: 'contact'
+    }
+  });
+});
+
+// File download
+document.querySelectorAll('a[download]').forEach(link => {
+  link.addEventListener('click', () => {
+    plausible('File Download', {
+      props: {
+        filename: link.getAttribute('href')
+      }
+    });
+  });
+});
+```
+
+<Aside type="caution">
+Plausible goal tracking doesn't work like GA4 conversions. Every event fires counts as a goal completion. If you track "Page View" as a goal and have 1K pageviews, that's 1K goal completions. Structure your events accordingly — track meaningful actions, not everything.
+</Aside>
+
+## Proxy Setup for Ad Blocker Avoidance
+
+If ad blockers are crushing your tracking (>20% traffic loss), proxy Plausible through your own domain.
+
+### Via Nginx
+
+```nginx
+location /js/script.js {
+  proxy_pass https://plausible.io/js/script.js;
+  proxy_ssl_verify off;
+}
+
+location /api/event {
+  proxy_pass https://plausible.io/api/event;
+  proxy_ssl_verify off;
+}
+```
+
+Then update your script tag:
+
+```html
+<script defer data-domain="yourdomain.com" src="/js/script.js"></script>
+```
+
+### Via Cloudflare Workers
+
+```javascript
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === '/js/analytics.js') {
+      return fetch('https://plausible.io/js/script.js');
+    }
+
+    if (url.pathname === '/api/event') {
+      return fetch('https://plausible.io/api/event', {
+        method: request.method,
+        headers: request.headers,
+        body: request.body
+      });
+    }
+
+    return new Response('Not found', { status: 404 });
+  }
+};
+```
+
+## What You Give Up vs GA4
+
+Be clear about trade-offs:
+
+- **No funnel analysis** — Can't visualize drop-off across steps
+- **No path exploration** — Can't see how users move through pages
+- **No ecommerce item-level data** — See total revenue, not which products sell
+- **No custom dimensions** — Can only add properties to events, not pages
+- **No segments** — Can't split data by user groups
+- **No BigQuery export** — Stats API and CSV export only
+- **No audience building** — Can't create lists for remarketing
+- **No cross-device tracking** — Mobile and desktop visits are separate
+
+If any of these are requirements, pick GA4 or a compromise tool like Fathom.
+
+## Pricing
+
+- **10K pageviews/month**: $9
+- **100K pageviews/month**: $20
+- **1M pageviews/month**: $200
+- **Self-hosted CE**: Free
+
+No free tier. The company makes money from subscriptions, not selling your data. Pricing is straightforward — more traffic = more cost.
+
+## When to Choose Plausible
+
+✅ **Good fit**:
+- Content sites, blogs, documentation
+- SaaS marketing sites
+- Developer tools
+- Teams that value privacy as a selling point
+- Sites that need GDPR compliance without consent banners
+- Teams tired of GA4's complexity
+
+❌ **Bad fit**:
+- Ecommerce (need item-level data)
+- Complex B2B funnels
+- Teams that need BigQuery export
+- Heavy remarketing requirements
+
+## Related Resources
+
+<CardGrid>
+  <LinkCard
+    title="Plausible vs GA4 Detailed Comparison"
+    description="Feature-by-feature breakdown of all analytics capabilities"
+    href="/analytics-alternatives/comparison"
+  />
+  <LinkCard
+    title="Privacy-First Analytics Guide"
+    description="Why cookie-free analytics matter and how to implement"
+    href="/guides/privacy-analytics"
+  />
+  <LinkCard
+    title="Migrating from GA4 to Plausible"
+    description="Step-by-step setup and data mapping"
+    href="/guides/ga4-to-plausible"
+  />
+  <LinkCard
+    title="Fathom Analytics"
+    description="Plausible's closest competitor with EU isolation"
+    href="/analytics-alternatives/fathom"
+  />
+</CardGrid>
