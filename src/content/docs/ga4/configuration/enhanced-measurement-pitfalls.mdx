@@ -49,7 +49,7 @@ This guide goes feature by feature.
 
 ## Site search tracking
 
-**What it does**: Fires `view_search_results` when the URL contains a query parameter matching common search parameter names (q, s, search, query, etc.).
+**What it does**: Fires `view_search_results` when the URL contains a query parameter matching common search parameter names (q, s, search, query, keyword, etc.).
 
 **The problem — wrong parameter detection**: If your site uses a URL parameter for something other than search (e.g., filtering, sorting) and that parameter happens to be named `q` or `s`, Enhanced Measurement fires `view_search_results` for every filtered page load.
 

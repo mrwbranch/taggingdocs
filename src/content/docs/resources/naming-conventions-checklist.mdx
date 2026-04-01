@@ -1,0 +1,524 @@
+---
+title: "GA4, GTM, and sGTM Naming Conventions Checklist"
+description: "Comprehensive naming standards for events, parameters, dimensions, tags, triggers, variables, and folder structure to ensure consistency across GTM and GA4."
+sidebar:
+  order: 10
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Naming conventions are not style preferences—they are infrastructure. When your team is coordinating across GTM, GA4, and server-side systems, ambiguous names create misunderstandings, breaks tracking, and slow down audits.
+
+This is a working checklist you can adopt directly. Copy it, fill in your org-specific values, and link it in your GTM container documentation.
+
+---
+
+## GA4 Event Naming
+
+### Core Rules
+
+- **Use snake_case exclusively**: `purchase_complete`, `form_submit`, not `purchaseComplete` or `Purchase Complete`
+- **Be descriptive but concise**: `form_submit` good, `user_submitted_contact_form_on_website` bad
+- **No PII or sensitive data**: Event name should never contain email, phone, or account number
+- **Maximum 40 characters**: GA4 has a 40-char limit; stay under 35 to leave room for platform prefixes
+- **Use verbs for actions**: `purchase_complete`, `cart_abandon`, `video_play`
+- **Use nouns for states**: `page_view`, `session_start` (avoid `page_viewed`, `session_started`)
+
+### Custom Event Naming Pattern
+
+```
+[action]_[object]_[context]
+
+action: purchase, add, remove, submit, start, complete, abandon, view, click
+object: product, cart, form, video, page, list
+context: (optional, clarifies business meaning) checkout, wishlist, newsletter
+
+Examples:
+- purchase_complete (not: transaction_completed, checkout_success)
+- cart_abandon (not: abandoned_cart_event)
+- form_submit_newsletter (not: newsletter_signup_form_submit)
+- video_start_homepage (not: homepage_video_play)
+```
+
+### Reserved Event Names (Google-defined)
+
+GA4 automatically captures these. Do not override them:
+
+```
+page_view        # Automatic
+click            # Automatic when element tracking enabled
+scroll           # Automatic when scroll tracking enabled
+view_search_results
+purchase
+refund
+add_to_cart
+remove_from_cart
+add_to_wishlist
+view_item
+view_item_list
+view_promotion
+select_promotion
+begin_checkout
+add_shipping_info
+add_payment_info
+```
+
+If you need custom logic around these events (e.g., "purchase with a discount"), use parameters, not a new event name.
+
+---
+
+## GA4 Event Parameters
+
+### Core Rules
+
+- **Use snake_case**: `transaction_id`, `product_category`, not `transactionID` or `ProductCategory`
+- **Limit to 100 parameters per event**: GA4 truncates beyond this; be selective
+- **No PII**: Do not send email, phone, full address, SSN, or account passwords as parameters
+- **Use standard ecommerce parameters**: GA4 has predefined ecommerce fields; use them
+- **Consistent types**: If `value` is a number in one event, it must be a number in all events (not sometimes a string)
+
+### Standard Ecommerce Parameters
+
+Use these exact names for ecommerce events—GA4 recognizes them:
+
+```
+# Product-level
+product_id           (string)
+product_name         (string)
+product_category     (string)
+product_brand        (string)
+product_variant      (string)
+quantity             (number)
+price                (number, without currency symbol)
+
+# Transaction-level
+transaction_id       (string, unique per purchase)
+value                (number, total transaction value)
+currency             (string, ISO 4217: USD, EUR, GBP)
+tax                  (number)
+shipping             (number)
+coupon               (string, promotion code)
+
+# List-level
+item_list_name       (string: "Homepage Featured", "Search Results")
+item_list_id         (string)
+item_list_index      (number: position in list)
+
+# Engagement
+engagement_time_msec (number, for non-standard interactions)
+```
+
+### Custom Parameter Naming Pattern
+
+For parameters outside standard ecommerce:
+
+```
+[context]_[attribute]
+
+context: user, session, page, form, experiment, offer
+attribute: (descriptive noun) id, name, status, value, count
+
+Examples:
+- user_type (free, premium, enterprise)
+- experiment_variant (control, variant_a, variant_b)
+- form_error_message (required_field_missing, invalid_email)
+- offer_discount_percent (number)
+- page_section (header, footer, sidebar, main_content)
+```
+
+### Parameter Type Consistency Checklist
+
+For each custom parameter, define its type once and enforce it:
+
+```
+Parameter: user_engagement_score
+Type: Number (0–100)
+Source: server-side GTM calculation
+Used in events: page_view, purchase, form_submit
+Never send as: String ("45"), Boolean
+
+Parameter: ab_test_variant
+Type: String (exactly: "control", "variant_a", "variant_b")
+Source: Optimizely API
+Never send as: Number, Boolean
+```
+
+---
+
+## GA4 Custom Dimensions
+
+### Core Rules
+
+- **Use the same name as the GA4 event parameter**: If your parameter is `user_type`, the dimension should be `user_type`, not `User Type`
+- **Scope correctly**: User-scoped dimensions (like `subscription_status`) vs event-scoped (like `product_color`)
+- **Use snake_case**: `subscription_status`, not `SubscriptionStatus`
+- **Avoid conflict with default dimensions**: GA4 reserves names like `page_title`, `page_location`, `source`, `medium`
+- **Maximum 500 dimensions**: Start with 20–30 core dimensions; add more only if you have a measurement reason
+
+### Dimension Naming by Scope
+
+**User-scoped** (describes the person across all sessions):
+```
+user_type                 # free, premium, enterprise
+subscription_status       # active, expired, cancelled
+user_age_range            # 18-24, 25-34, etc.
+user_location_region      # US, EU, APAC
+customer_lifetime_value   # monetary tier
+user_cohort_date          # YYYY-MM date first seen
+```
+
+**Event-scoped** (describes this specific event):
+```
+product_color             # red, blue, green
+product_availability      # in_stock, backorder, discontinued
+form_field_error          # email_invalid, required_field_missing
+experiment_variant        # control, variant_a, variant_b
+```
+
+---
+
+## GTM Tag Naming
+
+### Core Pattern
+
+```
+[Type] - [Brand/Context] - [Action] - [Platform]
+
+Type: GA4, Meta, LinkedIn, Hotjar, Klaviyo, etc.
+Brand: Which brand owns this (or "Global" if shared)
+Action: What does the tag do? (Pageview, Purchase, FormSubmit, etc.)
+Platform: Web, Mobile, Both (or omit if Web is default)
+
+Examples:
+- GA4 - Acme - Pageview
+- GA4 - Acme - Purchase - Mobile
+- Meta Pixel - Acme - AddToCart
+- Hotjar - Global - Scroll Depth
+- Klaviyo - SamsungUS - EmailCapture
+- LinkedIn Insight - Global - Pageview
+```
+
+### Anti-Patterns
+
+```
+❌ Track Purchase           (too vague, no vendor)
+❌ ga4-purchase            (inconsistent case, missing context)
+❌ Google Analytics Tag 1   (uninformative numbering)
+❌ PurchaseEventTracking   (camelCase instead of pattern)
+✅ GA4 - Acme - Purchase   (clear, scannable, consistent)
+```
+
+### Naming by Tag Type
+
+**Analytics vendors** (GA4, Adobe, Mixpanel):
+```
+GA4 - [Brand] - Pageview
+GA4 - [Brand] - Purchase
+GA4 - [Brand] - FormSubmit
+```
+
+**Ad platforms** (Meta, LinkedIn, Google Ads):
+```
+Meta Pixel - [Brand] - Purchase
+LinkedIn - [Brand] - LeadForm
+Google Ads - [Brand] - Conversion
+```
+
+**Behavioral analytics** (Hotjar, Crazy Egg, SessionCam):
+```
+Hotjar - [Brand] - Heatmap Setup
+Crazy Egg - [Brand] - Session Recording
+```
+
+**Email/CRM** (Klaviyo, HubSpot, Iterable):
+```
+Klaviyo - [Brand] - EmailCapture
+HubSpot - [Brand] - LeadSubmit
+```
+
+---
+
+## GTM Trigger Naming
+
+### Core Pattern
+
+```
+[Event Type] - [Condition] - [Details]
+
+Event Type: Pageview, Click, Scroll, Form, Timer, Element Visibility, History Change
+Condition: What makes this trigger fire?
+Details: (optional) further specificity
+
+Examples:
+- Pageview - Checkout Success
+- Click - AddToCart Button
+- Scroll - 50% Depth
+- Form - Newsletter Signup Submit
+- Visibility - Video Player Appears
+```
+
+### Standard Trigger Naming Reference
+
+**Pageview triggers:**
+```
+Pageview - All
+Pageview - Homepage
+Pageview - Checkout Page
+Pageview - Thank You Page
+```
+
+**Click triggers:**
+```
+Click - AddToCart Button
+Click - ExternalLink
+Click - Download Button
+Click - Video Play Button
+```
+
+**Form triggers:**
+```
+Form - Submit - Contact Form
+Form - Submit - Newsletter Signup
+Form - Field Blur - Email Validation
+```
+
+**Visibility triggers:**
+```
+Visibility - Hero Image (appears for 3 sec)
+Visibility - Video Player
+Visibility - Bottom Section (scroll-triggered)
+```
+
+**Custom event triggers:**
+```
+Custom Event - purchase_complete
+Custom Event - form_error
+Custom Event - video_complete
+```
+
+---
+
+## GTM Variable Naming
+
+### Core Pattern
+
+```
+[Source] - [Purpose] - [Scope]
+
+Source: DL (dataLayer), Cookie, FirstParty (server-side), Analytics, Query, Const
+Purpose: What info does this hold?
+Scope: (optional) Global or platform-specific
+
+Examples:
+- DL - EventName
+- Cookie - UserID
+- DL - ProductID - Ecommerce
+- Const - GA4MeasurementID
+- Query - UTMSource
+- FirstParty - SessionID - ServerSide
+```
+
+### By Variable Type
+
+**Data Layer variables:**
+```
+DL - EventName
+DL - EventValue
+DL - ProductID
+DL - ProductCategory
+DL - CartTotal
+DL - UserType
+```
+
+**Cookie variables:**
+```
+Cookie - UserID
+Cookie - SessionID
+Cookie - ConsentState
+Cookie - ABTestVariant
+```
+
+**Built-in variables:**
+```
+{{Hostname}}
+{{Page URL}}
+{{Page Path}}
+{{Referrer}}
+{{Click URL}}
+{{Event}}              (for gtag-based events)
+```
+
+**Custom variables to create:**
+```
+# Use "Const" for static values
+Const - GoogleTagID         (value: G-XXXXX)
+Const - GA4EventPrefix      (value: "acme_" for namespacing)
+
+# Use "JS Variable" for computed values
+JS - ProductTierFromPrice   (calculate tier based on {{DL - ProductID}})
+JS - ConsentCheckPassed     (true/false logic)
+```
+
+### Variable Lookup Table
+
+If you use lookup tables to map values (e.g., mapping product IDs to categories):
+
+```
+Lookup - ProductIDtoCategory
+Lookup - EventNameAliasing
+Lookup - CountryToRegion
+```
+
+---
+
+## Server-Side GTM Naming
+
+### Client (Source) Naming
+
+```
+[Platform] - [Purpose] - [Brand]
+
+Platform: Web, Mobile, iOS, Android, Backend, CMS
+Purpose: Data Collection, Event Processing, Conversion Tracking
+Brand: (if applicable)
+
+Examples:
+- Web - Data Collection - Global
+- Mobile - Event Processing - Acme
+- Backend - Conversion Tracking - Acme
+```
+
+### Server-Side Tag Naming
+
+```
+[Platform] - [Vendor] - [Action]
+
+Examples:
+- Web - GA4 - Event Send
+- Web - Meta - ConversionAPI
+- Web - CustomAPI - Webhook
+```
+
+### Server-Side Variable Naming
+
+```
+sGTM - [Purpose]
+
+Examples:
+- sGTM - ClientID
+- sGTM - ConversionValue
+- sGTM - EnrichedEventData
+```
+
+---
+
+## GTM Folder Organization
+
+### Folder Structure
+
+Organize your GTM container into logical folders to reduce cognitive load:
+
+```
+GTM Container Structure:
+├── Core Setup
+│   ├── Built-in Variables
+│   ├── Custom Variables
+│   ├── Data Layer Debugging
+│
+├── GA4 - Pageview & Events
+│   ├── GA4 Configuration
+│   ├── GA4 - Pageview
+│   ├── GA4 - Event: Purchase
+│   ├── GA4 - Event: FormSubmit
+│   ├── GA4 - Event: VideoPlay
+│
+├── Ad Platforms
+│   ├── Meta Pixel - Global
+│   ├── Google Ads - Conversion
+│   ├── LinkedIn - Pageview
+│
+├── Behavioral Analytics
+│   ├── Hotjar - Setup
+│   ├── Crazy Egg - Sessions
+│
+├── Email & CRM
+│   ├── Klaviyo - Newsletter
+│   └── HubSpot - Lead Tracking
+│
+├── Error Handling & QA
+│   ├── GTM Error Handler
+│   ├── Data Validation
+│   └── Consent Checks
+│
+└── Archive (deprecated items)
+```
+
+### Folder Naming Rules
+
+- **Use CapitalizedCase for folder names** (but tags inside remain `Type - Action` pattern)
+- **Start with vendor/platform name** for vendor-specific folders
+- **Group by purpose** (not by implementer)
+- **Mark deprecated** with [Archive] prefix if not deleting immediately
+
+---
+
+## Multi-Brand Considerations
+
+### Brand Prefix in Event Names
+
+If you have multiple brands, add a brand-scoped prefix:
+
+```
+Brand A:  acme_purchase_complete    (or acme.purchase_complete)
+Brand B:  samsung_purchase_complete
+
+Or use a parameter:
+brand: "acme"        (sent in all events)
+```
+
+This lets you easily filter reporting by brand in GA4 and BigQuery.
+
+### Brand-Scoped Dimensions
+
+```
+User-scoped:
+- brand_name                 (which brand is this user associated with)
+- brand_subscription_status  (varies by brand)
+
+Event-scoped:
+- brand_product_line         (which product line, if multi-brand)
+```
+
+---
+
+## Implementation Checklist
+
+- [ ] Event naming: All custom events use `snake_case`, no PII, under 40 chars
+- [ ] Parameters: All parameters use `snake_case`, consistent types across events
+- [ ] Custom dimensions: Match parameter names, no conflicts with GA4 defaults
+- [ ] GTM tags: Follow `[Type] - [Brand] - [Action]` pattern
+- [ ] GTM triggers: Follow `[EventType] - [Condition]` pattern
+- [ ] GTM variables: Follow `[Source] - [Purpose]` pattern
+- [ ] sGTM: All clients and tags named consistently
+- [ ] Folders: Organized by purpose, not by person
+- [ ] Documentation: Naming standard linked in GTM container notes
+- [ ] Enforcement: New contributors copy naming patterns, not create their own
+
+---
+
+## Reference: Optimize Smart Patterns
+
+This guide is inspired by conventions developed by the [Optimize Smart](https://www.optimizesmart.com/) team, who advocate for:
+
+1. **Consistency > cleverness** — Choose boring, predictable names
+2. **Scannability** — A developer should understand a tag's purpose from its name alone
+3. **Enforcement** — Once you define a pattern, enforce it with code review or tooling
+4. **Documentation** — Link this checklist in your GTM, not buried in Confluence
+
+---
+
+## Related Resources
+
+- [Enterprise GTM Governance](/security/enterprise-gtm-governance/) — Enforcing standards at scale
+- [Community Tools & Extensions](/resources/community-tools/) — Tools to audit naming compliance
+- [GTM Best Practices](/resources/gtm-best-practices/) — Broader implementation patterns

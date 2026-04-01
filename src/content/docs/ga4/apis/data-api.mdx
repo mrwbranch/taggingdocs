@@ -638,10 +638,19 @@ If sampling rate is below 100%, consider narrowing the date range, reducing dime
 
 ## Rate limits and error handling
 
-| Quota | Limit |
+The Data API uses a token-based quota model:
+
+| Tier | Daily quota | Hourly quota |
+|------|-------------|-------------|
+| Standard GA4 | 25,000 tokens/day | 1,250 tokens/hour |
+| GA4 360 | 250,000 tokens/day | 12,500 tokens/hour |
+
+Each API request consumes tokens based on query complexity. A typical `runReport` request costs 10–15 tokens; complex queries with many dimensions may cost more. The API returns token usage in response headers.
+
+Additional limits:
+
+| Limit | Value |
 |-------|-------|
-| Requests per day | 200,000 |
-| Requests per hour | 40,000 |
 | Concurrent requests | 10 |
 | Rows per request | 10,000 |
 

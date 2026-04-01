@@ -1,13 +1,13 @@
 ---
 title: "Attribution Queries"
-description: "Implement first-touch, last-touch, linear, time-decay, and position-based attribution models in BigQuery SQL using GA4 event data."
+description: "Implement custom multi-touch attribution models in BigQuery SQL using GA4 event data. These SQL implementations are now the primary way to do complex attribution since most UI models were removed."
 sidebar:
   order: 8
 ---
 
 import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Attribution analysis in BigQuery gives you full control over the model, lookback window, and conversion definition. Unlike GA4's built-in attribution (which is session-scoped and uses last non-direct click in standard reports), BigQuery attribution can span the full user lifetime and credit any event or channel you define.
+Attribution analysis in BigQuery gives you full control over the model, lookback window, and key event definition. GA4's UI now supports only Data-driven and Last-click attribution models. For other multi-touch attribution approaches (first-touch, linear, time-decay, position-based), BigQuery SQL implementations are your primary option. BigQuery attribution can span the full user lifetime and credit any event or channel you define.
 
 ## Foundation: building the touchpoint sequence
 

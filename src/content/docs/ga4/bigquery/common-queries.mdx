@@ -532,6 +532,23 @@ Session start events may not exist for all sessions (due to identity stitching o
 
 If an event does not have a parameter, `(SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'my_param')` returns NULL — which is correct. Just handle NULLs appropriately in your downstream logic.
 
+## Community Query Resources
+
+The queries in this article are solid starting points, but the GA4 + BigQuery community has built extensive libraries of production-tested SQL. Before writing a complex query from scratch, check these resources — they likely have something close to what you need.
+
+**GitHub repositories:**
+- [aliasoblomov/Bigquery-GA4-Queries](https://github.com/aliasoblomov/Bigquery-GA4-Queries) — 65+ curated queries covering sessions, users, events, ecommerce, funnels, and attribution. Well-documented with expected results and parameter notes.
+
+**No-code query generators:**
+- [GA4SQL.com](https://www.ga4sql.com/) — Build BigQuery queries without writing SQL. Select your dataset, choose analysis type, configure filters — the tool generates valid SQL.
+- [GA4BQ.com](https://www.ga4bq.com/) — Another no-code builder with a different UI if you prefer it.
+
+**Community analytics resources:**
+- [GA4BigQuery.com](https://www.ga4bigquery.com/) — Johan van de Werken's resource site with query examples and BigQuery best practices.
+- [Tanelytics.com](https://tanelytics.com/) — Taneli Salonen's site focused on GA4 and BigQuery integration, with analysis patterns and query tutorials.
+
+---
+
 ## Related articles
 
 <CardGrid>

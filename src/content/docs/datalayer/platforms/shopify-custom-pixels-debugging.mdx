@@ -1,0 +1,156 @@
+---
+title: "Shopify Custom Pixels: Debugging & Sandbox Guide"
+description: "How to debug GTM and tracking inside Shopify's Custom Pixel sandbox — console context switching, cross-origin workarounds, the productVariants gotcha, and postMessage patterns."
+sidebar:
+  order: 3
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Custom Pixels run in a cross-origin sandboxed iframe. This restriction is intentional—it protects checkout data from malicious scripts. But it makes debugging harder. This guide covers the tools and patterns that actually work.
+
+## The Sandbox Reality
+
+Custom Pixels cannot access the parent page. This fails immediately with a `SecurityError`:
+
+```javascript
+// ❌ Throws: SecurityError: Blocked a frame with origin
+console.log(window.parent.dataLayer);
+console.log(document.cookie);
+console.log(localStorage.getItem('key'));
+```
+
+You get a local dataLayer inside the pixel context. That's what you debug against.
+
+## Debugging Without GTM Preview Mode
+
+GTM Preview Mode doesn't connect to containers running inside Custom Pixel sandboxes. The fix is straightforward.
+
+<Steps>
+1. Open browser DevTools → **Console** tab
+2. Look for the JavaScript context dropdown (top-left, usually shows "top")
+3. Click it and select the Custom Pixel iframe (often labeled `sandbox-xxxxxxx` or a Shopify subdomain)
+4. Now you can inspect the pixel's local environment
+5. Run `console.log(dataLayer)` to see events the pixel receives
+</Steps>
+
+Use this debug pixel to verify events are firing:
+
+```javascript
+// Debug pixel - add this temporarily to verify events
+analytics.subscribe('all_events', (event) => {
+  console.log('[Custom Pixel Debug]', event.name, event.data);
+});
+```
+
+Run this in the iframe console context. You'll see all events in real-time: `page_view`, `add_to_cart`, `checkout_completed`, etc.
+
+## The `productVariants` vs `products` Gotcha
+
+Shopify's data structure is inconsistent. Checkout events use `checkout.lineItems`, but there is no `checkout.products` property.
+
+The correct path:
+
+```javascript
+// ❌ This doesn't work - products doesn't exist
+const items = event.data.checkout.products;
+
+// ✅ Correct - use lineItems
+const items = event.data.checkout.lineItems.map((item) => ({
+  item_id: item.variant?.sku || String(item.variant?.id),
+  item_name: item.title,
+  item_variant: item.variant?.title !== 'Default Title' ? item.variant?.title : '',
+  price: parseFloat(item.variant?.price?.amount || 0),
+  quantity: item.quantity,
+}));
+```
+
+Always iterate `lineItems` and extract variant data via `item.variant`. The property is nested, not at the root.
+
+## postMessage: Cross-Origin Communication
+
+When you need to trigger something on the parent page from inside the pixel, `window.parent.postMessage()` works in one direction: out of the sandbox.
+
+**Inside the Custom Pixel:**
+
+```javascript
+// Send data to parent
+window.parent.postMessage({
+  type: 'shopify_pixel_event',
+  eventName: 'purchase',
+  data: { transaction_id: checkout.order?.id }
+}, '*');
+```
+
+**In theme.liquid or GTM Custom HTML on the parent page:**
+
+```javascript
+window.addEventListener('message', function(event) {
+  // Validate origin
+  if (event.data?.type === 'shopify_pixel_event') {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: event.data.eventName,
+      ecommerce: event.data.data
+    });
+  }
+});
+```
+
+<Aside type="caution">
+Using `'*'` as the target origin broadcasts the message to any window. For production, specify the exact origin: `'https://example.com'`. This prevents leaking data to unintended frames.
+</Aside>
+
+## Network Request Debugging
+
+`fetch()` works inside the sandbox. Inspect the **Network** tab in DevTools to verify outbound requests:
+
+- Measurement Protocol hits to Google Analytics
+- Server-side conversion pixels
+- Custom API calls to your backend
+
+Filter by domain to focus on your requests. Check response status and payloads.
+
+## Common Errors and Fixes
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `SecurityError: Blocked a frame with origin` | Accessing parent window/DOM from pixel | Use local `dataLayer` and `postMessage` for parent communication |
+| `analytics is not defined` | Pixel not loaded via Customer Events | Ensure pixel is added in Shopify Admin → Settings → Customer Events |
+| Events fire but no data in GA4 | GTM not loaded or tag misconfigured | Check Network tab for GTM container load; switch console context to sandbox and log event payloads |
+| Duplicate events in GA4 | Multiple tracking sources firing | See Shopify Double-Tracking Prevention guide |
+
+## Network Request Debugging
+
+Since `fetch()` works in the sandbox, you can inspect network requests in DevTools to verify Measurement Protocol hits or server-side requests are going out correctly. Use the Network tab to filter requests and check response codes and payloads.
+
+## Key Takeaways
+
+- **Change console context** to the iframe to debug pixel code
+- **No parent access** — work within the sandbox; use `postMessage` to communicate outward
+- **Use `lineItems`, not `products`** — always access variant data via the nested `item.variant` property
+- **postMessage is one-way** from sandbox to parent
+- **Validate `postMessage` origins** in production
+- **Use Network tab** to verify outbound requests are firing
+
+---
+
+## Related Articles
+
+<CardGrid>
+  <LinkCard
+    title="Shopify Custom Pixels"
+    description="Setup, architecture, and supported events"
+    href="/datalayer/platforms/shopify-custom-pixels/"
+  />
+  <LinkCard
+    title="Shopify Double-Tracking Prevention"
+    description="Avoid duplicate events when mixing pixels and GTM"
+    href="/recipes/shopify-double-tracking-prevention/"
+  />
+  <LinkCard
+    title="Shopify Server-Side Tracking"
+    description="Implement Conversions API and server-side pixels"
+    href="/datalayer/platforms/shopify-server-side/"
+  />
+</CardGrid>

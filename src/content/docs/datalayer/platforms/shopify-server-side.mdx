@@ -1,0 +1,544 @@
+---
+title: "Server-Side Tracking for Shopify"
+description: "End-to-end guide to implementing server-side GTM with Shopify, including Custom Pixels, ecommerce event mapping, and sGTM integration."
+sidebar:
+  order: 20
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Shopify and server-side GTM form a powerful combination: you get first-party data control, accurate event tracking during checkout (where browsers often block third-party tags), and direct integration with Shopify's conversion events.
+
+But the integration requires coordination. Shopify's Custom Pixels have specific APIs, checkout is no longer accessible from client-side JavaScript, and you must map Shopify's ecommerce events to GA4's expected schema.
+
+This guide walks through the complete setup.
+
+---
+
+## Overview: Shopify Data Flow
+
+```
+Shopify Post-Purchase Event
+    ↓
+Custom Pixel (client-side, catches some events)
+    ↓
+Webhook (server-side, all events)
+    ↓
+Your Server-Side GTM
+    ↓
+GA4, other platforms
+```
+
+You will need:
+1. **Shopify Custom Pixel** for client-side tracking (product page, add to cart, initiate checkout)
+2. **Shopify Webhook** for post-purchase events (order.created, refund.created)
+3. **Server-Side GTM** to enrich and forward events to GA4
+4. **Custom app** to configure webhooks (or Shopify CLI)
+
+---
+
+## Part 1: Client-Side Tracking via Custom Pixel
+
+### Create a Custom Pixel
+
+1. Shopify Admin → Settings → Customer events
+2. Click **Add custom pixel**
+3. Paste this JavaScript:
+
+```javascript
+// Shopify Custom Pixel for GA4
+declare global {
+  interface Window {
+    gtag: any;
+  }
+}
+
+export function initialize() {
+  // Retrieve GA4 Measurement ID from pixel config
+  // (or hardcode if not configurable)
+  const measurementID = 'G-XXXXXXXXXX';
+
+  // Initialize Google Analytics (gtag)
+  if (!window.gtag) {
+    const script = document.createElement('script');
+    script.src = `https://www.googletagmanager.com/gtag/js?id=${measurementID}`;
+    document.head.appendChild(script);
+
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = function () {
+      dataLayer.push(arguments);
+    };
+    gtag('js', new Date());
+    gtag('config', measurementID);
+  }
+
+  // Track pageview
+  gtag('event', 'page_view');
+
+  // Listen for Shopify events
+  subscribe('product_viewed', (event) => {
+    handleProductViewed(event);
+  });
+
+  subscribe('product_added_to_cart', (event) => {
+    handleAddToCart(event);
+  });
+
+  subscribe('checkout_started', (event) => {
+    handleInitiateCheckout(event);
+  });
+
+  subscribe('payment_info_submitted', (event) => {
+    handlePaymentInfoSubmitted(event);
+  });
+}
+
+function handleProductViewed(event: any) {
+  const { data } = event;
+
+  gtag('event', 'view_item', {
+    items: [
+      {
+        item_id: data.productVariant.id,
+        item_name: data.productVariant.product.title,
+        item_variant: data.productVariant.title,
+        price: data.productVariant.price.amount,
+        currency: data.productVariant.price.currencyCode,
+        quantity: 1
+      }
+    ]
+  });
+}
+
+function handleAddToCart(event: any) {
+  const { data } = event;
+
+  gtag('event', 'add_to_cart', {
+    items: [
+      {
+        item_id: data.cartLine.merchandise.id,
+        item_name: data.cartLine.merchandise.product.title,
+        item_variant: data.cartLine.merchandise.title,
+        price: data.cartLine.merchandise.price.amount,
+        currency: data.cartLine.cost.totalAmount.currencyCode,
+        quantity: data.cartLine.quantity
+      }
+    ],
+    value: data.cart.cost.totalAmount.amount,
+    currency: data.cart.cost.totalAmount.currencyCode
+  });
+}
+
+function handleInitiateCheckout(event: any) {
+  const { data } = event;
+
+  const items = data.checkout.lineItems.map((line: any) => ({
+    item_id: line.merchandise.id,
+    item_name: line.merchandise.product.title,
+    item_variant: line.merchandise.title,
+    price: line.merchandise.price.amount,
+    currency: line.cost.totalAmount.currencyCode,
+    quantity: line.quantity
+  }));
+
+  gtag('event', 'begin_checkout', {
+    items: items,
+    value: data.checkout.subtotalPrice.amount,
+    currency: data.checkout.currencyCode
+  });
+}
+
+function handlePaymentInfoSubmitted(event: any) {
+  const { data } = event;
+
+  gtag('event', 'add_payment_info', {
+    currency: data.checkout.currencyCode,
+    value: data.checkout.subtotalPrice.amount
+  });
+}
+```
+
+### Save the Pixel
+
+The pixel is now active. Test it:
+1. Go to your Shopify store
+2. Open DevTools → Network tab
+3. Add a product to cart
+4. Look for `collect` requests to `www.google-analytics.com`
+
+---
+
+## Part 2: Post-Purchase Events via Webhook
+
+Custom Pixels do not have access to purchase data (checkout is isolated). You must use a webhook.
+
+### Create a Private App for Webhooks
+
+1. Shopify Admin → Apps and integrations → App and sales channel settings
+2. Click **Develop apps**
+3. Create a new app (name: "GA4 Server Events")
+4. In the app, navigate to **Configuration**
+5. Under "Admin API scopes", check:
+   - `read:orders`
+   - `read:fulfillments`
+6. Save and install app
+7. Copy the **API access token** (you will use this below)
+
+### Register Webhook for Order Created
+
+```bash
+# Use Shopify CLI or a direct HTTP request
+
+# Option 1: Shopify CLI
+shopify app generate extension --type webhook
+
+# Option 2: Direct HTTP (replace ACCESS_TOKEN, SHOP_NAME)
+curl -X POST https://YOUR_SHOP.myshopify.com/admin/api/2024-01/graphql.json \
+  -H "X-Shopify-Access-Token: YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation { webhookSubscriptionCreate(topic: ORDER_CREATED, webhookSubscription: { format: JSON, address: \"https://your-server.com/webhooks/shopify/order\"}) { userErrors { field message } webhookSubscription { id } } }"
+  }'
+```
+
+### Webhook Handler (Your Backend)
+
+```python
+# Flask example
+import hmac
+import hashlib
+import json
+import base64
+from flask import request
+
+SHOPIFY_API_SECRET = 'your_api_secret'
+
+@app.route('/webhooks/shopify/order', methods=['POST'])
+def shopify_order_webhook():
+    # Verify webhook authenticity
+    webhook_signature = request.headers.get('X-Shopify-Hmac-SHA256')
+    body = request.get_data()
+
+    computed_hmac = base64.b64encode(
+        hmac.new(
+            SHOPIFY_API_SECRET.encode('utf-8'),
+            body,
+            hashlib.sha256
+        ).digest()
+    ).decode()
+
+    if not hmac.compare_digest(webhook_signature, computed_hmac):
+        return {'error': 'Invalid signature'}, 403
+
+    # Parse order data
+    data = json.loads(body)
+    order = data  # Entire webhook payload is the order object
+
+    # Transform to GA4 format and send to server-side GTM
+    purchase_event = {
+        'client_id': get_client_id_from_order(order),
+        'event_name': 'purchase',
+        'event_params': {
+            'transaction_id': str(order['id']),
+            'value': float(order['total_price']),
+            'currency': order['currency'],
+            'tax': float(order['total_tax']),
+            'shipping': float(order['total_shipping']),
+            'coupon': order.get('discount_code', '') or '',
+            'items': [
+                {
+                    'item_id': line['sku'] or line['product_id'],
+                    'item_name': line['title'],
+                    'item_variant': line['variant_title'],
+                    'price': float(line['price']),
+                    'quantity': line['quantity']
+                }
+                for line in order['line_items']
+            ]
+        }
+    }
+
+    # Send to server-side GTM
+    send_to_sgtm(purchase_event)
+
+    return {'status': 'ok'}, 200
+
+def get_client_id_from_order(order):
+    # Try to extract GA4 client_id from order note or custom field
+    # If not available, use Shopify customer ID as fallback
+    note = order.get('note', '')
+    if 'ga4_client_id=' in note:
+        return note.split('ga4_client_id=')[1].split('&')[0]
+
+    # Fallback: use email as identifier for server-side linking
+    return f"shopify-{order['customer']['email']}"
+```
+
+### Collect GA4 Client ID in Checkout
+
+The challenge: Custom Pixels do not have access to checkout, so you cannot directly collect client_id there.
+
+**Solution:** Pass it via order note or checkout attribute
+
+```javascript
+// In your Custom Pixel:
+gtag('get', 'G-XXXXXXXXXX', 'client_id', (clientID) => {
+  // Store in localStorage; it will be accessible post-checkout
+  localStorage.setItem('ga4_client_id', clientID);
+
+  // Alternatively, if you have a backend:
+  // POST to your server with client_id, server includes it in checkout attributes
+});
+```
+
+Then after the purchase, retriev it from localStorage (thank you page) or include it in the order note via a pre-checkout webhook.
+
+---
+
+## Part 3: Server-Side GTM Configuration
+
+### Set Up sGTM Web Client
+
+In your Server-Side GTM, create a web client that listens for requests from Shopify Custom Pixel:
+
+```javascript
+// Server-Side GTM: Web Client configuration
+{
+  "requestPaths": ["/gtm-event"],
+  "userIdParameter": "user_id"
+}
+```
+
+### Create a Tag to Forward to GA4
+
+```javascript
+// Server-Side GTM: GA4 Measurement Protocol Tag
+
+const sendHttpRequest = require('sendHttpRequest');
+const JSON_STRINGIFY = require('JSON').stringify;
+
+const clientId = data.get('client_id');
+const eventName = data.get('event_name');
+const eventParams = data.get('event_params') || {};
+
+const payload = {
+  'client_id': clientId,
+  'events': [
+    {
+      'name': eventName,
+      'params': eventParams
+    }
+  ]
+};
+
+const MEASUREMENT_ID = 'G-XXXXXXXXXX';
+const API_SECRET = 'your-api-secret'; // From GA4 admin
+
+sendHttpRequest(
+  `https://www.google-analytics.com/mp/collect?measurement_id=${MEASUREMENT_ID}&api_secret=${API_SECRET}`,
+  {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    payload: JSON_STRINGIFY(payload)
+  },
+  (statusCode) => {
+    data.set('eventSent', statusCode === 204);
+  }
+);
+```
+
+---
+
+## Part 4: Ecommerce Event Mapping
+
+### Shopify Event → GA4 Event
+
+Map Shopify Custom Pixel events to GA4 standard events:
+
+| Shopify Event | GA4 Event | Notes |
+|---|---|---|
+| `product_viewed` | `view_item` | Standard ecommerce |
+| `product_added_to_cart` | `add_to_cart` | Standard ecommerce |
+| `checkout_started` | `begin_checkout` | Standard ecommerce |
+| `payment_info_submitted` | `add_payment_info` | Standard ecommerce |
+| (webhook) `order.created` | `purchase` | Via webhook, not Custom Pixel |
+
+### Shopify Item Properties → GA4 Items Array
+
+Always map to GA4's items array structure:
+
+```javascript
+// Shopify merchandise object
+{
+  "id": "gid://shopify/ProductVariant/123456",
+  "price": {"amount": "29.99", "currencyCode": "USD"},
+  "title": "Red Widget",
+  "product": {"title": "Widget"}
+}
+
+// Map to GA4 items
+{
+  "item_id": "123456",  // Use variant ID, not the full GID
+  "item_name": "Widget",  // Product name
+  "item_variant": "Red",  // Variant title
+  "price": 29.99,  // Numeric price
+  "currency": "USD"
+}
+```
+
+### Handle Missing Client ID
+
+If client_id is not available (common in checkout), use email or Shopify customer ID:
+
+```javascript
+function getClientIdentifier(order) {
+  // Prefer GA4 client_id
+  if (order.note && order.note.includes('ga4_client_id=')) {
+    return order.note.split('ga4_client_id=')[1].split('&')[0];
+  }
+
+  // Fallback to customer email (less ideal, but works)
+  if (order.customer && order.customer.email) {
+    return `email-${order.customer.email}`;
+  }
+
+  // Last resort: Shopify customer ID
+  return `shopify-${order.customer_id}`;
+}
+```
+
+---
+
+## Part 5: Handling Shopify Checkout Deprecation
+
+### The Change
+
+Shopify deprecated direct access to checkout.liquid in favor of Checkout Extensibility UI. This means you can no longer inject JavaScript directly into the checkout form.
+
+### Impact on GA4 Tracking
+
+- Client-side Custom Pixels still work (Shopify provides the events)
+- You cannot inject custom code to capture checkout fields
+- You must rely on Custom Pixels + webhooks
+
+### Migration Steps
+
+1. **Disable checkout.liquid customizations** — Remove any custom JS you added to checkout
+2. **Ensure Custom Pixel is active** — It should be in Shopify Admin → Customer events
+3. **Test webhook delivery** — In Shopify Admin, check the webhook logs to verify order events are reaching your server
+
+```bash
+# Check webhook status via Shopify API
+curl -X GET https://YOUR_SHOP.myshopify.com/admin/api/2024-01/webhooks.json \
+  -H "X-Shopify-Access-Token: YOUR_ACCESS_TOKEN"
+```
+
+---
+
+## Part 6: Testing the Integration
+
+### Test Custom Pixel (Client-Side)
+
+1. Shopify Admin → Customer events → Your pixel → View dashboard
+2. Add a product to cart on your storefront
+3. Check the pixel dashboard for events (should show `product_viewed`, `product_added_to_cart`)
+
+### Test Webhook (Server-Side)
+
+```bash
+# Trigger a test webhook (or make a test order)
+curl -X POST https://YOUR_SHOP.myshopify.com/admin/api/2024-01/graphql.json \
+  -H "X-Shopify-Access-Token: YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation { webhookSubscriptionTest(id: \"gid://shopify/WebhookSubscription/123456\") { webhookSubscription { id } userErrors { field message } } }"
+  }'
+```
+
+Then check your server logs for the incoming webhook.
+
+### Test in GA4
+
+1. GA4 → DebugView
+2. Filter by `transaction_id` (from Shopify order)
+3. You should see the `purchase` event with all items
+
+---
+
+## Troubleshooting
+
+### Custom Pixel Events Not Firing
+
+**Check:** Is the Custom Pixel published and active?
+```
+Shopify Admin → Settings → Customer events → Your pixel → Published?
+```
+
+**Check:** Are store events enabled?
+```
+Shopify Admin → Settings → Customer events → Turn on events
+```
+
+### Webhook Not Delivering
+
+**Check:** Webhooks are disabled by default; verify it is enabled:
+```
+Shopify Admin → Settings → Apps and integrations → Webhooks
+```
+
+**Check:** Is the API key/secret correct?
+```
+Shopify Admin → Apps and integrations → Your app → API credentials
+```
+
+**Check:** Is your server responding with 200?
+The webhook handler must return HTTP 200 within 5 seconds.
+
+### Client ID Not Present in Purchase Events
+
+**Workaround:** Use email or customer ID instead of client_id. In your server-side setup:
+
+```javascript
+// Server-side GTM: Use email as user identifier for purchases from Shopify
+const userIdentifier = data.get('client_id') || `email-${data.get('customer_email')}`;
+gtag('event', 'purchase', {
+  ...purchaseData,
+  user_id: userIdentifier
+});
+```
+
+Then in GA4, set up user ID views to link email-based users to their web sessions.
+
+---
+
+## Complete Flow Diagram
+
+```
+User on Shopify Store
+  ↓
+[Custom Pixel runs]
+  → GA4: page_view, product_viewed, add_to_cart, etc. (client-side)
+  ↓
+User completes purchase
+  ↓
+[Shopify webhook triggers]
+  → Your server receives order.created
+  → Transform to GA4 purchase event
+  → POST to server-side GTM
+  → server-side GTM forwards to GA4
+  ↓
+GA4 now has complete funnel:
+  → product_view → add_to_cart → purchase
+  → All linked by client_id or user_id
+```
+
+---
+
+## Related Resources
+
+- [Server-Side GTM Setup](/server-side/getting-started/) — sGTM configuration overview
+- [Measurement Protocol Guide](/server-side/measurement-protocol/) — Sending events to GA4
+- [Client ID Retrieval Patterns](/client-side/tracking/client-id-patterns/) — Extracting and storing GA4 client_id
+- [GA4 Ecommerce Implementation](/ga4/ecommerce/ecommerce-events/) — GA4 ecommerce event structure

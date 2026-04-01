@@ -1,0 +1,512 @@
+---
+title: "Client ID Retrieval and Storage Patterns"
+description: "Extract GA4 client_id, store in databases and CRMs, and use for Measurement Protocol and offline conversion attribution."
+sidebar:
+  order: 15
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The GA4 client_id is your universal user identifier on the web. It is also the key to linking online behavior to offline conversions, CRM data, and server-side events. But GA4 does not expose client_id easily—you must extract it deliberately.
+
+This guide covers the patterns for reliably retrieving client_id, storing it where you need it, and using it for cross-channel attribution.
+
+---
+
+## Why Client ID Matters
+
+GA4 client_id is:
+
+- **A stable, pseudonymous identifier** that persists for 2 years
+- **The only common key** between GA4, your CRM, your email platform, and your data warehouse
+- **Required for Measurement Protocol** if you want to associate server-side events with a web session
+- **Essential for offline conversion attribution** (linking form submissions to CRM records to purchases)
+
+Without client_id, you cannot:
+- Match a website session to a Salesforce lead
+- Link an offline purchase back to the ad that drove the user to your site
+- Send conversion data back to ad platforms using Measurement Protocol
+
+---
+
+## Method 1: gtag('get') API (Recommended)
+
+The simplest and most reliable approach is to use the Google tag's built-in API.
+
+### Basic Implementation
+
+```javascript
+// Get the client_id from GA4
+gtag('get', 'G-XXXXXXXXXX', 'client_id', (client_id) => {
+  console.log('GA4 Client ID:', client_id);
+
+  // Now do something with it: store, send, populate form
+  storeClientIDInCookie(client_id);
+  populateHiddenFormField(client_id);
+  sendToCRM(client_id);
+});
+```
+
+### Full Example: Populate Form Field
+
+```html
+<!-- Hidden form field for GA4 client_id -->
+<form id="contact-form">
+  <input type="text" name="email" />
+  <input type="hidden" name="ga4_client_id" id="ga4_client_id" />
+  <button type="submit">Submit</button>
+</form>
+
+<script>
+  // When page loads, retrieve client_id and populate hidden field
+  gtag('get', 'G-XXXXXXXXXX', 'client_id', (client_id) => {
+    document.getElementById('ga4_client_id').value = client_id;
+  });
+
+  // When form submits, client_id is included in the submission
+  document.getElementById('contact-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    // Submit form with client_id included
+    fetch('/api/lead', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: document.querySelector('[name="email"]').value,
+        ga4_client_id: document.querySelector('[name="ga4_client_id"]').value
+      })
+    });
+  });
+</script>
+```
+
+### Advantage
+
+- Native to GA4; no workarounds needed
+- Works on all browsers (if GA4 is loaded)
+- No dependency on cookie parsing
+
+### Disadvantage
+
+- Asynchronous; you cannot access immediately
+- If GA4 script has not loaded, callback may not fire
+
+---
+
+## Method 2: Cookie Parsing (Fallback)
+
+GA4 stores client_id in a first-party cookie named `_ga`. You can extract it if gtag('get') is unavailable.
+
+### Cookie Format
+
+GA4 stores client_id in the `_ga` cookie with format:
+
+```
+_ga = GA1.1.[client_id_part1].[client_id_part2]
+
+Example: GA1.1.1234567890.1609459200
+
+Extract: 1234567890.1609459200 = GA4 client_id
+```
+
+### Implementation
+
+```javascript
+function getClientIDFromCookie() {
+  // Find the _ga cookie
+  const cookies = document.cookie.split('; ');
+  const gaCookie = cookies.find(c => c.startsWith('_ga='));
+
+  if (!gaCookie) return null;
+
+  // Format: GA1.1.[clientid]
+  const parts = gaCookie.split('=')[1].split('.');
+
+  if (parts.length < 3) return null;
+
+  // Return the client_id (parts 2 and 3 joined by .)
+  return `${parts[2]}.${parts[3]}`;
+}
+
+// Use it
+const clientID = getClientIDFromCookie();
+console.log('GA4 Client ID from cookie:', clientID);
+```
+
+### Full Example: Populate CRM Form
+
+```javascript
+// Get client_id via cookie, fallback to gtag API
+function getGA4ClientID(callback) {
+  // Try gtag API first (preferred)
+  if (typeof gtag !== 'undefined') {
+    gtag('get', 'G-XXXXXXXXXX', 'client_id', callback);
+  } else {
+    // Fallback to cookie
+    const clientID = getClientIDFromCookie();
+    callback(clientID);
+  }
+}
+
+// Populate Salesforce form field
+getGA4ClientID((clientID) => {
+  if (clientID) {
+    // If it's a Salesforce form, look for the hidden field
+    const field = document.querySelector('input[name="00N4H0000023xyz"]'); // Salesforce field ID
+    if (field) {
+      field.value = clientID;
+    }
+  }
+});
+```
+
+### Advantage
+
+- Synchronous; immediate access
+- Does not depend on GA4 script loading
+- Works even if GA4 fails
+
+### Disadvantage
+
+- Brittle; cookie format could change
+- Does not work if cookies are blocked
+
+---
+
+## Method 3: Server-Side Extraction via Request Header
+
+If GA4 is in server-side GTM, the client_id is accessible on the server and can be extracted from the request.
+
+### Pattern
+
+```javascript
+// In Server-Side GTM: Web client configuration
+// GA4 events automatically include client_id in the request
+
+const clientID = data.get('client_id'); // Available from GA4 client
+sendHttpRequest('https://your-server/log-client-id', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json'
+  },
+  payload: JSON.stringify({
+    client_id: clientID,
+    timestamp: Math.floor(Date.now() / 1000),
+    page_url: data.get('page_location')
+  })
+});
+```
+
+Then on your backend:
+
+```python
+# Backend: log client_id to database
+@app.route('/log-client-id', methods=['POST'])
+def log_client_id():
+    data = request.json
+    client_id = data['client_id']
+    session_id = get_session_id_from_request()
+
+    # Store mapping for later
+    db.execute(
+        "INSERT INTO ga4_sessions (client_id, session_id, timestamp) VALUES (?, ?, ?)",
+        (client_id, session_id, data['timestamp'])
+    )
+    return {'status': 'ok'}
+```
+
+### Advantage
+
+- Server-side; you control the persistence
+- Can enrich with other session data
+- No cookie dependency
+
+### Disadvantage
+
+- Requires server-side GTM setup
+- More complex infrastructure
+
+---
+
+## Method 4: Webhook Pattern (Stripe, Form Submissions)
+
+For events that occur outside GA4 (like form submissions or Stripe charges), use a webhook to link the event back to the client_id stored earlier.
+
+### Step 1: Store Client ID When User Arrives
+
+On page load, store the client_id:
+
+```javascript
+gtag('get', 'G-XXXXXXXXXX', 'client_id', (clientID) => {
+  // Store in localStorage for later retrieval
+  localStorage.setItem('ga4_client_id', clientID);
+
+  // Or send to your server and associate with session
+  fetch('/api/session/set-client-id', {
+    method: 'POST',
+    body: JSON.stringify({ client_id: clientID })
+  });
+});
+```
+
+### Step 2: When External Event Occurs, Retrieve and Send
+
+```javascript
+// Form submission
+document.getElementById('form').addEventListener('submit', (e) => {
+  const clientID = localStorage.getItem('ga4_client_id');
+
+  fetch('/api/form/submit', {
+    method: 'POST',
+    body: JSON.stringify({
+      email: document.querySelector('[name="email"]').value,
+      ga4_client_id: clientID
+    })
+  });
+});
+
+// Stripe payment
+stripe.redirectToCheckout({
+  sessionId: sessionId,
+  // Pass client_id in metadata
+  clientMetadata: {
+    ga4_client_id: localStorage.getItem('ga4_client_id')
+  }
+});
+```
+
+### Step 3: Webhook Handler Links Back
+
+```python
+# Backend: Stripe webhook
+@app.route('/webhooks/stripe', methods=['POST'])
+def stripe_webhook():
+    event = json.loads(request.data)
+
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        client_id = session['metadata']['ga4_client_id']
+        purchase_amount = session['amount_total'] / 100
+
+        # Now you have: client_id + purchase_amount
+        # Send to GA4 via Measurement Protocol
+        send_purchase_to_ga4(client_id, purchase_amount)
+
+        # Store in data warehouse for attribution
+        db.execute(
+            "INSERT INTO purchases (ga4_client_id, amount) VALUES (?, ?)",
+            (client_id, purchase_amount)
+        )
+
+        return {'status': 'ok'}, 200
+```
+
+### Advantage
+
+- Links external events (Stripe, form submissions) back to web session
+- Works with any third-party service
+
+### Disadvantage
+
+- Requires backend setup for each integration
+- Client_id must be stored and passed through external systems
+
+---
+
+## Method 5: Redirect Parameters (Multi-Site Tracking)
+
+If you need to track a user across multiple domains (e.g., from your main site to a checkout domain), pass client_id as a URL parameter.
+
+### Setup
+
+```javascript
+// On main site: when user navigates to checkout
+gtag('get', 'G-XXXXXXXXXX', 'client_id', (clientID) => {
+  // Redirect to checkout with client_id as parameter
+  window.location.href = `https://checkout.example.com/start?ga4_cid=${clientID}`;
+});
+
+// On checkout site: retrieve from URL parameter
+const params = new URLSearchParams(window.location.search);
+const clientID = params.get('ga4_cid');
+
+// Populate checkout form or store
+if (clientID) {
+  localStorage.setItem('ga4_client_id', clientID);
+}
+
+// When purchase completes, send back to GA4
+gtag('event', 'purchase', {
+  value: 99.99,
+  currency: 'USD',
+  transaction_id: 'TXN-12345',
+  // GA4 will use the same client_id if set up correctly
+});
+```
+
+### Advantage
+
+- Works across domain boundaries
+- Simple to implement
+
+### Disadvantage
+
+- Client_id visible in URL (minor privacy concern)
+- Requires coordination between domains
+- Does not work if parameter is stripped by proxies
+
+---
+
+## Best Practices
+
+### 1. Always Use GTM's gtag('get') First
+
+```javascript
+// Preferred order:
+// 1. Try gtag API
+// 2. Fallback to cookie
+// 3. Fallback to localStorage from previous session
+
+function getClientID() {
+  return new Promise((resolve) => {
+    if (typeof gtag !== 'undefined') {
+      gtag('get', 'G-XXXXXXXXXX', 'client_id', resolve);
+    } else {
+      // Fallback
+      resolve(getClientIDFromCookie() || localStorage.getItem('ga4_client_id'));
+    }
+  });
+}
+```
+
+### 2. Store Client ID Immediately on Page Load
+
+Do not wait for a user action to retrieve client_id. Retrieve it on page load and store for later:
+
+```javascript
+// Page load
+gtag('get', 'G-XXXXXXXXXX', 'client_id', (clientID) => {
+  // Store in multiple places for redundancy
+  localStorage.setItem('ga4_client_id', clientID);
+  sessionStorage.setItem('ga4_client_id', clientID);
+  document.cookie = `ga4_client_id=${clientID}; max-age=63072000`; // 2 years
+});
+```
+
+### 3. Never Expose Client ID in Analytics Events
+
+Do not send client_id as an event parameter (it is already there implicitly):
+
+```javascript
+// Bad: client_id is already sent, do not duplicate
+gtag('event', 'purchase', {
+  value: 99.99,
+  ga4_client_id: clientID  // ❌ redundant
+});
+
+// Good: just send the event
+gtag('event', 'purchase', {
+  value: 99.99  // ✅ client_id is implicit
+});
+```
+
+### 4. Use User ID for Cross-Device Tracking
+
+If you have authenticated users, use GA4's user_id feature instead of relying on client_id:
+
+```javascript
+// Set user_id for authenticated users
+gtag('config', 'G-XXXXXXXXXX', {
+  'user_id': userId  // Use stable user identifier
+});
+
+// This enables cross-device tracking better than client_id alone
+```
+
+---
+
+## CRM Integration Example: HubSpot
+
+### Complete Workflow
+
+```javascript
+// 1. Page load: capture client_id
+gtag('get', 'G-XXXXXXXXXX', 'client_id', (clientID) => {
+  // 2. Store in window object for HubSpot form
+  window.ga4ClientID = clientID;
+});
+
+// 3. When HubSpot form is ready, populate hidden field
+document.addEventListener('hubspotFormReady', () => {
+  const form = document.querySelector('.hbspt-form');
+  const hiddenField = form.querySelector('input[name="ga4_client_id"]');
+  if (hiddenField) {
+    hiddenField.value = window.ga4ClientID;
+  }
+});
+
+// 4. When form submits, HubSpot sends client_id with lead data
+// You can then link HubSpot leads to GA4 in your data warehouse
+```
+
+### Backend: Link GA4 to HubSpot
+
+```python
+# When you receive a HubSpot form submission webhook:
+@app.route('/webhooks/hubspot', methods=['POST'])
+def hubspot_form_submit():
+    form_data = request.json
+    client_id = form_data['ga4_client_id']
+    email = form_data['email']
+
+    # Lookup GA4 session data
+    session_data = db.query(
+        "SELECT * FROM ga4_sessions WHERE client_id = ?",
+        (client_id,)
+    )
+
+    # Enrich HubSpot lead with GA4 session info
+    hubspot_client.update_contact(
+        email,
+        {
+            'hs_ga4_client_id': client_id,
+            'hs_acquisition_channel': session_data.channel,
+            'hs_utm_source': session_data.source
+        }
+    )
+
+    return {'status': 'ok'}
+```
+
+---
+
+## Debugging & Validation
+
+### Verify Client ID is Being Captured
+
+```javascript
+// Check gtag API
+gtag('get', 'G-XXXXXXXXXX', 'client_id', (cid) => {
+  console.log('Client ID from API:', cid);
+});
+
+// Check cookie
+console.log('_ga cookie:', document.cookie.split('; ').find(c => c.startsWith('_ga=')));
+
+// Check localStorage
+console.log('Stored client ID:', localStorage.getItem('ga4_client_id'));
+```
+
+### Verify it Matches in GA4
+
+1. Open GA4 real-time report
+2. Enable debug mode in your GTM container
+3. Refresh page
+4. Compare the client_id from console with the one shown in GA4 DebugView
+
+---
+
+## Related Resources
+
+- [GA4 User ID Implementation](/ga4/user-id-basics/) — Cross-device tracking with user_id
+- [Measurement Protocol Guide](/server-side/measurement-protocol/) — Sending server-side events
+- [Cross-Domain Tracking with Server-Side GTM](/server-side/advanced/cross-domain-server-side/) — Multi-domain patterns
+- [GA4 BigQuery Schema Reference](/ga4/bigquery/schema-reference/) — client_id in your data warehouse

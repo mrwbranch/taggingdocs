@@ -1,0 +1,272 @@
+---
+title: "Auto-Loading Google Tag in Server Containers"
+description: "Understand GA4 auto-loading in server-side GTM — how sGTM now auto-fetches gtag.js/gtm.js configuration, control auto-loading behavior, and migration implications for existing implementations."
+sidebar:
+  order: 10
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Server-side Google Tag Manager has evolved significantly. As of February 2025 (documented by Simo Ahava), sGTM now automatically loads and processes Google's `gtag.js` and `gtm.js` configurations directly from your property without requiring manual event forwarding from the client.
+
+This change simplifies server-side implementations for GA4, but it also introduces new considerations for existing deployments and requires understanding when and how auto-loading occurs.
+
+## What changed: Auto-loading behavior
+
+Historically, server-side GTM received events only from client-side tags that explicitly sent data to your sGTM endpoint. Google's tracking libraries (`gtag.js`, `GTM-XXXXX`) remained client-side.
+
+With auto-loading, the sGTM container now:
+1. Recognizes when your GA4 property is linked to a server container
+2. Automatically fetches the property's configuration (events, parameters, audiences, conversions)
+3. Processes incoming events through the same rules as the browser would
+4. Fires GA4 client templates without manual forwarding
+
+This means you no longer need client-side code to explicitly send events to sGTM before GA4 measurement begins.
+
+## How auto-loading works
+
+When a request arrives at your sGTM endpoint (Cloud Run container):
+
+<Steps>
+1. The GA4 client in sGTM receives the incoming event from the browser or server.
+2. The client checks if a GA4 property is configured in the container.
+3. If the property exists, the client auto-fetches the property's configuration snapshot from Google's configuration API.
+4. The container applies parameter validation, event filtering, and audience rules as if they were running client-side.
+5. GA4 server-side tags fire with the fully-processed Event Model.
+</Steps>
+
+**Key difference from manual forwarding**: You're no longer relying on the browser to apply property-level logic. The server container owns the entire validation and processing pipeline.
+
+## Auto-loading triggers: When it happens
+
+Auto-loading activates under these conditions:
+
+| Condition | Result |
+|---|---|
+| Event arrives at sGTM with a GA4 property ID | Configuration auto-fetches |
+| Property has a linked server container | Auto-loading enabled by default |
+| Configuration snapshot is fresh (cached for ~1 hour) | Uses cached version; no API call |
+| Configuration is stale or missing | Fetches fresh snapshot on next event |
+| Event has `measurement_id` parameter | Links to the correct GA4 property |
+
+If any of these conditions aren't met, the event is processed without auto-loading and basic GA4 client rules don't apply.
+
+## Configuration options to control auto-loading
+
+You can control auto-loading behavior via the GA4 client settings in your sGTM container:
+
+### Disable auto-loading entirely
+
+If you want manual control over event processing (e.g., you're running a custom implementation or testing), disable auto-loading:
+
+```
+GA4 Client Settings:
+- Auto-load configuration: OFF
+- Manual property ID: (enter your property ID)
+```
+
+When disabled, the container still accepts GA4 events but does not fetch or apply property-level configuration. You must manually define parameter rules, event filtering, and audience conditions using custom tags.
+
+### Use a specific property snapshot
+
+For staged testing, you can lock the configuration to a specific version:
+
+```
+GA4 Client Settings:
+- Configuration source: Pinned snapshot (v123)
+- Snapshot timestamp: 2025-02-15 10:30:00 UTC
+```
+
+This is useful for A/B testing a new property configuration before rolling it out to production.
+
+### Enable debug logging for auto-loading
+
+When troubleshooting auto-loading behavior, enable debug logging:
+
+```
+GA4 Client Settings:
+- Debug logging: ON
+- Log destination: Cloud Logging
+```
+
+The logs will show:
+- Configuration fetch requests and responses
+- Parameter validation steps
+- Event filtering decisions
+- Audience qualification results
+
+## Impact on existing server-side implementations
+
+### If you already have manual forwarding
+
+Existing implementations that explicitly forward events from client tags to sGTM will continue to work. Auto-loading runs in parallel:
+
+1. Client sends events to sGTM endpoint (your existing flow)
+2. sGTM GA4 client auto-loads and applies configuration
+3. GA4 server-side tags fire with the merged result
+
+**Potential issue**: If your manual forwarding duplicates parameters or tags that are now auto-loaded, you may see double-counting. Review your client-side GTM tags to avoid redundant forwarding.
+
+### If you have manual parameter forwarding rules
+
+Custom dimensions, user properties, and event parameters sent manually from the client still reach the server intact. Auto-loading does not interfere.
+
+However, if both the client property and your server container define the same custom dimension, the server-side value takes precedence.
+
+### If you use custom audiences or conversion logic
+
+Auto-loaded configuration includes audience definitions and conversion markings. If you've also manually implemented audience logic in sGTM custom tags, disable the manual implementation to avoid conflicts.
+
+## Debugging auto-loaded configurations
+
+When events aren't being processed as expected, check whether auto-loading is working:
+
+### Check 1: Verify auto-loading is enabled
+
+In your sGTM container UI:
+1. Go to **Clients** → **GA4**
+2. Look for the setting: **Auto-load configuration**
+3. Confirm it's set to **ON**
+
+### Check 2: Review configuration fetch logs
+
+In **Cloud Logging** for your sGTM Cloud Run service:
+
+```
+resource.type="cloud_run_revision"
+resource.labels.service_name="your-sgtm-container"
+severity="DEBUG"
+"auto_load_config" OR "config_fetch"
+```
+
+Look for entries showing:
+- `config_fetch_success: true` — Configuration loaded
+- `config_fetch_latency_ms: 45` — Fetch time (high latency suggests API rate limiting)
+- `config_version: 2025-02-15T10:30:00Z` — Timestamp of loaded configuration
+
+### Check 3: Validate incoming event structure
+
+Ensure incoming events include the `measurement_id` parameter:
+
+```
+Cloud Logging query:
+resource.type="cloud_run_revision"
+jsonPayload.measurement_id=~"G-[A-Z0-9]{10}"
+```
+
+If events are missing `measurement_id`, the GA4 client cannot auto-load the property configuration.
+
+### Check 4: Compare configuration across updates
+
+If you recently updated your GA4 property (added a conversion, created an audience), the configuration change may not have propagated to sGTM yet. Configuration snapshots cache for ~1 hour.
+
+Force a refresh:
+1. In sGTM, manually trigger a test event with **Preview Mode**
+2. Check Cloud Logging for a new `config_fetch_request`
+3. Verify the new configuration includes your changes
+
+## June 2025 consolidation: Script loading via sGTM
+
+Google's roadmap indicates that by June 2025, all Google script loading (gtag.js, gtm.js, GA4 configuration) will consolidate through the sGTM container. This means:
+
+- The client-side GTM container will forward all events to sGTM before GA4 processes them
+- sGTM becomes the authoritative measurement processor
+- Properties no longer maintain separate client-side and server-side configurations
+
+**Implication**: Existing implementations that run GA4 client-side and sGTM in parallel should begin consolidating now. Start by moving all custom logic to sGTM and disabling redundant client-side tags.
+
+## Common issues and solutions
+
+### Issue: Auto-loading doesn't seem to work
+
+**Symptoms**: Events arrive at sGTM but GA4 client is not processing them.
+
+**Diagnosis**:
+```
+1. Check: Is auto-loading enabled in GA4 client settings? (Should be ON)
+2. Check: Does the sGTM container have a linked GA4 property? (Admin → GA4 Links)
+3. Check: Are events including measurement_id parameter?
+4. Check: Is the GA4 client tag firing? (Preview Mode should show it)
+```
+
+**Solution**: If auto-loading is ON but events aren't processing, disable it temporarily and manually add a GA4 server tag. This isolates whether the issue is with auto-loading or with the event flow itself.
+
+### Issue: Configuration changes in GA4 don't reflect in sGTM immediately
+
+**Symptoms**: You mark a new event as a conversion in GA4, but sGTM isn't treating it as such.
+
+**Root cause**: Configuration snapshots cache for ~1 hour. Changes take time to propagate.
+
+**Solution**:
+- Wait 1 hour for automatic cache refresh, or
+- Manually refresh by triggering a test event in Preview Mode, or
+- Restart the sGTM container to clear the cache immediately
+
+### Issue: Duplicate events or parameters
+
+**Symptoms**: You see extra events in GA4, or parameters are duplicated.
+
+**Root cause**: Both the client-side GA4 tag and the auto-loading GA4 client are processing the same event.
+
+**Solution**: Disable client-side GA4 firing if you're running sGTM. Ensure only sGTM is the GA4 measurement endpoint. If you must run both, disable auto-loading and use manual tag sequencing instead.
+
+### Issue: High latency on configuration fetches
+
+**Symptoms**: Cloud Logging shows `config_fetch_latency_ms: 800+`
+
+**Root cause**: Google's configuration API is being rate-limited, or your Cloud Run container has insufficient CPU.
+
+**Solution**:
+- Upgrade Cloud Run CPU allocation (from 0.5 to 1 CPU)
+- Contact Google Cloud support to increase API quota
+- Cache configuration locally by reducing the snapshot refresh interval
+
+## When to disable auto-loading
+
+You might disable auto-loading in these scenarios:
+
+| Scenario | Reason |
+|---|---|
+| Custom GA4 implementation | You've built your own parameter validation and event filtering logic; auto-loading would conflict. |
+| Multi-property server container | You're running multiple GA4 properties in one sGTM; manual control is clearer. |
+| Legacy client-side-only GA4 | You're intentionally keeping GA4 client-side and sGTM separate for different use cases. |
+| High-volume, latency-sensitive requests | Configuration fetches add 50–100ms latency; if every millisecond matters, disable and cache locally. |
+
+## Migration checklist: Moving to auto-loaded configurations
+
+If you're migrating from manual forwarding to auto-loading:
+
+<Steps>
+1. **Audit current implementation** — Document all client-side GA4 tags and custom parameters.
+2. **Enable auto-loading in staging** — Turn on auto-loading in a test sGTM container; validate configuration loads.
+3. **Test end-to-end** — Send test events and confirm GA4 receives them correctly.
+4. **Compare data** — Run parallel measurement (client + sGTM) for 48 hours and compare event counts.
+5. **Disable redundant forwarding** — Remove any custom client-side tags that are now handled by auto-loading.
+6. **Monitor Cloud Logging** — Watch for configuration fetch errors or latency spikes.
+7. **Rollout to production** — Enable auto-loading in your production sGTM container.
+</Steps>
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Server-Side GTM Setup"
+    description="Deploy and configure your first server-side container."
+    href="/server-side/setup/cloud-run-deployment/"
+  />
+  <LinkCard
+    title="GA4 Client Configuration"
+    description="Configure the GA4 client in sGTM for measurement pipelines."
+    href="/server-side/setup/ga4-client-setup/"
+  />
+  <LinkCard
+    title="Cloud Logging & Monitoring"
+    description="Debug sGTM behavior using Cloud Logging queries and dashboards."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+  <LinkCard
+    title="Custom Templates"
+    description="Build custom variables and tags to extend GA4 measurement logic."
+    href="/server-side/advanced/custom-templates/"
+  />
+</CardGrid>

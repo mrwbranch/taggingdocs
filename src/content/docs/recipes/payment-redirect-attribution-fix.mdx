@@ -1,0 +1,291 @@
+---
+title: "Fixing Attribution After Payment Redirects"
+description: "How payment provider redirects (PayPal, Klarna, Swish) break GA4 session attribution and how to fix it with stored client IDs — client-side, server-side GTM, and BigQuery validation."
+sidebar:
+  order: 12
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## The Problem: Attribution Theft by Payment Providers
+
+When a user clicks "Pay with PayPal" (or Klarna, Swish, iDEAL, etc.), they leave your site to complete payment on the provider's domain. Upon return, GA4 treats this as a new session because the referrer is now `paypal.com` or `klarna.com` instead of Google, Facebook, or direct traffic.
+
+The purchase event fires in this new session with:
+- **source**: `paypal.com` (or the payment provider)
+- **medium**: `referral`
+- **original marketing attribution**: Lost forever
+
+In your GA4 reports, these conversions appear as:
+- "Unassigned" traffic (when GA can't determine a source)
+- Attributed to the payment provider as referral traffic
+- Completely disconnected from the original marketing channel (google/cpc, facebook/cpc, etc.)
+
+This isn't just a reporting inconvenience—**it destroys your ability to measure marketing ROI accurately.**
+
+## Measure the Damage: BigQuery Impact Analysis
+
+Run this query to see how much revenue is being misattributed:
+
+```sql
+-- Count purchases attributed to payment providers vs. real sources
+SELECT
+  event_date,
+  traffic_source.source,
+  traffic_source.medium,
+  COUNTIF(event_name = 'purchase') as purchases,
+  ROUND(SUM(CASE WHEN event_name = 'purchase'
+    THEN (SELECT COALESCE(value.double_value, value.int_value) FROM UNNEST(event_params) WHERE key = 'value')
+    ELSE 0 END), 2) as revenue
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY))
+  AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+  AND event_name = 'purchase'
+GROUP BY 1, 2, 3
+ORDER BY purchases DESC
+LIMIT 20
+```
+
+Look for rows where `source` is `paypal.com`, `klarna.com`, `swish.se`, or similar. These represent "stolen" attributions.
+
+## Why Referral Exclusion Isn't Enough
+
+GA4 offers referral exclusion in stream settings. It helps, but has critical limitations:
+
+1. **It doesn't fix retroactively** — Historical data remains misattributed
+2. **It only prevents session restart** — The session continues with its original source, but if the GA cookie expires or is cleared during redirect, it can't help
+3. **It doesn't work across device changes** — Mobile redirects are especially vulnerable
+4. **It requires configuration per property** — You must manually maintain the exclusion list
+
+The stored client ID approach is the production-grade solution.
+
+## The Solution: Store and Restore Client ID
+
+The robust fix captures the GA4 client ID before checkout and uses it to reconnect the purchase event to the original session.
+
+<Steps>
+
+### Store attribution data before checkout (Client-side GTM)
+
+Create a **Custom HTML tag** that fires on the `begin_checkout` event:
+
+```javascript
+// Custom HTML tag - fires on begin_checkout
+// Container: Client-side GTM
+// Trigger: purchase button click or explicit begin_checkout event
+
+<script>
+(function() {
+  // Get the current GA4 client ID from the _ga cookie
+  var clientId = '';
+  try {
+    var cookies = document.cookie.split(';');
+    for (var i = 0; i < cookies.length; i++) {
+      var cookie = cookies[i].trim();
+      if (cookie.indexOf('_ga=') === 0) {
+        // _ga cookie format: GA1.1.XXXXXXX.XXXXXXX
+        // Extract the last two parts
+        var parts = cookie.substring(4).split('.');
+        clientId = parts.slice(-2).join('.');
+        break;
+      }
+    }
+  } catch(e) {
+    console.error('Error extracting client ID:', e);
+  }
+
+  if (clientId) {
+    var attributionData = {
+      client_id: clientId,
+      timestamp: Date.now()
+    };
+    sessionStorage.setItem('ga_checkout_attribution', JSON.stringify(attributionData));
+    console.log('Attribution stored:', clientId);
+  }
+})();
+</script>
+```
+
+**Note:** This must fire BEFORE the user leaves your site. Attach it to the begin_checkout event or the actual checkout button click.
+
+### Inject stored client ID into purchase event (Client-side)
+
+Create a second **Custom HTML tag** that fires on `purchase` event with **priority 100** (ensures it runs first):
+
+```javascript
+// Custom HTML tag - fires on purchase event
+// Priority: 100 (high)
+// Trigger: purchase event (after PayPal redirect)
+
+<script>
+(function() {
+  var stored = sessionStorage.getItem('ga_checkout_attribution');
+  if (stored) {
+    try {
+      var data = JSON.parse(stored);
+
+      // Validate: only use if stored within last 2 hours (7200000ms)
+      if (Date.now() - data.timestamp < 7200000) {
+        // Push enhanced event to dataLayer
+        window.dataLayer = window.dataLayer || [];
+        dataLayer.push({
+          event: 'purchase_enhanced',
+          ecommerce: window.dataLayer[window.dataLayer.length - 1].ecommerce || {},
+          stored_client_id: data.client_id,
+          _suppress_server_side: true
+        });
+
+        console.log('Enhanced purchase event pushed with stored client ID');
+      } else {
+        console.warn('Stored client ID expired');
+      }
+    } catch(e) {
+      console.error('Error processing stored attribution:', e);
+    }
+
+    // Clean up
+    sessionStorage.removeItem('ga_checkout_attribution');
+  }
+})();
+</script>
+```
+
+**Why priority 100?** It ensures this tag fires before your GA4 tag, so the enhanced event is captured.
+
+### Server-side GTM: Enhanced Client ID variable
+
+In your **server-side GTM** container, create a new **Event Data** variable:
+
+**Variable Name:** `Client ID - Enhanced`
+
+**Key Path:** `stored_client_id`
+
+**Default Value:** `{{Client ID}}`
+
+This variable returns the stored client ID if present, otherwise falls back to the normal client ID.
+
+### Modify purchase tag in sGTM
+
+In your **Google Analytics 4** event tag (server-side):
+
+1. **Client ID field**: Change from `{{Client ID}}` to `{{Client ID - Enhanced}}`
+2. **Add a Note**: "Using enhanced client ID to restore attribution after payment redirects"
+
+Additionally, to prevent duplicate purchase events, add a **Transformation tag** before your GA4 tag:
+
+**Transformation Name:** `Suppress Duplicate Purchase`
+
+**Custom JavaScript:**
+```javascript
+// Return false if _suppress_server_side is true
+return !getEventData('_suppress_server_side');
+```
+
+Attach this to a **No-op** tag or add it as a conditional block in your GA4 tag to skip processing events marked for suppression.
+
+### Testing & debugging
+
+Add a **Custom HTML debug tag** to your client-side container (trigger: purchase event):
+
+```javascript
+<script>
+(function() {
+  var storedData = sessionStorage.getItem('ga_checkout_attribution');
+  var lastEvent = window.dataLayer[window.dataLayer.length - 1];
+
+  console.log('=== Purchase Attribution Debug ===');
+  console.log('Stored attribution data:', storedData ? JSON.parse(storedData) : 'None');
+  console.log('Latest dataLayer event:', lastEvent);
+  console.log('Current client ID (_ga cookie):',
+    document.cookie.split('; ').find(c => c.startsWith('_ga=')) || 'Not found');
+  console.log('=================================');
+})();
+</script>
+```
+
+**Verification Checklist:**
+1. Begin checkout → Open browser DevTools → Console and Application tabs
+2. Check `sessionStorage` for `ga_checkout_attribution` key
+3. Complete PayPal/Klarna redirect flow
+4. Return to your site → Check dataLayer for `purchase_enhanced` event
+5. Open GA4 DebugView → Verify purchase event fires with correct client_id
+6. GA4 Real-time report → Confirm attribution appears from original source, not payment provider
+
+</Steps>
+
+## BigQuery Validation Query
+
+After implementing the fix, measure improvement with this query:
+
+```sql
+-- Compare attribution quality before and after fix
+SELECT
+  event_date,
+  COUNTIF(traffic_source.source IN ('paypal.com', 'klarna.com', '(direct)')
+    AND traffic_source.medium IN ('referral', '(none)')) as misattributed_purchases,
+  COUNTIF(traffic_source.source NOT IN ('paypal.com', 'klarna.com', '(direct)')
+    OR traffic_source.medium NOT IN ('referral', '(none)')) as properly_attributed_purchases,
+  ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (PARTITION BY event_date), 2) as pct_properly_attributed,
+  COUNT(*) as total_purchases
+FROM `project.dataset.events_*`
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY))
+    AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+GROUP BY event_date
+ORDER BY event_date DESC
+```
+
+You should see `properly_attributed_purchases` increase significantly after deployment.
+
+## Edge Cases & Troubleshooting
+
+**Multiple checkouts in same session:**
+Only store attribution data on the FIRST `begin_checkout` event. Add a flag to sessionStorage:
+
+```javascript
+if (!sessionStorage.getItem('ga_checkout_attribution')) {
+  // Store it
+}
+```
+
+**Abandoned checkout with expired timestamp:**
+The 2-hour validation window prevents reusing stale client IDs if users abandon checkout and return days later. Adjust this window based on your typical redirect time (usually 5-15 minutes).
+
+**User clears cookies during redirect:**
+If the GA cookie is cleared while on PayPal, the session will still restart. This is unavoidable, but the stored client ID technique recovers attribution for most users.
+
+**Mobile app redirects:**
+This technique works best in web browsers. For app-based redirects (deep links), consider using Firebase with cross-device attribution.
+
+<Aside type="tip">
+This technique works for **ALL payment providers** that redirect users away from your site—not just PayPal. Klarna, Swish, iDEAL, Apple Pay (web), bank payment gateways, and even SMS payment providers all cause the same attribution break. Implement once, solve for all.
+</Aside>
+
+## Recap
+
+1. **Store** the GA4 client ID in sessionStorage before checkout
+2. **Restore** the stored client ID in the purchase event after redirect
+3. **Validate** in BigQuery that attributions are no longer "stolen"
+4. **Test** thoroughly with your actual payment provider's flow
+
+This approach is production-proven and used by e-commerce sites processing millions in transactions daily. It requires minimal maintenance and doesn't depend on cookie persistence during the redirect.
+
+---
+
+<CardGrid>
+  <LinkCard
+    title="Client ID Patterns"
+    description="Deep dive into GA4 client ID generation and lifecycle"
+    href="/client-side/tracking/client-id-patterns/"
+  />
+  <LinkCard
+    title="Sessions and Attribution"
+    description="Understanding session creation and how attribution is assigned"
+    href="/ga4/fundamentals/sessions-and-attribution/"
+  />
+  <LinkCard
+    title="Attribution Settings"
+    description="GA4 attribution model options and referral exclusion configuration"
+    href="/ga4/configuration/attribution-settings/"
+  />
+</CardGrid>

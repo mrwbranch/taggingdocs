@@ -1,0 +1,405 @@
+---
+title: "Predictive Audiences and Machine Learning"
+description: "Leverage GA4's machine learning predictions — purchase probability, churn risk, and predicted revenue. Prerequisites, audience creation, using predictions in Google Ads, and monitoring model quality."
+sidebar:
+  order: 6
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+GA4 includes machine learning models that predict user behavior 7 and 30 days into the future. These predictions power "Predictive Audiences," allowing you to target likely purchasers, retain at-risk users, and estimate customer lifetime value before users act.
+
+Unlike rule-based audiences (which require past behavior), predictive audiences forecast future behavior based on historical patterns. This shifts marketing from reactive (targeting users who already converted) to proactive (targeting users who will likely convert).
+
+## What GA4 predicts
+
+GA4 ML models generate three types of predictions:
+
+### 1. Purchase probability
+
+**Predicts**: Likelihood that a returning user will make a purchase in the next 7 days.
+
+**Training data**: Historical purchase events, user engagement patterns, device type, geography.
+
+**Output**: Probability score (0–100) for each returning user.
+
+**Use case**:
+- Bidding higher for high-purchase-probability users in Google Ads
+- Segmenting users for different messaging (high converters vs. uncertain users)
+- Identifying micro-moments where intervention is needed
+
+### 2. Churn probability
+
+**Predicts**: Likelihood that a returning user will stop engaging (no sessions for 7 consecutive days) in the next 7 days.
+
+**Training data**: Historical session frequency, event count trends, time since last session, device persistence.
+
+**Output**: Churn risk score (0–100) for each returning user.
+
+**Use case**:
+- Retention campaigns targeting high-churn users
+- Timing re-engagement messages before users go inactive
+- Identifying product gaps that drive disengagement
+
+### 3. Predicted revenue
+
+**Predicts**: Estimated revenue a returning user will spend in the next 28 days.
+
+**Training data**: Historical purchase value, frequency, product preferences, seasonality.
+
+**Output**: Revenue estimate (in USD) for each returning user.
+
+**Use case**:
+- Lifetime value (LTV) segmentation
+- Budget allocation (invest more in high-revenue-potential users)
+- Premium user identification
+
+## Prerequisites for predictive models
+
+GA4 will not generate predictions without meeting minimum data requirements. Models are compute-intensive and require sufficient training data to be statistically reliable.
+
+### Minimum data for purchase probability
+
+```
+1,000+ returning users who triggered a purchase event in the last 28 days
+1,000+ returning users who did NOT trigger a purchase event
+14+ days of event data in the property
+Purchase events must include transaction_id and value parameters
+```
+
+**How GA4 counts "returning users"**: A user is returning if they had a session more than 1 day after their first session.
+
+**When it's available**: Typically 1–2 weeks after meeting minimums. GA4 displays "Coming soon" if you're below thresholds.
+
+### Minimum data for churn probability
+
+```
+1,000+ returning users with high engagement (5+ sessions in the last month)
+1,000+ returning users with low engagement (0–2 sessions in the last month)
+14+ days of historical data
+```
+
+Higher-engagement properties (> 50,000 sessions/day) build churn models faster because engagement variation is easier to detect.
+
+### Minimum data for predicted revenue
+
+```
+1,000+ returning users who triggered a purchase or in_app_purchase event
+1,000+ returning users who did NOT purchase
+Purchase events must have accurate value parameters
+28+ days of transaction data (longer is better for seasonal trends)
+```
+
+**Critical requirement**: Purchase event value must be accurate. If 50% of purchase events have value = 0 or missing, the model loses predictive power.
+
+### Model quality requirements
+
+GA4 monitors model quality and disables predictions if:
+- Accuracy drops below a threshold (typically 65%)
+- Data volume drops below minimums
+- Event parameter quality degrades (too many missing values)
+- Seasonal patterns change dramatically (e.g., sudden drop in purchase frequency)
+
+When a model is disabled, GA4 displays "Model not available" and may suggest collecting more data.
+
+## How to create predictive audiences
+
+### Step 1: Verify model availability
+
+<Steps>
+1. Go to **Admin → Audiences**.
+2. Click **Create audience**.
+3. On the template screen, look for "Predictive" section at the bottom.
+4. If you don't see predictive options, your property hasn't met minimum data thresholds yet.
+</Steps>
+
+If predictive options are grayed out, you'll see one of these messages:
+- "Coming soon" — You're close to minimums; wait 1–2 weeks
+- "Insufficient data" — Far below minimums; collect more traffic
+- "Model quality is below threshold" — Existing model is unreliable; ensure event data is accurate
+
+### Step 2: Create purchase probability audience
+
+<Steps>
+1. In the audience builder, select **Predictive → Likely 7-day purchasers**.
+2. Set the **probability threshold** (default: "High"; adjust to "Medium" or "Low" for larger audiences).
+   - **High**: Top 5% most likely to purchase
+   - **Medium**: Top 15% most likely to purchase
+   - **Low**: Top 30% most likely to purchase
+3. Set **Membership duration**: Typically 7 days (prediction window is 7 days).
+4. (Optional) Add a **trigger event**: Fire `high_intent_user` when user enters the audience.
+5. Name and save.
+</Steps>
+
+**Naming convention**: `purchase_probability_high_7d` (indicates metric, threshold, and window).
+
+### Step 3: Create churn risk audience
+
+<Steps>
+1. Select **Predictive → Likely 7-day churners**.
+2. Set the **risk threshold**:
+   - **High**: Top 5% most likely to churn
+   - **Medium**: Top 15% most likely to churn
+   - **Low**: Top 30% most likely to churn
+3. Set **Membership duration**: 7 days (matches prediction window).
+4. (Optional) Add a trigger: `churn_risk_detected`.
+5. Save as `churn_risk_high_7d`.
+</Steps>
+
+### Step 4: Create predicted revenue audience
+
+<Steps>
+1. Select **Predictive → Predicted 28-day revenue**.
+2. Set the **revenue threshold** (in USD):
+   - **High**: Top 20% highest predicted revenue
+   - **Medium**: Top 50% highest predicted revenue
+   - **Low**: All users with positive predicted revenue
+3. Or manually set a threshold: "Predicted revenue ≥ $50"
+4. Set **Membership duration**: 28 days (matches prediction window).
+5. Save as `predicted_revenue_high_28d`.
+</Steps>
+
+## Available predictive metrics in Explorations
+
+You can use predictions as dimensions or metrics in **Explorations** (free-form analysis):
+
+### Predictive dimension: Purchase probability bucket
+
+Segment users into buckets: Very high, High, Medium, Low.
+
+**Query example**:
+```
+Rows: Purchase probability bucket
+Columns: Conversion rate, Avg. session duration
+Filter: All users
+```
+
+This shows which prediction bucket has the highest conversion rate, validating model accuracy.
+
+### Predictive metric: Predicted revenue
+
+Analyze revenue by any dimension (traffic source, device, geography).
+
+**Query example**:
+```
+Rows: Default channel grouping
+Columns: Predicted 28-day revenue, Actual revenue (last 28 days)
+```
+
+Compare predicted vs. actual revenue by channel to understand which channels drive high-value users.
+
+## Using predictive audiences in Google Ads
+
+Once a predictive audience reaches 1,000 members, it syncs to linked Google Ads accounts:
+
+<Steps>
+1. Link your Google Ads account in **Admin → Product Links → Google Ads Links** (if not already linked).
+2. Create the predictive audience in GA4 (audience reaches 1,000+ members).
+3. In Google Ads, go to **Audiences → Your Data Segments → Google Analytics**.
+4. Find your predictive audience (e.g., "purchase_probability_high_7d").
+5. Use it in a **Smart Bidding strategy** (Target CPA, Target ROAS) or **audience exclusion** (exclude churners).
+</Steps>
+
+### Bidding strategy integration
+
+**For purchase probability**:
+- Use **Target ROAS** with your `purchase_probability_high_7d` audience
+- Set a higher ROAS target for the audience (e.g., 8:1) than your default (5:1)
+- Google Ads will allocate budget to high-probability users
+
+```
+Campaign: "Premium Sneakers Campaign"
+Audience: purchase_probability_high_7d
+Bidding: Target ROAS 8:1 (vs. 5:1 default for all users)
+Result: Higher spend on high-probability users, lower spend on uncertain users
+```
+
+**For churn risk**:
+- Use **Target CPA** with a retention audience
+- Create an audience: `Likely churners` + High-value past purchasers
+- Set lower CPA target (e.g., $5) for retention ads
+
+```
+Campaign: "Win-Back Campaign"
+Audience: churn_risk_high_7d AND past_purchaser
+Bidding: Target CPA $5
+Action: Re-engagement email, discount offer
+```
+
+**For predicted revenue**:
+- Segment Google Ads campaigns by predicted revenue tiers
+- Allocate budget proportionally (more to high-revenue users)
+
+```
+Campaign 1: "Premium Users" — Target ROAS 10:1 (predicted_revenue_high_28d)
+Campaign 2: "Standard Users" — Target ROAS 5:1 (predicted_revenue_medium_28d)
+Campaign 3: "Budget Users" — Target CPA $10 (low predicted revenue)
+```
+
+## Limitations and caveats
+
+### Data volume requirements are strict
+
+If your app property has 1,100 purchasers and you launch a prediction model, it works today. But if purchase volume drops to 900 and stays there for 7 days, GA4 disables the model. This volatility is common for seasonal or emerging products.
+
+**Mitigation**: If you're below minimums, consider consolidating multiple properties (iOS + Android, multiple regions) into a single GA4 property to increase volume.
+
+### Model accuracy varies by vertical
+
+Some businesses naturally predict better than others:
+- **E-commerce**: 75–85% accuracy (consistent purchase intent signals)
+- **SaaS**: 60–75% accuracy (longer sales cycle, fewer signals)
+- **Content/Media**: 50–65% accuracy (engagement doesn't guarantee monetization)
+- **Gaming**: 70–80% accuracy (clear in-app purchase signals)
+
+Don't expect 90%+ accuracy. Use predictions as signals to augment your existing strategies, not replace them.
+
+### Predictions look backward; they don't account for external campaigns
+
+The ML model trains on historical data and doesn't know about:
+- A major flash sale you're about to launch
+- A competitor entering your market
+- A viral social media post
+- Macro economic shifts
+
+Predictions are useful for baseline optimization but require human judgment for major campaigns.
+
+### Audience size may shrink over time
+
+A predictive audience populated with 50,000 users today may have only 30,000 users tomorrow as new cohorts are scored and old cohorts mature. The membership refreshes continuously based on the prediction window.
+
+Track audience size as a metric. If it drops > 50% overnight, it often signals a model quality issue or data degradation.
+
+## Monitoring model quality
+
+### Check 1: Validate via Explorations
+
+Compare predicted vs. actual outcomes in a free-form exploration:
+
+```
+Query: Purchase Probability Validation
+Rows: Purchase probability bucket
+Columns: Conversion rate, Avg. purchase value
+Filter: 7 days after entering prediction audience
+Visualization: Table
+```
+
+Expected pattern:
+- Very high bucket: 15–20% conversion rate
+- High bucket: 8–12% conversion rate
+- Medium bucket: 4–6% conversion rate
+- Low bucket: 2–3% conversion rate
+
+If all buckets have the same conversion rate, the model has low precision.
+
+### Check 2: Monitor audience growth
+
+Set up a scheduled query to track audience size over time:
+
+```sql
+-- Daily audience member count tracking
+SELECT
+  CURRENT_DATE() AS check_date,
+  audience_name,
+  member_count
+FROM `project.dataset.audience_metrics`
+WHERE audience_name = 'purchase_probability_high_7d'
+ORDER BY check_date DESC;
+```
+
+Plot the results. A healthy predictive audience shows:
+- Gradual growth as new users are scored
+- Stable size (±15%) day-to-day
+- Seasonal trends matching your business
+
+A red flag is sudden drops (> 30%) or sustained growth (users aging out slower than new users entering).
+
+### Check 3: Compare model periods
+
+GA4 may regenerate models weekly or monthly. Compare predictions across generations:
+
+```
+Query: Model Comparison
+Dimension: User ID
+Metrics: Purchase probability (this week), Purchase probability (last week)
+Filter: Users in both cohorts
+Visualization: Scatter plot
+```
+
+A good model shows strong correlation (R² > 0.8) across generations. Weak correlation suggests instability.
+
+## Common reasons prediction isn't available
+
+### "Coming soon"
+
+**Meaning**: You've met some minimums but not all. Typically means:
+- Returning user count is high
+- But purchase event volume or diversity is low
+
+**Remedy**: Wait 1–2 weeks for GA4 to accumulate more event data.
+
+### "Insufficient data"
+
+**Meaning**: You're significantly below minimums. For purchase probability:
+- Fewer than 1,000 returning users who purchased in the last 28 days, OR
+- Fewer than 1,000 returning users who did NOT purchase
+
+**Remedy**:
+- Wait for traffic to grow, or
+- Consolidate multiple properties (iOS + Android), or
+- Adjust your event tracking to ensure all purchases are captured
+
+### "Model quality is below threshold"
+
+**Meaning**: A model exists but is unreliable (accuracy < 65%). Common causes:
+- Purchase event value is missing for 40%+ of transactions
+- Sudden spike in noise (bot traffic, test purchases)
+- Seasonal collapse (summer sales drop 80% vs. winter)
+
+**Remedy**:
+1. Audit purchase event quality: `SELECT COUNT(*) FROM events WHERE event = purchase AND value IS NULL`
+2. Deploy bot filtering (GA4 data filters)
+3. Contact Google Cloud support if problems persist
+
+## Migration and transition
+
+### Moving from rule-based to predictive audiences
+
+You can run both simultaneously. Predictive audiences complement rule-based ones:
+
+```
+Rule-based audiences (historical):
+- Cart abandoners (added_to_cart in last 14 days + no purchase)
+- Past purchasers (purchased_at any time)
+
+Predictive audiences (forward-looking):
+- Likely 7-day purchasers
+- Likely 7-day churners
+```
+
+Don't delete rule-based audiences immediately. Use predictive for 4 weeks in parallel, then evaluate ROI before sunset.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Audiences"
+    description="Create rule-based audiences for segmentation and remarketing."
+    href="/ga4/configuration/audiences/"
+  />
+  <LinkCard
+    title="Explore Reports"
+    description="Use predictive dimensions in free-form and funnel explorations."
+    href="/ga4/reporting/explore-reports/"
+  />
+  <LinkCard
+    title="Google Ads Integration"
+    description="Sync GA4 audiences and metrics to Google Ads for bidding strategies."
+    href="/ga4/integrations/google-ads/"
+  />
+  <LinkCard
+    title="Conversions & Key Events"
+    description="Mark events as conversions to feed ML models with training data."
+    href="/ga4/configuration/conversions/"
+  />
+</CardGrid>

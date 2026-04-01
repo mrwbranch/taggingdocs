@@ -113,7 +113,7 @@ Complete one row per planned event. This becomes the input for your dataLayer sp
 
 ### 3.2 Event Naming Conventions
 
-Document your naming rules here so everyone follows the same pattern.
+Document your naming rules here so everyone follows the same pattern. For a comprehensive guide on naming standards, see the [Naming Conventions Checklist](/resources/naming-conventions-checklist/).
 
 ```
 Convention: snake_case, all lowercase, verb + noun (where applicable)
@@ -128,6 +128,8 @@ Examples:
   ✗ button_click (too generic)
   ✗ _custom_event (reserved prefix)
 ```
+
+For detailed guidance on naming, standardization across teams, and naming governance, see [Naming Conventions Checklist](/resources/naming-conventions-checklist/).
 
 ### 3.3 Parameter Naming Conventions
 
@@ -144,6 +146,38 @@ Parameter types:
   String parameters: max 100 characters for GA4 UI, unlimited for BigQuery
   Numeric parameters: integer or float, used when you need to aggregate
 ```
+
+---
+
+## Part 3.4: Data Quality KPIs
+
+Define what "good data" means for your implementation. These KPIs help you monitor whether your tracking is working correctly and catch drift early.
+
+| KPI | Target | How to Monitor | Alert Threshold |
+|-----|--------|---|---|
+| **Daily event volume stability** | ±10% vs. 7-day average | Looker Studio dashboard checking yesterday vs. weekly baseline | > 15% drop |
+| **PII in event parameters** | 0 instances | Daily audit query scanning for email/phone patterns in strings | Any match |
+| **Parameter coverage** | P0 events with >95% of sessions | Query: sessions with event / total sessions | < 90% |
+| **Event naming consistency** | 100% match specification | Audit all unique `event_name` values monthly | Any deviation |
+| **Event parameter completeness** | P0 events with all required params | Count events with NULL values for mandatory params | > 5% NULL rate |
+| **Session ID validity** | 100% unique per session | Check for duplicate session IDs within same user | Any duplicates |
+
+---
+
+## Part 3.5: Measurement Stack Governance
+
+Define who owns what in your analytics infrastructure. Unclear ownership leads to configuration drift and broken tracking.
+
+| Component | Owner | Backup Owner | Update Process |
+|-----------|-------|--------------|-----------------|
+| **GA4 Property Configuration** | Analytics Lead | Engineering Lead | Changes approved in measurement review meeting before implementation |
+| **GTM Container** | Analytics Lead | Engineering Lead | All changes code-reviewed before publishing to production |
+| **Custom Event Spec** | Product Manager | Analytics Lead | Updated when features ship; reviewed in sprint planning |
+| **DataLayer Implementation** | Engineering Lead | Frontend Lead | Implementation tied to feature development; tested in PR review |
+| **BigQuery Setup & Access** | Analytics Lead | Data Engineer | Access provisioned through data governance process |
+| **Monitoring & Alerts** | Analytics Lead | | Configuration reviewed monthly |
+| **QA & Testing** | Analytics Team & Engineering | | Every release before going to production |
+| **Documentation** | Analytics Lead | | Updated immediately when configuration changes |
 
 ---
 

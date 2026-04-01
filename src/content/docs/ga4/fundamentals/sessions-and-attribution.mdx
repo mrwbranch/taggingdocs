@@ -44,7 +44,7 @@ Both parameters attach to every subsequent event in the session. The canonical u
 An "engaged session" meets at least one of:
 - Lasted longer than 10 seconds with the page in focus
 - Had 2 or more page views or screen views
-- Had at least 1 conversion event
+- Had at least 1 key event
 
 **Engagement rate** = engaged sessions ÷ total sessions. This is GA4's primary engagement signal.
 
@@ -66,20 +66,20 @@ Do not use session count as a migration validation metric between GA4 and UA. Us
 
 ## Attribution in GA4
 
-Attribution assigns credit for a conversion to a traffic source. GA4 supports multiple attribution models.
+Attribution assigns credit for a key event to a traffic source. GA4 supports multiple attribution models.
 
 ### Attribution models
+
+GA4 currently supports two attribution models:
 
 | Model | How credit is assigned |
 |-------|----------------------|
 | Data-driven (default) | ML distributes fractional credit based on actual impact of each touchpoint |
-| Last click | 100% to the last touchpoint before conversion |
-| First click | 100% to the first touchpoint that introduced the user |
-| Linear | Equal credit across all touchpoints in the conversion path |
-| Time decay | More credit to touchpoints closer to conversion |
-| Position-based | 40% first, 40% last, 20% distributed across middle touchpoints |
+| Last click | 100% to the last touchpoint before key event |
 
-Data-driven attribution requires sufficient volume — Google recommends 30+ conversions per day. Below that threshold, it falls back to last click.
+**Note**: First click, Linear, Time decay, and Position-based models were removed from GA4 in November 2023. For multi-touch attribution analysis, use BigQuery SQL-based models or the GA4 BI Connector to implement custom attribution.
+
+Data-driven attribution requires sufficient volume — Google recommends 30+ key events per day. Below that threshold, it falls back to last click.
 
 Configure the default model in **Admin → Attribution settings**.
 
@@ -88,7 +88,7 @@ Configure the default model in **Admin → Attribution settings**.
 | Event type | Default lookback window |
 |-----------|------------------------|
 | Acquisition events (first_visit, first_open) | 30 days |
-| All other conversions | 90 days |
+| All other key events | 90 days |
 
 Change in **Admin → Attribution settings**. Shorter windows concentrate credit on recent channels.
 

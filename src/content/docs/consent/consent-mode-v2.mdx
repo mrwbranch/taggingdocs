@@ -18,7 +18,11 @@ As of March 2024, Google requires Consent Mode v2 for any advertiser targeting u
 
 ## The seven consent types
 
-Consent Mode v2 introduced two new consent types on top of the original four. Here is what each one actually controls:
+Consent Mode v2 defines **four official consent signals** (required for compliance) plus three supplementary types (optional):
+
+### Official consent signals (v2)
+
+These four signals are the core of Consent Mode v2 and are required for GDPR/ePrivacy compliance:
 
 ### `analytics_storage`
 
@@ -47,6 +51,10 @@ Controls whether data can be used for personalized advertising. When denied:
 - Remarketing audiences are not built
 - User data is used for conversion measurement only, not audience targeting
 - This maps roughly to "opt out of personalized ads" in regulatory language
+
+### Supplementary consent signals (optional)
+
+These three are supplementary and optional for most implementations:
 
 ### `functionality_storage`
 

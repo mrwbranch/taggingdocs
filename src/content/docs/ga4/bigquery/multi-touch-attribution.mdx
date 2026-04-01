@@ -1,0 +1,419 @@
+---
+title: "Multi-Touch Attribution Models in BigQuery"
+description: "Implement position-based, time-decay, and linear attribution models in SQL after Google removed 4 attribution models from GA4 UI in November 2023."
+sidebar:
+  order: 7
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+In **November 2023**, Google removed four attribution models from the GA4 UI:
+
+- Position-based (first/last click weighted)
+- Time-decay
+- Linear
+- Data-driven
+
+These models are now exclusively available through **BigQuery** and the **Google Analytics Data API** via custom implementations. This guide covers SQL implementations for the three deterministic models and discusses why data-driven attribution is harder to replicate.
+
+## Why attribution modeling matters
+
+Attribution answers the question: **Which touchpoints deserve credit for a conversion?**
+
+Different models tell different stories:
+
+- **Last-click**: "The final touchpoint drives conversions" (simplest, default in GA4)
+- **First-touch**: "Initial awareness matters most"
+- **Linear**: "All touchpoints contribute equally"
+- **Time-decay**: "Recent interactions matter more"
+- **Position-based**: "First and last touches matter; middle touches split the remainder"
+
+By analyzing each model, you can identify undervalued channels and optimize budget allocation.
+
+## Position-based attribution (40/20/40)
+
+The **position-based model** allocates:
+
+- **40%** of credit to the first interaction
+- **20%** to middle interactions (split equally)
+- **40%** to the last interaction before conversion
+
+### SQL implementation
+
+```sql
+WITH user_sessions AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    collected_traffic_source.manual_source AS source,
+    collected_traffic_source.manual_medium AS medium,
+    event_timestamp,
+    event_name,
+    ROW_NUMBER() OVER (
+      PARTITION BY user_pseudo_id
+      ORDER BY event_timestamp
+    ) AS event_sequence
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+    AND (event_name = 'page_view' OR event_name = 'purchase')  -- Adjust based on your conversion event
+),
+conversion_paths AS (
+  SELECT
+    user_pseudo_id,
+    ARRAY_AGG(
+      STRUCT(
+        source,
+        medium,
+        event_sequence,
+        event_timestamp
+      ) ORDER BY event_timestamp
+    ) AS path
+  FROM user_sessions
+  WHERE event_name = 'purchase'  -- Only users who converted
+  GROUP BY user_pseudo_id
+),
+touchpoint_credits AS (
+  SELECT
+    user_pseudo_id,
+    source,
+    medium,
+    event_sequence,
+    CASE
+      WHEN event_sequence = ARRAY_LENGTH(path) THEN 0.40  -- Last touch
+      WHEN event_sequence = 1 THEN 0.40  -- First touch
+      ELSE 0.20 / (ARRAY_LENGTH(path) - 2)  -- Middle touches (equal split of 20%)
+    END AS credit
+  FROM conversion_paths,
+  UNNEST(path) AS touchpoint WITH OFFSET AS event_sequence
+  WHERE event_sequence < ARRAY_LENGTH(path)  -- Exclude the conversion event itself
+)
+SELECT
+  source,
+  medium,
+  SUM(credit) AS total_credit,
+  COUNT(DISTINCT user_pseudo_id) AS converting_users
+FROM touchpoint_credits
+GROUP BY source, medium
+ORDER BY total_credit DESC
+```
+
+This approach:
+
+1. Collects all page_view events per user (ordered by timestamp)
+2. Identifies only users who converted
+3. Allocates 40% to the first touch, 40% to the last, and splits 20% equally among middle touches
+4. Aggregates credit by source/medium
+
+<Aside type="tip">
+Adjust the `event_name` filter for your conversion event. Use `'purchase'` for ecommerce, `'sign_up'` for SaaS, or your custom event name.
+</Aside>
+
+## Time-decay attribution
+
+**Time-decay** allocates more credit to recent interactions using an exponential decay function. The most common formula:
+
+```
+credit = 2^(-days_since_conversion / half_life)
+```
+
+With a half-life of 7 days:
+
+- Interaction 7 days before conversion: 50% of the weight of the last interaction
+- Interaction 14 days before conversion: 25% of the weight of the last interaction
+- Interaction 1 day before conversion: ~93% of the weight of the last interaction
+
+### SQL implementation
+
+```sql
+WITH user_conversions AS (
+  SELECT
+    user_pseudo_id,
+    MIN(event_timestamp) AS first_conversion_timestamp
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name = 'purchase'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  GROUP BY user_pseudo_id
+),
+conversion_journeys AS (
+  SELECT
+    e.user_pseudo_id,
+    e.event_timestamp,
+    e.collected_traffic_source.manual_source AS source,
+    e.collected_traffic_source.manual_medium AS medium,
+    c.first_conversion_timestamp,
+    TIMESTAMP_DIFF(c.first_conversion_timestamp, e.event_timestamp, DAY) AS days_before_conversion
+  FROM `project.analytics_PROPERTY_ID.events_*` e
+  INNER JOIN user_conversions c USING (user_pseudo_id)
+  WHERE e.event_name = 'page_view'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+    AND e.event_timestamp <= c.first_conversion_timestamp
+    AND e.event_timestamp > TIMESTAMP_SUB(c.first_conversion_timestamp, INTERVAL 90 DAY)  -- Look back window
+),
+time_decay_credits AS (
+  SELECT
+    user_pseudo_id,
+    source,
+    medium,
+    days_before_conversion,
+    -- Exponential decay with 7-day half-life
+    POW(2.0, -days_before_conversion / 7.0) AS decay_weight
+  FROM conversion_journeys
+),
+normalized_credits AS (
+  SELECT
+    user_pseudo_id,
+    source,
+    medium,
+    decay_weight / SUM(decay_weight) OVER (PARTITION BY user_pseudo_id) AS normalized_credit
+  FROM time_decay_credits
+)
+SELECT
+  source,
+  medium,
+  SUM(normalized_credit) AS total_credit,
+  COUNT(DISTINCT user_pseudo_id) AS converting_users,
+  ROUND(SUM(normalized_credit) / COUNT(DISTINCT user_pseudo_id), 4) AS avg_credit_per_user
+FROM normalized_credits
+GROUP BY source, medium
+ORDER BY total_credit DESC
+```
+
+Key concepts:
+
+1. Find the first conversion timestamp for each user
+2. Collect all page_view events leading up to that conversion (within a 90-day lookback window)
+3. Calculate `decay_weight = 2^(-days_before_conversion / 7)` for each touchpoint
+4. Normalize weights so they sum to 1.0 per user (fair allocation per conversion)
+5. Aggregate by source/medium
+
+You can adjust the **half-life** (currently 7 days) to reflect your business:
+
+- **3 days**: Very recent activity is heavily weighted
+- **14 days**: Longer consideration cycle
+- **30 days**: Extended purchase cycle
+
+## Linear attribution (equal credit)
+
+**Linear attribution** gives equal credit to every touchpoint in the conversion path.
+
+### SQL implementation
+
+```sql
+WITH user_conversions AS (
+  SELECT
+    user_pseudo_id,
+    event_timestamp AS conversion_timestamp,
+    ROW_NUMBER() OVER (PARTITION BY user_pseudo_id ORDER BY event_timestamp) AS conversion_number
+  FROM `project.analytics_PROPERTY_ID.events_*`
+  WHERE event_name = 'purchase'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+),
+conversion_journeys AS (
+  SELECT
+    e.user_pseudo_id,
+    e.event_timestamp,
+    e.collected_traffic_source.manual_source AS source,
+    e.collected_traffic_source.manual_medium AS medium,
+    c.conversion_timestamp,
+    COUNT(*) OVER (
+      PARTITION BY e.user_pseudo_id, c.conversion_number
+      ORDER BY e.event_timestamp
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ) + 1 AS touchpoint_number,
+    COUNT(*) OVER (
+      PARTITION BY e.user_pseudo_id, c.conversion_number
+    ) AS total_touchpoints
+  FROM `project.analytics_PROPERTY_ID.events_*` e
+  INNER JOIN user_conversions c USING (user_pseudo_id)
+  WHERE e.event_name = 'page_view'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+    AND e.event_timestamp < c.conversion_timestamp
+    AND e.event_timestamp > TIMESTAMP_SUB(c.conversion_timestamp, INTERVAL 90 DAY)
+)
+SELECT
+  source,
+  medium,
+  SUM(1.0 / total_touchpoints) AS total_credit,
+  COUNT(DISTINCT user_pseudo_id) AS converting_users
+FROM conversion_journeys
+GROUP BY source, medium
+ORDER BY total_credit DESC
+```
+
+This is the simplest model: divide 1 conversion equally among all touchpoints.
+
+For example, if a user has a 3-touchpoint path (organic search → direct → paid search → purchase), each touchpoint gets 1/3 credit (0.33).
+
+## Data-driven attribution discussion
+
+**Data-driven attribution** is a machine learning model that determines credit allocation based on historical conversion patterns. Google uses this model internally for Google Ads accounts.
+
+### Why it's hard to replicate in SQL
+
+1. **Training data requirement**: You need thousands of conversion paths to train a model
+2. **Feature engineering**: Requires extracting features from paths (day of week, time between touches, channel combinations, etc.)
+3. **Counterfactual analysis**: Ideally, you'd compare "path with touchpoint X removed" to "path with touchpoint X present" — expensive to compute
+4. **Regularization and tuning**: Machine learning models need hyperparameter tuning to avoid overfitting
+
+### Alternatives to replicate data-driven attribution
+
+For practical purposes, consider:
+
+- **Logistic regression in BigQuery ML**: Train a model to predict conversion probability given channel combinations
+- **Markov chain model**: Simulate the probability of conversion based on state transitions (complex but deterministic)
+- **Google Analytics 360 Data-Driven Attribution**: If you have GA 360, use Google's built-in model (available via the API)
+- **Third-party attribution platforms**: Venture Ads, Lifesight, and others provide DDA across channels
+
+Here's a **simple logistic regression example** in BigQuery ML:
+
+```sql
+CREATE OR REPLACE MODEL `project.analytics_derived.dda_model` AS
+SELECT
+  source,
+  medium,
+  campaign_name,
+  CASE WHEN event_name = 'purchase' THEN 1 ELSE 0 END AS converted
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name IN ('page_view', 'purchase');
+
+-- Then predict probabilities
+SELECT
+  source,
+  medium,
+  campaign_name,
+  predicted_converted_probs[OFFSET(1)].prob AS conversion_probability
+FROM ML.PREDICT(
+  MODEL `project.analytics_derived.dda_model`,
+  (
+    SELECT DISTINCT source, medium, campaign_name
+    FROM `project.analytics_PROPERTY_ID.events_*`
+    WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  )
+)
+```
+
+This predicts conversion probability by channel combination, which you can use to weight attribution.
+
+## Building a comparison dashboard in Looker Studio
+
+Create a dashboard comparing all attribution models side-by-side:
+
+1. **Create a derived table in BigQuery** that materializes all three models (position-based, time-decay, linear)
+2. **Schedule a daily refresh** using a scheduled query
+3. **Connect Looker Studio** to the derived table
+4. **Add cards for each metric**:
+   - Table: Source/Medium with columns for each model's credit
+   - Chart: Total credit by model (stacked bar)
+   - Chart: Model comparison scatter plot (position-based vs. linear, etc.)
+
+Example derived table:
+
+```sql
+CREATE OR REPLACE TABLE `project.analytics_derived.attribution_models` AS
+-- UNION all three models with a model_type column
+SELECT 'position_based' AS model_type, source, medium, total_credit FROM (SELECT source, medium, SUM(credit) AS total_credit FROM ... )
+UNION ALL
+SELECT 'time_decay' AS model_type, source, medium, total_credit FROM (SELECT source, medium, SUM(normalized_credit) AS total_credit FROM ...)
+UNION ALL
+SELECT 'linear' AS model_type, source, medium, total_credit FROM (SELECT source, medium, SUM(1.0 / total_touchpoints) AS total_credit FROM ...)
+```
+
+## Handling direct traffic and null channels
+
+Direct traffic and organic search often appear with `NULL` or incomplete channel data:
+
+```sql
+-- Coalesce missing source/medium to sensible defaults
+SELECT
+  COALESCE(source, '(direct)') AS source,
+  COALESCE(medium, '(none)') AS medium,
+  total_credit
+FROM attribution_data
+WHERE source IS NULL OR medium IS NULL
+```
+
+Use these in your Looker Studio filters to keep direct traffic visible but aggregated separately from paid channels.
+
+## Credit allocation formulas with clear SQL examples
+
+### Example 1: Last-click (baseline)
+
+```sql
+-- Every conversion assigns 100% credit to the last touchpoint
+SELECT
+  source,
+  medium,
+  COUNT(DISTINCT user_pseudo_id) AS credit
+FROM conversion_last_touch
+GROUP BY source, medium
+```
+
+### Example 2: First-click
+
+```sql
+-- Assign 100% credit to the first touchpoint only
+SELECT
+  source,
+  medium,
+  COUNT(DISTINCT user_pseudo_id) AS credit
+FROM conversion_first_touch
+GROUP BY source, medium
+```
+
+### Example 3: 50/50 (first and last split)
+
+```sql
+-- Split credit 50/50 between first and last; ignore middle touches
+SELECT
+  source,
+  medium,
+  SUM(0.5) AS credit
+FROM conversion_endpoints
+GROUP BY source, medium
+```
+
+## Related resources
+
+- [aliasoblomov/Bigquery-GA4-Queries GitHub](https://github.com/aliasoblomov/Bigquery-GA4-Queries) — Community SQL examples
+- [GA4BigQuery.com](https://ga4bigquery.com) — GA4 + BigQuery documentation and templates
+- [Google Analytics Reporting API v4 Attribution](https://developers.google.com/analytics/devguides/reporting/core/v4/basics#multi-touch) — Concepts and definitions
+- [Looker Studio BigQuery Connector](https://support.google.com/looker-studio/answer/6370356) — Dashboard setup guide
+
+## Common questions
+
+### Which attribution model should I use?
+
+**Start with last-click** (GA4 default) because it's simple and works for short sales cycles. Experiment with **linear** for consideration cycles (SaaS, B2B). Use **time-decay** if recent behavior is most predictive.
+
+### How far back should I look (lookback window)?
+
+Use **90 days** as a baseline for most industries. Adjust to match your typical sales cycle: shorter for ecommerce (14-30 days), longer for enterprise (180+ days).
+
+### Can I use this for Google Ads optimization?
+
+These SQL models show historical attribution. To **optimize bids**, use Google Ads' native data-driven attribution or import GA4 key events as conversion actions in Google Ads.
+
+### How do I handle multi-session paths?
+
+The examples above work across all sessions for a user (within the lookback window). If you want session-level paths only, add a filter on `session_id` instead of `user_pseudo_id`.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Session Reconstruction"
+    description="Rebuild complete user journeys with UTM parameters."
+    href="/ga4/bigquery/session-reconstruction/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="Ready-to-use SQL for GA4 analysis."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Cost Optimization"
+    description="Minimize BigQuery scanning costs."
+    href="/ga4/bigquery/cost-optimization/"
+  />
+</CardGrid>

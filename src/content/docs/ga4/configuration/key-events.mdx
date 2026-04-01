@@ -1,0 +1,176 @@
+---
+title: "Key Events (formerly Conversions)"
+description: "Understanding GA4's March 2024 rename from conversions to key events, how to mark events as key, and the impact on reporting and APIs."
+sidebar:
+  order: 5
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+In March 2024, Google renamed the GA4 feature previously called "Conversions" to **Key Events**. This change clarifies the distinction between GA4 measurement data and Google Ads conversion goals.
+
+## Why the rename?
+
+Google made this terminology shift to avoid confusion between two different systems:
+
+- **GA4 Key Events**: Actions you mark as important in GA4 Admin. These are tracked as custom event conversions within GA4 reporting.
+- **Google Ads Conversions**: Conversion goals defined in Google Ads. These can be imported from GA4, but they're a separate system for bid optimization and campaign performance.
+
+The old term "Conversions" blurred this distinction. The new "Key Events" label makes it clear that you're marking events that matter to your business, independent of any Google Ads integration.
+
+## How to mark events as key events
+
+Navigate to **Admin > Data Collection and Modification > Events**, then:
+
+1. Find the event you want to mark as key (e.g., `purchase`, `sign_up`, `form_submit`)
+2. Click the event name
+3. Toggle **Mark as key event** to ON
+4. Click **Save**
+
+Once marked, the event is counted in your GA4 property's key event metrics and appears in reports under the "Key events" metric.
+
+<Aside type="tip">
+You can also mark an event as key directly while editing event parameters in the Conversions tab (deprecated UI), but the recommended approach is via the Events interface.
+</Aside>
+
+## Key event limits
+
+GA4 allows you to mark up to **30 key events per property**. This is the same limit as the old "Conversions" feature. If you need to track more than 30 important actions:
+
+- Consolidate lower-priority events into broader categories (e.g., "engagement" instead of individual micro-interactions)
+- Use separate GA4 properties for different business lines
+- Rely on BigQuery export for detailed event analysis beyond the 30-event limit
+
+## Viewing key events in reporting
+
+Key events appear in multiple GA4 reports:
+
+### Conversions report (now shows key events)
+
+Navigate to **Reports > Monetization > Conversions** (or your property's equivalent). You'll see:
+
+- **Key event name** (column)
+- **Key events** (count of how many times the event fired)
+- **Key event conversion rate** (percentage of sessions with that key event)
+- Segmentation by dimensions (source, medium, campaign, etc.)
+
+### Real-time reporting
+
+The real-time dashboard shows key events firing in real-time, broken down by dimension.
+
+### Funnel reports
+
+In funnel analysis, you can select key events as conversion steps. The funnel will calculate drop-off rates between those events.
+
+### Custom reports
+
+When building custom reports, key events are available as a metric alongside other GA4 metrics like sessions, users, and engagement rate.
+
+## GA4 key events vs. Google Ads conversions
+
+The two systems are related but distinct:
+
+| Aspect | GA4 Key Events | Google Ads Conversions |
+|--------|----------------|------------------------|
+| **Defined in** | GA4 Admin | Google Ads Account |
+| **Purpose** | Track important actions in GA4 | Optimize bids and measure campaign ROI in Ads |
+| **Import path** | GA4 properties are linked to Ads accounts; key events can be imported as Ads conversions | Google Ads imports them, or you create native Ads conversion tracking |
+| **Counting** | Each key event fire = 1 count | Ads uses last-click or data-driven attribution by default |
+| **Reporting visibility** | GA4 reports | Ads campaigns, conversion value, ROAS |
+
+When you link a GA4 property to Google Ads, you can import GA4 key events as Google Ads conversion actions. However, they remain independent systems with different attribution logic.
+
+## Impact on reporting and API queries
+
+### UI reporting changes
+
+The GA4 UI uses "key events" language throughout:
+
+- The "Conversions" metric in older templates is now labeled "Key events"
+- Filters and segments reference "key event" instead of "conversion"
+- Custom reports use the "Key event" metric dimension
+
+### BigQuery API impact
+
+In BigQuery, the underlying event structure hasn't changed. Key events are still regular GA4 events exported to the `events_*` table.
+
+To query key events in BigQuery:
+
+```sql
+-- Count key events by event name
+SELECT
+  event_name,
+  COUNT(*) AS key_event_count,
+  COUNT(DISTINCT user_pseudo_id) AS users
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE event_name IN ('purchase', 'sign_up', 'form_submit')  -- Your marked key events
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+GROUP BY event_name
+ORDER BY key_event_count DESC
+```
+
+The GA4 Reporting API returns key events in the same way as before; the change is purely nomenclature.
+
+### Google Analytics API (Data API) impact
+
+When querying the [Google Analytics Data API (v1beta)](https://developers.google.com/analytics/devguides/reporting/data/v1), key events are available as metrics. Example:
+
+```
+POST https://analyticsdata.googleapis.com/v1beta/properties/YOUR_PROPERTY:runReport
+{
+  "property": "properties/YOUR_PROPERTY_ID",
+  "dateRanges": [{"startDate": "2024-01-01", "endDate": "2024-01-31"}],
+  "metrics": [{"name": "keyEvents"}],
+  "dimensions": [{"name": "eventName"}]
+}
+```
+
+## Migration checklist for teams
+
+If your team documented GA4 integration around "conversions," update your docs and processes:
+
+- [ ] Audit all internal documentation that references "GA4 conversions" and update to "GA4 key events"
+- [ ] Update dashboard titles and descriptions (e.g., "Conversion Funnel" → "Key Event Funnel")
+- [ ] Notify stakeholders of the terminology shift to avoid confusion with Google Ads conversions
+- [ ] Review your 30-event limit and consolidate if you're approaching the cap
+- [ ] If you import GA4 key events to Google Ads, document that Google Ads conversions are separate objects
+- [ ] Update API documentation (BigQuery, GA Data API) to reference key events where applicable
+- [ ] Verify filters and segments in saved reports still work (they should; the underlying logic is unchanged)
+
+## Common questions
+
+### Are my existing conversions automatically renamed to "key events"?
+
+Yes. If you were using the Conversions feature before March 2024, they are now called Key Events in the UI. The underlying event data and limits are unchanged.
+
+### Can I have key events without Google Ads?
+
+Yes. Key events are a GA4-only feature. You can mark events as key regardless of whether you have a Google Ads account or link GA4 to Ads.
+
+### Do I need to change my event collection code?
+
+No. Your gtag.js or Google Tag Manager setup should not change. You still send events the same way; the only difference is how GA4 Admin labels them.
+
+### Why the 30-event limit?
+
+The limit keeps GA4 properties focused on the most important actions and prevents over-instrumentation. For fine-grained analysis of all events, export to BigQuery.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Event Planning and Implementation"
+    description="Design a measurement plan and configure custom events in GA4."
+    href="/ga4/configuration/event-planning/"
+  />
+  <LinkCard
+    title="Google Ads Conversion Tracking"
+    description="Set up and verify Google Ads conversions from GA4."
+    href="/ga4/integrations/google-ads-conversion-tracking/"
+  />
+  <LinkCard
+    title="BigQuery Event Export"
+    description="Export GA4 events to BigQuery for custom analysis."
+    href="/ga4/bigquery/setup/"
+  />
+</CardGrid>

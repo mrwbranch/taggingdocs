@@ -27,27 +27,33 @@ These mistakes appear repeatedly across GA4 implementations. Some produce incorr
 
 ## 3. Double-firing purchase events
 
-**What happens**: Revenue appears doubled in GA4 reports. Conversion count is 2x actual transactions.
+**What happens**: Revenue appears doubled in GA4 reports. Key event count is 2x actual transactions.
 
-**Why it happens**: The purchase event fires on the thank-you page (client-side) AND from a payment webhook (server-side Measurement Protocol). Both fire for the same transaction.
+**Why it happens**: GA4 deduplicates `purchase` events based on `transaction_id` — if two purchase events share the same `transaction_id`, GA4 counts the revenue only once. So the real double-counting happens when:
 
-**Diagnose**:
+- `transaction_id` is **missing** from one or both events (GA4 treats each as unique)
+- The `transaction_id` values **don't match** between client-side and server-side (e.g., the client sends `#12345` while the webhook sends `order_12345`)
+- One event has `transaction_id` as a string and the other as a number, causing a type mismatch
+
+**Diagnose** — find purchases without `transaction_id` (the real culprit):
 ```sql
 SELECT
+  event_name,
   (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id') AS transaction_id,
   COUNT(*) AS count
 FROM `project.analytics_PROPERTY_ID.events_*`
 WHERE event_name = 'purchase'
   AND _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
-GROUP BY transaction_id
-HAVING COUNT(*) > 1
+GROUP BY event_name, transaction_id
+HAVING COUNT(*) > 1 OR transaction_id IS NULL
+ORDER BY count DESC
 ```
 
-**Fix**: Choose one source — client-side OR server-side, not both. For most e-commerce, server-side (Measurement Protocol triggered by payment confirmation) is more reliable.
+**Fix**: Ensure every `purchase` event includes a consistent `transaction_id`. If you fire from both client-side and server-side (which is fine for reliability), the `transaction_id` must match exactly — GA4's built-in deduplication handles the rest. If you cannot guarantee matching IDs, choose one source. For most e-commerce setups, server-side (Measurement Protocol triggered by payment confirmation) is more reliable.
 
 ## 4. Missing cross-domain tracking
 
-**What happens**: Traffic from `shop.example.com` to `checkout.example.com` appears as direct. Attribution is broken — paid campaigns that convert show as direct conversions. Session counts are inflated.
+**What happens**: Traffic from `shop.example.com` to `checkout.example.com` appears as direct. Attribution is broken — paid campaigns that lead to key events show as direct key events. Session counts are inflated.
 
 **Why it happens**: GA4 treats each domain as a separate origin by default. The `_ga` cookie does not transfer across domains without configuration.
 
@@ -81,9 +87,11 @@ HAVING COUNT(*) > 1
 
 **What happens**: "I set up data-driven attribution but my Traffic acquisition report looks the same."
 
-**Why it happens**: Traffic acquisition always uses last non-direct click regardless of attribution settings. Data-driven attribution affects the Advertising section and API only.
+**Why it happens**: The attribution model setting (data-driven vs. last click) affects how **key event credit** is distributed — and this does show up in Traffic acquisition reports, not only in the Advertising section. What does NOT change is the **dimensions** (source, medium, campaign) in Traffic acquisition, because those are always session-scoped — they reflect what started the session.
 
-**Fix**: There is nothing to fix — this is expected behavior. Check the Advertising section for data-driven numbers.
+So the report's rows (sources) stay the same, but the key event and revenue columns should shift depending on the model. If they look identical, the likely cause is that the property doesn't have enough key event volume for the data-driven model to diverge meaningfully from last click.
+
+**Fix**: Compare the key event columns in Traffic acquisition between data-driven and last click (you can switch models in Admin → Attribution Settings). For small properties with limited key event volume, the two models often produce near-identical results. The Advertising section and Explore reports with event-scoped dimensions give the most visible difference.
 
 ## 9. Internal traffic not filtered before launch
 

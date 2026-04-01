@@ -1,73 +1,73 @@
 ---
-title: "Conversions"
-description: "Mark events as conversions in GA4 — how conversion counting works, how it differs from goals, and how to use conversions effectively."
+title: "Key Events"
+description: "Mark events as key events in GA4 — how key event counting works, how it differs from goals, and how to use key events effectively."
 sidebar:
   order: 6
 ---
 
 import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-In GA4, a conversion is any event that you mark as a conversion. There is no separate "goals" setup — you collect events, then designate which events count as conversions. This simplicity is real, but conversion counting in GA4 works differently from Universal Analytics goals in ways that matter for your reporting.
+In GA4, a key event is any event that you mark as a key event. There is no separate "goals" setup — you collect events, then designate which events count as key events. This simplicity is real, but key event counting in GA4 works differently from Universal Analytics goals in ways that matter for your reporting.
 
-## Marking an event as a conversion
+## Marking an event as a key event
 
 <Steps>
-1. Go to **Admin → Conversions** (or **Admin → Events** → toggle the conversion toggle).
+1. Go to **Admin → Key events** (or **Admin → Events** → toggle the key event toggle).
 
-2. Click **New conversion event**.
+2. Click **Create key event**.
 
 3. Enter the event name exactly as sent from your tracking code (e.g., `purchase`, `form_submission`, `newsletter_signup`). Case-sensitive.
 
-4. Click **Save**.
+4. Click **Create**.
 </Steps>
 
-The event is now marked as a conversion. GA4 will count it as a conversion in reports going forward.
+The event is now marked as a key event. GA4 will count it as a key event in reports going forward.
 
-Alternatively, go to **Admin → Events**, find the event in the list, and toggle the "Mark as conversion" switch.
+Alternatively, go to **Admin → Events**, find the event in the list, and toggle the "Mark as key event" switch.
 
 <Aside type="tip">
-You can mark events as conversions before they have ever fired. GA4 will count them as conversions whenever they occur from that point forward. You do not need to wait for the event to appear in the events list.
+You can mark events as key events before they have ever fired. GA4 will count them as key events whenever they occur from that point forward. You do not need to wait for the event to appear in the events list.
 </Aside>
 
-## How GA4 counts conversions
+## How GA4 counts key events
 
 This is where GA4 differs significantly from Universal Analytics goals.
 
 **UA goal counting**: each goal fires at most once per session. If a user completed a purchase 3 times in one session, UA counted 1 goal completion.
 
-**GA4 conversion counting**: by default, conversions are counted once per event, per session. If a user triggers `purchase` 3 times in one session, GA4 counts 3 conversions.
+**GA4 key event counting**: by default, key events are counted once per event, per session. If a user triggers `purchase` 3 times in one session, GA4 counts 3 key events.
 
 This means:
-- High-frequency events (page views, button clicks) should usually not be marked as conversions — each occurrence counts
+- High-frequency events (page views, button clicks) should usually not be marked as key events — each occurrence counts
 - Events that can legitimately occur multiple times per session (multiple purchases) count correctly
 - Events that should only count once per session (newsletter signup) may overcount if the event fires multiple times
 
-### Conversion deduplication for purchases
+### Key event deduplication for purchases
 
-For the standard `purchase` event, GA4 deduplicates based on `transaction_id`. If the same `transaction_id` is sent multiple times (e.g., from both client-side and server-side tags), GA4 counts it as one conversion.
+For the standard `purchase` event, GA4 deduplicates based on `transaction_id`. If the same `transaction_id` is sent multiple times (e.g., from both client-side and server-side tags), GA4 counts it as one key event.
 
-For other events, there is no built-in deduplication. If `form_submission` fires twice for the same form in one session, GA4 counts 2 conversions.
+For other events, there is no built-in deduplication. If `form_submission` fires twice for the same form in one session, GA4 counts 2 key events.
 
-## Default conversions
+## Default key events
 
-GA4 automatically marks two events as conversions for all new web properties:
+GA4 automatically marks two events as key events for all new web properties:
 
 - **`first_visit`** — fires when a user visits your site for the first time
 - **`purchase`** — fires when a purchase occurs (if you send this event)
 
 For app properties, `first_open` is also pre-marked.
 
-You can unmark `first_visit` if you do not want to treat new user acquisition as a conversion in your campaign reporting. However, for properties with Google Ads linked and conversion-based bidding, removing `first_visit` from conversions can affect Smart Bidding performance.
+You can unmark `first_visit` if you do not want to treat new user acquisition as a key event in your campaign reporting. However, for properties with Google Ads linked and conversion-based bidding, removing `first_visit` from key events can affect Smart Bidding performance.
 
-## Conversion limits
+## Key event limits
 
 | Limit | Value |
 |-------|-------|
-| Conversion events per property | 30 |
+| Key events per property | 30 |
 
-30 conversions sounds like a lot, but in complex implementations with many forms, lead sources, and purchase types, it fills up. Be selective.
+30 key events sounds like a lot, but in complex implementations with many forms, lead sources, and purchase types, it fills up. Be selective.
 
-Reserve conversions for events that represent genuine business value:
+Reserve key events for events that represent genuine business value:
 - `purchase`
 - `lead_form_submission`
 - `phone_call_click`
@@ -75,42 +75,42 @@ Reserve conversions for events that represent genuine business value:
 - `free_trial_signup`
 - `checkout_complete`
 
-Do not mark every interaction event as a conversion. Button clicks, page views, and micro-engagements create noise without analytical value.
+Do not mark every interaction event as a key event. Button clicks, page views, and micro-engagements create noise without analytical value.
 
-## Using conversions in reports
+## Using key events in reports
 
-Conversions appear throughout GA4:
-- **Acquisition reports** — "Conversions" column shows conversion count by source
-- **Engagement reports** — "Conversions" and "Conversion rate" columns
-- **Advertising section** — conversions attributed by channel with attribution model applied
+Key events appear throughout GA4:
+- **Acquisition reports** — "Key events" column shows key event count by source
+- **Engagement reports** — "Key events" and "Key event rate" columns
+- **Advertising section** — key events attributed by channel with attribution model applied
 - **Explorations** — available as a metric in any exploration
 
-### Filtering conversions by event name
+### Filtering key events by event name
 
-In standard reports, the "Conversions" metric aggregates all conversion events. To see conversions for a specific event:
+In standard reports, the "Key events" metric aggregates all key event types. To see key events for a specific event:
 
-1. In the Engagement overview or Events report, find your conversion event
+1. In the Engagement overview or Events report, find your key event
 2. Or in Explorations, use a segment filter: "Event name = purchase"
-3. Or use the "Conversions" dimension in a free-form exploration to break down by conversion type
+3. Or use the "Key events" dimension in a free-form exploration to break down by key event type
 
-## Conversions and Google Ads bidding
+## Key events and Google Ads bidding
 
-When GA4 is linked to Google Ads, you can import GA4 conversions into Google Ads for bidding:
+When GA4 is linked to Google Ads, you can import GA4 key events into Google Ads for conversion-based bidding:
 
 1. In Google Ads, go to **Tools → Measurement → Conversions → Import → Google Analytics 4 properties**
-2. Select the GA4 conversions to import
-3. These conversions become available for Smart Bidding (Target CPA, Target ROAS, Maximize Conversions)
+2. Select the GA4 key events to import
+3. These are treated as conversions in Google Ads and become available for Smart Bidding (Target CPA, Target ROAS, Maximize Conversions)
 
 <Aside type="caution">
-Use "primary" vs. "secondary" conversion designation in Google Ads. Primary conversions affect bidding; secondary conversions are reported but do not influence bidding. Only use high-intent, high-reliability events as primary conversions. If GA4 double-counts a conversion due to an implementation issue, your Smart Bidding will be affected.
+Use "primary" vs. "secondary" conversion designation in Google Ads. Primary conversions affect bidding; secondary conversions are reported but do not influence bidding. Only use high-intent, high-reliability events as primary conversions. If GA4 double-counts a key event due to an implementation issue, your Smart Bidding will be affected.
 </Aside>
 
-## Conversion counting for non-unique events
+## Key event counting for non-unique events
 
 For events that should only count once per user (e.g., "first newsletter signup"), implement deduplication in your tracking code rather than relying on GA4:
 
 ```javascript
-// Check if user has already signed up before firing the conversion
+// Check if user has already signed up before firing the key event
 function trackNewsletterSignup() {
   if (!localStorage.getItem('newsletter_signed_up')) {
     gtag('event', 'newsletter_signup', {
@@ -123,33 +123,33 @@ function trackNewsletterSignup() {
 
 This prevents the event from firing more than once per browser session, regardless of how many times the user interacts with the signup form.
 
-For server-side implementations where the conversion should only be counted once in your database, send it via the Measurement Protocol after confirming the action in your backend.
+For server-side implementations where the key event should only be counted once in your database, send it via the Measurement Protocol after confirming the action in your backend.
 
-## Viewing conversion paths
+## Viewing key event paths
 
-To understand the multi-step journey to conversion:
+To understand the multi-step journey to a key event:
 
-1. **Advertising → Attribution → Conversion paths** — shows the channel sequence leading to conversions
+1. **Advertising → Attribution → Conversion paths** — shows the channel sequence leading to key events
 2. **Explore → Funnel exploration** — shows drop-off at each step of a defined funnel
-3. **Explore → Path exploration** — shows all events leading up to a conversion
+3. **Explore → Path exploration** — shows all events leading up to a key event
 
 ## Common mistakes
 
-### Marking page views as conversions
+### Marking page views as key events
 
-This creates an enormous conversion count that is essentially meaningless for campaign optimization. Standard reports show conversion rate as "conversions / sessions" — if page views are conversions, your "conversion rate" becomes 4-8x per session on average.
+This creates an enormous key event count that is essentially meaningless for campaign optimization. Standard reports show key event rate as "key events / sessions" — if page views are key events, your "key event rate" becomes 4-8x per session on average.
 
 ### Not deduplicating purchase events
 
 Sending `purchase` from both the client (thank-you page) and server (payment confirmation) doubles your transaction count and inflates revenue. Choose one source. Server-side is more reliable; use the Measurement Protocol with `transaction_id` to deduplicate if you use both.
 
-### Using conversions for funnel steps instead of metrics
+### Using key events for funnel steps instead of metrics
 
-Marking "add to cart", "begin checkout", AND "purchase" as conversions means your conversion count includes every funnel step, not just completions. Use a Funnel exploration for funnel analysis. Reserve conversions for the terminal action.
+Marking "add to cart", "begin checkout", AND "purchase" as key events means your key event count includes every funnel step, not just completions. Use a Funnel exploration for funnel analysis. Reserve key events for the terminal action.
 
-### Ignoring the 30-conversion limit
+### Ignoring the 30 key event limit
 
-When you have more than 30 events you want to track as important actions, you must prioritize. Keep conversions for events that drive bidding decisions and business reporting. Use custom dimensions and explorations for events that need analysis but not conversion tracking.
+When you have more than 30 events you want to track as important actions, you must prioritize. Keep key events for events that drive bidding decisions and business reporting. Use custom dimensions and explorations for events that need analysis but not key event tracking.
 
 ## Related articles
 

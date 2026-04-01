@@ -120,7 +120,7 @@ Navigate to **Events Manager** → **Overview** → select your pixel → look a
 
 ## TikTok Events API deduplication
 
-TikTok uses the same mechanism: `event_id` on both the browser pixel and the server-side Events API call. The deduplication window is 7 days.
+TikTok uses the same mechanism: `event_id` on both the browser pixel and the server-side Events API call. The deduplication window is 48 hours.
 
 **Client-side TikTok Pixel:**
 
@@ -209,7 +209,7 @@ If you suspect deduplication is not working, check these indicators:
 
 **Only implementing deduplication for purchase events.** Meta and TikTok deduplicate all event types, not just purchases. If you send both browser and server events for `ViewContent`, `AddToCart`, and `InitiateCheckout`, those need deduplication too. Implement `event_id` on all events where you run dual-signal.
 
-**Assuming platform deduplication is retroactive.** Deduplication only works within the platform's lookback window (48 hours for Meta, 7 days for TikTok). Events sent before you implemented event_id matching that are still within the window cannot be retroactively deduplicated.
+**Assuming platform deduplication is retroactive.** Deduplication only works within the platform's lookback window (48 hours for Meta, 48 hours for TikTok). Events sent before you implemented event_id matching that are still within the window cannot be retroactively deduplicated.
 
 ## Related articles
 

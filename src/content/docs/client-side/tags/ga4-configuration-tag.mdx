@@ -1,5 +1,5 @@
 ---
-title: "GA4 Configuration Tag"
+title: "Google Tag"
 description: "Setting up the Google Tag for GA4 — the foundation of your analytics setup. One tag, configured correctly, powers everything else."
 sidebar:
   order: 1
@@ -8,7 +8,7 @@ sidebar:
 import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
 import TagConfig from '../../../../components/TagConfig.astro';
 
-The GA4 Configuration Tag — now officially called the **Google Tag** — is the foundation of your GA4 implementation. It loads the Google Analytics library, establishes the connection to your GA4 property, and optionally sends a page view hit. Every other GA4 Event tag in your container depends on it.
+The **Google Tag** (formerly GA4 Configuration Tag) is the foundation of your GA4 implementation. Introduced in September 2023, the Google Tag consolidated Google's measurement infrastructure to support GA4, Google Ads, and other Google products from a single tag. It loads the Google Analytics library, establishes the connection to your GA4 property, and optionally sends a page view hit. Every other GA4 Event tag in your container depends on it.
 
 You should have exactly one of these in any GTM container. Not one per page type. Not one for production and a separate one for staging. One.
 

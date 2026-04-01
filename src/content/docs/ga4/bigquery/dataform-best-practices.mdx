@@ -1,0 +1,453 @@
+---
+title: "Dataform Best Practices for GA4"
+description: "Optimize GA4 BigQuery data processing with Dataform: incremental refresh, materialization strategies, cost reduction, and data quality testing."
+sidebar:
+  order: 8
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+**Dataform** is a built-in BigQuery tool for transforming raw GA4 data into clean, queryable tables. By using incremental refresh patterns and smart materialization, you can reduce BigQuery costs by **90%+ compared to full table refreshes** while maintaining data quality and performance.
+
+## Why Dataform for GA4 BigQuery data?
+
+GA4 exports raw events to BigQuery as `events_*` daily tables. Querying these raw tables directly is costly and slow. Dataform solves this by:
+
+1. **Incremental processing**: Only process new data since the last run
+2. **Materialization**: Store transformed data in permanent tables (sessions, users, events_flat)
+3. **Dependency management**: Coordinate complex transformation workflows
+4. **Data quality testing**: Assert table schema and data integrity
+5. **Cost tracking**: Monitor query costs per transformation
+
+**Without Dataform**: Full table scans of raw events → 1000+ GB scanned per day
+
+**With Dataform**: Incremental inserts of new events → 5-10 GB scanned per day
+
+## Incremental refresh technique (90%+ cost savings)
+
+The **incremental table refresh** pattern is the core Dataform optimization for GA4:
+
+### Concept
+
+Instead of reprocessing all historical events every day, you:
+
+1. Process only events from the **last N days** (e.g., last 3 days to catch late-arriving data)
+2. **Delete** rows from the target table for those dates
+3. **Insert** fresh processed rows for those dates
+4. Result: A merged table with full history, processed incrementally
+
+### BigQuery SQL template
+
+```sql
+-- Incremental sessions table in Dataform
+MERGE `project.analytics_derived.sessions` T
+USING (
+  SELECT
+    session_id,
+    user_pseudo_id,
+    session_date,
+    session_start,
+    session_end,
+    event_count,
+    engaged,
+    source,
+    medium,
+    campaign
+  FROM (
+    SELECT
+      CONCAT(e.user_pseudo_id, '-',
+        CAST((SELECT value.int_value FROM UNNEST(e.event_params) WHERE key = 'ga_session_id') AS STRING)
+      ) AS session_id,
+      e.user_pseudo_id,
+      e.event_date AS session_date,
+      MIN(TIMESTAMP_MICROS(e.event_timestamp)) AS session_start,
+      MAX(TIMESTAMP_MICROS(e.event_timestamp)) AS session_end,
+      COUNT(*) AS event_count,
+      MAX((SELECT value.int_value FROM UNNEST(e.event_params) WHERE key = 'session_engaged')) AS engaged,
+      e.collected_traffic_source.manual_source AS source,
+      e.collected_traffic_source.manual_medium AS medium,
+      e.collected_traffic_source.manual_campaign_name AS campaign
+    FROM `project.analytics_PROPERTY_ID.events_*` e
+    WHERE e._TABLE_SUFFIX >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY))  -- Last 3 days
+    GROUP BY session_id, e.user_pseudo_id, session_date, source, medium, campaign
+  )
+) S
+ON T.session_id = S.session_id
+WHEN MATCHED THEN UPDATE SET
+  session_end = S.session_end,
+  event_count = S.event_count,
+  engaged = S.engaged
+WHEN NOT MATCHED THEN INSERT ROW
+```
+
+### Dataform SQLX syntax
+
+In Dataform, this becomes a `.sqlx` file with configuration:
+
+```sqlx
+-- sessions.sqlx
+config {
+  type: "incremental",
+  uniqueKeys: ["session_id"],
+  tags: ["ga4_sessions"],
+  incrementalStrategy: "merge"
+}
+
+SELECT
+  CONCAT(e.user_pseudo_id, '-',
+    CAST((SELECT value.int_value FROM UNNEST(e.event_params) WHERE key = 'ga_session_id') AS STRING)
+  ) AS session_id,
+  e.user_pseudo_id,
+  e.event_date AS session_date,
+  MIN(TIMESTAMP_MICROS(e.event_timestamp)) AS session_start,
+  MAX(TIMESTAMP_MICROS(e.event_timestamp)) AS session_end,
+  COUNT(*) AS event_count,
+  MAX((SELECT value.int_value FROM UNNEST(e.event_params) WHERE key = 'session_engaged')) AS engaged,
+  e.collected_traffic_source.manual_source AS source,
+  e.collected_traffic_source.manual_medium AS medium,
+  e.collected_traffic_source.manual_campaign_name AS campaign
+FROM `project.analytics_PROPERTY_ID.events_*` e
+WHERE e._TABLE_SUFFIX >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY))
+GROUP BY 1, 2, 3, source, medium, campaign
+```
+
+The `type: "incremental"` and `uniqueKeys: ["session_id"]` tell Dataform to use a MERGE statement.
+
+<Aside type="tip">
+Set the lookback window (currently 3 days) to catch late-arriving GA4 events. GA4 typically completes within 24-48 hours, but delays can occur.
+</Aside>
+
+## Key tables to materialize
+
+### 1. Sessions table
+
+**Purpose**: One row per session with source/medium and engagement metrics.
+
+**Size**: ~10-100 MB/day (vs. 500+ MB/day for raw events)
+
+```sqlx
+config {
+  type: "incremental",
+  uniqueKeys: ["session_id"]
+}
+
+SELECT
+  CONCAT(user_pseudo_id, '-', CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)) AS session_id,
+  user_pseudo_id,
+  event_date AS session_date,
+  MIN(TIMESTAMP_MICROS(event_timestamp)) AS session_start,
+  MAX(TIMESTAMP_MICROS(event_timestamp)) AS session_end,
+  COUNT(*) AS event_count,
+  MAX((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'session_engaged')) AS engaged,
+  collected_traffic_source.manual_source AS source,
+  collected_traffic_source.manual_medium AS medium,
+  collected_traffic_source.manual_campaign_name AS campaign,
+  device.category AS device_category,
+  device.operating_system,
+  geo.country,
+  geo.region,
+  geo.city
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY))
+GROUP BY 1, 2, 3, source, medium, campaign, device_category, operating_system, country, region, city
+```
+
+### 2. Users table
+
+**Purpose**: One row per user with acquisition source and lifetime metrics.
+
+**Size**: ~1-10 MB/day
+
+```sqlx
+config {
+  type: "incremental",
+  uniqueKeys: ["user_pseudo_id"]
+}
+
+SELECT
+  user_pseudo_id,
+  user_id,
+  MIN(event_date) AS first_visit_date,
+  MAX(event_date) AS last_visit_date,
+  COUNT(DISTINCT event_date) AS days_active,
+  traffic_source.source AS first_source,
+  traffic_source.medium AS first_medium,
+  traffic_source.name AS first_campaign,
+  COUNTIF(event_name = 'purchase') AS purchase_count,
+  SUM(ecommerce.purchase_revenue) AS lifetime_revenue
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY))
+GROUP BY 1, 2, first_source, first_medium, first_campaign
+```
+
+### 3. Events flat table
+
+**Purpose**: Unnested events with all parameters as columns (flattened).
+
+**Size**: Similar to raw events, but queryable without subqueries.
+
+```sqlx
+config {
+  type: "incremental",
+  uniqueKeys: ["event_id"],
+  partitionBy: "event_date",
+  clusterBy: ["user_pseudo_id", "event_name", "source"]
+}
+
+SELECT
+  CONCAT(user_pseudo_id, '-', CAST(event_timestamp AS STRING)) AS event_id,  -- Pseudo-unique
+  user_pseudo_id,
+  event_date,
+  event_timestamp,
+  event_name,
+  collected_traffic_source.manual_source AS source,
+  collected_traffic_source.manual_medium AS medium,
+  collected_traffic_source.manual_campaign_name AS campaign,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_location,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title') AS page_title,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'search_term') AS search_term,
+  device.category AS device_category,
+  device.operating_system,
+  device.language,
+  geo.country,
+  geo.region,
+  geo.city,
+  ecommerce.transaction_id,
+  ecommerce.purchase_revenue
+FROM `project.analytics_PROPERTY_ID.events_*`
+WHERE _TABLE_SUFFIX >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY))
+```
+
+## Session reconstruction in Dataform
+
+Dataform makes session reconstruction modular and reusable. Reference a shared `session_reconstruction` dataset:
+
+```sqlx
+-- sessions_with_reconstruction.sqlx
+config {
+  type: "incremental",
+  uniqueKeys: ["session_id"],
+  dependencies: ["session_reconstruction"]  -- Depends on the session_reconstruction.mdx patterns
+}
+
+SELECT
+  ${ref("session_reconstruction")}.* ,
+  -- Additional enrichment
+  geo.country,
+  device.category
+FROM `project.analytics_PROPERTY_ID.events_*`
+LEFT JOIN ...
+```
+
+For details on reconstructing sessions (UTM parameter handling, cross-domain tracking), see the [Session Reconstruction guide](/ga4/bigquery/session-reconstruction/).
+
+## Scheduling and dependency management
+
+### YAML configuration for scheduling
+
+Create a `dataform.json` in your Dataform repository:
+
+```json
+{
+  "projectId": "your-gcp-project",
+  "dataformCoreVersion": "2.0",
+  "assertionDataset": "dataform_assertions",
+  "defaultSchema": "analytics_derived",
+  "defaultLocation": "US"
+}
+```
+
+### Schedule daily runs
+
+In **Dataform UI** (under "Scheduling"):
+
+1. Click **Create schedule**
+2. Set frequency to **Daily** at **2:00 AM UTC** (adjust for your timezone; allow 24-48 hours for GA4 data to populate)
+3. Select which tables to include
+4. Enable **email notifications on failure**
+
+### Dependency graphs
+
+Dataform automatically resolves dependencies:
+
+- `events_flat.sqlx` depends on raw `events_*` tables
+- `sessions.sqlx` depends on `events_flat` (optional)
+- `users.sqlx` depends on `sessions.sqlx`
+- Attribution models depend on `sessions.sqlx`
+
+Define explicit dependencies in SQLX:
+
+```sqlx
+config {
+  dependencies: [ref("sessions"), ref("events_flat")]
+}
+
+SELECT ...
+```
+
+## Testing assertions for data quality
+
+### Assert row counts
+
+```sqlx
+config {
+  type: "assertion"
+}
+
+SELECT COUNT(*) as rows
+FROM `project.analytics_derived.sessions`
+WHERE session_date = CURRENT_DATE() - 1
+HAVING COUNT(*) > 100  -- Fail if yesterday has fewer than 100 sessions
+```
+
+### Assert no NULLs in required fields
+
+```sqlx
+config {
+  type: "assertion"
+}
+
+SELECT *
+FROM `project.analytics_derived.sessions`
+WHERE session_id IS NULL OR user_pseudo_id IS NULL
+```
+
+Returns 0 rows if the assertion passes, fails if NULLs are found.
+
+### Assert for data freshness
+
+```sqlx
+config {
+  type: "assertion"
+}
+
+SELECT *
+FROM `project.analytics_derived.sessions`
+WHERE session_date < DATE_SUB(CURRENT_DATE(), INTERVAL 2 DAY)
+```
+
+Fails if the table is missing data from the last 2 days.
+
+### Assert referential integrity
+
+```sqlx
+config {
+  type: "assertion"
+}
+
+SELECT s.session_id
+FROM `project.analytics_derived.sessions` s
+LEFT JOIN `project.analytics_derived.users` u ON s.user_pseudo_id = u.user_pseudo_id
+WHERE u.user_pseudo_id IS NULL
+```
+
+Fails if a session references a non-existent user.
+
+## Cost monitoring patterns
+
+### Track query cost per transformation
+
+```sqlx
+-- cost_monitoring.sqlx (informational query, not materialized)
+SELECT
+  table_name,
+  ROUND(SUM(total_bytes_billed) / POW(10,12), 4) AS cost_usd,
+  SUM(total_bytes_billed) AS bytes_billed
+FROM `project.region-us.INFORMATION_SCHEMA.JOBS_BY_PROJECT`
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+  AND statement_type = 'SELECT'
+GROUP BY table_name
+ORDER BY cost_usd DESC
+```
+
+### Monitor incremental vs. full refresh costs
+
+Compare incremental MERGE strategy (current cost) to hypothetical full refresh:
+
+```
+Incremental (actual): 5 GB scanned/day × $6.25/TB = $0.03/day = ~$0.90/month
+Full refresh (hypothetical): 500 GB scanned/day × $6.25/TB = $3.13/day = ~$93/month
+
+Savings: ~$92/month per table
+```
+
+### Set up Dataform notifications
+
+In **Dataform > Settings > Notifications**:
+
+- Email alerts on assertion failures
+- Slack notifications for long-running queries
+- Cost budget alerts (via BigQuery RI / commitments)
+
+## Related resources
+
+- [GA4Dataform.com](https://ga4dataform.com) — Pre-built Dataform templates for GA4
+- [Tanelytics.com Patterns](https://www.tanelytics.com/) — Advanced Dataform and dbt patterns
+- [Google Dataform Documentation](https://cloud.google.com/dataform/docs)
+- [BigQuery Scheduled Queries](https://cloud.google.com/bigquery/docs/scheduling-queries) — Alternative to Dataform
+
+## Example Dataform project structure
+
+```
+my-ga4-dataform/
+├── dataform.json
+├── definitions/
+│   ├── sources/
+│   │   └── ga4_raw_events.sql  -- Reference to analytics_PROPERTY_ID.events_*
+│   ├── staging/
+│   │   ├── events_flat.sqlx
+│   │   └── sessions.sqlx
+│   ├── marts/
+│   │   ├── users.sqlx
+│   │   └── sessions_attribution.sqlx
+│   └── assertions/
+│       ├── assert_sessions_row_count.sqlx
+│       ├── assert_no_null_session_id.sqlx
+│       └── assert_data_freshness.sqlx
+├── includes/
+│   └── helpers.sql  -- Reusable macros
+└── README.md
+```
+
+## Common questions
+
+### How often should I run incremental refreshes?
+
+**Daily** is recommended (once events are fully available, typically 2-4 hours after midnight UTC). High-volume sites may benefit from **twice-daily** runs (morning and afternoon).
+
+### What if my incremental table gets out of sync?
+
+Delete the target table and run a full refresh to rebuild it. Dataform can detect when incremental key values don't match and handle it gracefully (depending on configuration).
+
+### Can I materialize all GA4 events to a single flat table?
+
+Yes, but be mindful of cost and size. A 1-year GA4 history can be 500+ GB when fully flattened. Use **partitioning by event_date and clustering by user_pseudo_id** to optimize query performance.
+
+### How do I backfill historical data?
+
+In Dataform, re-run incremental tables with a wider date range in the `WHERE` clause, then switch back to the normal lookback window. Or, delete the target table and let incremental mode rebuild from scratch.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Session Reconstruction"
+    description="Rebuild complete user journeys with Dataform."
+    href="/ga4/bigquery/session-reconstruction/"
+  />
+  <LinkCard
+    title="Cost Optimization"
+    description="Minimize BigQuery costs with smart partitioning and clustering."
+    href="/ga4/bigquery/cost-optimization/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="Ready-to-use SQL for GA4 analysis."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Multi-Touch Attribution"
+    description="Build attribution models with Dataform-materialized sessions."
+    href="/ga4/bigquery/multi-touch-attribution/"
+  />
+</CardGrid>

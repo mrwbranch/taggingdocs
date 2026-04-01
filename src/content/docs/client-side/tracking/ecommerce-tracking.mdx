@@ -340,6 +340,16 @@ Never send a truncated items array in production. Some teams only send the first
 
 The most common GTM configuration mistake. Your dataLayer push can be perfect, but if the GA4 Event tag doesn't have "Send Ecommerce Data" checked, none of the ecommerce data reaches GA4.
 
+### Combining Send Ecommerce Data with manual parameter mapping
+
+If you check "Send Ecommerce Data" AND also manually map items as event parameters in the same GA4 Event tag, the manual parameters override the ecommerce struct. This causes confusing behavior — some ecommerce data appears, some doesn't.
+
+Pick one approach:
+- **Send Ecommerce Data** (recommended for standard ecommerce) — let GTM read the `ecommerce` object from the dataLayer automatically
+- **Manual parameter mapping** — explicitly map each parameter in the tag configuration
+
+Never combine both in the same tag. If you need custom parameters alongside ecommerce data, add them as separate event parameters while still using "Send Ecommerce Data" for the ecommerce object.
+
 ## Verifying your implementation
 
 1. **GA4 DebugView** — Log in to GA4, go to Configure → DebugView. Trigger events on your site with GTM Preview mode active. You should see each event with its ecommerce parameters within seconds.

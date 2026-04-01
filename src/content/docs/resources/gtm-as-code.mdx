@@ -1,0 +1,416 @@
+---
+title: "GTM-as-Code: Version Control with GTM CLI"
+description: "Treat your Google Tag Manager configuration as source code using the Owntag GTM CLI tool, enabling Git-based version control, CI/CD automation, and code review workflows."
+sidebar:
+  order: 10
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The **GTM-as-Code** paradigm treats your Google Tag Manager container configuration as source code. By exporting your container to JSON, storing it in Git, and deploying via CI/CD pipelines, you gain:
+
+- **Audit trail**: Full Git history of every tag, trigger, and variable change
+- **Code review**: Pull requests for tag deployments with approval workflows
+- **Rollback capability**: Revert to previous container versions via Git
+- **Environment parity**: Manage dev, staging, and production GTM containers from a single codebase
+
+The **Owntag GTM CLI** is the primary open-source tool for implementing this pattern.
+
+## Owntag GTM CLI overview
+
+The [Owntag GTM CLI](https://github.com/owntag/gtm-cli) is a command-line tool that:
+
+- Exports GTM container configurations to human-readable JSON format
+- Imports JSON back into GTM containers
+- Authenticates via Google service accounts (no manual login)
+- Integrates with CI/CD platforms (GitHub Actions, GitLab CI, Jenkins, etc.)
+
+### Installation
+
+Install via npm:
+
+```bash
+npm install -g @owntag/gtm-cli
+# or
+npm install --save-dev @owntag/gtm-cli
+```
+
+Verify installation:
+
+```bash
+gtm --version
+```
+
+### Authentication via service account
+
+GTM CLI authenticates to Google APIs using a **service account key** (a JSON file with credentials).
+
+#### Step 1: Create a service account in Google Cloud Console
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project or select an existing one
+3. Navigate to **IAM & Admin > Service Accounts**
+4. Click **Create Service Account**
+5. Name it (e.g., `gtm-cli-sa`)
+6. Grant the role **Editor** (or more restrictively, a custom role with GTM permissions)
+7. Create a JSON key and download it
+
+#### Step 2: Grant the service account access to your GTM container
+
+1. Go to [Google Tag Manager](https://tagmanager.google.com/)
+2. Open your container
+3. Navigate to **Admin > User Management**
+4. Click **Add User**
+5. Enter the service account email (found in the JSON key: `client_email`)
+6. Grant **Admin** role
+7. Click **Invite**
+
+#### Step 3: Export the key to your repository
+
+Store the service account JSON key securely:
+
+```bash
+# DO NOT commit the actual JSON file to Git!
+# Store it as a GitHub Secret or CI/CD variable
+export GTM_SERVICE_ACCOUNT_KEY="$(cat /path/to/service-account-key.json)"
+```
+
+Or store the key file in a `.gitignore`d directory:
+
+```bash
+echo "secrets/" >> .gitignore
+cp /path/to/service-account-key.json secrets/
+```
+
+## Exporting containers to JSON
+
+### Export a container
+
+```bash
+gtm export \
+  --service-account-key ./secrets/service-account-key.json \
+  --container-id YOUR_CONTAINER_ID \
+  --output ./gtm-container.json
+```
+
+The resulting `gtm-container.json` is a complete representation of your container:
+
+```json
+{
+  "containerVersion": {
+    "container": {
+      "accountId": "123456789",
+      "containerId": "987654321",
+      "name": "Web Container",
+      "containerTypeId": "web"
+    },
+    "tag": [
+      {
+        "accountId": "123456789",
+        "containerId": "987654321",
+        "tagId": "1",
+        "name": "GA4 Page View Tag",
+        "type": "gat",
+        "parameter": [
+          {"type": "template", "key": "trackingId", "value": "G-XXXXXXXXXX"}
+        ],
+        "firingTriggerId": ["2"]
+      }
+    ],
+    "trigger": [
+      {
+        "accountId": "123456789",
+        "containerId": "987654321",
+        "triggerId": "2",
+        "name": "All Pages",
+        "type": "pageview"
+      }
+    ],
+    "variable": [
+      {
+        "accountId": "123456789",
+        "containerId": "987654321",
+        "variableId": "1",
+        "name": "GA4 Measurement ID",
+        "type": "c",
+        "parameter": [{"type": "template", "key": "value", "value": "{{GA4 Tracking ID}}"}]
+      }
+    ]
+  }
+}
+```
+
+Commit this to Git:
+
+```bash
+git add gtm-container.json
+git commit -m "Export GTM container configuration"
+git push origin main
+```
+
+## Importing and deploying via CI/CD
+
+### Import a container from JSON
+
+```bash
+gtm import \
+  --service-account-key ./secrets/service-account-key.json \
+  --container-id YOUR_CONTAINER_ID \
+  --input ./gtm-container.json
+```
+
+This creates a new **container version** in GTM with all tags, triggers, and variables from the JSON file.
+
+### GitHub Actions CI/CD workflow
+
+Create `.github/workflows/deploy-gtm.yml`:
+
+```yaml
+name: Deploy GTM Container
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'gtm-container.json'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install GTM CLI
+        run: npm install -g @owntag/gtm-cli
+
+      - name: Import GTM container
+        env:
+          GTM_SERVICE_ACCOUNT_KEY: ${{ secrets.GTM_SERVICE_ACCOUNT_KEY }}
+          GTM_CONTAINER_ID: ${{ secrets.GTM_CONTAINER_ID }}
+        run: |
+          echo "$GTM_SERVICE_ACCOUNT_KEY" > /tmp/sa-key.json
+          gtm import \
+            --service-account-key /tmp/sa-key.json \
+            --container-id "$GTM_CONTAINER_ID" \
+            --input gtm-container.json
+          rm /tmp/sa-key.json
+
+      - name: Publish container version
+        env:
+          GTM_SERVICE_ACCOUNT_KEY: ${{ secrets.GTM_SERVICE_ACCOUNT_KEY }}
+          GTM_CONTAINER_ID: ${{ secrets.GTM_CONTAINER_ID }}
+        run: |
+          echo "$GTM_SERVICE_ACCOUNT_KEY" > /tmp/sa-key.json
+          gtm publish \
+            --service-account-key /tmp/sa-key.json \
+            --container-id "$GTM_CONTAINER_ID"
+          rm /tmp/sa-key.json
+```
+
+<Aside type="tip">
+Store `GTM_SERVICE_ACCOUNT_KEY` and `GTM_CONTAINER_ID` as GitHub Secrets (Settings > Secrets and variables > Actions).
+</Aside>
+
+### GitLab CI workflow
+
+Create `.gitlab-ci.yml`:
+
+```yaml
+deploy-gtm:
+  stage: deploy
+  only:
+    - main
+  script:
+    - npm install -g @owntag/gtm-cli
+    - echo "$GTM_SERVICE_ACCOUNT_KEY" > /tmp/sa-key.json
+    - gtm import --service-account-key /tmp/sa-key.json --container-id "$GTM_CONTAINER_ID" --input gtm-container.json
+    - gtm publish --service-account-key /tmp/sa-key.json --container-id "$GTM_CONTAINER_ID"
+    - rm /tmp/sa-key.json
+```
+
+## Managing multiple containers across environments
+
+For a typical setup with **dev**, **staging**, and **production** GTM containers:
+
+### Repository structure
+
+```
+gtm-as-code/
+├── containers/
+│   ├── dev/
+│   │   └── gtm-container.json
+│   ├── staging/
+│   │   └── gtm-container.json
+│   └── production/
+│       └── gtm-container.json
+├── .github/
+│   └── workflows/
+│       ├── deploy-dev.yml
+│       ├── deploy-staging.yml
+│       └── deploy-production.yml
+└── README.md
+```
+
+### Separate workflows per environment
+
+**`.github/workflows/deploy-production.yml`** (requires approval):
+
+```yaml
+name: Deploy GTM to Production
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production  # Requires approval in GitHub
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Install GTM CLI
+        run: npm install -g @owntag/gtm-cli
+      - name: Deploy to production
+        env:
+          GTM_SERVICE_ACCOUNT_KEY: ${{ secrets.GTM_PROD_SA_KEY }}
+          GTM_CONTAINER_ID: ${{ secrets.GTM_PROD_CONTAINER_ID }}
+        run: |
+          echo "$GTM_SERVICE_ACCOUNT_KEY" > /tmp/sa-key.json
+          gtm import --service-account-key /tmp/sa-key.json --container-id "$GTM_CONTAINER_ID" --input containers/production/gtm-container.json
+          gtm publish --service-account-key /tmp/sa-key.json --container-id "$GTM_CONTAINER_ID"
+          rm /tmp/sa-key.json
+```
+
+## Comparison with manual GTM API scripting
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **GTM-as-Code (GTM CLI)** | Pre-built, intuitive CLI; handles JSON serialization; active community | Requires Node.js; external dependency |
+| **Manual GTM API calls** | Full control; no external tools needed | Complex JSON formatting; error-prone; no built-in version management |
+| **GTM UI** | No learning curve | No audit trail; manual error-prone; no rollback; not reproducible |
+
+For most teams, **GTM CLI is recommended** because it eliminates boilerplate API calls and provides a standardized format.
+
+## Benefits of GTM-as-Code
+
+### Audit trail
+
+Every commit shows what changed, who changed it, and when:
+
+```bash
+git log --oneline
+```
+
+Output:
+
+```
+a3f2c1e Add retargeting pixel to analytics tag
+b4e5d2f Update GA4 measurement ID
+c5f6e3a Remove deprecated Universal Analytics tag
+```
+
+Inspect diffs between versions:
+
+```bash
+git show a3f2c1e
+```
+
+### Code review for tag changes
+
+Require pull request approvals before deploying to GTM:
+
+1. Make a change to `gtm-container.json` on a branch
+2. Open a pull request
+3. Colleagues review the diff
+4. After approval, merge to `main` and CI/CD automatically deploys
+
+### Rollback via Git
+
+If a tag deployment breaks tracking, revert in seconds:
+
+```bash
+git revert a3f2c1e
+# or
+git reset --hard <previous-commit>
+git push origin main
+```
+
+CI/CD automatically re-deploys the previous container version.
+
+### Local testing and schema validation
+
+Validate JSON syntax locally before pushing:
+
+```bash
+gtm validate --input gtm-container.json
+```
+
+(Check Owntag documentation for exact validation syntax; capabilities may vary by CLI version.)
+
+## Workflow example: Adding a new tag via pull request
+
+1. **Create a branch**:
+   ```bash
+   git checkout -b add-facebook-pixel
+   ```
+
+2. **Edit `gtm-container.json`** to add your tag, trigger, and variable
+
+3. **Push and open a PR**:
+   ```bash
+   git push origin add-facebook-pixel
+   ```
+
+4. **Request review**: Team members review the JSON diff
+
+5. **Merge and auto-deploy**: Once approved, merge to `main`. GitHub Actions runs the deployment workflow and updates your GTM container
+
+6. **Verify in GTM UI**: Visit your GTM container and confirm the new tag appears
+
+7. **Monitor**: Check GA4, Analytics dashboard, etc. to confirm the tag fires correctly
+
+## Related resources
+
+- [Owntag GTM CLI GitHub Repository](https://github.com/owntag/gtm-cli)
+- [Google Tag Manager API Documentation](https://developers.google.com/tag-manager/api/v2)
+- [Google Cloud Service Accounts](https://cloud.google.com/docs/authentication/getting-started)
+
+## Common questions
+
+### How do I handle sensitive data like API keys in my JSON?
+
+Use GTM variables with template syntax (e.g., `{{Facebook Pixel ID}}`). The actual values are stored in GTM Admin, not in JSON. The JSON contains the variable reference, not the secret.
+
+### Can I use GTM-as-Code with Google Ads Manager Account (MCC)?
+
+GTM CLI works with individual GTM containers. For MCC-level automation, you'd need to run separate imports for each sub-account container, or script multiple calls.
+
+### What happens if the GTM container in the UI diverges from Git?
+
+The next `gtm import` will overwrite the container with the JSON from Git. To avoid conflicts, establish a team rule: **all changes go through Git and CI/CD, never manual edits in the UI**. Periodic exports can detect drift if needed.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Google Tag Manager Basics"
+    description="Understand GTM containers, tags, triggers, and variables."
+    href="/gtm/introduction/"
+  />
+  <LinkCard
+    title="Event Naming Conventions"
+    description="Design consistent event schemas for tracking."
+    href="/gtm/event-naming-conventions/"
+  />
+  <LinkCard
+    title="Debugging GTM with Tag Assistant"
+    description="Verify tags are firing correctly before deployment."
+    href="/gtm/debugging/tag-assistant/"
+  />
+</CardGrid>

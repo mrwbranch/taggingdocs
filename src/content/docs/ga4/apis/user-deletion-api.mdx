@@ -470,14 +470,22 @@ After submitting a deletion request, you cannot directly verify in the GA4 UI wh
 
 For BigQuery, run the verification query above after the expected deletion date.
 
-## Rate limits and quotas
+## Deletion timeline and rate limits
 
-The User Deletion API has conservative rate limits:
+When you submit a deletion request, Google processes it bimonthly (approximately every 60 days). During that window:
+
+- User data is **removed from GA4 reports within 72 hours** of the bimonthly processing cycle
+- Data is **fully deleted from GA4 storage** within the bimonthly cycle (up to 60 days after request)
+
+For regulatory compliance, document the deletion request timestamp as your compliance evidence. Do not assume data is deleted until the bimonthly process completes.
+
+Rate limits:
 
 | Quota | Limit |
 |-------|-------|
-| Requests per day | 500 |
-| Requests per 100 seconds | 10 |
+| Deletion requests per day | 500 |
+| Queries per second per IP | 10 QPS |
+| Queries per second per property | 1.5 QPS |
 
 If you have more than 500 deletion requests per day, batch them over multiple days or contact Google for quota increases.
 

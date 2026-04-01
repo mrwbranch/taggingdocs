@@ -148,9 +148,39 @@ diff old-tags.txt new-tags.txt
 
 A command-line interface for the GTM API. Lets you export containers, compare versions, and automate common GTM management tasks from the terminal. Particularly useful for teams that want to version-control their GTM configuration in Git. See the [GTM API Automation](/resources/gtm-api-automation/) article for context on the API itself.
 
+### GTM CLI by Owntag (GTM-as-Code)
+
+**URL**: [github.com/owntag/gtm-cli](https://github.com/owntag/gtm-cli) | **Free, open source**
+
+A dedicated CLI tool for implementing GTM as code. Enables version control, collaboration, and CI/CD workflows for GTM containers. If your team uses Git and wants to manage GTM configuration in code rather than the UI, this is the primary tool in the ecosystem.
+
 ---
 
 ## GA4 Configuration & Analysis Tools
+
+### GA4SQL.com (No-Code BigQuery Query Generator)
+
+**URL**: [ga4sql.com](https://www.ga4sql.com/) | **Free**
+
+A web-based tool for building BigQuery SQL queries without writing SQL. Select your GA4 dataset, choose the analysis type (sessions, events, conversions, etc.), configure filters and grouping, and the tool generates the SQL. Excellent for analysts who know what they want to measure but not the exact query syntax.
+
+### GA4BQ.com (No-Code BigQuery Queries)
+
+**URL**: [ga4bq.com](https://www.ga4bq.com/) | **Free**
+
+Another no-code query builder for GA4 BigQuery analysis. Similar functionality to GA4SQL with a different UI — useful if you prefer a different interface or want a second option.
+
+### GA4Dataform.com (Pre-Built Dataform Templates)
+
+**URL**: [ga4dataform.com](https://www.ga4dataform.com/) | **Free**
+
+Pre-built Dataform (formerly Dataform) templates and starter code for common GA4 BigQuery analysis patterns. If you use Dataform for data transformation, this accelerates your initial setup.
+
+### DumbData.co (GA4 Audit Tool)
+
+**URL**: [dumbdata.co](https://www.dumbdata.co/) | **Free**
+
+An automated GA4 configuration audit tool that runs 20+ checks on your GA4 property. Identifies common setup mistakes, missing configurations, and data quality issues. Run periodically to catch drift.
 
 ### GA4 Event Builder (Google)
 
@@ -192,6 +222,12 @@ Segment's open-source analytics library. If you are considering whether GTM is t
 
 An open-source Customer Data Platform that can replace or complement GTM for structured event tracking. The JavaScript SDK provides a dataLayer-like interface with built-in integrations for GA4, Segment, and 200+ destinations. Worth evaluating if you want infrastructure-level control over where your data goes.
 
+### aliasoblomov/Bigquery-GA4-Queries (Community SQL Repository)
+
+**URL**: [github.com/aliasoblomov/Bigquery-GA4-Queries](https://github.com/aliasoblomov/Bigquery-GA4-Queries) | **Open source**
+
+A GitHub repository with 65+ curated, production-tested SQL queries for GA4 BigQuery analysis. Covers sessions, users, events, ecommerce, funnels, and more. Each query is documented with expected results and parameterization notes. Worth bookmarking as a reference library before writing your own.
+
 ### Datalayer Checker
 
 **URL**: [datalayerchecker.com](https://www.datalayerchecker.com/) | **Free**
@@ -215,6 +251,9 @@ Julian Juenemann's site focuses on tutorials and YouTube content for marketing a
 
 **Stape blog** — [stape.io/blog](https://stape.io/blog/)
 Server-side GTM focused content. Good technical depth on sGTM implementation, tagging server configuration, and privacy-preserving measurement patterns.
+
+**Stape Academy** — [stape.io/academy](https://stape.io/academy/)
+Free server-side GTM certification course. Covers sGTM architecture, tagging server setup, and privacy-compliant implementations. Good alternative to paid courses for learning server-side foundations.
 
 **Tanelytics** — [tanelytics.com](https://tanelytics.com/)
 Focused on the intersection of GA4 and BigQuery. Good for practitioners who want to move beyond the GA4 UI and into SQL-based analysis.

@@ -7,7 +7,7 @@ sidebar:
 
 import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Attribution settings in GA4 determine which touchpoint gets credit for a conversion and how far back GA4 looks for touchpoints. These settings matter most if you use the Advertising section of GA4 or export attribution data to Google Ads for bidding.
+Attribution settings in GA4 determine which touchpoint gets credit for a key event and how far back GA4 looks for touchpoints. These settings matter most if you use the Advertising section of GA4 or export attribution data to Google Ads for bidding.
 
 ## Accessing attribution settings
 
@@ -15,49 +15,36 @@ Go to **Admin → Attribution Settings** (under the Property column).
 
 You will see:
 - **Reporting attribution model** — the default model for the Advertising section
-- **Lookback windows** — how far back to attribute conversions
+- **Lookback windows** — how far back to attribute key events
 
 ## Attribution models
 
-GA4 offers six attribution models:
+As of November 2023, GA4 offers two attribution models in the UI:
 
 ### Data-driven attribution
 
-Uses machine learning to assign fractional credit to each touchpoint based on its actual contribution to conversion. The model analyzes patterns across converting and non-converting paths to estimate the incremental value of each channel.
+Uses machine learning to assign fractional credit to each touchpoint based on its actual contribution to key event. The model analyzes patterns across converting and non-converting paths to estimate the incremental value of each channel.
 
-**Requirements**: Your property needs sufficient data for the model to train. Google recommends at least 400 conversions and 4,000 conversion path observations over a 30-day period. Below this threshold, the model falls back to last-click.
+**Requirements**: Your property needs sufficient data for the model to train. Google recommends at least 400 key events and 4,000 conversion path observations over a 30-day period. Below this threshold, the model falls back to last-click.
 
-**Best for**: Properties with high conversion volume and diversified channel mix. Data-driven attribution is the default for all new GA4 properties and the best choice if you have sufficient data.
+**Best for**: Properties with high key event volume and diversified channel mix. Data-driven attribution is the default for all new GA4 properties and the best choice if you have sufficient data.
 
 ### Last click
 
-100% of credit goes to the last touchpoint before conversion. Direct traffic is excluded — if the last non-direct touchpoint was Paid Search and the user came back directly to convert, Paid Search gets the credit.
+100% of credit goes to the last touchpoint before the key event. Direct traffic is excluded — if the last non-direct touchpoint was Paid Search and the user came back directly to convert, Paid Search gets the credit.
 
-**Best for**: Simple implementations, low conversion volume, or when you want a baseline that is easy to explain to stakeholders.
+**Best for**: Simple implementations, low key event volume, or when you want a baseline that is easy to explain to stakeholders.
 
-### First click
+## Deprecated models
 
-100% of credit goes to the first touchpoint that brought the user to your site.
+The following attribution models were removed from GA4 in November 2023: First click, Linear, Time decay, and Position-based (U-shaped). These models are no longer available in the UI.
 
-**Best for**: Understanding which channels are best at acquiring new customers, regardless of the full conversion path.
+**To perform multi-touch attribution analysis**, use one of these approaches:
+- **BigQuery SQL**: Build custom multi-touch attribution queries using raw event data
+- **GA4 BI Connector**: Use Looker Studio with the BI Connector to implement custom attribution models
+- **Third-party tools**: Connect GA4 to your marketing mix modeling platform or attribution software
 
-### Linear
-
-Equal credit distributed across all touchpoints in the conversion path. A 5-touchpoint path gives 20% credit to each.
-
-**Best for**: Giving weight to channel combinations in long sales cycles where multiple touchpoints genuinely matter.
-
-### Time decay
-
-More credit to touchpoints closer in time to the conversion. By default, each preceding 7-day period gets half the credit of the subsequent period.
-
-**Best for**: Short sales cycles where recent interactions are genuinely more influential than older ones.
-
-### Position-based (U-shaped)
-
-40% credit to the first touchpoint, 40% to the last, and the remaining 20% distributed evenly across middle touchpoints.
-
-**Best for**: Valuing both acquisition (first touch) and closing (last touch) while acknowledging the middle journey.
+If you have specific multi-touch attribution needs that previously relied on these models, consider implementing the attribution logic in BigQuery or exporting data to a dedicated attribution platform.
 
 ## Attribution changes are retroactive
 
@@ -72,24 +59,24 @@ Before changing your default attribution model, export or screenshot your curren
 The attribution model setting does not affect:
 - Standard acquisition reports (Traffic acquisition, User acquisition) — these always use last non-direct click
 - Raw event data in BigQuery
-- Conversions counted in the Events report
+- Key events counted in the Events report
 
-It only affects the Advertising section's conversion attribution.
+It only affects the Advertising section's key event attribution.
 
 ## Lookback windows
 
-Lookback windows define how far back GA4 looks for touchpoints when attributing a conversion.
+Lookback windows define how far back GA4 looks for touchpoints when attributing a key event.
 
-| Conversion type | Default window | Range |
+| Key event type | Default window | Range |
 |----------------|---------------|-------|
-| Acquisition conversions (first_visit, first_open) | 30 days | 7, 14, 30, 60, 90 days |
-| All other conversions | 90 days | 7, 14, 30, 60, 90 days |
+| Acquisition key events (first_visit, first_open) | 30 days | 7, 14, 30, 60, 90 days |
+| All other key events | 90 days | 7, 14, 30, 60, 90 days |
 
-**Shorter window** — fewer touchpoints considered, credit concentrates on recent channels, shorter-path conversions represented more accurately.
+**Shorter window** — fewer touchpoints considered, credit concentrates on recent channels, shorter-path key events represented more accurately.
 
 **Longer window** — more touchpoints considered, credit spreads across older channels, long sales cycles represented more accurately.
 
-Set the lookback window to match your actual conversion cycle. If your typical path from first visit to conversion is 3-7 days, a 30-day window is generous. If your B2B sales cycle averages 45 days, you may need a 90-day window.
+Set the lookback window to match your actual key event cycle. If your typical path from first visit to key event is 3-7 days, a 30-day window is generous. If your B2B sales cycle averages 45 days, you may need a 90-day window.
 
 ## Which reports use attribution settings
 
@@ -100,7 +87,7 @@ The attribution model and lookback windows affect:
 - Attribution: Conversion paths
 - Attribution: Top conversion paths
 
-**Google Ads imported conversions**: When you import GA4 conversions to Google Ads, those conversions use the GA4 attribution model for optimization.
+**Google Ads imported key events**: When you import GA4 key events to Google Ads, those key events use the GA4 attribution model for optimization.
 
 **Standard reports (NOT affected):**
 - Reports → Acquisition → Traffic acquisition
@@ -110,13 +97,13 @@ These reports always use last non-direct click, regardless of your attribution s
 
 ## Comparing models
 
-The Attribution → Model comparison report lets you see how different models distribute credit across channels without committing to a model change:
+The Attribution → Model comparison report lets you see how different models distribute credit across channels without committing to a model change. Since only Data-driven and Last-click remain, this comparison is useful if you want to see the difference before enabling Data-driven:
 
 1. Go to **Advertising → Attribution → Model comparison**
-2. Select two or more models to compare
-3. The table shows conversions and conversion value attributed to each channel under each model
+2. Select Data-driven and Last-click to compare
+3. The table shows key events and key event value attributed to each channel under each model
 
-This is useful for understanding how model choice affects your reported channel performance before changing your default.
+This is useful for understanding the impact of switching to data-driven attribution before making the change.
 
 ## Data-driven attribution and consent mode
 
@@ -136,7 +123,7 @@ Attribution model changes restate historical data. A monthly channel performance
 
 ### Using the wrong lookback window for your sales cycle
 
-A 7-day lookback window on a B2B SaaS product with a 60-day trial period means most early-funnel touchpoints get zero attribution credit. The conversion appears to come entirely from "last click" within the window, making email nurture campaigns and content marketing look worthless.
+A 7-day lookback window on a B2B SaaS product with a 60-day trial period means most early-funnel touchpoints get zero attribution credit. The key event appears to come entirely from "last click" within the window, making email nurture campaigns and content marketing look worthless.
 
 ### Assuming standard reports use your attribution model
 
@@ -144,7 +131,7 @@ Many analysts configure data-driven attribution and then wonder why the Traffic 
 
 ### Not understanding data-driven requirements
 
-Data-driven attribution silently falls back to last-click when conversion volume is too low. If your property has 50 conversions per month, data-driven is not operating — you are getting last-click with a "data-driven" label. Check the model comparison to see if data-driven is actually distributing credit differently than last-click; if the numbers are identical, the model has not trained.
+Data-driven attribution silently falls back to last-click when key event volume is too low. If your property has 50 key events per month, data-driven is not operating — you are getting last-click with a "data-driven" label. Check the model comparison to see if data-driven is actually distributing credit differently than last-click; if the numbers are identical, the model has not trained.
 
 ## Related articles
 

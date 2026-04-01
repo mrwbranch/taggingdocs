@@ -1,0 +1,471 @@
+---
+title: "Cross-Domain Tracking with Server-Side GTM"
+description: "Server-side approaches to maintain session continuity across multiple domains using cookies, redirects, and server-side linking."
+sidebar:
+  order: 18
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Cross-domain tracking—maintaining a single session as a user moves from example.com to checkout.example.com to shop.example.com—is notoriously difficult. Client-side solutions (GTM linker, URL parameters) have limitations. Server-side GTM offers more reliable alternatives.
+
+This guide covers server-side patterns for cross-domain tracking and when they are better than client-side approaches.
+
+---
+
+## The Problem With Client-Side Linking
+
+### Traditional GTM Linker Limitations
+
+The GTM linker plugin passes session identifiers via URL parameters:
+
+```
+example.com → (add ?_gl=parameter) → checkout.example.com
+```
+
+**Problems:**
+- Visible in URL (privacy concern, URL tracking blockers can strip it)
+- Does not work if user bookmarks the redirect URL without the parameter
+- Does not work on app redirects (mobile) or 302 redirects that strip parameters
+- Requires coordination across multiple container implementations
+- Parameter can be lost by CDN, proxy, or redirect chain
+
+### When Client-Side Linker Still Works
+
+Use GTM linker for simple two-domain setups (main site → checkout) where you control both domains and can test thoroughly. But if you have:
+- 3+ domains
+- Mobile app involvement
+- Checkout redirects via payment processors
+- Privacy-conscious audience (parameter stripping)
+
+...then server-side approaches are more reliable.
+
+---
+
+## Approach 1: First-Party Cookie Bridge (Same-Domain Proxy)
+
+### Architecture
+
+Use a reverse proxy or edge function to serve both domains under the same parent domain. This allows first-party cookies to persist across "domain" boundaries at the edge.
+
+```
+User: example.com/shop → reverse proxy → backend: example.com/shop
+User: checkout.example.com → reverse proxy → backend: checkout.example.com
+
+Both routes served by same proxy, both set cookies under .example.com
+```
+
+### Implementation with Cloudflare Workers
+
+```javascript
+// Cloudflare Worker (runs at edge)
+export default {
+  async fetch(request, env, context) {
+    const url = new URL(request.url);
+
+    // Route checkout.example.com to checkout backend internally
+    if (url.hostname === 'checkout.example.com') {
+      url.hostname = 'checkout-api.internal.example.com';
+    }
+
+    // Route shop.example.com to shop backend internally
+    if (url.hostname === 'shop.example.com') {
+      url.hostname = 'shop-api.internal.example.com';
+    }
+
+    // Fetch from backend
+    let response = await fetch(url, request);
+
+    // Add cookie header that applies to parent domain
+    response.headers.set(
+      'Set-Cookie',
+      'ga4_session_id=123abc; Domain=.example.com; Path=/; Max-Age=63072000'
+    );
+
+    return response;
+  }
+};
+```
+
+### Advantage
+
+- Cookie persists across all subdomains automatically
+- No URL parameter passing needed
+- No client-side coordination required
+- Works with mobile app redirects
+
+### Disadvantage
+
+- Requires reverse proxy infrastructure
+- DNS and SSL setup complexity
+- Not suitable if checkout domain is a third party (Shopify, Stripe-hosted)
+
+---
+
+## Approach 2: Server-Side Cookie Bridging via Redirect
+
+### Architecture
+
+When user moves to a new domain, server-side GTM intercepts the request, retrieves the session ID from the first domain's cookie, and sets it on the new domain.
+
+```
+1. User on domain-a.com, cookie contains: session_id=abc123
+2. User clicks link to domain-b.com
+3. Server-side interceptor on domain-b retrieves session_id from referrer data
+4. Sets new cookie on domain-b: session_id=abc123
+5. Session continues with same ID across domains
+```
+
+### Step 1: Identify the Session on Domain A
+
+When a user clicks a link from domain-a.com to domain-b.com, the referrer header tells you where they came from:
+
+```javascript
+// Server-side GTM: Web client
+// Capture session ID from referrer or stored location
+const sessionID = data.get('session_id') || generateSessionID();
+
+// Store in database indexed by referrer + timestamp
+// (We will retrieve this on domain-b)
+db.insert('session_bridge', {
+  session_id: sessionID,
+  source_domain: 'domain-a.com',
+  created_at: Math.floor(Date.now() / 1000),
+  user_agent: data.get('user_agent')
+});
+
+data.set('session_id', sessionID);
+```
+
+### Step 2: On Domain B, Retrieve the Session
+
+```javascript
+// Server-side GTM: Web client on domain-b.com
+const referrer = data.get('document_referrer'); // The referrer header
+const userAgent = data.get('user_agent');
+
+// Check if this user just came from domain-a
+if (referrer && referrer.includes('domain-a.com')) {
+  // Look up session from bridge table
+  const session = db.query(
+    "SELECT session_id FROM session_bridge " +
+    "WHERE source_domain = 'domain-a.com' " +
+    "AND user_agent = ? " +
+    "AND created_at > ? " +
+    "ORDER BY created_at DESC LIMIT 1",
+    [userAgent, Math.floor(Date.now() / 1000) - 60] // Last 60 seconds
+  );
+
+  if (session) {
+    // Set the same session ID on domain-b
+    data.set('session_id', session.session_id);
+  }
+}
+```
+
+### Step 3: Send Events with Unified Session ID
+
+```javascript
+// Now both domains send events with same session_id
+gtag('event', 'page_view', {
+  session_id: sessionID  // Same across domains
+});
+```
+
+### Advantage
+
+- Works with third-party checkouts (Stripe, Shopify)
+- No URL parameter visible to user
+- Server-side; relies on backend infrastructure not client-side cookies
+- Can work across unrelated domains
+
+### Disadvantage
+
+- Requires backend database to bridge sessions
+- User-agent matching is not 100% reliable (mobile browser updates)
+- Does not work if referrer is stripped (some privacy browsers)
+
+---
+
+## Approach 3: Form-Based Redirect with Parameter Passthrough
+
+### Architecture
+
+When user submits a form on domain-a and it redirects to domain-b, include the session ID as a hidden form field, then extract it on domain-b.
+
+```
+1. Form on domain-a contains hidden field: <input type="hidden" name="session_id" value="abc123" />
+2. Form posts to domain-a backend
+3. Domain-a backend redirects user to domain-b?session_id=abc123
+4. Domain-b server receives session_id in query parameter
+5. Domain-b sets as cookie or session variable
+```
+
+### Implementation
+
+```html
+<!-- Form on domain-a.com -->
+<form id="checkout-form" action="/checkout" method="POST">
+  <input type="email" name="email" />
+  <input type="hidden" name="session_id" id="session_id" />
+  <button type="submit">Proceed to Checkout</button>
+</form>
+
+<script>
+  // Get GA4 client_id and session_id, populate form
+  gtag('get', 'G-XXXXXXXXXX', 'client_id', (clientID) => {
+    document.getElementById('session_id').value = clientID;
+  });
+</script>
+```
+
+```python
+# Backend on domain-a
+@app.route('/checkout', methods=['POST'])
+def checkout():
+    email = request.form.get('email')
+    session_id = request.form.get('session_id')
+
+    # Redirect to domain-b with session_id as parameter
+    return redirect(f'https://checkout.example.com/start?session_id={session_id}')
+```
+
+```javascript
+// Server-side GTM on domain-b
+const sessionIDParam = data.get('query_parameter_session_id');
+const referrer = data.get('document_referrer');
+
+if (sessionIDParam && referrer.includes('domain-a.com')) {
+  // Set cookie that persists on domain-b
+  const setCookie = require('setCookie');
+  setCookie('session_id', sessionIDParam, {
+    domain: 'checkout.example.com',
+    path: '/',
+    maxAge: 63072000
+  });
+
+  data.set('session_id', sessionIDParam);
+}
+```
+
+### Advantage
+
+- Explicit passthrough; you control exactly what is passed
+- Works with any domain (third-party checkout)
+- Simple to implement
+
+### Disadvantage
+
+- Session ID visible in URL (temporary, but still exposed)
+- Requires form submission (does not work for direct navigation)
+- Coordinate with backend team
+
+---
+
+## Approach 4: API-Based Session Lookup
+
+### Architecture
+
+Query a centralized session API to retrieve session info based on user email or identifier.
+
+```
+1. User submits email on domain-a.com
+2. Domain-a stores: email -> session_id mapping in database
+3. User navigates to domain-b.com
+4. Domain-b asks: "What session_id is associated with this email?"
+5. Shared API returns session_id
+6. Domain-b sets session_id cookie
+```
+
+### Implementation
+
+```javascript
+// Server-side GTM: Web client on domain-b
+const userEmail = data.get('email_from_context');
+
+if (userEmail) {
+  // Query centralized session API
+  const sessionData = fetch('https://api.example.com/sessions/lookup', {
+    method: 'POST',
+    body: JSON.stringify({ email: userEmail })
+  })
+    .then(r => r.json())
+    .catch(() => null);
+
+  if (sessionData && sessionData.session_id) {
+    data.set('session_id', sessionData.session_id);
+
+    // Set cookie
+    const setCookie = require('setCookie');
+    setCookie('session_id', sessionData.session_id);
+  }
+}
+```
+
+### Backend API
+
+```python
+# Centralized session lookup API
+@app.route('/sessions/lookup', methods=['POST'])
+def lookup_session():
+    email = request.json.get('email')
+
+    # Find the most recent session for this email
+    session = db.query(
+        "SELECT session_id FROM sessions " +
+        "WHERE email = ? " +
+        "ORDER BY created_at DESC LIMIT 1",
+        (email,)
+    )
+
+    if session:
+        return {'session_id': session['session_id']}
+    else:
+        return {'error': 'Session not found'}, 404
+```
+
+### Advantage
+
+- Works for authenticated users
+- Does not rely on referrer or user-agent matching
+- Flexible; works with any domain combination
+- GDPR-compatible if you limit lookups to authenticated users
+
+### Disadvantage
+
+- Requires authenticated user context (does not work for anonymous users)
+- Adds latency (API call on every page load)
+- Privacy concern if API logs email-session mappings
+
+---
+
+## Approach 5: Server-Side Client ID Inheritance
+
+### Architecture
+
+Instead of trying to pass session IDs, let both domains independently retrieve the GA4 client_id from their respective cookies (which are not shared), but send them to server-side GTM with a unified user_id.
+
+```
+User: authenticated as user_id=12345
+Domain-a.com: GA4 client_id = abc111
+Domain-b.com: GA4 client_id = abc222
+
+Both domains send: user_id=12345
+BigQuery: Group events by user_id, not client_id
+```
+
+### Implementation
+
+```javascript
+// Server-side GTM: Web client on both domains
+const userID = data.get('user_id_from_login');
+
+// GA4 will automatically associate this user_id
+// with all events on both domains
+gtag('config', 'G-XXXXXXXXXX', {
+  'user_id': userID
+});
+```
+
+### Advantage
+
+- Simplest implementation; no bridging infrastructure needed
+- Works automatically across domains
+- GA4 handles the cross-device/cross-domain linking
+
+### Disadvantage
+
+- Only works for authenticated users
+- Does not work for anonymous users
+
+---
+
+## Comparison Table
+
+| Approach | Third-Party Checkout? | Anonymous Users? | URL Visible? | Infrastructure |
+|---|---|---|---|---|
+| **Client-side linker** | ❌ No | ✅ Yes | ✅ Yes (parameter) | Minimal |
+| **Reverse proxy bridge** | ✅ Yes* | ✅ Yes | ❌ No | High |
+| **Server-side cookie bridge** | ✅ Yes | ✅ Yes | ❌ No | Medium |
+| **Form redirect** | ✅ Yes | ✅ Yes | ✅ Yes (temp) | Low |
+| **API lookup** | ✅ Yes | ❌ No | ❌ No | Medium |
+| **User ID inheritance** | ✅ Yes | ❌ No | ❌ No | Minimal |
+
+*Only if checkout domain is a subdomain under your control.
+
+---
+
+## Recommendation by Scenario
+
+### Scenario 1: User Flows from Your Site → Stripe-Hosted Checkout
+
+**Use:** Form-based redirect with session_id parameter
+- User submits form on your domain
+- Form redirects to Stripe with session_id in parameter (or stored in Stripe metadata)
+- Stripe redirects back with order confirmation
+- Link order back to original session
+
+### Scenario 2: User Flows from Your Site → Shopify Store
+
+**Use:** Server-side cookie bridging via referrer
+- Shopify does not allow parameter passing in redirects
+- Use referrer + user-agent to identify returning user
+- Set session_id cookie on Shopify domain
+- Both domains send events with same session_id
+
+### Scenario 3: Multiple Authenticated Properties (SaaS with Multiple Workspaces)
+
+**Use:** User ID inheritance
+- User has same user_id across all properties
+- Each domain independently sends user_id to GA4
+- GA4 automatically links sessions
+
+### Scenario 4: Large Organization with Many Subdomains
+
+**Use:** Reverse proxy bridge (Cloudflare Workers or similar)
+- Set up proxy to unify cookie domain
+- All subdomains share first-party cookies
+- Simplest long-term solution
+
+---
+
+## Testing & Debugging
+
+### Verify Session ID Persistence
+
+```javascript
+// Open DevTools console on domain-a.com
+console.log('Domain-a session:', document.cookie);
+
+// Navigate to domain-b.com
+// Open DevTools console on domain-b.com
+console.log('Domain-b session:', document.cookie);
+
+// Check if session_id is preserved (or retrievable via API)
+```
+
+### Check Server-Side Bridge Logs
+
+```sql
+-- Query session bridge table
+SELECT source_domain, session_id, created_at
+FROM session_bridge
+WHERE created_at > NOW() - INTERVAL '5 minutes'
+ORDER BY created_at DESC;
+```
+
+### Verify in GA4
+
+1. Go to GA4 → Admin → DebugView
+2. Enable debug mode on both domains
+3. Navigate: domain-a → domain-b
+4. Check if both domain pageviews appear in the same session (same session_id)
+
+---
+
+## Related Resources
+
+- [Client ID Retrieval and Storage Patterns](/client-side/tracking/client-id-patterns/) — Extracting GA4 client_id
+- [Server-Side GTM Setup](/server-side/getting-started/) — Infrastructure overview
+- [Measurement Protocol Guide](/server-side/measurement-protocol/) — Sending server-side events
+- [GA4 User ID Implementation](/ga4/user-id-basics/) — Cross-device tracking

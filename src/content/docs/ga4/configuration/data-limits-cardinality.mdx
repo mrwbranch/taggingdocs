@@ -21,7 +21,7 @@ These limits apply when you are sending data to GA4:
 | Event parameters per event | 25 | Excluding `items` array |
 | Event name length | 40 characters | |
 | Event parameter name length | 40 characters | |
-| Event parameter string value length | 100 characters | Values truncated silently |
+| Event parameter string value length | 100 characters (standard); 500 chars (GA4 360) | Values truncated silently |
 | User properties per user | 25 | |
 | User property name length | 24 characters | |
 | User property value length | 36 characters | |
@@ -42,6 +42,10 @@ Once 500 unique event names exist, additional unique names are dropped — the e
 Parameter string values are truncated to 100 characters without any error or warning. Long URLs, full product descriptions, or JSON strings sent as parameter values will be cut off silently. You will see the truncated value in reports and BigQuery without any indication that data was lost.
 
 Design your parameters to keep values under 100 characters. For longer values, store them server-side and send a shorter identifier.
+
+**Parameter-specific exceptions:**
+- Standard GA4: `page_location` (1,000 chars), `page_title` (300 chars), `page_referrer` (420 chars)
+- GA4 360: Parameter string values up to 500 characters, except `page_location` (1,000 chars), `page_title` (300 chars), `page_referrer` (420 chars)
 
 ## Configuration limits
 

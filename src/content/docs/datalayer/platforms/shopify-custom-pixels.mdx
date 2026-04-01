@@ -170,6 +170,35 @@ For most standard Shopify merchants: use theme-based GTM for the storefront and 
 For checkout tracking, the cleanest approach is to use Custom Pixels without GTM — subscribe directly to Customer Events and make fetch requests to your server or directly to GA4 Measurement Protocol. This avoids the GTM sandbox complexity entirely.
 </Aside>
 
+## Debugging Custom Pixels
+
+GTM Preview Mode does not connect to GTM containers loaded inside Custom Pixel sandboxes. Use browser DevTools instead.
+
+<Steps>
+1. Open Chrome DevTools (F12).
+
+2. In the **Console** tab, click the JavaScript context dropdown (it says "top" by default).
+
+3. Switch to the Custom Pixel iframe context — it appears as a Shopify subdomain or `sandbox-*` label.
+
+4. Now `console.log(dataLayer)` shows the pixel's local dataLayer, and you can inspect events as they fire.
+</Steps>
+
+Add a temporary debug pixel to log all events:
+
+```javascript
+// Temporary debug pixel — remove before going live
+analytics.subscribe('all_events', (event) => {
+  console.log('[Pixel Debug]', event.name, JSON.stringify(event.data, null, 2));
+});
+```
+
+<Aside type="caution">
+The `productVariants` vs `products` data structure catches many developers. Shopify's checkout event data does NOT have `event.data.checkout.products` — always use `event.data.checkout.lineItems` and access variant data via `item.variant`.
+</Aside>
+
+See [Shopify Custom Pixels: Debugging & Sandbox Guide](/datalayer/platforms/shopify-custom-pixels-debugging/) for the complete debugging reference including postMessage workarounds and common error fixes.
+
 ## Common mistakes
 
 **Trying to use DOM-based GTM triggers in Custom Pixels.** Click triggers, form triggers, and scroll triggers all fail silently. You won't see errors — the triggers just never fire because GTM's click delegation can't attach to the DOM.
@@ -193,5 +222,10 @@ For checkout tracking, the cleanest approach is to use Custom Pixels without GTM
     title="Shopify Advanced"
     description="Post-purchase upsells, subscriptions, multi-currency, server-side tracking."
     href="/datalayer/platforms/shopify-advanced/"
+  />
+  <LinkCard
+    title="Debugging & Sandbox Guide"
+    description="Complete guide to debugging GTM inside Custom Pixel sandboxes — console context, postMessage, common errors."
+    href="/datalayer/platforms/shopify-custom-pixels-debugging/"
   />
 </CardGrid>

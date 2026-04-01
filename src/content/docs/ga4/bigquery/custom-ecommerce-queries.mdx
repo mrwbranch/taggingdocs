@@ -1,0 +1,190 @@
+---
+title: "Querying Custom Ecommerce Events in BigQuery"
+description: "How to query custom ecommerce events in GA4 BigQuery exports — handling items in event_params vs. the ecommerce struct, diagnosing empty items arrays, and the Send Ecommerce Data checkbox gotcha."
+sidebar:
+  order: 9
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+GA4's BigQuery export includes an `ecommerce` struct with a repeated `items` record, but this only gets populated for recognized ecommerce event names (`purchase`, `add_to_cart`, `view_item`, etc.) when specific conditions are met. Custom event names often break this flow, leaving you with empty items arrays even though data was sent. This guide shows how to diagnose and query custom ecommerce events effectively.
+
+## The ecommerce Struct Limitation
+
+GA4's ecommerce struct in BigQuery only populates for recognized ecommerce event names. If you send a custom event like `subscription_change` or `plan_upgrade` with ecommerce data in your dataLayer, the `ecommerce.*` fields and `items` array will be empty.
+
+Additionally, the "Send Ecommerce Data" checkbox in GTM must be enabled for the ecommerce struct to populate at all. Without it, even standard ecommerce events may not have structured ecommerce data in BigQuery.
+
+**Result**: Your custom ecommerce events appear in BigQuery, but the items are nowhere to be found.
+
+## Diagnosing the Empty Items Problem
+
+Before writing complex queries, figure out where your items actually ended up. Use this diagnostic query:
+
+```sql
+-- Check if items array is populated for your custom event
+SELECT
+  event_name,
+  ARRAY_LENGTH(items) as item_count,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'items') as items_in_params,
+  COUNT(*) as events
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name = 'subscription_change'
+GROUP BY 1, 2, 3
+ORDER BY events DESC
+```
+
+This query shows you:
+- Whether `items` is empty (ARRAY_LENGTH = 0 or NULL)
+- Whether items exist in `event_params` as a separate parameter
+- How many events match your custom event name
+
+If `items_in_params` is not NULL, your items were sent as a JSON string in event parameters instead of the ecommerce struct.
+
+## Extracting Items from event_params
+
+When items are stored as a JSON string in `event_params` instead of the `items` struct, you need to parse them with JSON functions:
+
+```sql
+-- Extract items from event_params when stored as JSON string
+SELECT
+  event_date,
+  user_pseudo_id,
+  event_name,
+  JSON_EXTRACT_SCALAR(item, '$.item_id') as item_id,
+  JSON_EXTRACT_SCALAR(item, '$.item_name') as item_name,
+  CAST(JSON_EXTRACT_SCALAR(item, '$.price') AS FLOAT64) as price,
+  CAST(JSON_EXTRACT_SCALAR(item, '$.quantity') AS INT64) as quantity
+FROM `project.dataset.events_*`,
+  UNNEST(JSON_EXTRACT_ARRAY(
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'items')
+  )) AS item
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name = 'subscription_change'
+  AND (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'items') IS NOT NULL
+```
+
+This approach:
+1. Finds the `items` parameter in the event_params array
+2. Extracts it as a JSON string
+3. Uses `JSON_EXTRACT_ARRAY` to split the JSON array into individual items
+4. Parses each item's fields using `JSON_EXTRACT_SCALAR`
+5. Casts numeric values to proper types
+
+## The "Send Ecommerce Data" Checkbox Conflict
+
+<Aside type="warning">
+If you have "Send Ecommerce Data" checked in your GTM tag AND you're manually mapping items as event parameters, you create a conflict. Manual parameter mappings override the ecommerce struct. **Choose one approach**: either use "Send Ecommerce Data" OR manual parameter mapping, never both.
+</Aside>
+
+When both are enabled, GTM's manual parameters take precedence. This means your carefully configured ecommerce struct gets overridden by your parameter mappings. Result: unpredictable data structure in BigQuery.
+
+**Fix**: In your GA4 event tag settings, disable "Send Ecommerce Data" if you're manually mapping items as parameters. Or remove manual mappings if you're relying on "Send Ecommerce Data" to handle it.
+
+## Combining Ecommerce Data with Custom Parameters
+
+For standard ecommerce events (like `purchase`) that also have custom dimensions or parameters, you can query both together:
+
+```sql
+SELECT
+  event_date,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id') as transaction_id,
+  ecommerce.total_item_quantity,
+  ecommerce.purchase_revenue,
+  items.item_id,
+  items.item_name,
+  items.price,
+  items.quantity,
+  -- Custom parameters alongside ecommerce
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'subscription_type') as subscription_type,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'plan_change_direction') as change_direction
+FROM `project.dataset.events_*`,
+  UNNEST(items) as items
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name = 'purchase'
+  AND ARRAY_LENGTH(items) > 0
+```
+
+This pattern unnests the `items` array to get one row per item, while preserving the event-level ecommerce fields and custom parameters.
+
+## Best Practice: Use Recognized Event Names
+
+For custom ecommerce-like events, consider using a recognized event name (like `purchase` or `add_to_cart`) with custom parameters to distinguish the sub-type, rather than creating entirely custom event names.
+
+**Example**: Instead of a custom event `subscription_change`, use the `purchase` event with a custom parameter `subscription_type: 'upgrade'`. This ensures:
+- The ecommerce struct populates automatically
+- Items appear in the correct `items` array
+- You still capture custom classification via parameters
+
+```sql
+SELECT
+  event_date,
+  user_pseudo_id,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'subscription_type') as subscription_type,
+  ecommerce.purchase_revenue,
+  items.item_id,
+  items.item_name,
+  items.price
+FROM `project.dataset.events_*`,
+  UNNEST(items) as items
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name = 'purchase'
+  AND (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'subscription_type') IS NOT NULL
+```
+
+## Handling Currency and Value Edge Cases
+
+When dealing with multi-currency or complex ecommerce data, account for nulls and invalid values:
+
+```sql
+-- Multi-currency ecommerce with null and validation handling
+SELECT
+  event_date,
+  user_pseudo_id,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'currency') as currency,
+  items.item_id,
+  items.item_name,
+  items.price,
+  items.quantity,
+  COALESCE(items.price * items.quantity, 0) as item_revenue,
+  ecommerce.purchase_revenue,
+  -- Flag suspicious values
+  CASE
+    WHEN items.price < 0 THEN 'negative_price'
+    WHEN items.quantity < 0 THEN 'negative_quantity'
+    WHEN items.price IS NULL OR items.quantity IS NULL THEN 'missing_value'
+    ELSE 'valid'
+  END as data_quality_flag
+FROM `project.dataset.events_*`,
+  UNNEST(items) as items
+WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20240131'
+  AND event_name = 'purchase'
+ORDER BY event_date DESC
+```
+
+This query:
+- Handles NULL values with `COALESCE`
+- Validates numeric fields are positive
+- Flags data quality issues for review
+- Includes currency information from event_params
+
+## Related Articles
+
+<CardGrid>
+  <LinkCard
+    title="Common BigQuery Queries"
+    description="Essential GA4 BigQuery patterns and queries"
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Ecommerce Tracking"
+    description="Setting up and implementing ecommerce tracking in GA4"
+    href="/client-side/tracking/ecommerce-tracking/"
+  />
+  <LinkCard
+    title="Ecommerce Item Attribution"
+    description="Attributing revenue to items and analyzing ecommerce performance"
+    href="/ga4/bigquery/ecommerce-item-attribution/"
+  />
+</CardGrid>

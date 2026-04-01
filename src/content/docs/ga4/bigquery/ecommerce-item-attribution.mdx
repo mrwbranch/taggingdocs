@@ -1,0 +1,505 @@
+---
+title: "Ecommerce Item List Attribution in BigQuery"
+description: "SQL patterns for attributing purchases back to the item list where they were first viewed, building ecommerce reporting tables with proper item_list_name attribution."
+sidebar:
+  order: 25
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+One of the most valuable questions an ecommerce business can answer is: "Which product list drove this purchase?" Was it from a search results page? The homepage featured section? The category page?
+
+GA4's `item_list_name` parameter captures this, but building reliable attribution in BigQuery requires careful SQL. This guide covers the patterns used for production ecommerce reporting.
+
+---
+
+## The Problem: Linking Item Views to Purchases
+
+GA4 tracks ecommerce events with an `items` array. Each event can contain multiple items, and each item has an `item_list_name`:
+
+```json
+{
+  "event_name": "view_item_list",
+  "items": [
+    {
+      "item_id": "SKU-123",
+      "item_name": "Blue Shoe",
+      "item_list_name": "Search Results"
+    },
+    {
+      "item_id": "SKU-456",
+      "item_name": "Red Shoe",
+      "item_list_name": "Search Results"
+    }
+  ]
+}
+```
+
+Later, the user purchases:
+
+```json
+{
+  "event_name": "purchase",
+  "items": [
+    {
+      "item_id": "SKU-123",
+      "transaction_id": "TXN-001"
+    }
+  ]
+}
+```
+
+**The question:** Where did the user first see SKU-123? In which list?
+
+This requires joining view_item_list events to purchase events by item_id, handling multiple views (which list did the user see last before purchasing?), and handling incomplete data (some items may never have view events).
+
+---
+
+## Part 1: Unnest and Flatten GA4 Items
+
+GA4's items are stored as a repeated field (array) in BigQuery. To analyze them, you must unnest:
+
+```sql
+SELECT
+  user_pseudo_id,
+  event_name,
+  event_timestamp,
+  item.item_id,
+  item.item_name,
+  item.item_list_name,
+  item.price,
+  item.quantity
+FROM `project.dataset.events_*`
+CROSS JOIN UNNEST(items) AS item
+WHERE event_name IN ('view_item_list', 'purchase')
+  AND DATE(TIMESTAMP_MICROS(event_timestamp)) = CURRENT_DATE()
+ORDER BY user_pseudo_id, event_timestamp;
+```
+
+Result:
+
+```
+user_pseudo_id | event_name | item_id | item_list_name | event_timestamp
+123            | view_item_list | SKU-123 | Search Results | 2024-01-15 10:00:00
+123            | view_item_list | SKU-456 | Search Results | 2024-01-15 10:00:00
+123            | purchase | SKU-123 | NULL | 2024-01-15 11:30:00
+```
+
+Note: The purchase event's `item_list_name` is NULL because purchases do not include that field.
+
+---
+
+## Part 2: Build a Session-Level Item View Map
+
+For each user-session, track which lists they viewed items from:
+
+```sql
+WITH item_views AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'session_id') AS session_id,
+    event_timestamp,
+    item.item_id,
+    item.item_list_name,
+    item.item_name,
+    item.price,
+    ROW_NUMBER() OVER (
+      PARTITION BY user_pseudo_id, item.item_id
+      ORDER BY event_timestamp DESC  -- Most recent view first
+    ) AS view_rank
+  FROM `project.dataset.events_*`
+  CROSS JOIN UNNEST(items) AS item
+  WHERE event_name = 'view_item_list'
+    AND DATE(TIMESTAMP_MICROS(event_timestamp)) = CURRENT_DATE()
+)
+
+SELECT
+  user_pseudo_id,
+  session_id,
+  item_id,
+  item_list_name,
+  item_name,
+  view_rank,
+  -- Only keep the most recent view (rank 1)
+  IF(view_rank = 1, item_list_name, NULL) AS last_viewed_list
+FROM item_views
+ORDER BY user_pseudo_id, item_id, view_rank;
+```
+
+---
+
+## Part 3: Attach Item List Attribution to Purchases
+
+Now join the item views to purchase events:
+
+```sql
+WITH item_views AS (
+  SELECT
+    user_pseudo_id,
+    item.item_id,
+    item.item_list_name,
+    item.item_name,
+    event_timestamp AS view_timestamp,
+    ROW_NUMBER() OVER (
+      PARTITION BY user_pseudo_id, item.item_id
+      ORDER BY event_timestamp DESC
+    ) AS view_rank
+  FROM `project.dataset.events_*`
+  CROSS JOIN UNNEST(items) AS item
+  WHERE event_name = 'view_item_list'
+),
+
+purchases AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id') AS transaction_id,
+    event_timestamp AS purchase_timestamp,
+    item.item_id,
+    item.item_name,
+    item.price,
+    item.quantity
+  FROM `project.dataset.events_*`
+  CROSS JOIN UNNEST(items) AS item
+  WHERE event_name = 'purchase'
+),
+
+-- Join with last viewed item list
+attributed AS (
+  SELECT
+    p.user_pseudo_id,
+    p.transaction_id,
+    p.purchase_timestamp,
+    p.item_id,
+    p.item_name,
+    p.price,
+    p.quantity,
+    COALESCE(iv.item_list_name, 'Direct/Unknown') AS item_list_name,
+    iv.view_timestamp,
+    TIMESTAMP_DIFF(p.purchase_timestamp, iv.view_timestamp, SECOND) AS seconds_between_view_and_purchase
+  FROM purchases p
+  LEFT JOIN item_views iv
+    ON p.user_pseudo_id = iv.user_pseudo_id
+    AND p.item_id = iv.item_id
+    AND iv.view_rank = 1  -- Only the most recent view
+    AND iv.view_timestamp < p.purchase_timestamp  -- View must come before purchase
+)
+
+SELECT
+  user_pseudo_id,
+  transaction_id,
+  purchase_timestamp,
+  item_id,
+  item_name,
+  price,
+  quantity,
+  item_list_name,
+  view_timestamp,
+  seconds_between_view_and_purchase
+FROM attributed
+ORDER BY user_pseudo_id, transaction_id;
+```
+
+---
+
+## Part 4: Aggregate to Purchase-Level Report
+
+Group by transaction to see which lists drove each purchase:
+
+```sql
+WITH item_views AS (
+  -- Same as before: view_item_list unnested
+  ...
+),
+
+purchases AS (
+  -- Same as before: purchase unnested
+  ...
+),
+
+attributed AS (
+  -- Same join as before
+  ...
+),
+
+purchase_lists AS (
+  SELECT
+    transaction_id,
+    user_pseudo_id,
+    purchase_timestamp,
+    -- Combine all item_list_names for this transaction
+    STRING_AGG(DISTINCT item_list_name, ', ' ORDER BY item_list_name) AS item_lists_viewed,
+    SUM(price * quantity) AS total_value,
+    COUNT(DISTINCT item_id) AS item_count
+  FROM attributed
+  GROUP BY transaction_id, user_pseudo_id, purchase_timestamp
+)
+
+SELECT
+  purchase_timestamp,
+  transaction_id,
+  item_lists_viewed,
+  item_count,
+  total_value,
+  -- Categorize by list for reporting
+  CASE
+    WHEN item_lists_viewed LIKE '%Search Results%' THEN 'Search'
+    WHEN item_lists_viewed LIKE '%Category Page%' THEN 'Category'
+    WHEN item_lists_viewed LIKE '%Homepage Featured%' THEN 'Homepage'
+    WHEN item_lists_viewed = 'Direct/Unknown' THEN 'Direct'
+    ELSE 'Other'
+  END AS list_category
+FROM purchase_lists
+ORDER BY purchase_timestamp DESC;
+```
+
+---
+
+## Part 5: Handle Shopify's 5-Tier Category Hierarchy
+
+Shopify sends product categories in a hierarchical format. GA4 flattens these into a single field, but you may want to rebuild the hierarchy:
+
+### Shopify Category Format
+
+```
+Electronics > Computers > Laptops > Gaming > High-Performance
+```
+
+Stored in GA4 as:
+```
+item_category = "Electronics"
+item_category2 = "Computers"
+item_category3 = "Laptops"
+item_category4 = "Gaming"
+item_category5 = "High-Performance"
+```
+
+### SQL to Reconstruct
+
+```sql
+SELECT
+  item.item_id,
+  item.item_name,
+  item.item_category,
+  (SELECT value.string_value FROM UNNEST(item.custom_map) WHERE key = 'category_level_2') AS category_level_2,
+  (SELECT value.string_value FROM UNNEST(item.custom_map) WHERE key = 'category_level_3') AS category_level_3,
+  (SELECT value.string_value FROM UNNEST(item.custom_map) WHERE key = 'category_level_4') AS category_level_4,
+  (SELECT value.string_value FROM UNNEST(item.custom_map) WHERE key = 'category_level_5') AS category_level_5,
+  -- Reconstruct full path
+  CONCAT(
+    item.item_category,
+    IF(category_level_2 IS NOT NULL, CONCAT(' > ', category_level_2), ''),
+    IF(category_level_3 IS NOT NULL, CONCAT(' > ', category_level_3), ''),
+    IF(category_level_4 IS NOT NULL, CONCAT(' > ', category_level_4), ''),
+    IF(category_level_5 IS NOT NULL, CONCAT(' > ', category_level_5), '')
+  ) AS full_category_path
+FROM `project.dataset.events_*`
+CROSS JOIN UNNEST(items) AS item
+WHERE event_name = 'purchase'
+  AND DATE(TIMESTAMP_MICROS(event_timestamp)) = CURRENT_DATE();
+```
+
+---
+
+## Part 6: Create a Reusable Reporting Table
+
+Build a materialized view you can query repeatedly:
+
+```sql
+CREATE OR REPLACE TABLE `project.dataset.ecommerce_item_attribution` AS
+
+WITH item_views AS (
+  SELECT
+    user_pseudo_id,
+    item.item_id,
+    item.item_list_name,
+    item.item_name,
+    event_timestamp,
+    ROW_NUMBER() OVER (
+      PARTITION BY user_pseudo_id, item.item_id
+      ORDER BY event_timestamp DESC
+    ) AS view_rank
+  FROM `project.dataset.events_*`
+  CROSS JOIN UNNEST(items) AS item
+  WHERE event_name = 'view_item_list'
+    AND DATE(TIMESTAMP_MICROS(event_timestamp)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+),
+
+purchases AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'transaction_id') AS transaction_id,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'currency') AS currency,
+    event_timestamp AS purchase_timestamp,
+    item.item_id,
+    item.item_name,
+    item.item_category,
+    item.price,
+    item.quantity
+  FROM `project.dataset.events_*`
+  CROSS JOIN UNNEST(items) AS item
+  WHERE event_name = 'purchase'
+    AND DATE(TIMESTAMP_MICROS(event_timestamp)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+),
+
+attributed AS (
+  SELECT
+    p.transaction_id,
+    p.user_pseudo_id,
+    DATE(TIMESTAMP_MICROS(p.purchase_timestamp)) AS purchase_date,
+    TIMESTAMP_MICROS(p.purchase_timestamp) AS purchase_timestamp,
+    p.item_id,
+    p.item_name,
+    p.item_category,
+    p.price,
+    p.quantity,
+    COALESCE(iv.item_list_name, 'Direct/Unknown') AS attributed_item_list,
+    TIMESTAMP_MICROS(iv.event_timestamp) AS viewed_timestamp
+  FROM purchases p
+  LEFT JOIN item_views iv
+    ON p.user_pseudo_id = iv.user_pseudo_id
+    AND p.item_id = iv.item_id
+    AND iv.view_rank = 1
+    AND TIMESTAMP_MICROS(iv.event_timestamp) < TIMESTAMP_MICROS(p.purchase_timestamp)
+)
+
+SELECT
+  *
+FROM attributed
+ORDER BY purchase_date DESC, transaction_id;
+```
+
+Query it:
+
+```sql
+-- Items purchased from search results
+SELECT
+  COUNT(*) AS items_purchased,
+  SUM(price * quantity) AS revenue
+FROM `project.dataset.ecommerce_item_attribution`
+WHERE attributed_item_list = 'Search Results'
+  AND purchase_date >= CURRENT_DATE() - 30;
+
+-- Item list performance ranking
+SELECT
+  attributed_item_list,
+  COUNT(DISTINCT transaction_id) AS transactions,
+  SUM(price * quantity) AS revenue,
+  ROUND(SUM(price * quantity) / COUNT(DISTINCT transaction_id), 2) AS avg_order_value
+FROM `project.dataset.ecommerce_item_attribution`
+WHERE purchase_date >= CURRENT_DATE() - 90
+GROUP BY attributed_item_list
+ORDER BY revenue DESC;
+```
+
+---
+
+## Part 7: Handle Edge Cases
+
+### Multiple List Views (Which One Caused the Purchase?)
+
+If a user views an item in multiple lists before purchasing, choose the most recent:
+
+```sql
+-- This is already handled by the ROW_NUMBER() OVER (...ORDER BY event_timestamp DESC)
+-- which keeps only view_rank = 1 (most recent)
+```
+
+### Items Viewed But Never Purchased
+
+Include them in your view analysis but exclude from purchase attribution:
+
+```sql
+WITH item_views_summary AS (
+  SELECT
+    item_list_name,
+    item.item_id,
+    COUNT(*) AS view_count
+  FROM `project.dataset.events_*`
+  CROSS JOIN UNNEST(items) AS item
+  WHERE event_name = 'view_item_list'
+  GROUP BY item_list_name, item_id
+),
+
+purchased_items AS (
+  SELECT DISTINCT item_id FROM `project.dataset.events_*`, UNNEST(items) AS item
+  WHERE event_name = 'purchase'
+)
+
+SELECT
+  iv.item_list_name,
+  iv.item_id,
+  iv.view_count,
+  IF(pi.item_id IS NOT NULL, 'Purchased', 'Not Purchased') AS purchase_status
+FROM item_views_summary iv
+LEFT JOIN purchased_items pi ON iv.item_id = pi.item_id;
+```
+
+### Purchase Without Prior View Event
+
+This happens when:
+- User came directly (no view event recorded)
+- View event was outside the 90-day window
+- Tracking was incomplete
+
+Handle with `COALESCE` to default to "Direct/Unknown":
+
+```sql
+-- Already handled in the attribution query:
+COALESCE(iv.item_list_name, 'Direct/Unknown') AS attributed_item_list
+```
+
+---
+
+## Part 8: Connect to Looker Studio
+
+Once you have the ecommerce_item_attribution table, connect it to Looker Studio for dashboards:
+
+1. Looker Studio → Create new report
+2. Add source: BigQuery
+3. Select `project.dataset.ecommerce_item_attribution`
+4. Create cards:
+   - **Top Lists by Revenue** — GROUP BY attributed_item_list, SUM(price * quantity)
+   - **Conversion by List** — GROUP BY attributed_item_list, COUNT(DISTINCT transaction_id)
+   - **Items Most Viewed, Least Purchased** — Items with high views but low conversion
+
+---
+
+## Performance Tips
+
+### Materialized View with Incremental Updates
+
+Instead of recalculating the entire 90 days every day, use incremental updates:
+
+```sql
+-- Daily update: only process yesterday's data
+-- Then UNION with older data
+
+SELECT * FROM `project.dataset.ecommerce_item_attribution_2024_q1`
+UNION ALL
+SELECT * FROM `project.dataset.ecommerce_item_attribution_daily_latest`
+WHERE purchase_date = CURRENT_DATE() - 1;
+```
+
+### Partition by Purchase Date
+
+Ensure your table is partitioned by purchase_date for fast filtering:
+
+```sql
+CREATE TABLE `project.dataset.ecommerce_item_attribution`
+PARTITION BY purchase_date
+AS ...
+```
+
+Then queries filter on partition:
+```sql
+SELECT ... WHERE purchase_date >= '2024-01-01'  -- Fast, scans only relevant partitions
+```
+
+---
+
+## Related Resources
+
+- [GA4 BigQuery Schema Reference](/ga4/bigquery/schema-reference/) — Complete field reference
+- [No-Code BigQuery Tools](/resources/no-code-bigquery-tools/) — GA4SQL, GA4BQ for visual analysis
+- [GA4 Ecommerce Implementation](/ga4/ecommerce/ecommerce-events/) — Event structure and requirements
+- [BigQuery for GA4 Beginners](/ga4/bigquery/getting-started/) — Foundational SQL patterns

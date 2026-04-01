@@ -1,0 +1,487 @@
+---
+title: "GA4 Data Quality Validation"
+description: "Run automated data quality checks in GA4 — event count anomalies, parameter validation, duplicate detection, internal traffic filtering, and monthly audit best practices using BigQuery and Cloud Monitoring."
+sidebar:
+  order: 4
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Data quality is foundational to any analytics program, yet many organizations ship measurement implementations without systematic validation. A missing parameter here, a traffic spike there, and six months later your acquisition reports are unreliable, your attribution model trains on corrupted data, and your marketing team makes decisions on faulty signals.
+
+GA4 + BigQuery enable automated auditing. Rather than manually spot-checking reports, define 15+ automated checks that run daily or weekly, alert when thresholds are breached, and give you early warning before data problems compound.
+
+## Why systematic validation matters
+
+Without data quality checks, you discover problems reactively:
+- A bot surge inflates pageviews on March 15. You notice it March 22 when reporting on March's baseline.
+- An iOS app stops sending `purchase` events. By the time you notice, two weeks of conversion data is incomplete.
+- A third-party integration starts double-counting orders. The corruption spreads through attribution models, audience cohorts, and forecasting.
+
+Automated checks catch these issues within hours of occurrence, when remediation is still possible.
+
+## 15+ Essential Data Quality Checks
+
+### 1. Event count anomalies (sudden drops)
+
+Detect when event volume drops below a moving baseline. A sudden 40%+ drop often signals a measurement breakage.
+
+```sql
+-- Check: Daily event count vs. 7-day rolling average
+WITH daily_events AS (
+  SELECT
+    CURRENT_DATE() - 1 AS check_date,
+    COUNT(*) AS event_count
+  FROM `project.dataset.events_*`
+  WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+),
+baseline AS (
+  SELECT
+    AVG(event_count) AS avg_7day,
+    STDDEV_POP(event_count) * 2 AS alert_threshold
+  FROM (
+    SELECT
+      COUNT(*) AS event_count
+    FROM `project.dataset.events_*`
+    WHERE _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 8)
+                            AND FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 2)
+    GROUP BY _TABLE_SUFFIX
+  )
+)
+SELECT
+  d.check_date,
+  d.event_count,
+  ROUND(b.avg_7day) AS expected_count,
+  ROUND((d.event_count / b.avg_7day - 1) * 100, 1) AS pct_change,
+  'DROP_ALERT' AS alert_type
+FROM daily_events d, baseline b
+WHERE d.event_count < (b.avg_7day - b.alert_threshold);
+```
+
+**Action**: Volume drops > 30% warrant immediate investigation. Check measurement tags, client-side errors, and server-side filtering rules.
+
+### 2. Event count anomalies (sudden spikes)
+
+Traffic spikes may be legitimate (viral post, PR coverage) or problematic (bot surge, tag duplication). Raise alerts so you can inspect the spike in real time.
+
+```sql
+-- Check: Daily event count spike detection
+WITH daily_events AS (
+  SELECT
+    CURRENT_DATE() - 1 AS check_date,
+    COUNT(*) AS event_count
+  FROM `project.dataset.events_*`
+  WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+),
+baseline AS (
+  SELECT
+    AVG(event_count) AS avg_7day,
+    STDDEV_POP(event_count) * 2 AS alert_threshold
+  FROM (
+    SELECT
+      COUNT(*) AS event_count
+    FROM `project.dataset.events_*`
+    WHERE _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 8)
+                            AND FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 2)
+    GROUP BY _TABLE_SUFFIX
+  )
+)
+SELECT
+  d.check_date,
+  d.event_count,
+  ROUND(b.avg_7day) AS expected_count,
+  ROUND((d.event_count / b.avg_7day - 1) * 100, 1) AS pct_change,
+  'SPIKE_ALERT' AS alert_type
+FROM daily_events d, baseline b
+WHERE d.event_count > (b.avg_7day + b.alert_threshold);
+```
+
+**Action**: Spikes > 50% should trigger immediate review. Cross-reference with marketing activity calendar. If unexplained, check for tag duplication or bot traffic.
+
+### 3. Missing required parameters
+
+Events should have specific parameters depending on event type. For example, `purchase` events must include `transaction_id` and `value`.
+
+```sql
+-- Check: Purchase events without required parameters
+SELECT
+  event_date,
+  COUNT(*) AS missing_count,
+  ROUND(COUNT(*) / (
+    SELECT COUNT(*)
+    FROM `project.dataset.events_*`
+    WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', event_date)
+      AND event_name = 'purchase'
+  ) * 100, 2) AS pct_of_purchases
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+  AND event_name = 'purchase'
+  AND (
+    NOT EXISTS (
+      SELECT 1 FROM UNNEST(event_params) AS param
+      WHERE param.key = 'transaction_id'
+    )
+    OR NOT EXISTS (
+      SELECT 1 FROM UNNEST(event_params) AS param
+      WHERE param.key = 'value'
+    )
+  )
+GROUP BY event_date
+HAVING missing_count > 0;
+```
+
+**Threshold**: Flag if > 5% of purchase events lack `transaction_id` or `value`. This corrupts revenue reporting.
+
+### 4. Duplicate transactions
+
+Duplicate transactions inflate revenue. Check for multiple purchase events with identical `transaction_id` within short timeframes.
+
+```sql
+-- Check: Duplicate transaction IDs
+WITH transaction_ids AS (
+  SELECT
+    event_date,
+    (SELECT value.string_value FROM UNNEST(event_params)
+     WHERE key = 'transaction_id') AS transaction_id,
+    COUNT(*) AS occurrence_count
+  FROM `project.dataset.events_*`
+  WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+    AND event_name = 'purchase'
+  GROUP BY event_date, transaction_id
+)
+SELECT
+  event_date,
+  COUNT(*) AS duplicate_txn_ids,
+  SUM(occurrence_count - 1) AS excess_events
+FROM transaction_ids
+WHERE occurrence_count > 1
+GROUP BY event_date;
+```
+
+**Threshold**: Any duplicate transaction ID is a warning. Investigate tag firing rules or backend retry logic.
+
+### 5. Internal traffic leaking into production
+
+Exclude internal/office traffic from analytics to avoid skewing conversion rates and polluting audiences.
+
+```sql
+-- Check: Internal IP traffic reaching GA4
+WITH params AS (
+  SELECT
+    event_date,
+    user_id,
+    (SELECT value.string_value FROM UNNEST(event_params)
+     WHERE key = 'ip_address') AS ip_address,
+    COUNT(*) AS event_count
+  FROM `project.dataset.events_*`
+  WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+  GROUP BY event_date, user_id, ip_address
+)
+SELECT
+  event_date,
+  COUNT(DISTINCT user_id) AS internal_users,
+  SUM(event_count) AS internal_events,
+  ARRAY_AGG(DISTINCT ip_address LIMIT 10) AS sample_ips
+FROM params
+WHERE ip_address LIKE '203.0.113.%'  -- Replace with your office IP range
+   OR ip_address LIKE '10.0.%'
+GROUP BY event_date;
+```
+
+**Action**: If internal traffic appears, verify that GA4 filters are active under **Admin → Data Filters**.
+
+### 6. Enhanced measurement double-counting
+
+GA4's enhanced measurement auto-tracks page views, scrolls, and form submissions. If you also manually fire these events, you'll double-count.
+
+```sql
+-- Check: Potential enhanced measurement + manual event overlap
+SELECT
+  event_date,
+  event_name,
+  COUNT(*) AS event_count,
+  COUNT(DISTINCT user_id) AS unique_users,
+  ROUND(COUNT(*) / COUNT(DISTINCT user_id), 2) AS avg_events_per_user
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+  AND event_name IN ('page_view', 'scroll', 'form_submit')
+GROUP BY event_date, event_name
+ORDER BY avg_events_per_user DESC;
+```
+
+**Threshold**: If average events per user > 1.5 for `page_view` on a single-page app, investigate. On multi-page sites, ratios > 1.2 warrant review.
+
+### 7. Referral spam detection
+
+Referral spam in the `session_source` parameter pollutes attribution. Common patterns: `(direct) (none)` with referrer, or obvious bot domains.
+
+```sql
+-- Check: Suspicious referrer spam patterns
+SELECT
+  event_date,
+  (SELECT value.string_value FROM UNNEST(event_params)
+   WHERE key = 'session_source') AS source,
+  (SELECT value.string_value FROM UNNEST(event_params)
+   WHERE key = 'session_medium') AS medium,
+  COUNT(DISTINCT user_id) AS user_count,
+  COUNT(*) AS event_count
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+  AND (
+    (SELECT value.string_value FROM UNNEST(event_params)
+     WHERE key = 'session_source') IN (
+      'bestwebsiteslinks.com', 'edakma.ru', 'sady.ua', 'buttons-for-website.com'
+    )
+    OR (
+      (SELECT value.string_value FROM UNNEST(event_params)
+       WHERE key = 'session_source') LIKE '%bot%'
+      OR (SELECT value.string_value FROM UNNEST(event_params)
+          WHERE key = 'session_source') LIKE '%spam%'
+    )
+  )
+GROUP BY event_date, source, medium
+ORDER BY event_count DESC;
+```
+
+**Action**: Add detected spam sources to GA4's referral exclusion list under **Admin → Data Streams → Enhanced Measurement**.
+
+### 8. Session count vs. user count ratio anomalies
+
+The session-to-user ratio typically ranges from 1.2 to 1.5. Ratios > 2.0 suggest session-splitting bugs or bots with session management.
+
+```sql
+-- Check: Session to user ratio anomalies
+SELECT
+  event_date,
+  COUNT(DISTINCT user_id) AS users,
+  COUNT(DISTINCT concat(user_id, '_', (
+    SELECT value.int_value FROM UNNEST(event_params)
+    WHERE key = 'ga_session_id'
+  ))) AS sessions,
+  ROUND(
+    COUNT(DISTINCT concat(user_id, '_', (
+      SELECT value.int_value FROM UNNEST(event_params)
+      WHERE key = 'ga_session_id'
+    ))) / COUNT(DISTINCT user_id), 2
+  ) AS session_to_user_ratio
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+GROUP BY event_date
+HAVING session_to_user_ratio > 2.0;
+```
+
+**Threshold**: Ratio > 2.0 warrants investigation. Check for session ID initialization issues or bot traffic with randomized sessions.
+
+### 9. Conversion rate anomalies
+
+Sudden dips in conversion rate (purchases, key events) signal breakage.
+
+```sql
+-- Check: Conversion rate vs. baseline
+WITH daily_metrics AS (
+  SELECT
+    event_date,
+    COUNT(DISTINCT user_id) AS users,
+    SUM(CASE
+      WHEN event_name IN ('purchase', 'signup', 'key_event') THEN 1
+      ELSE 0
+    END) AS conversions
+  FROM `project.dataset.events_*`
+  WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+  GROUP BY event_date
+),
+baseline AS (
+  SELECT
+    AVG(conversions / users) AS avg_rate
+  FROM (
+    SELECT
+      event_date,
+      SUM(CASE
+        WHEN event_name IN ('purchase', 'signup', 'key_event') THEN 1
+        ELSE 0
+      END) / COUNT(DISTINCT user_id) AS conversions,
+      COUNT(DISTINCT user_id) AS users
+    FROM `project.dataset.events_*`
+    WHERE _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 8)
+                            AND FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 2)
+    GROUP BY _TABLE_SUFFIX
+  )
+)
+SELECT
+  d.event_date,
+  ROUND(d.conversions / d.users * 100, 2) AS cr_pct,
+  ROUND(b.avg_rate * 100, 2) AS baseline_cr,
+  ROUND((d.conversions / d.users / b.avg_rate - 1) * 100, 1) AS pct_change
+FROM daily_metrics d, baseline b
+WHERE (d.conversions / d.users) < (b.avg_rate * 0.7)
+  OR (d.conversions / d.users) > (b.avg_rate * 1.3);
+```
+
+**Action**: CR drops > 30% suggest broken conversion tracking. Check GTM tag firing, validation rules, and backend integration.
+
+### 10. Data freshness monitoring
+
+GA4 has a reporting latency of 24–48 hours for most data. Check that yesterday's data is complete.
+
+```sql
+-- Check: Data freshness
+SELECT
+  MAX(_TABLE_SUFFIX) AS latest_date,
+  COUNT(*) AS event_count,
+  CURRENT_DATE() - 1 AS expected_date,
+  IF(
+    PARSE_DATE('%Y%m%d', MAX(_TABLE_SUFFIX)) = CURRENT_DATE() - 1,
+    'COMPLETE',
+    'INCOMPLETE'
+  ) AS freshness_status
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX >= FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 2);
+```
+
+**Action**: If `freshness_status` = 'INCOMPLETE' on day 2, check GA4 reporting API and BigQuery export configuration.
+
+### 11. Cardinality threshold warnings
+
+High-cardinality dimensions (like user IDs in custom parameters) waste storage and slow queries. GA4 warns when a single property or dimension exceeds 50,000 unique values in a day.
+
+```sql
+-- Check: Custom dimension cardinality
+SELECT
+  event_date,
+  (SELECT key FROM UNNEST(event_params) LIMIT 1) AS dimension_name,
+  COUNT(DISTINCT (SELECT value.string_value FROM UNNEST(event_params)
+                  WHERE key = 'user_id')) AS cardinality
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+  AND EXISTS (
+    SELECT 1 FROM UNNEST(event_params) AS param
+    WHERE param.key = 'user_id'
+  )
+GROUP BY event_date, dimension_name
+HAVING cardinality > 50000;
+```
+
+**Action**: High-cardinality dimensions should be sent to BigQuery only, not GA4's front-end, to preserve reporting capacity.
+
+### 12. Custom dimension utilization audit
+
+Ensure custom dimensions are actually in use and not wasting your dimension quota (max 25 per property).
+
+```sql
+-- Check: Which custom dimensions are actually populated
+SELECT
+  param.key AS dimension_name,
+  COUNT(DISTINCT user_id) AS users_with_value,
+  COUNT(*) AS total_occurrences,
+  ROUND(COUNT(*) / (
+    SELECT COUNT(*)
+    FROM `project.dataset.events_*`
+    WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+  ) * 100, 2) AS fill_rate_pct
+FROM `project.dataset.events_*`
+CROSS JOIN UNNEST(event_params) AS param
+WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE() - 1)
+  AND param.key LIKE 'custom_%'
+GROUP BY param.key
+ORDER BY total_occurrences DESC;
+```
+
+**Action**: Dimensions with < 1% fill rate are wasting quota. Disable them and repurpose the slot.
+
+## Setting up alerts
+
+### Via Cloud Monitoring (recommended for automated response)
+
+Create a Cloud Monitoring alert that triggers when the BigQuery query returns rows:
+
+<Steps>
+1. In **Cloud Monitoring**, click **Alerts → Create Policy**.
+2. Under **Select a metric**, choose **BigQuery → Query Result**.
+3. Point to your data quality check query.
+4. Set the threshold: "Alert when result count > 0".
+5. Add notification channels (email, Slack webhook, PagerDuty).
+6. Save the policy with a name like "GA4 Data Quality - Event Count Spike".
+</Steps>
+
+### Via Scheduled Queries
+
+If you prefer to consolidate all checks into a single report:
+
+<Steps>
+1. In **BigQuery**, create each check query as a **Scheduled Query**.
+2. Set frequency to **Daily** at 2 AM UTC (gives GA4 time to export data).
+3. Destination table: `project.dataset.data_quality_checks`
+4. Append results each run.
+5. Set up a Data Studio dashboard that visualizes all check results.
+</Steps>
+
+<Aside type="note">
+BigQuery export to a standard table has 24–48 hour latency. If you need real-time alerts, use the GA4 Realtime API (capped at 100 concurrent requests, max 10 second window).
+</Aside>
+
+## DumbData.co audit tool
+
+For a faster, code-free audit, [DumbData.co](https://dumbdata.co) provides a GA4 audit checklist that includes:
+- Event count consistency
+- Parameter completeness
+- Conversion tracking validation
+- Custom dimension coverage
+- Audience member counts
+
+Use it as a monthly spot-check before reviewing your automated query results.
+
+## Monthly audit schedule
+
+Run these checks on a regular cadence:
+
+| Frequency | Checks |
+|---|---|
+| Daily | Event count anomalies, spike detection, data freshness |
+| Weekly | Missing parameters, duplicate transactions, session ratio |
+| Monthly | Referral spam, dimension utilization, dimension cardinality |
+| Quarterly | Review conversion rate baseline, audit dimension necessity |
+
+Maintain a data quality log documenting each check run, any alerts, and remediation actions taken. This log becomes invaluable when investigating attribution questions months later ("Was our data clean in January?").
+
+## Common mistakes
+
+### Running checks too infrequently
+
+Waiting until your monthly review to check data quality means problems compound. Run critical checks (event count anomalies, missing parameters, duplicates) daily. By the time you see the spike in your dashboard, a week of corrupted data is already in BigQuery.
+
+### Ignoring small data quality issues
+
+A 2% gap in purchase events seems minor. But multiplied across 30 days and 10 properties, that's 6 days of missed conversion data. Small issues compound. Set thresholds low and investigate early.
+
+### Not alerting stakeholders to data quality changes
+
+When you deploy a filter to remove bot traffic, event counts drop 15% overnight. If you don't proactively communicate this to your marketing team, they'll lose confidence in your data. Always notify stakeholders before and after data quality deployments.
+
+### Confusing BigQuery tables with GA4 reports
+
+BigQuery export is raw, unfiltered data. GA4 reports apply bot filtering, deduplication, and sampling. A discrepancy between your BigQuery check and GA4's UI is normal. Always query BigQuery for data quality — never rely on GA4 reports for validation.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="BigQuery Integration"
+    description="Set up and troubleshoot GA4 to BigQuery export for custom analysis."
+    href="/ga4/setup/bigquery-integration/"
+  />
+  <LinkCard
+    title="Conversions"
+    description="Mark events as conversions and monitor conversion data completeness."
+    href="/ga4/configuration/conversions/"
+  />
+  <LinkCard
+    title="Bot Detection & Filtering"
+    description="Filter bot traffic server-side to prevent corrupted conversion data."
+    href="/server-side/advanced/bot-detection-filtering/"
+  />
+  <LinkCard
+    title="Custom Dimensions"
+    description="Dimension cardinality, utilization, and quota limits."
+    href="/ga4/configuration/custom-dimensions/"
+  />
+</CardGrid>
