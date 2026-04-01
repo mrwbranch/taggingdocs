@@ -19,10 +19,10 @@ export default defineConfig({
         root: { label: 'English', lang: 'en' },
       },
       social: [
-        { icon: 'github', label: 'GitHub', href: 'https://github.com/taggingdocs' },
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/mrwbranch/taggingdocs' },
       ],
       editLink: {
-        baseUrl: 'https://github.com/taggingdocs/taggingdocs/edit/main/',
+        baseUrl: 'https://github.com/mrwbranch/taggingdocs/edit/master/',
       },
       expressiveCode: {
         themes: ['dracula', 'github-light'],

@@ -2,3 +2,12 @@ node_modules/
 dist/
 .astro/
 .DS_Store
+
+# Internal planning docs
+/docs/
+CONTENT-PLAN.md
+CONTENT-PLAN-V2.md
+new-article-ideas.md
+PROMPT-*.md
+*.xlsx
+_tmp_*
