@@ -7,7 +7,8 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "start": "serve dist -l 3000"
   },
   "keywords": [],
   "author": "",
@@ -24,6 +25,7 @@
     "re2js": "^1.2.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "serve": "^14.2.6",
     "tailwindcss": "^4.2.2"
   },
   "devDependencies": {
