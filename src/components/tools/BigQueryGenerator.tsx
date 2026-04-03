@@ -212,6 +212,25 @@ export default function BigQueryGenerator() {
             <p className="text-sm m-0" style={{ color: '#94a3b8', lineHeight: '1.6' }}>
               {selectedTemplate.explanation}
             </p>
+            {selectedTemplate.relatedDocs && selectedTemplate.relatedDocs.length > 0 && (
+              <div className="flex flex-wrap gap-2 mt-3">
+                <span className="text-xs" style={{ color: '#64748b' }}>Learn more:</span>
+                {selectedTemplate.relatedDocs.map((doc) => (
+                  <a
+                    key={doc.href}
+                    href={doc.href}
+                    className="text-xs px-2 py-0.5 rounded-full border transition-colors"
+                    style={{
+                      borderColor: 'rgb(6 182 212 / 0.3)',
+                      color: '#67e8f9',
+                      textDecoration: 'none',
+                    }}
+                  >
+                    {doc.label} →
+                  </a>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

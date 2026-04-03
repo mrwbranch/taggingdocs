@@ -1,0 +1,168 @@
+---
+title: "Dynamic Remarketing"
+description: "Set up dynamic remarketing with GA4 and Google Ads — ecommerce dataLayer requirements, tag configuration, and custom parameters for non-ecommerce."
+sidebar:
+  order: 3
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Dynamic remarketing shows ads featuring the specific products or content a user viewed on your site. It requires passing item data to Google Ads via the dataLayer so the ad system knows what to show. This recipe covers the ecommerce dataLayer structure, Google Ads tag configuration, and how to adapt it for non-ecommerce sites.
+
+## How dynamic remarketing works
+
+1. A user views a product page → your site pushes item data to the dataLayer
+2. Google Ads tag reads the item data and sends it to Google's servers
+3. When that user later browses other sites, Google Ads shows them an ad featuring that specific product
+
+The key is that the product/item data must be in the dataLayer before the Google Ads Remarketing tag fires.
+
+## Ecommerce dataLayer setup
+
+GA4 ecommerce events automatically carry item data that Google Ads can use. Push GA4-format ecommerce events on every page where remarketing should trigger.
+
+<DataLayerExample event="view_item" description="Push on product detail pages. This feeds both GA4 ecommerce and Google Ads remarketing.">
+```javascript
+window.dataLayer = window.dataLayer || [];
+
+// Always clear ecommerce before pushing new data
+window.dataLayer.push({ ecommerce: null });
+
+window.dataLayer.push({
+  event: 'view_item',
+  ecommerce: {
+    currency: 'USD',
+    value: 49.99,
+    items: [{
+      item_id: 'SKU-12345',
+      item_name: 'Running Shoes Pro',
+      item_category: 'Footwear',
+      item_brand: 'BrandName',
+      item_variant: 'Blue / Size 10',
+      price: 49.99,
+      quantity: 1,
+      index: 0
+    }]
+  }
+});
+```
+</DataLayerExample>
+
+For category and search pages, use `view_item_list`:
+
+```javascript
+window.dataLayer.push({ ecommerce: null });
+window.dataLayer.push({
+  event: 'view_item_list',
+  ecommerce: {
+    item_list_name: 'Search Results',
+    items: [
+      { item_id: 'SKU-001', item_name: 'Product A', price: 29.99 },
+      { item_id: 'SKU-002', item_name: 'Product B', price: 39.99 },
+      { item_id: 'SKU-003', item_name: 'Product C', price: 19.99 }
+    ]
+  }
+});
+```
+
+## GTM Configuration
+
+<Steps>
+1. **Create Data Layer Variables for ecommerce data**
+
+   - `DLV - ecommerce.items` → Data Layer Variable name: `ecommerce.items`
+   - `DLV - ecommerce.value` → `ecommerce.value`
+   - `DLV - ecommerce.currency` → `ecommerce.currency`
+
+2. **Create a Google Ads Remarketing tag**
+
+   - Tag type: **Google Ads Remarketing**
+   - Conversion ID: your Google Ads Conversion ID (from Google Ads → Tools → Conversions → Tag Setup)
+   - Remarketing parameters:
+     - `items` → `{{DLV - ecommerce.items}}`
+     - `value` → `{{DLV - ecommerce.value}}`
+     - `currency` → `{{DLV - ecommerce.currency}}`
+
+3. **Create Custom Event Triggers**
+
+   Create triggers for each ecommerce event you want to use for remarketing:
+   - Custom Event: `view_item`
+   - Custom Event: `view_item_list`
+   - Custom Event: `add_to_cart`
+   - Custom Event: `purchase`
+
+   Assign all four as triggers to the Remarketing tag.
+
+4. **Test with Google Tag Assistant**
+
+   Install the Google Tag Assistant Chrome extension. Visit a product page and verify the Remarketing tag fires with `items` data populated.
+</Steps>
+
+<TagConfig
+  name="Google Ads Remarketing"
+  type="Google Ads Remarketing"
+  trigger="Custom Events - view_item, add_to_cart, purchase"
+  variables={["DLV - ecommerce.items", "DLV - ecommerce.value", "DLV - ecommerce.currency"]}
+/>
+
+## Non-ecommerce dynamic remarketing
+
+If you run a non-ecommerce site (SaaS, travel, real estate, finance), you can still use dynamic remarketing with custom parameters that map to your Google Ads feed.
+
+<DataLayerExample event="view_listing" description="For real estate, travel, or SaaS — map to your Google Ads custom feed.">
+```javascript
+// Real estate example
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  event: 'view_listing',
+  remarketing_items: [{
+    id: 'PROPERTY-9876',
+    name: '2BR Apartment Downtown',
+    category: 'apartment',
+    price: 2500,
+    location: 'New York, NY'
+  }],
+  remarketing_pagetype: 'offerdetail',
+  remarketing_totalvalue: 2500
+});
+```
+</DataLayerExample>
+
+Configure the Google Ads Remarketing tag with:
+- `ecomm_pagetype` → `{{DLV - remarketing_pagetype}}`
+- `ecomm_totalvalue` → `{{DLV - remarketing_totalvalue}}`
+
+Or create a custom parameter mapping that aligns with your Business Data feed in Google Ads.
+
+## Linking GA4 and Google Ads audiences
+
+For the most effective remarketing, link your GA4 property to Google Ads:
+
+1. In GA4 → **Admin → Google Ads Links → Add Link**
+2. Connect your Google Ads account
+3. Enable **Personalized Advertising** data sharing
+
+This allows GA4 audiences (like "viewed product but did not purchase") to sync to Google Ads automatically, without needing a separate Remarketing tag for every touchpoint.
+
+## Test it
+
+1. Open GTM Preview and visit a product page
+2. Verify the `view_item` ecommerce event fires in the Summary pane
+3. Check the Google Ads Remarketing tag is in Tags Fired
+4. Click the tag to inspect parameters — verify `items` contains your product data
+5. Use Google Tag Assistant → **Test** to see the remarketing hit details
+
+## Common gotchas
+
+**Items array is not being read correctly.** If `{{DLV - ecommerce.items}}` returns `undefined`, check that you pushed `ecommerce.items` (not `ecommerce[0].item_id`). The variable name should be `ecommerce.items` — the GTM Data Layer Variable handles nested dot-notation paths.
+
+**Always clear ecommerce first.** GTM's data model is additive. If you push `view_item` on product A then `view_item` on product B without clearing, the items array from product A persists in the data model and contaminates product B's event. Always push `{ ecommerce: null }` before every ecommerce push.
+
+**Consent mode blocks remarketing.** If you have Consent Mode configured and a user declines ad storage, the Remarketing tag should not fire. Make sure your Consent Mode implementation has `ad_storage` set correctly.
+
+<CardGrid>
+  <LinkCard title="Enhanced Conversions Setup" href="/recipes/ecommerce-conversions/enhanced-conversions-setup/" description="Add hashed user data to Google Ads conversion tags." />
+  <LinkCard title="Consent Mode with Cookiebot" href="/recipes/privacy-consent/google-consent-mode-cookiebot/" description="Ensure remarketing respects consent correctly." />
+</CardGrid>

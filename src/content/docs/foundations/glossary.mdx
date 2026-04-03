@@ -61,7 +61,7 @@ A server-side GTM component that receives incoming HTTP requests, transforms the
 A Core Web Vital measuring the visual stability of a page — how much content unexpectedly shifts position during load. Score of < 0.1 is good. GTM and its tags (especially late-loading scripts that inject content) can negatively impact CLS. See [Browser APIs for Tracking](/foundations/browser-apis-for-tracking/).
 
 **CMP** (Consent Management Platform)
-A third-party service that manages cookie consent dialogs, stores consent choices, and provides an API for querying consent state. Examples: Cookiebot, CookieYes, OneTrust, Didomi, Usercentrics. CMPs integrate with GTM's Consent Mode to block or unblock tags based on user choices. See [CMP Integration](/consent/cmp-integration/).
+A third-party service that manages cookie consent dialogs, stores consent choices, and provides an API for querying consent state. Examples: Cookiebot, CookieYes, OneTrust, Didomi, Usercentrics. CMPs integrate with GTM's Consent Mode to block or unblock tags based on user choices. See [CMP Integration](/consent/cmp-integration/cmp-integration/).
 
 **Consent Mode**
 Google's framework for adjusting tag behavior based on user consent state. Tags can be configured to fire without cookies (cookieless mode) when consent is denied, or to not fire at all. Consent Mode v2 added `ad_user_data` and `ad_personalization` signals. See [Google Consent Mode](/client-side/setup/google-consent-mode/).

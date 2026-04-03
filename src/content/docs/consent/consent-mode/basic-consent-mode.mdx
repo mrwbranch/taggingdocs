@@ -1,0 +1,191 @@
+---
+title: "Basic Consent Mode"
+description: "How Basic Consent Mode completely suppresses data collection before consent, the data gap it creates, when it is legally required, and how to configure it in GTM."
+sidebar:
+  order: 2
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+Basic Consent Mode is the simpler, stricter alternative to Advanced Consent Mode. In Basic mode, Google's tags send **nothing** until consent is granted. No cookieless pings, no aggregate signals — zero data collection before a user explicitly accepts.
+
+The trade-off is significant: you lose all data from users who deny consent and you lose behavioral modeling capabilities. Whether this trade-off is worth making depends on your legal requirements and risk tolerance.
+
+## What Basic Consent Mode actually does
+
+In Basic Consent Mode:
+- Google's tags (GA4, Ads, Floodlight) do not load until consent is granted
+- No cookies are written — not even session-scoped ones
+- No network requests to Google's collection infrastructure are made
+- If a user navigates away without accepting consent, that visit is entirely invisible to your analytics
+
+The practical effect: your analytics data represents only users who have actively granted consent. Every denied-consent user leaves zero trace in GA4, Google Ads, or any Google measurement tool.
+
+## Basic vs. Advanced Consent Mode
+
+<Comparison leftTitle="Basic Consent Mode" rightTitle="Advanced Consent Mode" leftType="neutral" rightType="neutral">
+  <div slot="left">
+
+Nothing sent to Google without consent.
+
+Zero data from denied-consent users.
+
+No behavioral modeling available.
+
+No conversion modeling for Google Ads.
+
+Maximum privacy posture — easiest to defend legally.
+
+Significant data gap, especially on first visit where consent rates are low.
+
+  </div>
+  <div slot="right">
+
+Cookieless pings sent even with denied consent.
+
+Aggregate behavioral signals from denied users.
+
+Behavioral modeling fills GA4 data gaps.
+
+Conversion modeling improves Google Ads performance.
+
+Requires legal assessment of whether pings constitute personal data.
+
+Better data quality, more complex compliance argument.
+
+  </div>
+</Comparison>
+
+## When to use Basic Consent Mode
+
+Use Basic mode when:
+- Your legal counsel or DPA has explicitly advised against sending any data before consent
+- You operate in jurisdictions with strict enforcement where cookieless pings may be challenged
+- Your organization has a "zero data without consent" policy
+- You are subject to specific sectoral regulations (healthcare, finance, children's services) where even aggregate data sharing is restricted
+
+Use Advanced mode when:
+- Your legal assessment permits aggregate signals without consent
+- You need behavioral modeling to understand denied-consent user behavior
+- You are running Google Ads campaigns that rely on conversion modeling
+
+## Configuring Basic Consent Mode in GTM
+
+Basic Consent Mode requires blocking Google's tags from even loading until consent is granted. There are two approaches:
+
+### Approach 1: Consent requirements on every tag
+
+Set consent requirements directly on each Google tag in GTM:
+
+1. Open each Google tag (GA4 Configuration, GA4 Event, Google Ads, etc.)
+2. Go to **Advanced Settings → Consent Settings**
+3. Under **Additional consent checks required**, add the relevant consent type
+4. Select **No additional consent required** and instead use the built-in consent check
+
+GTM will not fire the tag unless the consent type is `granted`. This effectively makes every Google tag wait for granted consent.
+
+### Approach 2: Block GTM until consent is granted
+
+A more aggressive approach: do not load GTM until consent is granted. This prevents any GTM-managed code from running before consent.
+
+```javascript
+// Load GTM only after consent is granted
+// Call this from your CMP's consent-granted callback
+function loadGTMAfterConsent() {
+  if (window.gtmLoaded) return; // Prevent double-loading
+  window.gtmLoaded = true;
+
+  (function(w,d,s,l,i){
+    w[l]=w[l]||[];
+    w[l].push({'gtm.start': new Date().getTime(), event:'gtm.js'});
+    var f=d.getElementsByTagName(s)[0],
+        j=d.createElement(s),
+        dl=l!='dataLayer'?'&l='+l:'';
+    j.async=true;
+    j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;
+    f.parentNode.insertBefore(j,f);
+  })(window,document,'script','dataLayer','GTM-XXXX');
+}
+
+// In your CMP callback:
+cmp.onConsentGranted(function() {
+  loadGTMAfterConsent();
+});
+```
+
+<Aside type="caution">
+If you use GTM for non-tracking purposes (A/B tests, site functionality, customer support widgets), blocking GTM until consent is granted may break those features for users who deny tracking consent. Separate tracking-specific tags from functional tags if you use this approach.
+</Aside>
+
+### Approach 3: Consent-based trigger conditions
+
+Add the consent state as a trigger condition on all tracking-related triggers. Using the dataLayer consent state pattern from [Consent State via DataLayer](/consent/cmp-integration/consent-state-datalayer/):
+
+1. Push consent state to dataLayer when CMP callback fires
+2. Create a Data Layer Variable reading `consent.analytics`
+3. Add `consent.analytics equals true` as a trigger condition on all analytics triggers
+
+This is less strict than Approach 2 (GTM still loads and evaluates tags) but effectively prevents any data from being sent without consent.
+
+## The data gap problem
+
+Basic Consent Mode creates a significant data gap on sites where consent acceptance rates are low. Across EU websites, consent acceptance rates typically range from 40% to 70% depending on banner design, pre-selected options, and industry.
+
+If 50% of your users deny consent:
+- Your GA4 data represents only half your actual traffic
+- Bounce rate, session duration, and conversion rate may be biased toward engaged users who accepted
+- Your Google Ads conversion data is halved, affecting Smart Bidding model performance
+
+Managing this gap:
+- Use server-side analytics (Plausible, Fathom, or server logs) as a consent-free baseline for total traffic
+- Compare server-side traffic against GA4 to understand your consent rate and data loss
+- Report on consent rate as a KPI — banner design changes that improve consent rates directly improve data quality
+
+## What data you lose
+
+Understanding the specific data loss helps you make the trade-off decision:
+
+**You lose from denied-consent users:**
+- All session and pageview data
+- All event data (clicks, scrolls, conversions)
+- All user acquisition data (which campaigns brought them)
+- All behavioral data (how long they stayed, what they engaged with)
+
+**You retain:**
+- Server-side request logs (raw HTTP requests — no user identification)
+- Server-side conversion data if you record it independently
+- Aggregate traffic from CDN logs or infrastructure monitoring
+
+## Verifying Basic mode is working
+
+After implementing Basic mode, verify with a fresh incognito browser:
+
+1. Open incognito, load your site
+2. Do not interact with the consent banner
+3. Open DevTools → Network → filter for `google-analytics.com`
+4. You should see **zero requests** to Google's collection infrastructure
+
+In Advanced mode, you would see requests to `/g/collect` with `gcs=G100`. In Basic mode, you should see nothing at all.
+
+Also check:
+- DevTools → Application → Cookies: no `_ga`, `_ga_XXXX`, or `_gcl_au` cookies
+- No GTM loading (if using Approach 2): check the Network tab for `gtm.js` requests
+
+## Common mistakes
+
+**Partial implementation.** Configuring Basic mode for GA4 but forgetting to gate Google Ads or Floodlight tags. Audit every Google tag in your container for consent requirements.
+
+**Not testing the consent-denied path.** Always test Basic mode with a fresh browser session where no consent cookie exists. The first-visit experience is the highest-risk scenario legally.
+
+**Confusing Basic mode with having no banner.** Having no banner and never loading tags is also "no data before consent," but it is not the same as Basic Consent Mode. Basic mode specifically refers to how Google's Consent Mode protocol suppresses tag firing.
+
+**Using Basic mode for returning visitors but Advanced mode for new visitors.** The mode needs to be consistent. If you send cookieless pings to returning denied-consent users, you are not in Basic mode for those users.
+
+---
+
+<CardGrid>
+  <LinkCard title="Advanced Consent Mode" href="/consent/consent-mode/advanced-consent-mode/" description="How cookieless pings work and the privacy tradeoffs of Advanced mode." />
+  <LinkCard title="Consent Mode GTM Setup" href="/consent/consent-mode/consent-mode-gtm-setup/" description="Complete configuration guide including tag consent settings." />
+  <LinkCard title="Testing Consent" href="/consent/advanced/testing-consent/" description="Verify that Basic mode correctly suppresses all data before consent." />
+</CardGrid>

@@ -1,0 +1,202 @@
+---
+title: "Offline Conversion Import"
+description: "Import offline conversions into Google Ads — GCLID capture, backend storage, Measurement Protocol upload, and conversion action setup."
+sidebar:
+  order: 4
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+When your conversions happen offline — a sales call that closes a week after the initial ad click, a signed contract that follows a demo request — standard conversion tracking cannot attribute them. Offline conversion import solves this by linking the Google Ads click ID (GCLID) captured at lead time to a conversion recorded in your CRM or ERP.
+
+## The overall flow
+
+1. User clicks your Google Ad → Google appends `?gclid=ABC123` to the landing page URL
+2. Your site captures the GCLID and stores it alongside the lead record
+3. Lead converts offline (sales call, signed contract, in-store purchase)
+4. You export a CSV or use the API to upload the conversion to Google Ads, referencing the original GCLID
+5. Google Ads attributes the offline conversion to the original ad click
+
+## Step 1 — Capture the GCLID on your landing page
+
+<DataLayerExample event="gclid_captured" description="Read the GCLID from the URL and store it in localStorage for use on the conversion page.">
+```javascript
+(function() {
+  // Read GCLID from URL parameter
+  var urlParams = new URLSearchParams(window.location.search);
+  var gclid = urlParams.get('gclid');
+
+  if (gclid) {
+    // Store in localStorage with expiry (90 days = Google's attribution window)
+    var expiryDate = new Date();
+    expiryDate.setDate(expiryDate.getDate() + 90);
+
+    var gclidData = {
+      value: gclid,
+      expiry: expiryDate.toISOString()
+    };
+
+    localStorage.setItem('gclid', JSON.stringify(gclidData));
+
+    // Also push to dataLayer so GTM can capture it
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'gclid_captured',
+      gclid: gclid
+    });
+  }
+
+  // On form submit, retrieve stored GCLID
+  function getStoredGclid() {
+    var stored = localStorage.getItem('gclid');
+    if (!stored) return null;
+    var data = JSON.parse(stored);
+    if (new Date(data.expiry) < new Date()) {
+      localStorage.removeItem('gclid');
+      return null;
+    }
+    return data.value;
+  }
+
+  // Expose for use in form submissions
+  window.getStoredGclid = getStoredGclid;
+})();
+```
+</DataLayerExample>
+
+Add this as a Custom HTML tag in GTM with an All Pages trigger. It runs silently — only the push fires if a GCLID is present in the URL.
+
+## Step 2 — Pass GCLID with your lead form submission
+
+When a user submits a lead form, include the GCLID in the data sent to your backend:
+
+```javascript
+async function handleFormSubmit(event) {
+  event.preventDefault();
+
+  var gclid = window.getStoredGclid();
+  var formData = {
+    email: document.getElementById('email').value,
+    phone: document.getElementById('phone').value,
+    message: document.getElementById('message').value,
+    gclid: gclid || null,
+    gclid_captured_at: gclid ? new Date().toISOString() : null,
+    // Include source page
+    landing_page: sessionStorage.getItem('landing_page') || window.location.href
+  };
+
+  const response = await fetch('/api/leads', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(formData)
+  });
+
+  if (response.ok) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submission',
+      form_name: 'contact',
+      has_gclid: !!gclid
+    });
+  }
+}
+```
+
+Store the `gclid` field in your CRM or database alongside the lead record.
+
+## Step 3 — Configure the Google Ads conversion action
+
+<Steps>
+1. In Google Ads → **Tools → Conversions → New Conversion Action**
+2. Select **Import** → **Other data sources or CRMs**
+3. Select **Track conversions from clicks**
+4. Name your conversion (e.g., "Signed Contract", "Qualified Lead")
+5. Set the conversion window (typically 90 days for long sales cycles)
+6. Note the **Conversion Name** and **Conversion Action** for use in your upload
+
+7. **In GTM, create a Data Layer Variable** for GCLID storage:
+
+   Variable `DLV - gclid` (Custom JavaScript):
+   ```javascript
+   function() {
+     var stored = localStorage.getItem('gclid');
+     if (!stored) return undefined;
+     var data = JSON.parse(stored);
+     return new Date(data.expiry) >= new Date() ? data.value : undefined;
+   }
+   ```
+</Steps>
+
+## Step 4 — Upload offline conversions
+
+When a lead converts in your CRM, export the conversion data as a CSV:
+
+```csv
+Google Click ID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency
+Tg8AMbkcQw...,Signed Contract,2024-03-15 14:30:00+0000,4500,USD
+Ke2NMpdrBx...,Signed Contract,2024-03-15 17:45:00+0000,7200,USD
+```
+
+Upload via **Google Ads → Tools → Conversions → [your conversion action] → Upload**
+
+<Aside type="tip">
+The conversion must be uploaded within the attribution window (default 90 days from click). Google processes uploads within 24-48 hours. You need at least 50 conversions in 30 days for Smart Bidding to use offline conversion data effectively.
+</Aside>
+
+## Automating the upload with the Google Ads API
+
+For high-volume operations, automate via the Google Ads API:
+
+```python
+# Python example using google-ads library
+from google.ads.googleads.client import GoogleAdsClient
+from google.ads.googleads.errors import GoogleAdsException
+
+def upload_offline_conversions(customer_id, conversions):
+    client = GoogleAdsClient.load_from_storage()
+    service = client.get_service("ConversionUploadService")
+
+    click_conversions = []
+    for conv in conversions:
+        conversion = client.get_type("ClickConversion")
+        conversion.gclid = conv['gclid']
+        conversion.conversion_action = (
+            f"customers/{customer_id}/conversionActions/{conv['action_id']}"
+        )
+        conversion.conversion_date_time = conv['date_time']
+        conversion.conversion_value = conv['value']
+        conversion.currency_code = conv.get('currency', 'USD')
+        click_conversions.append(conversion)
+
+    request = client.get_type("UploadClickConversionsRequest")
+    request.customer_id = customer_id
+    request.conversions = click_conversions
+    request.partial_failure = True
+
+    response = service.upload_click_conversions(request=request)
+    return response
+```
+
+## Test it
+
+1. Click a Google Ad (use a test campaign if you do not want to spend budget)
+2. Verify the URL has `?gclid=...` appended
+3. Submit your lead form
+4. Check your backend database — verify the GCLID is stored with the lead
+5. Create a test CSV with the GCLID, a backdated conversion time, and $1 value
+6. Upload to Google Ads → verify status shows "Processed"
+
+## Common gotchas
+
+**GCLID is missing from the URL.** Google appends GCLIDs to all ad clicks by default, but URL tracking must be enabled in your campaign settings. Go to **Google Ads → Campaign → Settings → Auto-tagging** and verify it is enabled.
+
+**GCLID disappears after a redirect.** If your landing page URL gets redirected (e.g., `example.com/lp` → `example.com/landing-page/`), the redirect must preserve the query parameters. Verify your server-side redirects pass all query strings.
+
+**90-day upload window.** If your sales cycle is longer than 90 days, the conversion cannot be imported. Consider using a longer attribution window in your conversion action settings, up to the maximum your conversion type allows.
+
+<CardGrid>
+  <LinkCard title="Enhanced Conversions" href="/recipes/ecommerce-conversions/enhanced-conversions/" description="Improve online conversion matching with hashed user data." />
+  <LinkCard title="User-ID Implementation" href="/recipes/testing/user-id-implementation/" description="Cross-device attribution via consistent user identification." />
+</CardGrid>

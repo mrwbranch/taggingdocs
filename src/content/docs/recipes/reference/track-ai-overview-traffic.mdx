@@ -1,0 +1,188 @@
+---
+title: "Tracking AI Overview & AI Chat Traffic in GA4"
+description: "How to identify and measure traffic from AI search features like Google AI Overviews, ChatGPT, Perplexity, Claude, and Copilot using custom channel groups and GTM."
+sidebar:
+  order: 2
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+As AI-powered search and chat tools proliferate, distinguishing traffic from these sources in GA4 has become increasingly important for understanding user behavior and attribution. This guide covers the trackable and non-trackable aspects of AI traffic, plus practical implementation methods.
+
+## The Core Problem
+
+Google AI Overviews (formerly SGE) appear in Google Search results alongside traditional organic listings. When a user clicks on an AI Overview result, the traffic arrives in GA4 indistinguishable from regular organic search. There is no distinct referrer parameter, no utm parameter, and no session-level signal that separates AI Overview clicks from standard Google organic traffic.
+
+Google Search Console's Search Appearance filter does show AI Overview impressions and clicks, but this data does not appear in GA4. The two platforms operate independently with no direct integration. This creates a gap: you know AI Overviews are sending traffic (from GSC), but you cannot quantify it in GA4.
+
+## What IS Trackable
+
+Standalone AI chat tools—ChatGPT, Perplexity, Claude, and Microsoft Copilot—transmit identifiable referrer information when users click links. These arrive in GA4 as referral traffic and can be segmented into a dedicated channel using channel groupings and custom dimensions.
+
+The key difference: AI Overview traffic is inherently untrackable in GA4 because it originates from Google's index. Standalone AI tools are trackable because they are separate applications with their own referral chains.
+
+## Create a Custom Channel Group for AI Traffic
+
+GA4's channel groupings allow you to classify traffic by source, medium, and user engagement patterns. Creating a dedicated AI channel groups ChatGPT, Perplexity, Claude, and Copilot into one reportable segment.
+
+<Steps>
+
+1. In GA4, navigate to **Admin** > **Data Display** > **Channel Groups**.
+
+2. Click **Create Channel Group**.
+
+3. Name it **AI Chat Tools** and set the description as needed.
+
+4. Click **Add Rule** and configure the following conditions. Each rule below represents one AI source:
+
+   **ChatGPT Rule:**
+   - Condition: Source contains `chatgpt.com` OR Source contains `chat.openai.com`
+   - Medium: any
+
+   **Perplexity Rule:**
+   - Condition: Source contains `perplexity.ai`
+   - Medium: any
+
+   **Claude Rule:**
+   - Condition: Source contains `claude.ai`
+   - Medium: any
+
+   **Microsoft Copilot Rule:**
+   - Condition: Source contains `copilot.microsoft.com` OR Source contains `bing.com`
+   - Medium: any (optional: add secondary condition Medium matches `referral` to avoid conflating with organic Bing traffic)
+
+   **Google Gemini Rule:**
+   - Condition: Source contains `gemini.google.com`
+   - Medium: any
+
+5. Set the rule order such that AI Chat Tools rules evaluate before "Direct" and generic "Referral" groupings.
+
+6. Click **Save**. The channel group applies to data going forward. Historical data will not be reclassified.
+
+</Steps>
+
+Once saved, navigate to **Reports** > **Traffic** > **Source/Medium** and set the **Channel Group** dimension to verify traffic is being captured.
+
+## Detect AI Referrals with GTM
+
+For finer-grained attribution, use Google Tag Manager to inspect the document referrer and push a custom dimension to the dataLayer. This method works for both AI chat tools and any other sources where referrer is available.
+
+Deploy a Custom HTML tag in GTM that fires on the **Page View** trigger:
+
+```javascript
+<script>
+(function() {
+  var referrer = document.referrer.toLowerCase();
+  var aiSource = 'none';
+
+  if (referrer.indexOf('chatgpt.com') > -1 || referrer.indexOf('chat.openai.com') > -1) {
+    aiSource = 'chatgpt';
+  } else if (referrer.indexOf('perplexity.ai') > -1) {
+    aiSource = 'perplexity';
+  } else if (referrer.indexOf('claude.ai') > -1) {
+    aiSource = 'claude';
+  } else if (referrer.indexOf('copilot.microsoft.com') > -1) {
+    aiSource = 'copilot';
+  } else if (referrer.indexOf('gemini.google.com') > -1) {
+    aiSource = 'gemini';
+  }
+
+  if (aiSource !== 'none') {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'ai_referral_detected',
+      ai_traffic_source: aiSource
+    });
+  }
+})();
+</script>
+```
+
+Map `ai_traffic_source` as an Event-scoped custom dimension in GA4. This allows you to filter events and sessions by AI source and build custom reports without relying on source/medium logic.
+
+**Advantages of this method:**
+- Works even if referrer is overwritten or cleaned by a CDN
+- Provides a dedicated dimension specific to AI sources
+- Allows you to trigger subsequent GA4 events with the AI source embedded
+- Easier to update and test than channel grouping rules
+
+**Limitations:**
+- Requires GTM implementation on your site
+- Does not affect the standard "Source" or "Medium" dimensions
+- Relies on `document.referrer` being available (some browsers or configurations may sanitize it)
+
+## Google Search Console: The AI Overview Picture
+
+Google Search Console remains the primary source of AI Overview performance data. In GSC, use the **Search Appearance** filter to view:
+- Impressions: How many times your pages appeared in AI Overviews
+- Clicks: How many users clicked from an AI Overview to your site
+- Average position: Where your content ranked among AI Overview results
+
+This data does not flow into GA4. Combine GSC data with GA4 channel groupings to build a complete attribution model. For example, compare organic search clicks in GA4 with AI Overview clicks in GSC to estimate the proportion of search traffic influenced by AI.
+
+## BigQuery Analysis of AI Referrals
+
+If you export GA4 events to BigQuery, you can query and classify AI-referred sessions programmatically:
+
+```sql
+SELECT
+  session_id,
+  user_id,
+  event_timestamp,
+  traffic_source.source,
+  traffic_source.medium,
+  CASE
+    WHEN traffic_source.source LIKE '%chatgpt.com%'
+      OR traffic_source.source LIKE '%chat.openai.com%' THEN 'chatgpt'
+    WHEN traffic_source.source LIKE '%perplexity.ai%' THEN 'perplexity'
+    WHEN traffic_source.source LIKE '%claude.ai%' THEN 'claude'
+    WHEN traffic_source.source LIKE '%copilot.microsoft.com%' THEN 'copilot'
+    WHEN traffic_source.source LIKE '%gemini.google.com%' THEN 'gemini'
+    ELSE 'other'
+  END AS ai_source
+FROM
+  `your-project.analytics_123456789.events_*`
+WHERE
+  event_name = 'page_view'
+  AND (
+    traffic_source.source LIKE '%chatgpt.com%'
+    OR traffic_source.source LIKE '%chat.openai.com%'
+    OR traffic_source.source LIKE '%perplexity.ai%'
+    OR traffic_source.source LIKE '%claude.ai%'
+    OR traffic_source.source LIKE '%copilot.microsoft.com%'
+    OR traffic_source.source LIKE '%gemini.google.com%'
+  )
+ORDER BY
+  event_timestamp DESC
+```
+
+This query surfaces all page views from identified AI sources, allowing you to aggregate metrics, compute conversion rates, and compare performance across AI platforms at scale.
+
+## Limitations and What You Cannot Track
+
+Be explicit with stakeholders about what GA4 can and cannot reveal:
+
+- **Google AI Overview clicks**: Untrackable in GA4. They appear as organic search traffic with no distinguishing signal. GSC is your only source of truth for AI Overview performance.
+- **Standalone AI tool detection via referrer only**: The GTM method and channel groupings rely on `document.referrer`. Some configurations (e.g., referrer-policy headers, certain browsers) may suppress this data.
+- **AI Overviews with stripped referrer**: If Google deliberately removes or sanitizes the referrer header on AI Overview clicks, detection becomes impossible.
+- **Private or incognito browsing**: Third-party referrer data is often unavailable in these modes.
+
+<Aside type="tip">
+As new AI tools emerge and existing ones evolve their domain structure, maintain your channel grouping rules and GTM script. Subscribe to AI product announcements from OpenAI, Anthropic, Perplexity, and Microsoft to stay informed of domain changes. Test periodically by simulating clicks from each tool and verifying they classify correctly.
+</Aside>
+
+## Summary
+
+Tracking AI traffic in GA4 requires a two-part approach:
+
+1. **For Google AI Overviews**: Monitor Google Search Console's Search Appearance data. GA4 cannot distinguish these clicks from organic search.
+2. **For standalone AI chat tools**: Create a custom channel group in GA4, deploy referrer-detection code via GTM, and optionally query BigQuery for detailed attribution analysis.
+
+Combine these methods to build a comprehensive view of how AI-powered tools drive traffic to your site.
+
+---
+
+<CardGrid>
+  <LinkCard title="Channel Groupings" href="/ga4/configuration/channel-groupings/" />
+  <LinkCard title="Custom Channel Grouping in BigQuery" href="/ga4/bigquery/custom-channel-grouping/" />
+</CardGrid>

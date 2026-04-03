@@ -1,0 +1,171 @@
+---
+title: "Consent Mode v2 with CookieYes"
+description: "Step-by-step Google Consent Mode v2 integration with CookieYes CMP via GTM — consent mapping, GTM template configuration, default state, and testing."
+sidebar:
+  order: 3
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+CookieYes is a popular Consent Management Platform used on WordPress and other CMS platforms. This recipe covers the full GTM-based Consent Mode v2 integration, including the CookieYes GTM template, consent category mapping, and verification steps.
+
+<Aside type="caution">
+The default consent state must be set **before** GTM loads. Review your page source to verify the consent defaults appear before the GTM snippet. If they appear after, your implementation is non-compliant.
+</Aside>
+
+## Step 1 — Set default consent state
+
+Add this to your `<head>` before the GTM snippet:
+
+```html
+<!-- Google Consent Mode v2 defaults — BEFORE GTM snippet -->
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+
+  gtag('consent', 'default', {
+    ad_storage: 'denied',
+    analytics_storage: 'denied',
+    ad_user_data: 'denied',
+    ad_personalization: 'denied',
+    functionality_storage: 'denied',
+    personalization_storage: 'denied',
+    security_storage: 'granted',
+    wait_for_update: 500
+  });
+</script>
+```
+
+CookieYes will update these signals after the user interacts with the consent banner.
+
+## Step 2 — Install the CookieYes GTM template
+
+<Steps>
+1. In GTM → **Templates → Tag Templates → Search Gallery**
+2. Search for **CookieYes** → select the official template
+3. Click **Add to workspace**
+
+4. **Create a new tag** from the CookieYes template:
+   - Tag name: `CMP - CookieYes`
+   - Template: CookieYes
+   - Trigger: **Consent Initialization - All Pages**
+   - Priority: **10** (higher than all other tags)
+
+5. **Configure consent category mapping** in the template:
+
+   CookieYes uses these category names — map them to Google Consent Mode signals:
+   - `analytics` → `analytics_storage`
+   - `advertisement` → `ad_storage`, `ad_user_data`, `ad_personalization`
+   - `functional` → `functionality_storage`
+   - `performance` → `analytics_storage` (if you use CookieYes's performance category)
+</Steps>
+
+## Step 3 — Manual integration (if GTM template is unavailable)
+
+If you prefer not to use the GTM template, or if your CookieYes version does not have one, you can integrate manually using CookieYes's JavaScript callback:
+
+```javascript
+// Custom HTML tag — fires on Consent Initialization
+document.addEventListener('cookieyes_consent_update', function(event) {
+  var consent = event.detail;
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push(function() {
+    gtag('consent', 'update', {
+      analytics_storage: consent.accepted.includes('analytics') ? 'granted' : 'denied',
+      ad_storage: consent.accepted.includes('advertisement') ? 'granted' : 'denied',
+      ad_user_data: consent.accepted.includes('advertisement') ? 'granted' : 'denied',
+      ad_personalization: consent.accepted.includes('advertisement') ? 'granted' : 'denied',
+      functionality_storage: consent.accepted.includes('functional') ? 'granted' : 'denied'
+    });
+  });
+});
+```
+
+Alternatively, use the CookieYes `CookieYes.getConsent()` method:
+
+```javascript
+// Check consent state at any time
+if (typeof CookieYes !== 'undefined') {
+  var consent = CookieYes.getConsent();
+  var analyticsGranted = consent && consent.accepted && consent.accepted.includes('analytics');
+  console.log('Analytics consent:', analyticsGranted ? 'granted' : 'denied');
+}
+```
+
+## Step 4 — CookieYes consent category mapping
+
+| CookieYes Category | Google Consent Signal |
+|---|---|
+| `analytics` | `analytics_storage` |
+| `advertisement` | `ad_storage`, `ad_user_data`, `ad_personalization` |
+| `functional` | `functionality_storage`, `personalization_storage` |
+| `performance` | `analytics_storage` (if used) |
+| `necessary` | Always granted |
+
+## Step 5 — Configure Google Tag consent requirements
+
+<Steps>
+1. Open your **Google Tag** in GTM
+2. Go to **Advanced Settings → Consent Settings**
+3. For **Additional consent checks**: ensure `analytics_storage` is listed
+
+4. For **Google Ads Conversion Tracking** tags:
+   - Advanced Settings → Consent Settings
+   - Add `ad_storage` and `ad_user_data` as required
+
+5. **Publish the workspace**
+</Steps>
+
+## Verification checklist
+
+### Before accepting cookies
+- No `_ga` cookie present in browser
+- No `_gads` or Google Ads cookies present
+- GA4 DebugView shows no events (or shows cookieless pings, depending on your setup)
+
+### After accepting all cookies
+- `_ga` cookie appears
+- GA4 DebugView shows events with session and user data
+- Google Ads conversion tags fire (if on a conversion page)
+
+### Check consent state in console
+```javascript
+// After CookieYes loads
+CookieYes.getConsent()
+// Returns: { accepted: ['analytics', 'advertisement', ...], rejected: [...] }
+```
+
+### Verify in GTM Preview
+
+1. Open GTM Preview and visit the site
+2. The CookieYes banner should appear
+3. Click **Accept All** — the consent update should appear as a dataLayer event
+4. In the Variables tab, check `analytics_storage` shows `granted`
+5. Navigate between pages — GA4 events should now fire normally
+
+## Testing with different consent scenarios
+
+Test all four scenarios to ensure each works correctly:
+
+| Scenario | Expected behavior |
+|----------|-----------------|
+| No cookies (fresh visit) | Banner shows, no GA4 cookies, no conversion tags fire |
+| Accept analytics only | GA4 fires normally, Google Ads tags blocked |
+| Accept all | All tags fire normally |
+| Reject all | Banner shows, no cookies, no tags fire |
+| Returning user (accepted) | No banner, GA4 fires from first pageview |
+
+## Common gotchas
+
+**CookieYes script loads after GTM.** If CookieYes's script tag appears after GTM in your HTML, the consent update may arrive after Google's tags have already initialised. Always load CookieYes before GTM, or use the `wait_for_update: 500` parameter in your consent defaults.
+
+**WordPress plugin conflicts.** If you manage CookieYes through WordPress and also have GTM through a plugin, the load order can be unpredictable. Verify the rendered HTML order in browser DevTools → View Page Source.
+
+**CookieYes categories don't match your audit.** CookieYes auto-detects cookies and assigns them to categories. If your GA4 cookies are placed in the wrong category (e.g., "functional" instead of "analytics"), users may accept functional cookies and expect GA4 to fire, but your mapping blocks it. Audit your CookieYes cookie categorisation.
+
+<CardGrid>
+  <LinkCard title="Consent Mode with Cookiebot" href="/recipes/privacy-consent/google-consent-mode-cookiebot/" description="The same process for Cookiebot users." />
+  <LinkCard title="PII Detection & Removal" href="/recipes/privacy-consent/pii-detection-removal/" description="Additional privacy safeguards beyond consent signals." />
+</CardGrid>

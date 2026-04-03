@@ -1,0 +1,232 @@
+---
+title: "Server-Side Shopify Tracking"
+description: "End-to-end server-side tracking for Shopify via Stape — web container setup, sGTM container configuration, GA4, Meta CAPI, and Google Ads via server."
+sidebar:
+  order: 8
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Server-side tracking for Shopify moves event processing from the user's browser to a server you control. This improves data accuracy (bypasses ad blockers and ITP), enables first-party cookie setting with full lifetime, and unlocks server-to-server integrations like Meta CAPI and Google Ads conversion uploads. Stape is the most accessible platform for hosting a server GTM container.
+
+<Aside type="note">
+This recipe covers a full stack setup. It requires GTM experience, access to your Shopify store's theme code, and a Stape account. Budget 2-4 hours for initial setup and testing.
+</Aside>
+
+## Architecture overview
+
+```
+User's browser
+    ↓
+Shopify store (with GTM web container)
+    ↓ HTTP requests to your sGTM endpoint
+sGTM container (on Stape servers)
+    ↓ Server-to-server requests
+GA4 Measurement Protocol
+Meta CAPI (Conversions API)
+Google Ads Conversion Upload
+```
+
+The web GTM container handles client-side event collection. The sGTM container receives those events and distributes them to GA4, Meta, and Google Ads via server-to-server connections.
+
+## Step 1 — Set up Stape
+
+<Steps>
+1. Create an account at [stape.io](https://stape.io)
+2. Create a new **Server GTM Container**:
+   - Click **New Container** → **Server**
+   - Stape auto-provisions a server GTM container and gives you a subdomain: `yoursite.stape.io`
+3. Note your **Container Config** URL: `https://yoursite.stape.io/gtm.js`
+4. Note your **Server endpoint**: `https://yoursite.stape.io`
+</Steps>
+
+## Step 2 — Configure the web GTM container
+
+In your existing GTM **web container**:
+
+<Steps>
+1. **Install the GA4 client configuration for sGTM**
+
+   Open your **Google Tag** (the GA4 configuration) and update it:
+   - Expand **Configuration settings → Fields to set**
+   - Add: `transport_url` → `https://yoursite.stape.io`
+   - Add: `first_party_collection` → `true`
+
+   This routes GA4 hits through your sGTM server instead of directly to Google.
+
+2. **Verify the web container sends to sGTM**
+
+   In GTM Preview, fire a `page_view` event. In the Network tab of DevTools, you should see a request going to `yoursite.stape.io` instead of `google-analytics.com`.
+</Steps>
+
+## Step 3 — Configure the server GTM container
+
+In your **sGTM container** (access via the Stape dashboard or Tag Manager's server container interface):
+
+<Steps>
+1. **Create a GA4 Client**
+
+   - Client type: **GA4**
+   - This client receives events from the web container and makes them available to server-side tags
+
+2. **Create a GA4 Tag (server-side)**
+
+   - Tag type: **Google Analytics: GA4**
+   - Measurement ID: your GA4 Measurement ID (G-XXXXXXXXXX)
+   - Trigger: **GA4** (the client)
+
+   This forwards all GA4 events from the browser to GA4 via the Measurement Protocol.
+
+3. **Create a Meta CAPI Tag** (if needed)
+
+   - Install the **Facebook Conversions API** template from the template gallery
+   - Configure:
+     - Pixel ID: your Meta Pixel ID
+     - Access Token: your Meta Conversions API access token (from Meta Events Manager)
+     - Enable **Event Deduplication**: set `event_id` parameter to prevent double-counting with client-side Pixel
+
+4. **Create a Google Ads Conversion Tag** (if needed)
+
+   - Tag type: **Google Ads Conversion Tracking**
+   - Same Conversion ID and Label as your client-side tag
+   - Add user data variables for Enhanced Conversions from the server-side event data
+</Steps>
+
+## Step 4 — Shopify-specific setup
+
+Shopify requires special handling for purchase events because the order confirmation page (`/thank_you`) is hosted on `checkout.shopify.com`, not your domain.
+
+### Option A — Shopify Customer Events (recommended for Shopify 2.0)
+
+<Steps>
+1. In Shopify Admin → **Settings → Customer events**
+2. Click **Add custom pixel**
+3. Name it "GTM Server-Side"
+4. Add this code:
+
+   ```javascript
+   analytics.subscribe('checkout_completed', (event) => {
+     const order = event.data.checkout;
+
+     // Push to parent page's dataLayer (for GTM web container)
+     window.parent.postMessage({
+       type: 'GTM_EVENT',
+       payload: {
+         event: 'purchase',
+         ecommerce: {
+           transaction_id: order.order.id,
+           value: parseFloat(order.totalPrice.amount),
+           currency: order.totalPrice.currencyCode,
+           tax: parseFloat(order.totalTax?.amount || 0),
+           shipping: parseFloat(order.shippingLine?.price?.amount || 0),
+           items: order.lineItems.map((item, index) => ({
+             item_id: item.variant?.sku || item.variant?.id,
+             item_name: item.title,
+             item_variant: item.variant?.title,
+             price: parseFloat(item.variant?.price?.amount || 0),
+             quantity: item.quantity,
+             index: index
+           }))
+         }
+       }
+     }, '*');
+   });
+   ```
+
+5. Save and activate the pixel
+</Steps>
+
+### Option B — Shopify Order Status page injection
+
+For older Shopify themes:
+
+1. Go to **Shopify Admin → Settings → Checkout → Order status page**
+2. In **Additional scripts**, add:
+
+```html
+{% if first_time_accessed %}
+<script>
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({ ecommerce: null });
+  window.dataLayer.push({
+    event: 'purchase',
+    ecommerce: {
+      transaction_id: '{{ order.order_number }}',
+      value: {{ order.total_price | money_without_currency | remove: ',' }},
+      currency: '{{ shop.currency }}',
+      tax: {{ order.total_tax | money_without_currency | remove: ',' }},
+      shipping: {{ order.shipping_price | money_without_currency | remove: ',' }},
+      items: [{% for line_item in order.line_items %}{
+        item_id: '{{ line_item.sku | escape }}',
+        item_name: '{{ line_item.title | escape }}',
+        item_variant: '{{ line_item.variant.title | escape }}',
+        price: {{ line_item.price | money_without_currency | remove: ',' }},
+        quantity: {{ line_item.quantity }}
+      }{% unless forloop.last %},{% endunless %}{% endfor %}]
+    }
+  });
+</script>
+{% endif %}
+```
+
+The `{% if first_time_accessed %}` guard prevents duplicate purchase events on page refresh.
+
+## Step 5 — Install GTM on Shopify theme
+
+<Steps>
+1. In Shopify Admin → **Online Store → Themes → Edit code**
+2. Open `theme.liquid`
+3. Add GTM snippet in `<head>`:
+   ```html
+   <!-- GTM head snippet -->
+   `{{ '<!-- Google Tag Manager -->' }}`
+   <script>(function(w,d,s,l,i){...})(window,document,'script','dataLayer','GTM-XXXXXX');</script>
+   <!-- End GTM -->
+   ```
+4. Add GTM noscript after `<body>` tag
+5. Save
+</Steps>
+
+## Step 6 — Verify the full pipeline
+
+<Steps>
+1. **Test a purchase** using Shopify's test payment gateway
+2. In GTM Preview (web container), verify the `purchase` event fires with correct ecommerce data
+3. In GTM Preview (server container), verify the event is received by the GA4 client
+4. Verify the GA4 server tag fires and forwards to GA4
+5. Verify Meta CAPI tag fires (if configured)
+6. In GA4 DebugView, verify the purchase event appears with correct revenue and items
+7. In Meta Events Manager → Test Events, verify the Purchase event appears
+</Steps>
+
+## Cookie setup for first-party tracking
+
+Set up Stape's first-party cookie proxy to write GA4 cookies directly on your Shopify domain, bypassing ITP restrictions:
+
+1. In Stape → **Settings → Custom Domain**
+2. Add a subdomain of your Shopify store: `gtm.yourshop.com`
+3. Point it at your Stape endpoint via CNAME
+4. In your Google Tag configuration, update `transport_url` to use your custom domain
+
+First-party cookies set this way have a full 13-month expiry instead of the 7-day maximum Safari ITP imposes on script-set cookies.
+
+## Test it
+
+1. Complete a full test purchase in Shopify
+2. Verify in GA4: `purchase` event appears in DebugView with correct `transaction_id` and `value`
+3. Verify in Meta Events Manager: `Purchase` event received with matching `event_id`
+4. Verify no duplicate events (check `transaction_id` appears only once in GA4 Explore)
+
+## Common gotchas
+
+**Double purchase events.** If you have client-side tracking AND server-side tracking both configured to send `purchase`, you will get duplicates. Disable the client-side GA4 purchase event and let sGTM handle it exclusively. Use `event_id` deduplication for Meta CAPI.
+
+**checkout.shopify.com is a separate domain.** Shopify's checkout runs on a Shopify-owned domain. Your GTM web container is not loaded there (unless you are on Shopify Plus). Use Customer Events or the Order Status injection method for purchase tracking.
+
+**Stape server location affects latency.** Choose a Stape server region close to your primary user base. If most of your customers are in Europe, do not host the sGTM container in US-East.
+
+<CardGrid>
+  <LinkCard title="Duplicate Transaction Prevention" href="/recipes/ecommerce-conversions/duplicate-transaction-prevention/" description="Client-side deduplication guard for purchase events." />
+  <LinkCard title="Enhanced Conversions Setup" href="/recipes/ecommerce-conversions/enhanced-conversions-setup/" description="Add hashed user data to Google Ads through sGTM." />
+</CardGrid>

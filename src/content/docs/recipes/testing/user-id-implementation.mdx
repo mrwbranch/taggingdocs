@@ -1,0 +1,185 @@
+---
+title: "User-ID Implementation"
+description: "Complete User-ID implementation for GA4 — server-side ID generation, dataLayer push, GTM configuration, and cross-device attribution benefits."
+sidebar:
+  order: 3
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+GA4's default Client ID is cookie-based and device-specific — a user who browses on their phone and converts on their laptop appears as two separate users. The User-ID feature lets you associate a consistent, server-generated identifier with each authenticated user, enabling cross-device attribution and accurate user counts.
+
+<Aside type="caution">
+You must only set `user_id` for authenticated users who have consented to tracking. Never set `user_id` to personally identifiable information like email addresses or names — use an internal opaque identifier (database ID, UUID). Document your User-ID implementation in your privacy policy.
+</Aside>
+
+## How User-ID works in GA4
+
+1. A user logs in to your site
+2. Your server generates (or retrieves) an opaque user identifier — a database primary key, a UUID, or a hashed internal ID
+3. You push this identifier to the dataLayer
+4. GTM reads it and sets `user_id` on the GA4 Configuration tag
+5. GA4 associates all subsequent events in that session with the user identifier
+6. When the same user logs in on another device, GA4 merges their activity into a unified user record
+
+## Step 1 — Generate the user identifier
+
+Use your database primary key or a UUID — never an email address:
+
+```python
+# Backend example — include in your page render context
+import uuid
+
+def get_or_create_analytics_id(user):
+    if not user.analytics_id:
+        user.analytics_id = str(uuid.uuid4())
+        user.save()
+    return user.analytics_id
+```
+
+```javascript
+// Node.js / Express example
+app.get('/dashboard', authenticate, (req, res) => {
+  res.render('dashboard', {
+    analyticsUserId: req.user.analyticsId  // Opaque ID, not email
+  });
+});
+```
+
+## Step 2 — Push to the dataLayer
+
+Push the user identifier on any page where the user is authenticated. Typically this means all pages after login:
+
+<DataLayerExample event="user_identified" description="Push immediately on page load for authenticated users. Place before GTM snippet if possible.">
+```html
+<!-- Server-rendered template — replace SERVER_VAR with your template syntax -->
+<script>
+  window.dataLayer = window.dataLayer || [];
+
+  {% if user.is_authenticated %}
+  window.dataLayer.push({
+    event: 'user_identified',
+    user_id: '{{ user.analytics_id }}',
+    user_login_status: 'logged_in',
+    // Optional: non-PII user segments
+    user_type: '{{ user.plan_type }}',   // 'free', 'pro', 'enterprise'
+    user_tenure_days: {{ user.days_since_signup }}
+  });
+  {% else %}
+  window.dataLayer.push({
+    user_login_status: 'logged_out'
+  });
+  {% endif %}
+</script>
+<!-- GTM snippet goes here -->
+```
+</DataLayerExample>
+
+For React/Next.js, set this in a server component or `getServerSideProps`:
+
+```javascript
+// Next.js pages/_app.js or app/layout.js
+export default function Layout({ children, session }) {
+  useEffect(() => {
+    if (session?.user) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'user_identified',
+        user_id: session.user.analyticsId,
+        user_login_status: 'logged_in',
+        user_type: session.user.planType
+      });
+    }
+  }, [session]);
+
+  return <>{children}</>;
+}
+```
+
+## Step 3 — Configure GTM
+
+<Steps>
+1. **Create Data Layer Variables**
+
+   - `DLV - user_id` → Data Layer Variable name: `user_id`
+   - `DLV - user_type` → `user_type`
+   - `DLV - user_login_status` → `user_login_status`
+
+2. **Add `user_id` to your Google Tag / GA4 Configuration**
+
+   Open your **Google Tag** in GTM → **Configuration settings → Fields to set**:
+   - Field: `user_id`
+   - Value: `{{DLV - user_id}}`
+
+   This sets `user_id` on every GA4 hit when the variable is populated.
+
+3. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `user_identified`
+
+4. **Create a GA4 Event Tag for user properties**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `login`
+   - User Properties:
+     - `user_type` → `{{DLV - user_type}}`
+   - Trigger: the Custom Event trigger
+
+5. **Register user properties in GA4**
+
+   Go to **GA4 → Admin → Custom Definitions → User Properties**:
+   - `user_type`: User scope
+   - `user_login_status`: User scope
+
+6. **Enable User-ID reporting in GA4**
+
+   Go to **GA4 → Admin → Reporting Identity** and set it to **By User ID and Device** (or **Blended**). This enables GA4 to merge sessions across devices when User-ID data is available.
+</Steps>
+
+<TagConfig
+  name="GA4 - login (with user properties)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - user_identified"
+  variables={["DLV - user_id", "DLV - user_type"]}
+/>
+
+## Handling logout
+
+When a user logs out, clear the `user_id` from the dataLayer to prevent subsequent events from being attributed to the user:
+
+```javascript
+function handleLogout() {
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'logout',
+    user_id: undefined,     // Clear the user_id
+    user_type: undefined,
+    user_login_status: 'logged_out'
+  });
+  // Proceed with logout logic
+}
+```
+
+## Test it
+
+1. Log in to your site and open GTM Preview
+2. Verify the `user_identified` event fires on page load
+3. Check the Variables tab — `DLV - user_id` should contain your opaque user identifier (not an email)
+4. In GA4 DebugView, verify events show `user_id` in the user properties section
+5. Log in on a different device/browser with the same account — verify GA4 merges the sessions
+
+## Common gotchas
+
+**User-ID is an email address.** This is the most common mistake. Email addresses are PII and cannot be sent to GA4 without proper processing. Use a database ID or a UUID. If you only have an email, hash it first: `sha256(email)` is acceptable but opaque IDs are better.
+
+**`user_id` is not being set before the first hit.** If you push `user_id` after the GA4 Configuration tag has already fired on page load, the first page view will not have `user_id` set. Push to the dataLayer before the GTM snippet loads for authenticated pages.
+
+**Consent gates user identification.** If the user has not consented to analytics storage, you should not set `user_id`. Guard the dataLayer push behind your consent state check.
+
+<CardGrid>
+  <LinkCard title="A/B Test Tracking" href="/recipes/testing/ab-test-tracking/" description="Combine User-ID with experiment variant tracking for accurate results." />
+  <LinkCard title="Cross-Domain Tracking Setup" href="/recipes/cross-domain-setup/cross-domain-setup/" description="User-ID complements cross-domain tracking for multi-site journeys." />
+</CardGrid>

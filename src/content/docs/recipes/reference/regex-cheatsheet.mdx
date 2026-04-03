@@ -1,0 +1,172 @@
+---
+title: "GTM Regex Cheatsheet"
+description: "30+ regex patterns commonly used in GTM triggers, variables, and lookup tables — URL matching, file types, PII detection, hostname matching, and more."
+sidebar:
+  order: 1
+---
+
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+GTM uses ECMAScript-flavoured regex throughout: in trigger conditions, variable transformations, lookup tables, and regex table variables. This cheatsheet covers the patterns you will reach for constantly. All patterns are tested against the GTM engine.
+
+<Aside type="tip">
+GTM regex matching is **case-sensitive by default**. Select "Ignore Case" in trigger conditions or use the `(?i)` flag equivalent for case-insensitive matching. In GTM, use the "matches RegEx (ignore case)" operator rather than the `(?i)` flag — GTM does not support inline flags.
+</Aside>
+
+## URL and path matching
+
+| Pattern | Matches | Notes |
+|---------|---------|-------|
+| `^/blog/` | Paths starting with `/blog/` | Use `^` to anchor to path start |
+| `^/blog$` | Exactly `/blog` with no trailing slash | `$` anchors to end |
+| `^/blog/?$` | `/blog` and `/blog/` | `?` makes the trailing slash optional |
+| `^/(shop\|store)/` | `/shop/` and `/store/` | Alternation with `\|` (escaped in some contexts) |
+| `/product/[0-9]+` | `/product/123`, `/product/9876` | `[0-9]+` = one or more digits |
+| `/product/[a-z0-9\-]+` | `/product/blue-running-shoes` | Slug pattern |
+| `\?` | A literal `?` in the URL | Escape special chars with `\` |
+| `[?&]utm_source=` | `?utm_source=` or `&utm_source=` | Matches UTM parameter anywhere in query string |
+| `^/thank.you` | `/thank-you`, `/thank_you`, `/thankyou` | `.` matches any character — may match too broadly |
+| `^/thank\-you` | Exactly `/thank-you` | Escape `-` with `\` to be explicit |
+| `checkout` | Any URL containing "checkout" | No anchors = contains match |
+| `^https://www\.example\.com` | Full URL starting with your domain | Escape `.` in domain names |
+
+## Hostname patterns
+
+| Pattern | Matches | Notes |
+|---------|---------|-------|
+| `^www\.example\.com$` | Exactly `www.example.com` | Use with `{{Page Hostname}}` variable |
+| `example\.com$` | `www.example.com`, `shop.example.com` | Matches any subdomain of example.com |
+| `^(www\|shop)\.example\.com$` | Only www and shop subdomains | Explicit subdomain list |
+| `staging\|localhost\|127\.0\.0\.1` | Development environments | Use as a blocking trigger |
+| `^(?!www\.)` | Any hostname NOT starting with www | Negative lookahead — useful for staging blocks |
+| `\.co\.uk$` | UK domain variants | Country-code TLD matching |
+
+## File extension matching
+
+| Pattern | Matches | Notes |
+|---------|---------|-------|
+| `\.(pdf)(\?|$)` | URLs ending in `.pdf` | `(\?|$)` handles both `report.pdf` and `report.pdf?download=1` |
+| `\.(pdf\|docx?\|xlsx?\|pptx?)(\?|$)` | Common office document types | `x?` makes the `x` optional |
+| `\.(zip\|tar\.gz\|rar)(\?|$)` | Archive files | |
+| `\.(jpg\|jpeg\|png\|gif\|webp\|svg)(\?|$)` | Image files | |
+| `\.(mp4\|webm\|mov\|avi)(\?|$)` | Video files | |
+| `\.(mp3\|wav\|ogg\|aac)(\?|$)` | Audio files | |
+| `\.(csv\|json\|xml)(\?|$)` | Data files | Commonly downloaded for analysis |
+
+## Query parameter matching
+
+| Pattern | Matches | Notes |
+|---------|---------|-------|
+| `[?&]q=([^&]+)` | The value of `?q=` parameter | Use capture group in a replacement variable |
+| `[?&]utm_source=([^&]+)` | UTM source value | Combine with regex capture for extraction |
+| `[?&]gclid=` | Any URL with a Google Click ID | Detect paid traffic |
+| `[?&]fbclid=` | Any URL with a Facebook Click ID | Detect Facebook paid traffic |
+| `[?&](utm_source\|utm_medium\|utm_campaign)=` | Any UTM parameter | Check if URL has any UTM tags |
+
+## Click text and element matching
+
+| Pattern | Matches | Notes |
+|---------|---------|-------|
+| `^(Add to Cart\|Buy Now)$` | Exact button text variants | Case-sensitive; add "(ignore case)" operator |
+| `(free trial\|sign up\|get started)` | CTA phrases anywhere in text | |
+| `^\s*(.*?)\s*$` | Text trimmed of leading/trailing whitespace | Use in a Custom JavaScript Variable instead |
+| `\d+` | Any text containing a number | |
+| `^\d+$` | Text that is only digits | |
+
+## PII detection patterns
+
+Use these in Custom HTML tags to scrub event data before it reaches GA4.
+
+| Pattern | Detects | Notes |
+|---------|---------|-------|
+| `[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}` | Email addresses | Standard email regex |
+| `\b\d{3}[\s.\-]?\d{3}[\s.\-]?\d{4}\b` | US phone numbers (various formats) | Matches `555-123-4567`, `555.123.4567`, `5551234567` |
+| `\+?\d{1,3}[\s\-]?\(?\d{1,4}\)?[\s\-]?\d{1,9}([\s\-]\d{1,9})*` | International phone numbers | More permissive — adjust for your regions |
+| `\b\d{3}\-\d{2}\-\d{4}\b` | US Social Security Numbers | |
+| `\b4[0-9]{12}(?:[0-9]{3})?\b` | Visa card numbers | |
+| `\b5[1-5][0-9]{14}\b` | Mastercard numbers | |
+| `\b3[47][0-9]{13}\b` | American Express numbers | |
+| `\b[0-9]{4}[\s\-]?[0-9]{4}[\s\-]?[0-9]{4}[\s\-]?[0-9]{4}\b` | Generic 16-digit card pattern | |
+| `\b[A-Z]{1,2}[0-9R][0-9A-Z]?\s?[0-9][A-Z]{2}\b` | UK postcodes | |
+| `\b[0-9]{5}(?:\-[0-9]{4})?\b` | US ZIP codes (basic, high false-positive rate) | Use sparingly |
+
+<Aside type="caution">
+PII regex patterns have false-positive risk. A product code like `123-45-6789` could match an SSN pattern. Always review matches before blocking them, and prefer allowlist approaches (only send known-safe fields) over blocklist approaches (try to detect all PII).
+</Aside>
+
+## Number and value matching
+
+| Pattern | Matches | Notes |
+|---------|---------|-------|
+| `^\d+$` | Integer: `42`, `1000` | Only digits, entire string |
+| `^\d+(\.\d{1,2})?$` | Decimal with up to 2 places: `49.99` | |
+| `^\d{1,3}(,\d{3})*(\.\d{2})?$` | Formatted number: `1,234.56` | European formatting differs |
+| `^[+-]?\d+(\.\d+)?$` | Any positive or negative number | |
+| `^\$[\d,]+(\.\d{2})?$` | Dollar amount string: `$49.99` | |
+
+## GTM variable extraction (use with "Replace" in variables)
+
+These regex patterns are used in the Search/Replace field of GTM variables to extract specific parts of a string.
+
+| Find | Replace | Use case |
+|------|---------|---------|
+| `.*[?&]q=([^&]*).*` | `$1` | Extract search query from full URL |
+| `^https?://[^/]+(.*)` | `$1` | Strip protocol and hostname, return path |
+| `^([^?#]*).*` | `$1` | Strip query string and fragment |
+| `.*\/([^\/\?]+)(\?.*)?$` | `$1` | Extract last path segment (filename) |
+| `\.([a-zA-Z0-9]+)(\?.*)?$` | `$1` | Extract file extension |
+| `^.*?\/\/([^\/]+)\/.*$` | `$1` | Extract hostname from full URL |
+
+## Trigger condition operators
+
+When choosing between GTM's trigger condition operators:
+
+| Use case | Operator | Example |
+|----------|----------|---------|
+| Exact match | **equals** | `Page Path equals /contact` |
+| Prefix match | **starts with** | `Page Path starts with /blog` |
+| Substring match | **contains** | `Page Path contains checkout` |
+| Pattern match | **matches RegEx** | `Page Path matches RegEx ^/(en\|fr\|de)/` |
+| Case-insensitive | **matches RegEx (ignore case)** | `Click Text matches RegEx (ignore case) add to cart` |
+| Exclusion | **does not match RegEx** | `Page Hostname does not match RegEx staging\|localhost` |
+
+## Common patterns for GTM Lookup Tables
+
+Use these in **Regex Table** variables to map URL patterns to readable values:
+
+```
+Pattern                          → Output
+^/blog/                          → Blog
+^/product/                       → Product
+^/checkout/                      → Checkout
+^/account/                       → Account
+^/$                              → Homepage
+.*                               → Other  ← Default fallback (put last)
+```
+
+## Useful anchors and quantifiers quick reference
+
+| Symbol | Meaning | Example |
+|--------|---------|---------|
+| `^` | Start of string | `^/blog` |
+| `$` | End of string | `\.html$` |
+| `.` | Any character except newline | `p.ge` matches `page`, `p1ge` |
+| `\d` | Digit `[0-9]` | `order-\d+` |
+| `\w` | Word char `[a-zA-Z0-9_]` | `\w+` |
+| `\s` | Whitespace | `first\sname` |
+| `\b` | Word boundary | `\bcat\b` won't match `category` |
+| `*` | 0 or more | `colou*r` matches `color` and `colour` |
+| `+` | 1 or more | `id=\d+` |
+| `?` | 0 or 1 (optional) | `https?` |
+| `{n}` | Exactly n times | `\d{4}` |
+| `{n,m}` | Between n and m times | `\d{5,10}` |
+| `[abc]` | Character class | `[aeiou]` |
+| `[^abc]` | Negated class | `[^?&]+` |
+| `(a\|b)` | Alternation | `(pdf\|docx)` |
+| `(...)` | Capture group | `([^&]+)` |
+| `(?:...)` | Non-capturing group | `(?:www\.)?` |
+
+<CardGrid>
+  <LinkCard title="PII Detection & Removal" href="/recipes/privacy-consent/pii-detection-removal/" description="Full recipe for stripping PII from tracking data using these patterns." />
+  <LinkCard title="Track PDF Downloads" href="/recipes/interaction-tracking/track-pdf-downloads/" description="File extension regex patterns in action." />
+</CardGrid>

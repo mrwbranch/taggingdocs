@@ -1,0 +1,134 @@
+---
+title: "Cross-Domain Tracking Setup"
+description: "Complete cross-domain tracking setup for GA4 via GTM — Google Tag configuration, domain list, referral exclusion, and verification."
+sidebar:
+  order: 1
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+
+Cross-domain tracking is needed when users travel between two separate domains — say `yourstore.com` and `checkout.payments-provider.com` — and you want GA4 to treat the entire journey as a single session. Without it, the payment domain will show `yourstore.com` as a referrer, breaking attribution.
+
+<Aside type="tip">
+Cross-domain tracking is NOT needed for subdomains of the same root domain (e.g., `shop.example.com` and `blog.example.com`). GA4 handles subdomains automatically with the default cookie configuration. See [Subdomain Tracking](/recipes/cross-domain-setup/subdomain-tracking/) for that scenario.
+</Aside>
+
+## How GA4 cross-domain tracking works
+
+GA4 appends a `_gl` parameter to links that cross domain boundaries. This parameter encodes the current session information. When the user lands on the second domain, GA4 reads the `_gl` parameter and restores the session — keeping the user in the same session rather than starting a new one.
+
+Example URL with `_gl` parameter:
+```
+https://checkout.payments-provider.com/pay?cart=abc&_gl=1*abc123*_ga*...
+```
+
+The second domain's GA4 measurement reads the `_gl` parameter before setting its own cookie, carrying the session forward.
+
+## Step 1 — Configure cross-domain in GA4
+
+<Steps>
+1. Go to **GA4 → Admin → Data Streams → [your stream] → Configure tag settings**
+2. Expand **Configure your domains**
+3. Add the conditions for ALL domains in your user journey:
+   - `yourstore.com`
+   - `checkout.payments-provider.com`
+   - Any other domains users might travel through
+
+4. Match type options:
+   - **Contains**: most flexible, use for `payments-provider.com` (covers all subdomains)
+   - **Equals**: exact domain match
+   - **Begins with**: for paths that differ
+   - **Matches regex**: for complex patterns
+
+5. Save changes
+</Steps>
+
+## Step 2 — Configure cross-domain in GTM (if using Google Tag)
+
+If you deploy GA4 via GTM using the Google Tag, configure cross-domain in the tag:
+
+<Steps>
+1. Open your **Google Tag** configuration in GTM (not the GA4 Event tag — the Google Tag itself)
+2. Expand **Configuration settings → Fields to set**
+3. Add a field:
+   - Field name: `linker`
+   - Value: a JavaScript object (use a Custom JavaScript Variable)
+
+   Create a Custom JavaScript Variable named `Linker Configuration`:
+   ```javascript
+   function() {
+     return {
+       domains: ['yourstore.com', 'checkout.payments-provider.com']
+     };
+   }
+   ```
+   Set `linker` → `{{Linker Configuration}}`
+
+   Or simply use the **Cross-domain settings** section in newer Google Tag configurations and list the domains directly.
+
+4. Publish the container changes
+</Steps>
+
+## Step 3 — Add referral exclusions in GA4
+
+When a user returns from `checkout.payments-provider.com` to your confirmation page on `yourstore.com`, GA4 may count this as a new session with `payments-provider.com` as the source. Prevent this by adding referral exclusions.
+
+<Steps>
+1. Go to **GA4 → Admin → Data Streams → [your stream] → Configure tag settings**
+2. Expand **List unwanted referrals**
+3. Add `payments-provider.com` (or all domains in your cross-domain setup)
+4. Save changes
+</Steps>
+
+This prevents the return journey from being counted as a referral.
+
+## Verifying cross-domain tracking works
+
+<Steps>
+1. Open your main site in a browser
+2. Navigate to a page and open the browser console
+3. Run: `document.cookie` — look for the `_ga` cookie value, e.g., `GA1.1.123456789.1616000000`
+4. Click a link that goes to your second domain
+5. In the URL bar, check that `_gl=` is appended to the URL before the page loads on the second domain
+6. On the second domain, run `document.cookie` again — the `_ga` value should match the first domain
+7. In GA4 DebugView, verify both domains show as a single session in the stream view
+</Steps>
+
+If the `_gl` parameter is not being appended, cross-domain linking is not configured correctly. Double-check the domain list in GA4 or the Google Tag linker configuration.
+
+## Common multi-domain scenarios
+
+**Main site + third-party checkout:**
+- Add the checkout domain to your GA4 cross-domain configuration
+- Add it to referral exclusions
+- Verify the checkout platform allows the `_ga` cookie (some platforms strip unknown cookies)
+
+**Multi-brand / multi-country domains:**
+- `brand-uk.com` and `brand-us.com` running the same GA4 property
+- List both in the cross-domain configuration
+- Consider whether you actually want the same property — sometimes two properties is the right answer
+
+**Landing page platform (Unbounce, Leadpages) → main site:**
+- If the landing page uses your GA4 measurement ID, add it to cross-domain
+- If the landing page uses a different GA4 property, cross-domain will not help — use UTM parameters instead
+
+## Test it
+
+1. Navigate from your main domain to the second domain by clicking an internal link
+2. Inspect the URL in the address bar — `_gl=` should appear in the query string
+3. In GA4 DebugView: the session should appear in both domains without a new session starting
+4. Check GA4 → **Reports → Acquisition → Traffic Acquisition** — `payments-provider.com` should not appear as a referral source
+
+## Common gotchas
+
+**Links open in new tabs.** When `target="_blank"` is used, the `_gl` parameter is still appended. This is correct behavior.
+
+**JavaScript-based navigation.** If your site uses `window.location.href = 'https://other-domain.com'` programmatically, the linker may not append `_gl`. Use `window.open()` or anchor tags instead, or call the `get()` method from the gtag linker plugin to get the URL with `_gl` appended.
+
+**Consent Mode blocks cookies.** If the user has not consented and `analytics_storage` is `denied`, GA4 will not set or read the `_ga` cookie. Cross-domain tracking will not work for these users — this is expected and correct behavior from a privacy perspective.
+
+<CardGrid>
+  <LinkCard title="Subdomain Tracking" href="/recipes/cross-domain-setup/subdomain-tracking/" description="Track across subdomains — a much simpler scenario." />
+  <LinkCard title="iFrame Tracking" href="/recipes/cross-domain-setup/iframe-tracking/" description="When the other domain is embedded as an iframe." />
+</CardGrid>

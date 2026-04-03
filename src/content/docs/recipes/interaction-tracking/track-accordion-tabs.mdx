@@ -1,0 +1,213 @@
+---
+title: "Track Accordion & Tab Interactions"
+description: "Track clicks on accordion and tab components — toggle buttons, expanded content sections, data attribute identification, and GA4 event configuration."
+sidebar:
+  order: 14
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Accordions and tabs are used for FAQs, product feature lists, pricing plan comparisons, and step-by-step guides. Tracking which panels users open tells you what information they seek most — and which questions they have that your main copy does not answer.
+
+## Accordion tracking
+
+Accordions typically have a clickable header that toggles a content panel. The tracking goal is to capture which panel was opened, the panel's title or question, and whether it was an open or close action.
+
+### GTM All Elements Trigger approach
+
+If your accordion uses semantic HTML:
+
+```html
+<div class="accordion-item">
+  <button
+    class="accordion-header"
+    data-panel="shipping-policy"
+    aria-expanded="false"
+  >
+    What is your shipping policy?
+  </button>
+  <div class="accordion-content" id="shipping-policy">
+    <!-- Content -->
+  </div>
+</div>
+```
+
+<Steps>
+1. **Create an All Elements Click Trigger**
+
+   - Trigger type: **All Elements**
+   - Fire on: **Some Clicks**
+   - Condition: `Click Classes` **contains** `accordion-header`
+
+2. **Create Custom JavaScript Variables**
+
+   Variable `Click - Panel Name`:
+   ```javascript
+   function() {
+     var el = `{{Click Element}}`;
+     while (el && !el.dataset.panel) el = el.parentElement;
+     return el ? el.dataset.panel : `{{Click ID}}`;
+   }
+   ```
+
+   Variable `Click - Panel State`:
+   ```javascript
+   function() {
+     var el = `{{Click Element}}`;
+     while (el && !el.hasAttribute('aria-expanded')) el = el.parentElement;
+     // aria-expanded is the state BEFORE the click
+     // 'false' = was closed, now opening
+     return el ? (el.getAttribute('aria-expanded') === 'false' ? 'opened' : 'closed') : 'unknown';
+   }
+   ```
+
+3. **Create a GA4 Event Tag**
+
+   - Event name: `accordion_interaction`
+   - Parameters:
+     - `panel_name` → `{{Click - Panel Name}}`
+     - `panel_action` → `{{Click - Panel State}}`
+     - `panel_question` → `{{Click Text}}`
+     - `page_path` → `{{Page Path}}`
+   - Trigger: the click trigger above
+</Steps>
+
+### DataLayer approach (more reliable)
+
+Attach the dataLayer push directly to your accordion's toggle function:
+
+<DataLayerExample event="accordion_interaction" description="Push from your accordion toggle handler with full state context.">
+```javascript
+function toggleAccordion(button) {
+  var isExpanding = button.getAttribute('aria-expanded') === 'false';
+  var panelId = button.getAttribute('aria-controls') || button.dataset.panel;
+  var panel = document.getElementById(panelId);
+
+  // Toggle the accordion
+  button.setAttribute('aria-expanded', isExpanding);
+  if (panel) {
+    panel.hidden = !isExpanding;
+  }
+
+  // Track the interaction
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'accordion_interaction',
+    panel_name: panelId,
+    panel_question: button.textContent.trim(),
+    panel_action: isExpanding ? 'opened' : 'closed',
+    panel_category: button.dataset.category || 'general',
+    page_path: window.location.pathname
+  });
+}
+
+// Attach to all accordion buttons
+document.querySelectorAll('.accordion-header').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    toggleAccordion(this);
+  });
+});
+```
+</DataLayerExample>
+
+## Tab tracking
+
+Tabs show different content panels, with only one panel visible at a time. Track which tab is activated and from which previous tab:
+
+<DataLayerExample event="tab_interaction" description="Tracks tab selection with context about which tab was active before.">
+```javascript
+(function() {
+  var currentTab = null;
+
+  document.querySelectorAll('[role="tab"]').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      var tabGroup = this.closest('[role="tablist"]');
+      var previousTab = currentTab ||
+        (tabGroup ? tabGroup.querySelector('[aria-selected="true"]')?.textContent?.trim() : null);
+
+      currentTab = this.textContent.trim();
+
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'tab_interaction',
+        tab_name: currentTab,
+        tab_id: this.id || this.dataset.tab,
+        tab_panel: this.getAttribute('aria-controls'),
+        previous_tab: previousTab !== currentTab ? previousTab : null,
+        tab_group: tabGroup ? (tabGroup.id || tabGroup.dataset.tabGroup || 'default') : 'default',
+        page_path: window.location.pathname
+      });
+    });
+  });
+})();
+```
+</DataLayerExample>
+
+## GTM Configuration (combined)
+
+<Steps>
+1. **Create a Custom Event Trigger for accordion interactions**
+
+   - Trigger type: **Custom Event**
+   - Event name: `accordion_interaction`
+
+2. **Create a Custom Event Trigger for tab interactions**
+
+   - Trigger type: **Custom Event**
+   - Event name: `tab_interaction`
+
+3. **Create Data Layer Variables**
+
+   For accordions:
+   - `DLV - panel_name` → `panel_name`
+   - `DLV - panel_action` → `panel_action`
+   - `DLV - panel_question` → `panel_question`
+
+   For tabs:
+   - `DLV - tab_name` → `tab_name`
+   - `DLV - previous_tab` → `previous_tab`
+   - `DLV - tab_group` → `tab_group`
+
+4. **Create GA4 Event Tags** for each Custom Event trigger with the relevant DLV variables.
+
+5. **Test in Preview Mode**
+
+   Open an accordion panel. The `accordion_interaction` event should fire with `panel_action: opened`. Close it — another event should fire with `panel_action: closed`. Switch tabs — `tab_interaction` should fire with the correct `tab_name`.
+</Steps>
+
+<TagConfig
+  name="GA4 - accordion_interaction"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - accordion_interaction"
+  variables={["DLV - panel_name", "DLV - panel_action", "DLV - panel_question"]}
+/>
+
+## Analysing accordion data
+
+In GA4, create an Exploration with:
+- Dimension: `panel_question` or `panel_name`
+- Metric: `Event count` filtered to `panel_action = opened`
+
+High-open-rate panels indicate important information that users need but cannot find in your main copy. Consider promoting that content to the body of the page.
+
+Low-open-rate panels with important information suggest either the question wording is not clear or users do not realise it is relevant to them.
+
+## Test it
+
+1. Open GTM Preview on a page with accordions or tabs
+2. Click an accordion header to open it — verify `accordion_interaction` fires with `panel_action: opened`
+3. Click again to close it — verify `panel_action: closed`
+4. Switch tabs — verify `tab_interaction` fires with the correct `tab_name`
+
+## Common gotchas
+
+**`aria-expanded` is toggled after click, not before.** Depending on how your component is implemented, `aria-expanded` may already be toggled by the time your click handler reads it. Test this in your specific setup and adjust the variable logic accordingly.
+
+**Tabs and accordions without semantic markup.** Some component libraries use custom `div` elements instead of `button[aria-expanded]` or `[role="tab"]`. Adjust the trigger conditions and variable paths to match your library's DOM structure.
+
+<CardGrid>
+  <LinkCard title="Track Button Clicks" href="/recipes/interaction-tracking/track-button-clicks/" description="The foundational pattern that accordion and tab tracking builds on." />
+  <LinkCard title="Track Anchor Clicks" href="/recipes/interaction-tracking/track-anchor-clicks/" description="Same-page navigation tracking for long-form content." />
+</CardGrid>

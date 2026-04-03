@@ -1,0 +1,191 @@
+---
+title: "Consent Mode in Cross-Domain Tracking"
+description: "Inconsistent consent states across domains, how mismatched consent breaks the _gl linker parameter, and the patterns for keeping consent synchronized when users navigate between your domains."
+sidebar:
+  order: 2
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+Cross-domain tracking relies on the `_gl` parameter to pass session and user identity between domains. But `_gl` is a consent-sensitive mechanism — it only generates when `analytics_storage` is granted. If a user navigates from a domain where they accepted analytics to a domain where no consent exists (or consent defaults to denied), the `_gl` parameter either isn't generated, isn't consumed, or the two tracking contexts become incompatible.
+
+The result: your cross-domain tracking silently breaks for a subset of users without any obvious error.
+
+## How the `_gl` parameter and consent interact
+
+When a user clicks a link between domains configured for cross-domain tracking, GA4 generates a `_gl` parameter containing the client ID and session information. This parameter is appended to the link URL and consumed by GA4 on the destination domain.
+
+GA4 only generates `_gl` when `analytics_storage` is `granted` on the **source** domain. If analytics consent is denied on the source domain, GA4 does not append `_gl` — the link looks clean, but the destination domain has no way to continue the same session.
+
+On the **destination** domain, `_gl` is only processed when `analytics_storage` is `granted`. If the destination domain has a denied default (waiting for the CMP to load), and the user arrives before the CMP fires, the `_gl` parameter may expire before it can be consumed.
+
+## The core problem: different consent states on different domains
+
+Most cross-domain setups involve separate GTM containers on each domain. Each container has its own consent configuration, its own CMP integration, and potentially its own consent UI (or no UI — some subdomain or partner sites don't have a consent banner at all).
+
+Scenario 1: User accepts consent on `store.example.com`, clicks a link to `payment-provider.com`. If `payment-provider.com` has no consent setup or defaults to denied, the `_gl` parameter lands on a page that cannot process it.
+
+Scenario 2: User has active consent on `example.com`. They navigate to `blog.example.com` via a cross-domain link. `blog.example.com` loads, the CMP starts initializing, but the `wait_for_update` hasn't expired yet. During this window, GA4 on the destination domain may or may not process the `_gl` parameter before determining consent state.
+
+## Solution 1: Synchronized consent via URL parameter
+
+Pass the consent state as a URL parameter alongside `_gl`, and use it to accelerate consent initialization on the destination domain.
+
+On the source domain, when a cross-domain link is clicked, append the current consent state:
+
+```javascript
+// Custom HTML tag on All Link Clicks trigger (filtered to cross-domain links)
+// Run on the source domain
+<script>
+(function() {
+  var analyticsConsent = 'denied';
+  var adConsent = 'denied';
+
+  // Read current consent state
+  try {
+    var consentData = window.google_tag_data &&
+                      window.google_tag_data.ics &&
+                      window.google_tag_data.ics.entries;
+    if (consentData) {
+      analyticsConsent = (consentData.analytics_storage &&
+                          consentData.analytics_storage.update === 'granted')
+                         ? 'granted' : 'denied';
+      adConsent = (consentData.ad_storage &&
+                   consentData.ad_storage.update === 'granted')
+                  ? 'granted' : 'denied';
+    }
+  } catch(e) {}
+
+  // Only modify links if we can read the element
+  var el = {{Click Element}};
+  if (el && el.href && analyticsConsent === 'granted') {
+    var url = new URL(el.href);
+    url.searchParams.set('consent_analytics', analyticsConsent);
+    url.searchParams.set('consent_ad', adConsent);
+    el.href = url.toString();
+  }
+})();
+</script>
+```
+
+On the destination domain, read these parameters and immediately initialize consent before GTM processes:
+
+```javascript
+// Inline script on destination domain — runs before GTM snippet
+<script>
+(function() {
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+
+  var urlParams = new URLSearchParams(window.location.search);
+  var crossDomainAnalytics = urlParams.get('consent_analytics');
+  var crossDomainAd = urlParams.get('consent_ad');
+
+  if (crossDomainAnalytics === 'granted') {
+    // User already consented on the source domain — restore that consent
+    gtag('consent', 'default', {
+      'analytics_storage': 'granted',
+      'ad_storage': crossDomainAd === 'granted' ? 'granted' : 'denied',
+      'ad_user_data': crossDomainAd === 'granted' ? 'granted' : 'denied',
+      'ad_personalization': crossDomainAd === 'granted' ? 'granted' : 'denied',
+      'security_storage': 'granted'
+    });
+  } else {
+    // No valid cross-domain consent — use standard denied defaults
+    gtag('consent', 'default', {
+      'analytics_storage': 'denied',
+      'ad_storage': 'denied',
+      'ad_user_data': 'denied',
+      'ad_personalization': 'denied',
+      'security_storage': 'granted',
+      'wait_for_update': 500
+    });
+  }
+})();
+</script>
+```
+
+<Aside type="caution">
+Only restore consent from a URL parameter if the destination domain is under your control and the source domain is trusted. Accepting consent signals from arbitrary URL parameters on third-party traffic is a security risk.
+</Aside>
+
+## Solution 2: Shared CMP with cross-domain consent storage
+
+Some CMP platforms support cross-domain consent synchronization — one consent choice applies across all your domains. This is the cleanest solution when it is available.
+
+Cookiebot, OneTrust, and Usercentrics all have multi-domain configuration options. The specifics vary:
+- **Cookiebot**: Configure multiple domains in a single Domain Group; consent is shared via the Cookiebot cloud
+- **OneTrust**: IAB TCF consent string stored in localStorage can be read across related domains with proper configuration
+- **Usercentrics**: Cross-domain consent available in enterprise plans
+
+When the CMP synchronizes consent across domains, both domains see the same consent state from the CMP's stored record. The destination domain's CMP restores consent immediately on load without a cross-domain parameter hack.
+
+## Solution 3: First-party server-side session
+
+For checkout flows and similar critical paths, maintain consent state server-side in the user's session:
+
+1. When user accepts consent on the source domain, record that in the session cookie
+2. When the user arrives on the destination domain with a valid session, the server injects the consent state into the page before it renders
+3. The inline consent default uses the server-injected value
+
+```html
+<!-- Server-rendered HTML on destination domain -->
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+
+  // Server injects consent state from session
+  gtag('consent', 'default', {
+    'analytics_storage': '<%= session.consent.analytics ? "granted" : "denied" %>',
+    'ad_storage': '<%= session.consent.advertising ? "granted" : "denied" %>',
+    'ad_user_data': '<%= session.consent.advertising ? "granted" : "denied" %>',
+    'ad_personalization': '<%= session.consent.advertising ? "granted" : "denied" %>',
+    'security_storage': 'granted'
+  });
+</script>
+```
+
+This approach requires both domains to share a session (typically only possible on same-domain or through a shared authentication system).
+
+## The edge case: consent granted on A, not on B
+
+When a user visits domain A (consent granted), then navigates to domain B (consent not yet established), GA4 generates `_gl` on domain A because consent is granted. On domain B:
+
+1. GA4 sees the `_gl` parameter in the URL
+2. But `wait_for_update` is still running (default denied until CMP loads)
+3. If `wait_for_update` expires before the CMP fires, GA4 may ignore `_gl` because consent is still denied
+4. Session continuity is lost
+
+The `wait_for_update` parameter on domain B needs to cover the CMP's load time. If the CMP takes 400ms and `wait_for_update` is 500ms, there is a 100ms margin. On slow connections, that margin disappears.
+
+Test this specific scenario: simulate slow CMP loading by adding a network throttle, navigate cross-domain, and verify in GA4 that the session continues rather than creating a new user.
+
+## Verifying cross-domain consent works
+
+<Steps>
+1. Grant consent on domain A
+2. Click a cross-domain link to domain B
+3. Check: did `_gl` appear in the URL? (Required for cross-domain tracking to work at all — check the URL in the browser address bar before it's consumed)
+4. On domain B, open GTM Preview mode
+5. Check the first event's Consent tab: consent should be established before GA4 tags fire
+6. In GA4, check that the session continues from domain A to domain B (same session ID, same client ID)
+</Steps>
+
+Also check: what happens when the user's `_gl` parameter expires. GA4's `_gl` parameter has a short TTL (typically 60 seconds). If the user clicks a link, takes 2 minutes on an intermediate page, and then arrives on domain B, `_gl` has expired. This is expected behavior, not a consent issue — but it looks similar in reporting.
+
+## Common mistakes
+
+**Assuming one CMP instance covers multiple domains automatically.** Each domain typically has its own CMP instance and consent record unless you explicitly configure cross-domain consent sharing. Verify this with your CMP vendor.
+
+**Testing cross-domain consent with the same browser session that already has cookies on both domains.** Existing cookies may make the flow look correct when it isn't. Always test with cleared cookies on both domains.
+
+**Not accounting for the `_gl` parameter TTL.** Cross-domain consent synchronization keeps the consent state consistent, but `_gl` still expires. Long navigation paths between domains may lose the cross-domain session regardless of consent state.
+
+---
+
+<CardGrid>
+  <LinkCard title="Consent Initialization Timing" href="/consent/advanced/consent-initialization-timing/" description="The trigger order that determines when _gl can be consumed on the destination domain." />
+  <LinkCard title="CMP Integration" href="/consent/cmp-integration/cmp-integration/" description="CMP-specific cross-domain consent configuration." />
+  <LinkCard title="Testing Consent" href="/consent/advanced/testing-consent/" description="Testing protocol including cross-domain scenarios." />
+</CardGrid>

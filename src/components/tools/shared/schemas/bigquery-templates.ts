@@ -15,6 +15,7 @@ export interface QueryTemplate {
   category: 'basic' | 'ecommerce' | 'advanced' | 'utility';
   description: string;
   explanation: string;
+  relatedDocs?: { label: string; href: string }[];
   config: ConfigField[];
   generateSQL: (cfg: Record<string, string>) => string;
 }
@@ -37,6 +38,10 @@ export const QUERY_TEMPLATES: QueryTemplate[] = [
     description: 'Count pageviews grouped by page path and hostname.',
     explanation:
       'Extracts the page_location and page_title event parameters from page_view events, then counts sessions and pageviews per page. Optionally filter by a specific hostname.',
+    relatedDocs: [
+      { label: 'Common Queries', href: '/ga4/bigquery/common-queries/' },
+      { label: 'Unnesting Patterns', href: '/ga4/bigquery/unnesting-patterns/' },
+    ],
     config: [
       {
         name: 'limit',
@@ -69,13 +74,14 @@ export const QUERY_TEMPLATES: QueryTemplate[] = [
 SELECT
   (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_location,
   (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title')    AS page_title,
-  COUNT(DISTINCT CONCAT(user_pseudo_id, ga_session_id.value))                       AS sessions,
-  COUNT(*)                                                                           AS pageviews
-FROM ${'`'}${dataset}.${tableName}${'`'},
-  UNNEST(event_params) AS ga_session_id
+  COUNT(*)                                                                           AS pageviews,
+  COUNT(DISTINCT user_pseudo_id)                                                   AS users,
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  ))                                                                                 AS sessions
+FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix}
-  AND event_name = 'page_view'
-  AND ga_session_id.key = 'ga_session_id'${hostnameFilter}
+  AND event_name = 'page_view'${hostnameFilter}
 GROUP BY
   page_location,
   page_title
@@ -92,6 +98,10 @@ LIMIT ${limit};`;
     description: 'Daily trend of users and sessions over the selected date range.',
     explanation:
       'Counts distinct users and sessions per day using the event_date field and the ga_session_id parameter. Useful for spotting traffic trends and anomalies.',
+    relatedDocs: [
+      { label: 'Common Queries', href: '/ga4/bigquery/common-queries/' },
+      { label: 'Session Reconstruction', href: '/ga4/bigquery/session-reconstruction/' },
+    ],
     config: [],
     generateSQL: (cfg) => {
       const dataset = cfg.dataset || 'your_project.analytics_XXXXXXXXX';
@@ -103,9 +113,9 @@ LIMIT ${limit};`;
 SELECT
   event_date,
   COUNT(DISTINCT user_pseudo_id)                                                   AS users,
-  COUNT(DISTINCT CONCAT(user_pseudo_id, (
-    SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id'
-  )))                                                                              AS sessions
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  ))                                                                               AS sessions
 FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix}
 GROUP BY
@@ -122,6 +132,10 @@ ORDER BY
     description: 'Count how many times each event name was fired.',
     explanation:
       'Groups all events by their event_name and counts occurrences. Optionally filter to a single event name. Helpful for understanding overall event volume and debugging missing events.',
+    relatedDocs: [
+      { label: 'Common Queries', href: '/ga4/bigquery/common-queries/' },
+      { label: 'Schema Reference', href: '/ga4/bigquery/schema-reference/' },
+    ],
     config: [
       {
         name: 'eventFilter',
@@ -162,6 +176,10 @@ ORDER BY
     description: 'Sessions and users broken down by traffic source and medium.',
     explanation:
       'Uses collected_traffic_source.manual_source and manual_medium (set by GTM / sGTM) to attribute sessions. Falls back gracefully when source/medium are null.',
+    relatedDocs: [
+      { label: 'Attribution Queries', href: '/ga4/bigquery/attribution-queries/' },
+      { label: 'Common Queries', href: '/ga4/bigquery/common-queries/' },
+    ],
     config: [
       {
         name: 'limit',
@@ -185,9 +203,9 @@ SELECT
   IFNULL(collected_traffic_source.manual_medium, '(none)')     AS medium,
   collected_traffic_source.manual_campaign_name                AS campaign,
   COUNT(DISTINCT user_pseudo_id)                               AS users,
-  COUNT(DISTINCT CONCAT(user_pseudo_id, (
-    SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id'
-  )))                                                          AS sessions
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  ))                                                           AS sessions
 FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix}
   AND event_name = 'session_start'
@@ -208,6 +226,10 @@ LIMIT ${limit};`;
     description: 'Top landing pages by session count.',
     explanation:
       'Identifies the first page_view in each session using the entrances parameter (value = 1), then counts sessions per landing page URL.',
+    relatedDocs: [
+      { label: 'Common Queries', href: '/ga4/bigquery/common-queries/' },
+      { label: 'Session Reconstruction', href: '/ga4/bigquery/session-reconstruction/' },
+    ],
     config: [
       {
         name: 'limit',
@@ -228,9 +250,10 @@ LIMIT ${limit};`;
 -- Date range: ${cfg.startDate || 'YYYYMMDD'} to ${cfg.endDate || 'YYYYMMDD'}
 SELECT
   (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS landing_page,
-  COUNT(DISTINCT CONCAT(user_pseudo_id, (
-    SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id'
-  )))                                                                               AS sessions
+  COUNT(DISTINCT user_pseudo_id)                                                   AS users,
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  ))                                                                               AS sessions
 FROM ${'`'}${dataset}.${tableName}${'`'}
 WHERE ${suffix}
   AND event_name = 'page_view'
@@ -250,6 +273,10 @@ LIMIT ${limit};`;
     description: 'Top exit pages — the last page viewed in each session.',
     explanation:
       'Uses ROW_NUMBER() partitioned by user + session, ordered by event_timestamp DESC, to find the final page_view event per session. Then counts how often each page is the exit page.',
+    relatedDocs: [
+      { label: 'Common Queries', href: '/ga4/bigquery/common-queries/' },
+      { label: 'Session Reconstruction', href: '/ga4/bigquery/session-reconstruction/' },
+    ],
     config: [
       {
         name: 'limit',
@@ -285,8 +312,8 @@ WITH ranked_pageviews AS (
     AND event_name = 'page_view'
 )
 SELECT
-  page_location                                                       AS exit_page,
-  COUNT(DISTINCT CONCAT(user_pseudo_id, CAST(session_id AS STRING))) AS exit_sessions
+  page_location                                                     AS exit_page,
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '-', CAST(session_id AS STRING))) AS exit_sessions
 FROM ranked_pageviews
 WHERE rn = 1
 GROUP BY
@@ -307,6 +334,10 @@ LIMIT ${limit};`;
     description: 'Total revenue, quantity sold, and purchase count per product.',
     explanation:
       'UNNESTs the items array from purchase events to get per-item revenue (price × quantity) and aggregates by item_id and item_name.',
+    relatedDocs: [
+      { label: 'Custom Ecommerce Queries', href: '/ga4/bigquery/custom-ecommerce-queries/' },
+      { label: 'Unnesting Patterns', href: '/ga4/bigquery/unnesting-patterns/' },
+    ],
     config: [
       {
         name: 'limit',
@@ -332,7 +363,7 @@ SELECT
   item.item_category,
   SUM(item.quantity)             AS total_quantity,
   SUM(item.item_revenue)         AS total_revenue,
-  COUNT(DISTINCT event_bundle_sequence_id) AS purchase_count
+  COUNT(DISTINCT ecommerce.transaction_id) AS purchase_count
 FROM ${'`'}${dataset}.${tableName}${'`'},
   UNNEST(items) AS item
 WHERE ${suffix}
@@ -356,6 +387,10 @@ LIMIT ${limit};`;
     description: 'Overall conversion rate from session to purchase.',
     explanation:
       'Counts total sessions and sessions containing a purchase event, then uses SAFE_DIVIDE to compute the conversion rate. Broken down by date.',
+    relatedDocs: [
+      { label: 'Custom Ecommerce Queries', href: '/ga4/bigquery/custom-ecommerce-queries/' },
+      { label: 'Funnel Analysis SQL', href: '/ga4/bigquery/funnel-analysis-sql/' },
+    ],
     config: [],
     generateSQL: (cfg) => {
       const dataset = cfg.dataset || 'your_project.analytics_XXXXXXXXX';
@@ -366,12 +401,12 @@ LIMIT ${limit};`;
 -- Date range: ${cfg.startDate || 'YYYYMMDD'} to ${cfg.endDate || 'YYYYMMDD'}
 SELECT
   event_date,
-  COUNT(DISTINCT CONCAT(user_pseudo_id, CAST(
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '-', CAST(
     (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING
   )))                                                                               AS total_sessions,
   COUNT(DISTINCT IF(
     event_name = 'purchase',
-    CONCAT(user_pseudo_id, CAST(
+    CONCAT(user_pseudo_id, '-', CAST(
       (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING
     )),
     NULL
@@ -380,12 +415,12 @@ SELECT
     SAFE_DIVIDE(
       COUNT(DISTINCT IF(
         event_name = 'purchase',
-        CONCAT(user_pseudo_id, CAST(
+        CONCAT(user_pseudo_id, '-', CAST(
           (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING
         )),
         NULL
       )),
-      COUNT(DISTINCT CONCAT(user_pseudo_id, CAST(
+      COUNT(DISTINCT CONCAT(user_pseudo_id, '-', CAST(
         (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING
       )))
     ) * 100, 2
@@ -406,6 +441,9 @@ ORDER BY
     description: 'Average, min, max, and total purchase revenue.',
     explanation:
       'Uses the ecommerce.purchase_revenue field (automatically populated by GA4 on purchase events) to calculate order value metrics.',
+    relatedDocs: [
+      { label: 'Custom Ecommerce Queries', href: '/ga4/bigquery/custom-ecommerce-queries/' },
+    ],
     config: [],
     generateSQL: (cfg) => {
       const dataset = cfg.dataset || 'your_project.analytics_XXXXXXXXX';
@@ -439,6 +477,10 @@ ORDER BY
     description: 'Sessions that added to cart but did not complete a purchase.',
     explanation:
       'Uses COUNTIF within a CTE to flag sessions that fired add_to_cart and/or purchase, then computes abandonment rate with SAFE_DIVIDE.',
+    relatedDocs: [
+      { label: 'Custom Ecommerce Queries', href: '/ga4/bigquery/custom-ecommerce-queries/' },
+      { label: 'Funnel Analysis SQL', href: '/ga4/bigquery/funnel-analysis-sql/' },
+    ],
     config: [],
     generateSQL: (cfg) => {
       const dataset = cfg.dataset || 'your_project.analytics_XXXXXXXXX';
@@ -450,7 +492,7 @@ ORDER BY
 WITH session_events AS (
   SELECT
     event_date,
-    CONCAT(user_pseudo_id, CAST(
+    CONCAT(user_pseudo_id, '-', CAST(
       (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING
     )) AS session_key,
     COUNTIF(event_name = 'add_to_cart') AS added_to_cart,
@@ -487,6 +529,10 @@ ORDER BY
     description: 'Views, add-to-cart, and purchases per product in a single report.',
     explanation:
       'Creates one CTE per funnel stage (view_item, add_to_cart, purchase) by UNNESTing items, then JOINs them on item_id and item_name to produce a combined funnel table.',
+    relatedDocs: [
+      { label: 'Custom Ecommerce Queries', href: '/ga4/bigquery/custom-ecommerce-queries/' },
+      { label: 'Ecommerce Item Attribution', href: '/ga4/bigquery/ecommerce-item-attribution/' },
+    ],
     config: [
       {
         name: 'limit',
@@ -562,7 +608,7 @@ LIMIT ${limit};`;
   },
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // ADVANCED (3)
+  // ADVANCED (6)
   // ─────────────────────────────────────────────────────────────────────────────
   {
     id: 'session_reconstruction',
@@ -571,6 +617,10 @@ LIMIT ${limit};`;
     description: 'Reconstruct full event sequences per session using ARRAY_AGG.',
     explanation:
       'Groups all events by user and session, then uses ARRAY_AGG ordered by event_timestamp to build an ordered array of event names. Provides session-level metrics alongside the event trail.',
+    relatedDocs: [
+      { label: 'Session Reconstruction', href: '/ga4/bigquery/session-reconstruction/' },
+      { label: 'Unnesting Patterns', href: '/ga4/bigquery/unnesting-patterns/' },
+    ],
     config: [
       {
         name: 'limit',
@@ -593,6 +643,15 @@ WITH session_data AS (
   SELECT
     user_pseudo_id,
     (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'session_engaged') AS is_engaged,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec') AS engagement_time_msec,
+    collected_traffic_source.manual_source,
+    collected_traffic_source.manual_medium,
+    collected_traffic_source.manual_campaign_name,
+    device.category AS device_category,
+    device.browser,
+    geo.country,
+    geo.city,
     event_name,
     event_timestamp,
     (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS page_location
@@ -605,11 +664,23 @@ SELECT
   MIN(event_timestamp)  AS session_start_ts,
   MAX(event_timestamp)  AS session_end_ts,
   ROUND((MAX(event_timestamp) - MIN(event_timestamp)) / 1000000, 0) AS session_duration_secs,
-  COUNT(*)              AS total_events,
+  MAX(is_engaged) AS session_engaged,
+  ROUND(MAX(engagement_time_msec) / 1000, 1) AS engagement_seconds,
+  MAX(manual_source) AS traffic_source,
+  MAX(manual_medium) AS traffic_medium,
+  MAX(manual_campaign_name) AS traffic_campaign,
+  MAX(device_category) AS device_type,
+  MAX(browser) AS browser,
+  MAX(country) AS user_country,
+  MAX(city) AS user_city,
+  COUNT(*) AS total_events,
+  COUNTIF(event_name = 'purchase') AS purchase_count,
+  COUNTIF(event_name = 'purchase') > 0 AS had_purchase,
   ARRAY_AGG(
-    STRUCT(event_name, page_location, event_timestamp)
+    event_name
     ORDER BY event_timestamp ASC
-  )                     AS event_sequence
+    LIMIT 100
+  ) AS event_sequence
 FROM session_data
 GROUP BY
   user_pseudo_id,
@@ -627,6 +698,9 @@ LIMIT ${limit};`;
     description: 'Sequential funnel from up to 4 events showing drop-off at each step.',
     explanation:
       'Counts users who reached each step of a sequential funnel. Steps are counted cumulatively — a user is counted at step N only if they also fired all previous steps within the date range. Step 4 is optional.',
+    relatedDocs: [
+      { label: 'Funnel Analysis SQL', href: '/ga4/bigquery/funnel-analysis-sql/' },
+    ],
     config: [
       {
         name: 'step1',
@@ -731,6 +805,10 @@ SELECT
     description: 'Explore the values of a specific event parameter for any event.',
     explanation:
       'UNNESTs event_params and extracts the selected value type (string_value, int_value, or double_value) for a given event and parameter key. Groups and counts by parameter value.',
+    relatedDocs: [
+      { label: 'Unnesting Patterns', href: '/ga4/bigquery/unnesting-patterns/' },
+      { label: 'Schema Reference', href: '/ga4/bigquery/schema-reference/' },
+    ],
     config: [
       {
         name: 'eventName',
@@ -791,8 +869,232 @@ LIMIT 50;`;
     },
   },
 
+  {
+    id: 'custom_channel_grouping',
+    name: 'Custom Channel Grouping',
+    category: 'advanced',
+    description: 'Classify traffic into standard marketing channels.',
+    explanation:
+      'Uses collected_traffic_source.manual_source and manual_medium to group traffic into standard Google Analytics channels: Organic Search, Paid Search, Email, Social, Referral, Direct, and Other. Shows session counts per channel.',
+    relatedDocs: [
+      { label: 'Custom Channel Grouping', href: '/ga4/bigquery/custom-channel-grouping/' },
+      { label: 'Attribution Queries', href: '/ga4/bigquery/attribution-queries/' },
+    ],
+    config: [],
+    generateSQL: (cfg) => {
+      const dataset = cfg.dataset || 'your_project.analytics_XXXXXXXXX';
+      const tableName = cfg.tableName || 'events_*';
+      const suffix = tableSuffix(cfg.startDate || '', cfg.endDate || '');
+
+      return `-- Custom Channel Grouping
+-- Date range: ${cfg.startDate || 'YYYYMMDD'} to ${cfg.endDate || 'YYYYMMDD'}
+WITH channel_data AS (
+  SELECT
+    CASE
+      WHEN LOWER(collected_traffic_source.manual_medium) = 'organic' THEN 'Organic Search'
+      WHEN LOWER(collected_traffic_source.manual_medium) IN ('cpc', 'ppc') THEN 'Paid Search'
+      WHEN LOWER(collected_traffic_source.manual_medium) = 'email' THEN 'Email'
+      WHEN LOWER(collected_traffic_source.manual_medium) IN ('social', 'social-network', 'social-media', 'sm') THEN 'Social'
+      WHEN LOWER(collected_traffic_source.manual_medium) = 'referral' THEN 'Referral'
+      WHEN collected_traffic_source.manual_source IS NULL OR LOWER(collected_traffic_source.manual_source) = '(direct)' THEN 'Direct'
+      ELSE 'Other'
+    END AS channel,
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id
+  FROM ${'`'}${dataset}.${tableName}${'`'}
+  WHERE ${suffix}
+    AND event_name = 'session_start'
+)
+SELECT
+  channel,
+  COUNT(DISTINCT user_pseudo_id) AS users,
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '-', CAST(session_id AS STRING))) AS sessions
+FROM channel_data
+GROUP BY
+  channel
+ORDER BY
+  sessions DESC;`;
+    },
+  },
+
+  {
+    id: 'cohort_analysis',
+    name: 'Cohort Analysis',
+    category: 'advanced',
+    description: 'Analyze user retention by cohort across time periods.',
+    explanation:
+      'Groups users by their first visit cohort (day/week/month), then tracks how many returned in subsequent periods. Useful for measuring retention and understanding user lifecycle patterns.',
+    relatedDocs: [
+      { label: 'Common Queries', href: '/ga4/bigquery/common-queries/' },
+      { label: 'Session Reconstruction', href: '/ga4/bigquery/session-reconstruction/' },
+    ],
+    config: [
+      {
+        name: 'granularity',
+        label: 'Cohort Granularity',
+        type: 'select',
+        required: true,
+        defaultValue: 'week',
+        helpText: 'Time period for cohort grouping',
+        options: [
+          { label: 'Daily', value: 'day' },
+          { label: 'Weekly', value: 'week' },
+          { label: 'Monthly', value: 'month' },
+        ],
+      },
+      {
+        name: 'retention_event',
+        label: 'Retention Event',
+        type: 'text',
+        required: false,
+        defaultValue: 'page_view',
+        placeholder: 'page_view',
+        helpText: 'Event name to track for retention (default: page_view)',
+      },
+    ],
+    generateSQL: (cfg) => {
+      const dataset = cfg.dataset || 'your_project.analytics_XXXXXXXXX';
+      const tableName = cfg.tableName || 'events_*';
+      const suffix = tableSuffix(cfg.startDate || '', cfg.endDate || '');
+      const granularity = cfg.granularity || 'week';
+      const retentionEvent = cfg.retention_event || 'page_view';
+
+      let cohortFormat = 'DATE(TIMESTAMP_MICROS(MIN(event_timestamp)))';
+      let periodFormat = 'DATE(TIMESTAMP_MICROS(event_timestamp))';
+
+      if (granularity === 'week') {
+        cohortFormat = 'DATE_TRUNC(DATE(TIMESTAMP_MICROS(MIN(event_timestamp))), WEEK)';
+        periodFormat = 'DATE_TRUNC(DATE(TIMESTAMP_MICROS(event_timestamp)), WEEK)';
+      } else if (granularity === 'month') {
+        cohortFormat = 'DATE_TRUNC(DATE(TIMESTAMP_MICROS(MIN(event_timestamp))), MONTH)';
+        periodFormat = 'DATE_TRUNC(DATE(TIMESTAMP_MICROS(event_timestamp)), MONTH)';
+      }
+
+      return `-- Cohort Analysis (${granularity})
+-- Date range: ${cfg.startDate || 'YYYYMMDD'} to ${cfg.endDate || 'YYYYMMDD'}
+-- Retention event: ${retentionEvent}
+WITH first_visit AS (
+  SELECT
+    user_pseudo_id,
+    ${cohortFormat} AS cohort_date
+  FROM ${'`'}${dataset}.${tableName}${'`'}
+  WHERE ${suffix}
+  GROUP BY
+    user_pseudo_id
+),
+activity AS (
+  SELECT
+    fv.user_pseudo_id,
+    fv.cohort_date,
+    ${periodFormat} AS activity_date,
+    DATE_DIFF(
+      ${periodFormat},
+      fv.cohort_date,
+      ${granularity === 'day' ? 'DAY' : granularity === 'week' ? 'WEEK' : 'MONTH'}
+    ) AS period_number
+  FROM ${'`'}${dataset}.${tableName}${'`'} e
+  INNER JOIN first_visit fv ON e.user_pseudo_id = fv.user_pseudo_id
+  WHERE ${suffix}
+    AND e.event_name = '${retentionEvent}'
+  GROUP BY
+    fv.user_pseudo_id,
+    fv.cohort_date,
+    activity_date
+)
+SELECT
+  cohort_date,
+  COUNTIF(period_number = 0) AS period_0,
+  COUNTIF(period_number = 1) AS period_1,
+  COUNTIF(period_number = 2) AS period_2,
+  COUNTIF(period_number = 3) AS period_3,
+  COUNTIF(period_number = 4) AS period_4,
+  ROUND(100.0 * COUNTIF(period_number = 1) / COUNTIF(period_number = 0), 1) AS retention_pct_p1,
+  ROUND(100.0 * COUNTIF(period_number = 2) / COUNTIF(period_number = 0), 1) AS retention_pct_p2,
+  ROUND(100.0 * COUNTIF(period_number = 3) / COUNTIF(period_number = 0), 1) AS retention_pct_p3
+FROM activity
+GROUP BY
+  cohort_date
+ORDER BY
+  cohort_date DESC;`;
+    },
+  },
+
+  {
+    id: 'user_journey_analysis',
+    name: 'User Journey / Path Analysis',
+    category: 'advanced',
+    description: 'Identify the most common event sequences in user sessions.',
+    explanation:
+      'Groups events by session and creates an ordered sequence of event names. Then aggregates to show the most common paths users take. Useful for understanding user behavior patterns and identifying conversion funnel drops.',
+    relatedDocs: [
+      { label: 'Session Reconstruction', href: '/ga4/bigquery/session-reconstruction/' },
+      { label: 'Funnel Analysis SQL', href: '/ga4/bigquery/funnel-analysis-sql/' },
+    ],
+    config: [
+      {
+        name: 'max_steps',
+        label: 'Max Steps in Path',
+        type: 'number',
+        required: false,
+        defaultValue: '5',
+        helpText: 'Maximum number of events to include in path sequence',
+      },
+      {
+        name: 'starting_event',
+        label: 'Starting Event (optional)',
+        type: 'text',
+        required: false,
+        placeholder: 'session_start',
+        helpText: 'Filter to paths starting with a specific event (leave blank for all)',
+      },
+    ],
+    generateSQL: (cfg) => {
+      const dataset = cfg.dataset || 'your_project.analytics_XXXXXXXXX';
+      const tableName = cfg.tableName || 'events_*';
+      const suffix = tableSuffix(cfg.startDate || '', cfg.endDate || '');
+      const maxSteps = cfg.max_steps || '5';
+      const startingEvent = cfg.starting_event || '';
+
+      const startFilter = startingEvent
+        ? `AND (SELECT event_name FROM UNNEST(event_sequence) ORDER BY OFFSET LIMIT 1) = '${startingEvent}'`
+        : '';
+
+      return `-- User Journey / Path Analysis
+-- Date range: ${cfg.startDate || 'YYYYMMDD'} to ${cfg.endDate || 'YYYYMMDD'}
+-- Max steps: ${maxSteps}
+WITH session_events AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    ARRAY_AGG(
+      event_name
+      ORDER BY event_timestamp ASC
+      LIMIT ${maxSteps}
+    ) AS event_sequence
+  FROM ${'`'}${dataset}.${tableName}${'`'}
+  WHERE ${suffix}
+  GROUP BY
+    user_pseudo_id,
+    session_id
+)
+SELECT
+  STRING_AGG(event_name, ' > ' ORDER BY OFFSET) AS user_path,
+  COUNT(*) AS path_count,
+  COUNT(DISTINCT user_pseudo_id) AS unique_users,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct_of_paths
+FROM session_events,
+  UNNEST(event_sequence) AS event_name WITH OFFSET
+WHERE TRUE ${startFilter}
+GROUP BY
+  user_path
+ORDER BY
+  path_count DESC
+LIMIT 50;`;
+    },
+  },
+
   // ─────────────────────────────────────────────────────────────────────────────
-  // UTILITY (3)
+  // UTILITY (4)
   // ─────────────────────────────────────────────────────────────────────────────
   {
     id: 'schema_explorer',
@@ -801,6 +1103,10 @@ LIMIT 50;`;
     description: 'List all distinct event_params keys present in the data.',
     explanation:
       'UNNESTs event_params across all events and uses ARRAY_AGG(DISTINCT ...) to collect the unique parameter keys. Useful for discovering what custom parameters have been sent.',
+    relatedDocs: [
+      { label: 'Schema Reference', href: '/ga4/bigquery/schema-reference/' },
+      { label: 'Export Setup', href: '/ga4/bigquery/export-setup/' },
+    ],
     config: [],
     generateSQL: (cfg) => {
       const dataset = cfg.dataset || 'your_project.analytics_XXXXXXXXX';
@@ -830,6 +1136,10 @@ ORDER BY
     description: 'Check the latest event timestamp in the table.',
     explanation:
       'Returns the maximum event_timestamp (converted to a readable datetime) and the latest event_date shard available. Useful for verifying that data is up to date.',
+    relatedDocs: [
+      { label: 'Export Setup', href: '/ga4/bigquery/export-setup/' },
+      { label: 'Cost Optimization', href: '/ga4/bigquery/cost-optimization/' },
+    ],
     config: [],
     generateSQL: (cfg) => {
       const dataset = cfg.dataset || 'your_project.analytics_XXXXXXXXX';
@@ -856,6 +1166,9 @@ WHERE ${suffix};`;
     description: 'Quick summary of total events, unique users, and dates in the table.',
     explanation:
       'Counts total event rows, distinct users (user_pseudo_id), and distinct event_date values. No filtering on event_name so it covers the full dataset.',
+    relatedDocs: [
+      { label: 'Cost Optimization', href: '/ga4/bigquery/cost-optimization/' },
+    ],
     config: [],
     generateSQL: (cfg) => {
       const dataset = cfg.dataset || 'your_project.analytics_XXXXXXXXX';

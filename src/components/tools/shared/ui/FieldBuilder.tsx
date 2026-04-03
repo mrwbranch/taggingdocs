@@ -1,3 +1,5 @@
+import React from 'react';
+
 interface TextFieldProps {
   label: string;
   value: string;
@@ -6,9 +8,57 @@ interface TextFieldProps {
   helpText?: string;
   required?: boolean;
   type?: 'text' | 'number' | 'date';
+  validation?: { pattern?: string; min?: number; max?: number; maxLength?: number };
+  error?: string;
+  onBlur?: () => void;
 }
 
-export function TextField({ label, value, onChange, placeholder, helpText, required, type = 'text' }: TextFieldProps) {
+function validateInput(value: string, validation?: TextFieldProps['validation']): string {
+  if (!validation || !value) return '';
+
+  if (validation.pattern) {
+    const regex = new RegExp(validation.pattern);
+    if (!regex.test(value)) {
+      return `Invalid format`;
+    }
+  }
+
+  if (validation.maxLength && value.length > validation.maxLength) {
+    return `Maximum ${validation.maxLength} characters`;
+  }
+
+  if (validation.min !== undefined && !isNaN(parseFloat(value))) {
+    const num = parseFloat(value);
+    if (num < validation.min) {
+      return `Minimum value is ${validation.min}`;
+    }
+  }
+
+  if (validation.max !== undefined && !isNaN(parseFloat(value))) {
+    const num = parseFloat(value);
+    if (num > validation.max) {
+      return `Maximum value is ${validation.max}`;
+    }
+  }
+
+  return '';
+}
+
+export function TextField({ label, value, onChange, placeholder, helpText, required, type = 'text', validation, error: externalError, onBlur }: TextFieldProps) {
+  const [internalError, setInternalError] = React.useState('');
+  const displayError = externalError || internalError;
+
+  const handleBlur = () => {
+    const validationError = validateInput(value, validation);
+    setInternalError(validationError);
+    onBlur?.();
+  };
+
+  const handleChange = (newValue: string) => {
+    onChange(newValue);
+    setInternalError('');
+  };
+
   return (
     <div className="flex flex-col gap-1">
       <label className="text-sm font-medium" style={{ color: '#e2e8f0' }}>
@@ -18,19 +68,27 @@ export function TextField({ label, value, onChange, placeholder, helpText, requi
       <input
         type={type}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => handleChange(e.target.value)}
         placeholder={placeholder}
         className="px-3 py-2 rounded-md border text-sm outline-none transition-colors"
         style={{
           backgroundColor: 'rgb(15 23 42 / 0.5)',
-          borderColor: 'rgb(51 65 85 / 0.7)',
+          borderColor: displayError ? '#f87171' : 'rgb(51 65 85 / 0.7)',
           color: '#e2e8f0',
         }}
         onFocus={(e) => (e.target.style.borderColor = '#06b6d4')}
-        onBlur={(e) => (e.target.style.borderColor = 'rgb(51 65 85 / 0.7)')}
+        onBlur={(e) => {
+          handleBlur();
+          if (!displayError) {
+            e.target.style.borderColor = 'rgb(51 65 85 / 0.7)';
+          }
+        }}
       />
       {helpText && (
         <span className="text-xs" style={{ color: '#64748b' }}>{helpText}</span>
+      )}
+      {displayError && (
+        <span className="text-xs" style={{ color: '#fca5a5' }}>{displayError}</span>
       )}
     </div>
   );

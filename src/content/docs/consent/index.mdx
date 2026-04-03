@@ -23,12 +23,12 @@ If you are new to Consent Mode, read these two articles first. They give you the
   <LinkCard
     title="Consent Mode v2 Explained"
     description="What the seven consent types actually do, how cookieless pings work, and why behavioral modeling matters."
-    href="/consent/consent-mode-v2/"
+    href="/consent/consent-mode/consent-mode-v2/"
   />
   <LinkCard
     title="Basic vs. Advanced Consent Mode"
     description="The single most consequential configuration decision in your consent setup — and how to choose correctly."
-    href="/consent/basic-consent-mode/"
+    href="/consent/consent-mode/basic-consent-mode/"
   />
 </CardGrid>
 
@@ -38,22 +38,22 @@ If you are new to Consent Mode, read these two articles first. They give you the
   <LinkCard
     title="Consent Mode GTM Setup"
     description="Step-by-step: setting default consent state, updating on user interaction, and configuring per-tag consent checks."
-    href="/consent/consent-mode-gtm-setup/"
+    href="/consent/consent-mode/consent-mode-gtm-setup/"
   />
   <LinkCard
     title="CMP Integration"
     description="Connecting Cookiebot, OneTrust, Usercentrics, CookieYes, and other CMPs to Consent Mode via GTM."
-    href="/consent/cmp-integration/"
+    href="/consent/cmp-integration/cmp-integration/"
   />
   <LinkCard
     title="Consent Initialization Timing"
     description="The most common Consent Mode misconfiguration — and the trigger order that fixes it."
-    href="/consent/consent-initialization-timing/"
+    href="/consent/advanced/consent-initialization-timing/"
   />
   <LinkCard
     title="Consent State via DataLayer"
     description="Managing and reading consent state in the dataLayer for non-native tags and custom logic."
-    href="/consent/consent-state-datalayer/"
+    href="/consent/cmp-integration/consent-state-datalayer/"
   />
 </CardGrid>
 
@@ -63,22 +63,22 @@ If you are new to Consent Mode, read these two articles first. They give you the
   <LinkCard
     title="Advanced Consent Mode"
     description="Cookieless pings, behavioral modeling, and the privacy tradeoffs of sending data before consent."
-    href="/consent/advanced-consent-mode/"
+    href="/consent/consent-mode/advanced-consent-mode/"
   />
   <LinkCard
     title="Consent for Non-Google Tags"
     description="How to gate Meta Pixel, TikTok, LinkedIn, and other tags that don't natively respect Consent Mode."
-    href="/consent/consent-non-google-tags/"
+    href="/consent/cmp-integration/consent-non-google-tags/"
   />
   <LinkCard
     title="Cross-Domain Consent"
     description="Consistent consent state across multiple domains — and what breaks when you get it wrong."
-    href="/consent/consent-cross-domain/"
+    href="/consent/advanced/consent-cross-domain/"
   />
   <LinkCard
     title="Server-Side Consent"
     description="Consent handling in server-side GTM — the architecture, the event model, and PII redaction."
-    href="/consent/server-side-consent/"
+    href="/consent/advanced/server-side-consent/"
   />
 </CardGrid>
 
@@ -87,7 +87,7 @@ If you are new to Consent Mode, read these two articles first. They give you the
 <LinkCard
   title="Testing Your Consent Implementation"
   description="A complete testing protocol: cookies, network requests, GTM Preview mode, GA4 DebugView, and automated verification."
-  href="/consent/testing-consent/"
+  href="/consent/advanced/testing-consent/"
 />
 
 ## What you need to understand before starting
@@ -102,7 +102,7 @@ What Consent Mode does **not** do:
 
 The CMP (Consent Management Platform) is the tool that shows the banner, records the choice, and calls the consent update function. GTM + Consent Mode is the mechanism that receives that signal and acts on it. You need both.
 
-The articles in this section assume you have (or are about to get) a CMP. If you don't have one, start with [CMP Integration](/consent/cmp-integration/) to understand your options before configuring anything in GTM.
+The articles in this section assume you have (or are about to get) a CMP. If you don't have one, start with [CMP Integration](/consent/cmp-integration/cmp-integration/) to understand your options before configuring anything in GTM.
 
 <Aside type="tip">
 If consent banners are a concern for your team, some analytics tools work without cookies and do not require consent for basic analytics in most EU jurisdictions. See [Analytics Alternatives](/analytics-alternatives/) for privacy-focused options like Plausible, Fathom, and Simple Analytics.

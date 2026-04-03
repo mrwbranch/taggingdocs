@@ -7,44 +7,44 @@ interface Props {
 }
 
 function highlightCode(code: string, language: string): string {
-  let highlighted = code
+  const escaped = code
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
-  // Comments
-  highlighted = highlighted.replace(
-    /(\/\/.*$)/gm,
-    '<span style="color:#6272a4">$1</span>'
-  );
+  const isJS = language === 'javascript' || language === 'typescript';
+  const isSQL = language === 'sql';
 
-  // Strings
-  highlighted = highlighted.replace(
-    /('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/g,
-    '<span style="color:#f1fa8c">$1</span>'
-  );
+  // Single-pass tokenization prevents nested span corruption.
+  // Each branch in the combined regex captures into its own group —
+  // once a token is matched (e.g., a comment), text inside it won't
+  // be re-processed by other patterns.
+  const commentPat = isSQL ? '(--.*$)' : '(\\/\\/.*$)';
+  const stringPat = "('(?:[^'\\\\]|\\\\.)*'|\"(?:[^\"\\\\]|\\\\.)*\")";
+  const numberPat = '(\\b\\d+\\.?\\d*\\b)';
 
-  // Numbers
-  highlighted = highlighted.replace(
-    /\b(\d+\.?\d*)\b/g,
-    '<span style="color:#bd93f9">$1</span>'
-  );
-
-  if (language === 'javascript' || language === 'typescript') {
-    highlighted = highlighted.replace(
-      /\b(const|let|var|function|return|if|else|true|false|null|undefined|interface|type|export|import|from)\b/g,
-      '<span style="color:#ff79c6">$1</span>'
-    );
+  let keywordPat = '';
+  if (isJS) {
+    keywordPat = '(\\b(?:const|let|var|function|return|if|else|true|false|null|undefined|interface|type|export|import|from)\\b)';
+  } else if (isSQL) {
+    keywordPat = '(\\b(?:SELECT|FROM|WHERE|AND|OR|GROUP|BY|ORDER|ASC|DESC|JOIN|LEFT|RIGHT|INNER|OUTER|ON|AS|COUNT|SUM|AVG|MIN|MAX|DISTINCT|LIMIT|OFFSET|HAVING|UNION|ALL|IN|NOT|NULL|IS|BETWEEN|LIKE|CASE|WHEN|THEN|ELSE|END|WITH|UNNEST|CROSS|SAFE_CAST|SAFE_DIVIDE|APPROX_COUNT_DISTINCT|TIMESTAMP_MICROS|TIMESTAMP_DIFF|PARSE_DATE|FORMAT_DATE|DATE|INT64|STRING|FLOAT64|STRUCT|ARRAY|PARTITION|OVER|ROW_NUMBER|LEAD|LAG|FIRST_VALUE|LAST_VALUE|COUNTIF|IFNULL|COALESCE|ROUND|CONCAT|CAST|ARRAY_AGG|STRING_AGG|FULL|USING)\\b)';
   }
 
-  if (language === 'sql') {
-    highlighted = highlighted.replace(
-      /\b(SELECT|FROM|WHERE|AND|OR|GROUP|BY|ORDER|ASC|DESC|JOIN|LEFT|RIGHT|INNER|OUTER|ON|AS|COUNT|SUM|AVG|MIN|MAX|DISTINCT|LIMIT|OFFSET|HAVING|UNION|ALL|IN|NOT|NULL|IS|BETWEEN|LIKE|CASE|WHEN|THEN|ELSE|END|WITH|UNNEST|CROSS|SAFE_CAST|APPROX_COUNT_DISTINCT|COUNT_DISTINCT|TIMESTAMP_MICROS|PARSE_DATE|FORMAT_DATE|DATE|INT64|STRING|FLOAT64|STRUCT|ARRAY|PARTITION|OVER|ROW_NUMBER|LEAD|LAG|FIRST_VALUE|LAST_VALUE)\b/gi,
-      '<span style="color:#ff79c6">$1</span>'
-    );
-  }
+  const parts = [commentPat, stringPat];
+  if (keywordPat) parts.push(keywordPat);
+  parts.push(numberPat);
 
-  return highlighted;
+  const combined = new RegExp(parts.join('|'), 'gm' + (isSQL ? 'i' : ''));
+
+  return escaped.replace(combined, (...args) => {
+    // Groups are positional: 1=comment, 2=string, 3=keyword (if present), last=number
+    if (args[1]) return `<span style="color:#6272a4">${args[1]}</span>`;
+    if (args[2]) return `<span style="color:#f1fa8c">${args[2]}</span>`;
+    if (keywordPat && args[3]) return `<span style="color:#ff79c6">${args[3]}</span>`;
+    const numIdx = keywordPat ? 4 : 3;
+    if (args[numIdx]) return `<span style="color:#bd93f9">${args[numIdx]}</span>`;
+    return args[0];
+  });
 }
 
 export function CodeOutput({ code, language, title }: Props) {

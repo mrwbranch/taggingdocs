@@ -55,15 +55,6 @@ export default defineConfig({
       ],
       sidebar: [
         {
-          label: 'Tools',
-          items: [
-            { label: 'All Tools', link: '/tools/' },
-            { label: 'DataLayer Builder', link: '/tools/datalayer-builder/' },
-            { label: 'BigQuery Generator', link: '/tools/bigquery-generator/' },
-            { label: 'Regex Tester', link: '/tools/regex-tester/' },
-          ],
-        },
-        {
           label: 'Foundations',
           collapsed: true,
           autogenerate: { directory: 'foundations' },
@@ -121,44 +112,60 @@ export default defineConfig({
           ],
         },
         {
+          label: 'How-To Guides',
+          collapsed: true,
+          items: [
+            { label: 'Overview', link: '/recipes/' },
+            { label: 'Interaction Tracking', collapsed: true, autogenerate: { directory: 'recipes/interaction-tracking' } },
+            { label: 'Ecommerce & Conversions', collapsed: true, autogenerate: { directory: 'recipes/ecommerce-conversions' } },
+            { label: 'Cross-Domain & Setup', collapsed: true, autogenerate: { directory: 'recipes/cross-domain-setup' } },
+            { label: 'Testing & Experimentation', collapsed: true, autogenerate: { directory: 'recipes/testing' } },
+            { label: 'Privacy & Consent', collapsed: true, autogenerate: { directory: 'recipes/privacy-consent' } },
+            { label: 'Reference', collapsed: true, autogenerate: { directory: 'recipes/reference' } },
+          ],
+        },
+        {
+          label: 'Ad Platforms & Integrations',
+          collapsed: true,
+          autogenerate: { directory: 'integrations' },
+        },
+        {
+          label: 'Consent & Privacy',
+          collapsed: true,
+          items: [
+            { label: 'Overview', link: '/consent/' },
+            { label: 'Consent Mode', collapsed: true, autogenerate: { directory: 'consent/consent-mode' } },
+            { label: 'CMP Integration', collapsed: true, autogenerate: { directory: 'consent/cmp-integration' } },
+            { label: 'Advanced', collapsed: true, autogenerate: { directory: 'consent/advanced' } },
+          ],
+        },
+        {
+          label: 'Privacy & Browsers',
+          collapsed: true,
+          autogenerate: { directory: 'privacy' },
+        },
+        {
+          label: 'GTM Advanced',
+          collapsed: true,
+          items: [
+            { label: 'Internals', collapsed: true, autogenerate: { directory: 'internals' } },
+            { label: 'Custom Templates', collapsed: true, autogenerate: { directory: 'templates' } },
+            { label: 'Security & Governance', collapsed: true, autogenerate: { directory: 'security' } },
+          ],
+        },
+        {
           label: 'Analytics Alternatives',
           collapsed: true,
           autogenerate: { directory: 'analytics-alternatives' },
         },
         {
-          label: 'Consent & Privacy',
-          collapsed: true,
-          autogenerate: { directory: 'consent' },
-        },
-        {
-          label: 'GTM Internals',
-          collapsed: true,
-          autogenerate: { directory: 'internals' },
-        },
-        {
-          label: 'Custom Templates',
-          collapsed: true,
-          autogenerate: { directory: 'templates' },
-        },
-        {
-          label: 'Security & Governance',
-          collapsed: true,
-          autogenerate: { directory: 'security' },
-        },
-        {
-          label: 'Browser & Privacy',
-          collapsed: true,
-          autogenerate: { directory: 'privacy' },
-        },
-        {
-          label: 'Ad Platforms',
-          collapsed: true,
-          autogenerate: { directory: 'integrations' },
-        },
-        {
-          label: 'Recipes',
-          collapsed: true,
-          autogenerate: { directory: 'recipes' },
+          label: 'Tools',
+          items: [
+            { label: 'All Tools', link: '/tools/' },
+            { label: 'DataLayer Builder', link: '/tools/datalayer-builder/' },
+            { label: 'BigQuery Generator', link: '/tools/bigquery-generator/' },
+            { label: 'Regex Tester', link: '/tools/regex-tester/' },
+          ],
         },
         {
           label: 'Resources',

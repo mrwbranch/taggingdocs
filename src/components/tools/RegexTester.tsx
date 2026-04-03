@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo } from 'react';
 import { RE2JS } from 're2js';
+import { useToolState } from './shared/hooks/useToolState';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -223,6 +224,16 @@ const TEMPLATES: Template[] = [
   },
 ];
 
+// ── Tool State Configuration ──────────────────────────────────────────────────
+
+const TOOL_FIELDS = [
+  { name: 'context', defaultValue: 'ga4' },
+  { name: 'pattern', defaultValue: '' },
+  { name: 'case_insensitive', defaultValue: 'false' },
+  { name: 'full_match', defaultValue: 'false' },
+  { name: 'test_strings_json', defaultValue: JSON.stringify([{ id: 1, value: '' }]) },
+];
+
 // ── ID counter ────────────────────────────────────────────────────────────────
 
 let nextId = 1;
@@ -389,14 +400,32 @@ function RegexReference() {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function RegexTester() {
-  const [context, setContext] = useState<Context>('ga4');
-  const [pattern, setPattern] = useState('');
-  const [caseInsensitive, setCaseInsensitive] = useState(false);
-  const [fullMatch, setFullMatch] = useState(false);
-  const [testStrings, setTestStrings] = useState<TestString[]>([
-    { id: makeId(), value: '' },
-  ]);
+  const { values, setValue } = useToolState('regex-tester', TOOL_FIELDS);
   const [focusedId, setFocusedId] = useState<number | null>(null);
+
+  // Derive state from stored values
+  const context = values.context as Context;
+  const pattern = values.pattern;
+  const caseInsensitive = values.case_insensitive === 'true';
+  const fullMatch = values.full_match === 'true';
+
+  // Parse test strings from JSON
+  const testStrings: TestString[] = useMemo(() => {
+    try {
+      const parsed = JSON.parse(values.test_strings_json);
+      return Array.isArray(parsed) && parsed.length > 0 ? parsed : [{ id: 1, value: '' }];
+    } catch {
+      return [{ id: 1, value: '' }];
+    }
+  }, [values.test_strings_json]);
+
+  // Advance nextId past any restored IDs to avoid collisions
+  useMemo(() => {
+    const maxRestoredId = testStrings.reduce((max, ts) => Math.max(max, ts.id), 0);
+    if (maxRestoredId >= nextId) {
+      nextId = maxRestoredId + 1;
+    }
+  }, [testStrings]);
 
   const re2Validation = useMemo(
     () => validateRe2(pattern, caseInsensitive),
@@ -414,25 +443,27 @@ export default function RegexTester() {
   }, [pattern, testStrings, caseInsensitive, fullMatch, context, re2Validation.valid]);
 
   const addTestString = useCallback(() => {
-    setTestStrings((prev) => [...prev, { id: makeId(), value: '' }]);
-  }, []);
+    const newTestStrings = [...testStrings, { id: makeId(), value: '' }];
+    setValue('test_strings_json', JSON.stringify(newTestStrings));
+  }, [testStrings, setValue]);
 
   const removeTestString = useCallback((id: number) => {
-    setTestStrings((prev) => {
-      if (prev.length === 1) return prev;
-      return prev.filter((ts) => ts.id !== id);
-    });
-  }, []);
+    if (testStrings.length === 1) return;
+    const newTestStrings = testStrings.filter((ts) => ts.id !== id);
+    setValue('test_strings_json', JSON.stringify(newTestStrings));
+  }, [testStrings, setValue]);
 
   const updateTestString = useCallback((id: number, value: string) => {
-    setTestStrings((prev) => prev.map((ts) => (ts.id === id ? { ...ts, value } : ts)));
-  }, []);
+    const newTestStrings = testStrings.map((ts) => (ts.id === id ? { ...ts, value } : ts));
+    setValue('test_strings_json', JSON.stringify(newTestStrings));
+  }, [testStrings, setValue]);
 
   const applyTemplate = useCallback((template: Template) => {
-    setPattern(template.pattern);
-    setTestStrings(template.testStrings.map((s) => ({ id: makeId(), value: s })));
+    setValue('pattern', template.pattern);
+    const newTestStrings = template.testStrings.map((s) => ({ id: makeId(), value: s }));
+    setValue('test_strings_json', JSON.stringify(newTestStrings));
     setFocusedId(null);
-  }, []);
+  }, [setValue]);
 
   const isGtm = context === 'gtm';
   const effectiveFullMatch = fullMatch || isGtm;
@@ -489,7 +520,7 @@ export default function RegexTester() {
               <button
                 key={value}
                 type="button"
-                onClick={() => setContext(value)}
+                onClick={() => setValue('context', value)}
                 className="flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors border"
                 style={
                   context === value
@@ -535,7 +566,7 @@ export default function RegexTester() {
           <input
             type="text"
             value={pattern}
-            onChange={(e) => setPattern(e.target.value)}
+            onChange={(e) => setValue('pattern', e.target.value)}
             placeholder="Enter a regex pattern…"
             className="px-3 py-2 rounded-md border text-sm font-mono outline-none transition-colors"
             style={{
@@ -578,7 +609,7 @@ export default function RegexTester() {
             <input
               type="checkbox"
               checked={caseInsensitive}
-              onChange={(e) => setCaseInsensitive(e.target.checked)}
+              onChange={(e) => setValue('case_insensitive', String(e.target.checked))}
               className="accent-cyan-500"
             />
             <span className="text-sm" style={{ color: '#e2e8f0' }}>
@@ -590,7 +621,7 @@ export default function RegexTester() {
               type="checkbox"
               checked={effectiveFullMatch}
               disabled={isGtm}
-              onChange={(e) => !isGtm && setFullMatch(e.target.checked)}
+              onChange={(e) => !isGtm && setValue('full_match', String(e.target.checked))}
               className="accent-cyan-500"
               style={{ cursor: isGtm ? 'not-allowed' : 'pointer' }}
             />

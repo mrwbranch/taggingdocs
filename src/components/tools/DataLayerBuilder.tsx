@@ -8,6 +8,8 @@ import type { ValidationMessage } from './shared/ui/ValidationResult';
 import { ECOMMERCE_EVENTS } from './shared/schemas/ecommerce-events';
 import { RECOMMENDED_EVENTS } from './shared/schemas/recommended-events';
 import type { EventSchema, ParameterDef } from './shared/schemas/item-parameters';
+import { ISO_CURRENCIES, EVENT_NAME_REGEX, EVENT_NAME_MAX_LENGTH, PARAM_VALUE_MAX_LENGTH } from './shared/validation/constants';
+import { validateEventName, validateParamValue, enumToOptions } from './shared/validation/helpers';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -128,7 +130,17 @@ function generateCode(opts: {
       lines.push('dataLayer.push({');
       lines.push(`  event: '${resolvedName}',`);
       lines.push('  user_data: {');
-      lines.push("    email: 'user@example.com'");
+      lines.push("    email: '',        // SHA256 hash or plain text (Google hashes automatically)");
+      lines.push("    phone_number: '', // E.164 format: +1234567890");
+      lines.push('    address: {');
+      lines.push("      first_name: '',");
+      lines.push("      last_name: '',");
+      lines.push("      street: '',");
+      lines.push("      city: '',");
+      lines.push("      region: '',     // State or province");
+      lines.push("      postal_code: '',");
+      lines.push("      country: ''     // ISO 3166-1 alpha-2: US, SE, GB");
+      lines.push('    }');
       lines.push('  }');
       lines.push('});');
     }
@@ -195,7 +207,22 @@ function generateCode(opts: {
     if (includeUserData) {
       lines.push('');
       lines.push('// Enhanced Conversions — user_data');
-      lines.push('// Add user_data alongside ecommerce in the same push, or separately');
+      lines.push('dataLayer.push({');
+      lines.push(`  event: '${eventName}',`);
+      lines.push('  user_data: {');
+      lines.push("    email: '',        // SHA256 hash or plain text (Google hashes automatically)");
+      lines.push("    phone_number: '', // E.164 format: +1234567890");
+      lines.push('    address: {');
+      lines.push("      first_name: '',");
+      lines.push("      last_name: '',");
+      lines.push("      street: '',");
+      lines.push("      city: '',");
+      lines.push("      region: '',     // State or province");
+      lines.push("      postal_code: '',");
+      lines.push("      country: ''     // ISO 3166-1 alpha-2: US, SE, GB");
+      lines.push('    }');
+      lines.push('  }');
+      lines.push('});');
     }
   } else {
     // Engagement / non-ecommerce
@@ -217,9 +244,19 @@ function generateCode(opts: {
       lines.push('');
       lines.push('// Enhanced Conversions — user_data');
       lines.push('dataLayer.push({');
-      lines.push("  event: 'user_data',");
+      lines.push(`  event: '${eventName}',`);
       lines.push('  user_data: {');
-      lines.push("    email: 'user@example.com'");
+      lines.push("    email: '',        // SHA256 hash or plain text (Google hashes automatically)");
+      lines.push("    phone_number: '', // E.164 format: +1234567890");
+      lines.push('    address: {');
+      lines.push("      first_name: '',");
+      lines.push("      last_name: '',");
+      lines.push("      street: '',");
+      lines.push("      city: '',");
+      lines.push("      region: '',     // State or province");
+      lines.push("      postal_code: '',");
+      lines.push("      country: ''     // ISO 3166-1 alpha-2: US, SE, GB");
+      lines.push('    }');
       lines.push('  }');
       lines.push('});');
     }
@@ -228,21 +265,6 @@ function generateCode(opts: {
   return lines.join('\n');
 }
 
-// ── ISO 4217 common currencies ───────────────────────────────────────────────
-const ISO_CURRENCIES = new Set([
-  'AED','AFN','ALL','AMD','ANG','AOA','ARS','AUD','AWG','AZN','BAM','BBD','BDT',
-  'BGN','BHD','BIF','BMD','BND','BOB','BRL','BSD','BTN','BWP','BYN','BZD','CAD',
-  'CDF','CHF','CLP','CNY','COP','CRC','CUP','CVE','CZK','DJF','DKK','DOP','DZD',
-  'EGP','ERN','ETB','EUR','FJD','FKP','GBP','GEL','GHS','GIP','GMD','GNF','GTQ',
-  'GYD','HKD','HNL','HRK','HTG','HUF','IDR','ILS','INR','IQD','IRR','ISK','JMD',
-  'JOD','JPY','KES','KGS','KHR','KMF','KPW','KRW','KWD','KYD','KZT','LAK','LBP',
-  'LKR','LRD','LSL','LYD','MAD','MDL','MGA','MKD','MMK','MNT','MOP','MRU','MUR',
-  'MVR','MWK','MXN','MYR','MZN','NAD','NGN','NIO','NOK','NPR','NZD','OMR','PAB',
-  'PEN','PGK','PHP','PKR','PLN','PYG','QAR','RON','RSD','RUB','RWF','SAR','SBD',
-  'SCR','SDG','SEK','SGD','SHP','SLL','SOS','SRD','STN','SVC','SYP','SZL','THB',
-  'TJS','TMT','TND','TOP','TRY','TTD','TWD','TZS','UAH','UGX','USD','UYU','UZS',
-  'VES','VND','VUV','WST','XAF','XCD','XOF','XPF','YER','ZAR','ZMW','ZWL',
-]);
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
@@ -308,6 +330,30 @@ function validateDataLayer(raw: string): ValidationMessage[] {
         if (param.required) {
           if (ecommerceObj[param.name] === undefined || ecommerceObj[param.name] === '') {
             messages.push({ type: 'error', message: `Required ecommerce field missing: ${param.name}` });
+          }
+        }
+      }
+
+      // Validate parameter values
+      for (const param of schema.parameters) {
+        const val = ecommerceObj[param.name];
+        if (val !== undefined && val !== '') {
+          const valStr = String(val);
+
+          // Type checking
+          if (param.type === 'number' && typeof val === 'string') {
+            messages.push({ type: 'error', message: `"${param.name}" should be a number, not a string. Found: "${val}"` });
+          }
+
+          // Length check for strings
+          if (param.type === 'string' && typeof val === 'string' && val.length > PARAM_VALUE_MAX_LENGTH) {
+            messages.push({ type: 'warning', message: `"${param.name}" is ${val.length} characters — GA4 truncates at ${PARAM_VALUE_MAX_LENGTH}.` });
+          }
+
+          // Use shared validation for specific params
+          if (param.type === 'string' && typeof val === 'string') {
+            const paramValidation = validateParamValue(val, param);
+            messages.push(...paramValidation.filter(m => m.type !== 'success'));
           }
         }
       }
@@ -457,6 +503,127 @@ function ItemEditor({ index, values, paramDefs, onChange, onRemove, canRemove }:
   );
 }
 
+// ── Auto-fix functionality ────────────────────────────────────────────────────
+
+interface AutoFixResult {
+  eventName: string;
+  paramValues: Record<string, string>;
+  items: ItemValues[];
+  isCustom: boolean;
+  fixes: string[];
+  unfixable: string[];
+}
+
+function autoFixDataLayer(raw: string): AutoFixResult | null {
+  const fixes: string[] = [];
+  const unfixable: string[] = [];
+
+  // Parse
+  let stripped = raw.trim();
+  const pushMatch = stripped.match(/^dataLayer\.push\s*\(([\s\S]*)\)\s*;?\s*$/);
+  if (pushMatch) {
+    stripped = pushMatch[1].trim();
+  }
+
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON5.parse(stripped);
+  } catch (err) {
+    unfixable.push(`Syntax error: ${(err as Error).message}`);
+    return null;
+  }
+
+  const event = obj.event;
+  if (!event || typeof event !== 'string') {
+    unfixable.push('Missing or invalid event field');
+    return null;
+  }
+
+  let eventName = event;
+  const paramValues: Record<string, string> = {};
+  let items: ItemValues[] = [{ item_id: '', item_name: '', price: '', quantity: '1' }];
+
+  const schema = findSchema(event);
+
+  if (schema?.isEcommerce) {
+    const ecommerceObj = obj.ecommerce as Record<string, unknown>;
+    if (ecommerceObj && typeof ecommerceObj === 'object') {
+      // Extract parameters
+      for (const param of schema.parameters) {
+        let val = ecommerceObj[param.name];
+        if (val !== undefined && val !== '') {
+          // Convert string numbers to numbers
+          if (param.type === 'number' && typeof val === 'string') {
+            const num = parseFloat(val);
+            if (!isNaN(num)) {
+              val = num;
+              fixes.push(`Converted "${param.name}" from string to number`);
+            }
+          }
+
+          // Uppercase currency codes
+          if (param.name === 'currency' && typeof val === 'string') {
+            const upper = val.toUpperCase();
+            if (upper !== val) {
+              val = upper;
+              fixes.push(`Uppercased currency code to ${upper}`);
+            }
+          }
+
+          paramValues[param.name] = String(val);
+        }
+      }
+
+      // Extract items
+      const itemsArray = ecommerceObj.items;
+      if (Array.isArray(itemsArray) && itemsArray.length > 0) {
+        items = itemsArray.map((item: Record<string, unknown>) => {
+          const itemValues: ItemValues = { item_id: '', item_name: '', price: '', quantity: '1' };
+          for (const [key, value] of Object.entries(item)) {
+            itemValues[key] = String(value || '');
+          }
+          return itemValues;
+        });
+      }
+    }
+  } else if (schema) {
+    // Non-ecommerce event
+    for (const param of schema.parameters) {
+      let val = obj[param.name];
+      if (val !== undefined && val !== '') {
+        // Convert string numbers to numbers
+        if (param.type === 'number' && typeof val === 'string') {
+          const num = parseFloat(val);
+          if (!isNaN(num)) {
+            val = num;
+            fixes.push(`Converted "${param.name}" from string to number`);
+          }
+        }
+
+        // Uppercase currency codes
+        if (param.name === 'currency' && typeof val === 'string') {
+          const upper = val.toUpperCase();
+          if (upper !== val) {
+            val = upper;
+            fixes.push(`Uppercased currency code to ${upper}`);
+          }
+        }
+
+        paramValues[param.name] = String(val);
+      }
+    }
+  }
+
+  return {
+    eventName,
+    paramValues,
+    items,
+    isCustom: !schema,
+    fixes,
+    unfixable,
+  };
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 const TOOL_FIELDS = [
@@ -590,24 +757,46 @@ export default function DataLayerBuilder() {
   // ── Validation ──────────────────────────────────────────────────────────────
 
   const [validationMessages, setValidationMessages] = useState<ValidationMessage[]>([]);
+  const [autoFixResult, setAutoFixResult] = useState<AutoFixResult | null>(null);
 
   const handleValidate = useCallback(() => {
     setValidationMessages(validateDataLayer(validateInput));
+    setAutoFixResult(null);
   }, [validateInput]);
+
+  const handleAutoFix = useCallback(() => {
+    const result = autoFixDataLayer(validateInput);
+    if (result) {
+      setAutoFixResult(result);
+      // Populate build mode with the fixed data
+      setValue('event', result.eventName);
+      setValue('param_values_json', JSON.stringify(result.paramValues));
+      setValue('items_json', JSON.stringify(result.items));
+      // Switch to build mode
+      setValue('mode', 'build');
+    }
+  }, [validateInput, setValue]);
 
   // ── Inline build-mode validation ────────────────────────────────────────────
 
   const buildValidationMessages = useCallback((): ValidationMessage[] => {
     const msgs: ValidationMessage[] = [];
     if (isCustom) {
-      if (!customEventName) {
-        msgs.push({ type: 'warning', message: 'Custom event name is required.' });
-      } else if (!/^[a-z][a-z0-9_]*$/.test(customEventName)) {
-        msgs.push({ type: 'warning', message: 'Event name should be snake_case.' });
-      } else if (customEventName.length > 40) {
-        msgs.push({ type: 'error', message: `Event name exceeds 40 characters (${customEventName.length}).` });
-      } else {
-        msgs.push({ type: 'success', message: 'Event name looks valid.' });
+      const eventNameValidation = validateEventName(customEventName);
+      msgs.push(...eventNameValidation);
+
+      // Validate custom param names
+      for (const param of customParams) {
+        if (!param.key) continue;
+        if (!/^[a-z][a-z0-9_]*$/.test(param.key)) {
+          msgs.push({ type: 'warning', message: `Parameter name "${param.key}" should be snake_case.` });
+        }
+        if (param.key.length > 40) {
+          msgs.push({ type: 'error', message: `Parameter name "${param.key}" exceeds 40 characters (${param.key.length}).` });
+        }
+        if (param.value && param.value.length > PARAM_VALUE_MAX_LENGTH) {
+          msgs.push({ type: 'warning', message: `Parameter value for "${param.key}" exceeds ${PARAM_VALUE_MAX_LENGTH} characters (${param.value.length}).` });
+        }
       }
     } else if (schema) {
       const missingRequired = schema.parameters
@@ -619,10 +808,12 @@ export default function DataLayerBuilder() {
         msgs.push({ type: 'success', message: 'All required fields are filled.' });
       }
 
-      const currencyParam = schema.parameters.find((p) => p.name === 'currency');
-      if (currencyParam && paramValues.currency) {
-        if (!ISO_CURRENCIES.has(paramValues.currency)) {
-          msgs.push({ type: 'warning', message: `Currency "${paramValues.currency}" may not be a valid ISO 4217 code.` });
+      // Validate each parameter value
+      for (const param of schema.parameters) {
+        const value = paramValues[param.name];
+        if (value) {
+          const paramValidation = validateParamValue(value, param);
+          msgs.push(...paramValidation);
         }
       }
 
@@ -634,7 +825,7 @@ export default function DataLayerBuilder() {
       }
     }
     return msgs;
-  }, [isCustom, customEventName, schema, paramValues, items]);
+  }, [isCustom, customEventName, schema, paramValues, items, customParams]);
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -689,6 +880,69 @@ export default function DataLayerBuilder() {
       <div className="p-4 flex flex-col gap-4">
         {mode === 'build' && (
           <>
+            {/* Quick-start templates */}
+            <div style={sectionStyle}>
+              <span style={sectionLabelStyle}>Start from Example</span>
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={() => {
+                    setValue('event', 'purchase');
+                    const purchaseParams = {
+                      transaction_id: 'T-12345',
+                      value: '99.99',
+                      currency: 'USD',
+                      tax: '19.99',
+                      shipping: '10.00',
+                    };
+                    setValue('param_values_json', JSON.stringify(purchaseParams));
+                    const purchaseItems = [
+                      { item_id: 'SKU-001', item_name: 'Premium Headphones', price: '59.99', quantity: '1', brand: 'TechBrand', category: 'Electronics' },
+                      { item_id: 'SKU-002', item_name: 'USB-C Cable', price: '9.99', quantity: '2', brand: 'AccessoryPro', category: 'Accessories' },
+                    ];
+                    setValue('items_json', JSON.stringify(purchaseItems));
+                    setValue('ecommerce_clearing', 'true');
+                  }}
+                  className="px-3 py-2 rounded text-sm text-left font-medium transition-colors"
+                  style={{ color: '#e2e8f0', backgroundColor: 'rgb(6 182 212 / 0.1)', border: '1px solid rgb(6 182 212 / 0.3)' }}
+                >
+                  Purchase (full) — Complete ecommerce transaction with items
+                </button>
+                <button
+                  onClick={() => {
+                    setValue('event', 'add_to_cart');
+                    const cartParams = {
+                      currency: 'USD',
+                      value: '29.99',
+                    };
+                    setValue('param_values_json', JSON.stringify(cartParams));
+                    const cartItems = [
+                      { item_id: 'SKU-003', item_name: 'Blue T-Shirt', price: '29.99', quantity: '1', brand: 'FashionCo', category: 'Apparel' },
+                    ];
+                    setValue('items_json', JSON.stringify(cartItems));
+                  }}
+                  className="px-3 py-2 rounded text-sm text-left font-medium transition-colors"
+                  style={{ color: '#e2e8f0', backgroundColor: 'rgb(6 182 212 / 0.1)', border: '1px solid rgb(6 182 212 / 0.3)' }}
+                >
+                  Add to Cart — Single item with price and quantity
+                </button>
+                <button
+                  onClick={() => {
+                    setValue('event', 'generate_lead');
+                    const leadParams = {
+                      currency: 'USD',
+                      value: '0.00',
+                    };
+                    setValue('param_values_json', JSON.stringify(leadParams));
+                    setValue('items_json', JSON.stringify([{ item_id: '', item_name: '', price: '', quantity: '1' }]));
+                  }}
+                  className="px-3 py-2 rounded text-sm text-left font-medium transition-colors"
+                  style={{ color: '#e2e8f0', backgroundColor: 'rgb(6 182 212 / 0.1)', border: '1px solid rgb(6 182 212 / 0.3)' }}
+                >
+                  Lead Generation — Simple form submission
+                </button>
+              </div>
+            </div>
+
             {/* Event selection */}
             <div style={sectionStyle}>
               <span style={sectionLabelStyle}>Event Type</span>
@@ -804,18 +1058,38 @@ export default function DataLayerBuilder() {
               <div style={sectionStyle}>
                 <span style={sectionLabelStyle}>Event Parameters</span>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  {schema.parameters.map((param) => (
-                    <TextField
-                      key={param.name}
-                      label={param.displayName}
-                      value={paramValues[param.name] ?? ''}
-                      onChange={(v) => handleParamChange(param.name, v)}
-                      placeholder={param.placeholder}
-                      helpText={param.description}
-                      required={param.required}
-                      type={param.type === 'number' ? 'number' : 'text'}
-                    />
-                  ))}
+                  {schema.parameters.map((param) => {
+                    const hasEnum = param.validation?.enum && param.validation.enum.length > 0;
+                    if (hasEnum) {
+                      return (
+                        <SelectField
+                          key={param.name}
+                          label={param.displayName}
+                          value={paramValues[param.name] ?? ''}
+                          onChange={(v) => handleParamChange(param.name, v)}
+                          options={[
+                            { label: 'Select...', value: '' },
+                            ...enumToOptions(param.validation!.enum!),
+                          ]}
+                          helpText={param.description}
+                          required={param.required}
+                        />
+                      );
+                    }
+                    return (
+                      <TextField
+                        key={param.name}
+                        label={param.displayName}
+                        value={paramValues[param.name] ?? ''}
+                        onChange={(v) => handleParamChange(param.name, v)}
+                        placeholder={param.placeholder}
+                        helpText={param.description}
+                        required={param.required}
+                        type={param.type === 'number' ? 'number' : 'text'}
+                        validation={param.validation}
+                      />
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -895,6 +1169,17 @@ export default function DataLayerBuilder() {
               <div style={sectionStyle}>
                 <span style={sectionLabelStyle}>Validation Results</span>
                 <ValidationResult messages={validationMessages} />
+                {autoFixDataLayer(validateInput) && (
+                  <div className="mt-4 flex gap-2">
+                    <button
+                      onClick={handleAutoFix}
+                      className="px-4 py-2 rounded text-sm font-medium transition-colors"
+                      style={{ backgroundColor: '#10b981', color: '#0f172a', border: 'none', fontWeight: 600 }}
+                    >
+                      Auto-fix and switch to Build mode
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </>

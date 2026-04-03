@@ -1,0 +1,187 @@
+---
+title: "A/B Testing Without Tools"
+description: "Implement simple A/B tests purely through GTM — cookie-based variant assignment, DOM manipulation, anti-flicker snippet, and GA4 custom dimensions."
+sidebar:
+  order: 2
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+You do not need Optimizely or VWO for every A/B test. For simple copy or layout tests — changing a headline, swapping a CTA colour, reordering sections — GTM can handle assignment, variant application, and result tracking entirely on its own. This recipe shows you how.
+
+<Aside type="note">
+GTM-based A/B tests have a flash of original content (FOOC) problem: the page loads first in its default state, then GTM applies the variant after loading. Use the anti-flicker snippet to prevent this. For tests involving significant layout changes, a purpose-built testing tool is more appropriate.
+</Aside>
+
+## Anti-flicker snippet
+
+Add this snippet to your `<head>` before the GTM snippet. It hides the page until the variant is applied:
+
+```html
+<!-- Anti-flicker: hide body until GTM has applied the variant -->
+<style id="anti-flicker">.async-hide { opacity: 0 !important }</style>
+<script>
+  (function(a,s,y,n,c,h,i,d,e){
+    s.className+=' '+y;
+    h.start=1*new Date;
+    h.end=i=function(){s.className=s.className.replace(RegExp(' ?'+y),'')};
+    (a[n]=a[n]||[]).hide=h;
+    setTimeout(function(){i();h.end=null},c);
+    a.dataLayer=a.dataLayer||[];
+  })(window,document.documentElement,'async-hide','dataLayer',3000,{});
+</script>
+```
+
+This hides the page for up to 3 seconds. Your variant tag must call `dataLayer.hide.end()` when it finishes to reveal the page.
+
+## Step 1 — Assign variants with a cookie
+
+Create a **Custom HTML tag** in GTM that runs on the target page and assigns the user to a variant. Fire it with your highest tag priority.
+
+```javascript
+(function() {
+  var EXPERIMENT_ID = 'headline-test-v1';
+  var VARIANTS = ['control', 'variant_a'];
+  var TRAFFIC_PERCENT = 100; // Percentage of users in the experiment
+
+  // Check existing assignment
+  var cookieName = 'exp_' + EXPERIMENT_ID;
+  var existingVariant = null;
+
+  document.cookie.split(';').forEach(function(cookie) {
+    var parts = cookie.trim().split('=');
+    if (parts[0] === cookieName) existingVariant = parts[1];
+  });
+
+  // Not in experiment (traffic split)
+  if (!existingVariant && Math.random() * 100 > TRAFFIC_PERCENT) {
+    if (window.dataLayer && window.dataLayer.hide) window.dataLayer.hide.end();
+    return;
+  }
+
+  // Assign new variant
+  if (!existingVariant) {
+    existingVariant = VARIANTS[Math.floor(Math.random() * VARIANTS.length)];
+    var expires = new Date(Date.now() + 30 * 86400000).toUTCString(); // 30 days
+    document.cookie = cookieName + '=' + existingVariant + '; expires=' + expires + '; path=/; SameSite=Lax';
+  }
+
+  // Store assignment for GTM to read
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    experiment_id: EXPERIMENT_ID,
+    experiment_variant: existingVariant
+  });
+
+  // Apply the variant
+  applyVariant(existingVariant);
+
+  // Reveal page
+  if (window.dataLayer.hide) window.dataLayer.hide.end();
+
+  function applyVariant(variant) {
+    if (variant === 'control') return; // No change for control
+
+    if (variant === 'variant_a') {
+      // Example: Change headline text
+      var headline = document.querySelector('h1.main-headline');
+      if (headline) {
+        headline.textContent = 'Your new compelling headline here';
+      }
+
+      // Example: Change CTA button colour
+      var cta = document.querySelector('.hero-cta');
+      if (cta) {
+        cta.style.backgroundColor = '#2ecc71';
+        cta.style.borderColor = '#27ae60';
+      }
+    }
+  }
+})();
+```
+
+## Step 2 — Track the variant assignment
+
+<DataLayerExample event="experiment_impression" description="Fires after variant assignment to record which variant the user saw.">
+```javascript
+// Add at the end of applyVariant(), or push separately after assignment:
+window.dataLayer.push({
+  event: 'experiment_impression',
+  experiment_id: EXPERIMENT_ID,
+  experiment_variant: existingVariant
+});
+```
+</DataLayerExample>
+
+<Steps>
+1. **Create a Custom Event Trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `experiment_impression`
+
+2. **Create Data Layer Variables**
+
+   - `DLV - experiment_id` → `experiment_id`
+   - `DLV - experiment_variant` → `experiment_variant`
+
+3. **Create a GA4 Event Tag**
+
+   - Event name: `experiment_impression`
+   - Parameters:
+     - `experiment_id` → `{{DLV - experiment_id}}`
+     - `experiment_variant` → `{{DLV - experiment_variant}}`
+   - Trigger: the Custom Event trigger
+
+4. **Register custom dimensions in GA4**
+
+   Go to **GA4 → Admin → Custom Definitions → Custom Dimensions**:
+   - `experiment_id`: Event scope
+   - `experiment_variant`: Event scope
+
+5. **Set as a User Property** for persistent attribution
+
+   In your GA4 tag → User Properties:
+   - `active_experiment` → `{{DLV - experiment_id}}_{{DLV - experiment_variant}}`
+
+   This allows filtering any GA4 report by experiment variant, not just the impression event.
+
+6. **Test in Preview Mode**
+
+   Visit the experiment page. The variant assignment tag should fire, followed by the `experiment_impression` GA4 event. Refresh the page — the same variant should be assigned (cookie persists). Open in a private window — may get a different variant.
+</Steps>
+
+## Reading results
+
+In GA4, create an Exploration:
+
+1. **Dimensions**: `User > active_experiment`
+2. **Metrics**: conversions, sessions, engagement rate
+3. **Filter**: active_experiment **contains** `headline-test-v1`
+4. **Compare**: `headline-test-v1_control` vs `headline-test-v1_variant_a`
+
+For statistical significance, export to BigQuery or Google Sheets and run a chi-squared test on the conversion counts.
+
+## Test it
+
+1. Open GTM Preview and visit the experiment page
+2. The assignment tag should fire first
+3. The `experiment_impression` event should follow
+4. Verify `experiment_variant` is either `control` or `variant_a`
+5. If `variant_a`, verify the DOM changes have been applied (headline text, button colour)
+6. Refresh the page — verify the same variant persists (cookie)
+7. Open in a private window — may get a different variant (new cookie assignment)
+
+## Common gotchas
+
+**FOOC despite anti-flicker.** If the variant tag fires after the page renders (e.g., Window Loaded trigger), users briefly see the control before the variant applies. Use DOM Ready or a Page View trigger (not Window Loaded) for the variant assignment tag. Set tag priority to a high number (e.g., 99) to ensure it fires before other tags.
+
+**50/50 randomisation is not guaranteed.** `Math.random()` is not truly 50/50 across sessions — with small sample sizes, one variant may get 55-45. This is normal. Over 1000+ sessions, the split approaches 50/50. Do not manually adjust the cookie logic to force even splits.
+
+**Variant A users see control on second visit before cookie is set.** The cookie is set synchronously in the same event loop as the variant application. There should be no gap between assignment and application. If you see users switching variants between visits, check that the cookie `path` and `SameSite` settings are correct for your domain.
+
+<CardGrid>
+  <LinkCard title="A/B Test Tracking" href="/recipes/testing/ab-test-tracking/" description="Integrating data from professional A/B testing tools with GA4." />
+  <LinkCard title="User-ID Implementation" href="/recipes/testing/user-id-implementation/" description="Consistent user identification for cross-device test attribution." />
+</CardGrid>

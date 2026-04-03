@@ -1,0 +1,174 @@
+---
+title: "Advanced Consent Mode"
+description: "How Advanced Consent Mode sends cookieless pings before consent, what those pings contain, how behavioral modeling works, and when Advanced mode is the right choice."
+sidebar:
+  order: 3
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+Advanced Consent Mode is a specific operational mode where Google's tags continue to send minimal, non-cookie data to Google's servers even when a user has not yet consented — or has denied consent. The term "Advanced" here is Google's naming, not a description of complexity. Understanding exactly what gets sent, and what does not, is essential before deciding whether to use it.
+
+## What Advanced Consent Mode actually does
+
+When `analytics_storage` is `denied`, GA4 does not write the `_ga` cookie and does not send a full measurement hit. But in Advanced mode, it does send a **cookieless ping** — a minimal HTTP request that includes:
+
+- A timestamp
+- Approximate geographic region (country level, not city or postal code)
+- Browser and device type category
+- Session engagement signals (visit started, visit ended)
+- The fact that consent was denied
+
+What the ping explicitly **does not contain**:
+- Client ID (no `_ga` cookie means no persistent user identifier)
+- Session ID (no session-scoped cookie)
+- IP address (Google explicitly drops this in the collection infrastructure)
+- Any URL parameters
+- Any event-specific data beyond what is listed above
+
+The ping is sent to the same collection endpoint as regular GA4 hits (`https://www.google-analytics.com/g/collect`) but with a consent signal parameter (`gcs=G100` for fully denied vs. `gcs=G111` for fully granted).
+
+### What the consent signal values mean
+
+The `gcs` parameter encodes consent state:
+- `G100` — ad_storage denied, analytics_storage denied
+- `G101` — ad_storage denied, analytics_storage granted
+- `G110` — ad_storage granted, analytics_storage denied
+- `G111` — ad_storage granted, analytics_storage granted
+
+You can verify this in the Network tab of DevTools after interacting with your consent banner.
+
+## Advanced vs. Basic Consent Mode
+
+<Comparison leftTitle="Advanced Consent Mode" rightTitle="Basic Consent Mode" leftType="neutral" rightType="neutral">
+  <div slot="left">
+
+Sends cookieless pings even when consent is denied.
+
+GA4 receives aggregate behavioral signals from denied-consent users.
+
+Enables behavioral modeling in GA4 reports.
+
+Enables conversion modeling for Google Ads.
+
+More data available, but requires defending the practice of sending any data without consent.
+
+  </div>
+  <div slot="right">
+
+No data sent whatsoever until consent is granted.
+
+Zero signal from users who deny consent.
+
+No behavioral modeling available.
+
+No conversion modeling available.
+
+Maximum privacy posture — nothing sent to Google without explicit consent.
+
+  </div>
+</Comparison>
+
+The choice between these modes is partially technical and partially legal. Basic mode is simpler to defend from a GDPR perspective — "we send nothing without consent" is an easy argument. Advanced mode requires you to assess whether the cookieless pings constitute personal data processing, and if so, whether you have a lawful basis for that processing.
+
+## Behavioral modeling in practice
+
+Behavioral modeling is GA4's mechanism for filling in data gaps created by users who deny analytics consent. Here is how it works:
+
+**The training sample**: GA4 learns from your users who have granted consent. It builds models of typical behavior patterns — session duration distributions, page view counts, conversion rates by traffic source.
+
+**The inference step**: For denied-consent users (represented by cookieless pings), GA4 uses the observed aggregate signals (device type, approximate region, session timing) to infer where they fall in the behavioral distribution.
+
+**The output**: Modeled user counts, sessions, and conversions appear in your GA4 reports alongside observed data. GA4 labels these as modeled data in some report views.
+
+### Requirements for modeling to activate
+
+Behavioral modeling does not activate automatically. You need:
+- Minimum 1,000 daily users with consent granted (the training floor)
+- Minimum 7 days of data collection before models initialize
+- Sufficient ratio of granted-to-denied users — the models cannot extrapolate reliably if 95%+ of users deny
+
+If your site has fewer than 1,000 daily consenting users, you will not get behavioral modeling. In that case, the main advantage of Advanced over Basic mode is the potential to get modeling in the future as traffic grows.
+
+### Accuracy of modeled data
+
+Modeled data is useful for understanding directional trends but is not appropriate for:
+- Precise conversion counting for financial reporting
+- Attribution at the individual campaign or keyword level
+- SLA reporting or contractual obligations tied to analytics numbers
+
+Use modeled data to understand relative changes (is Tuesday engagement higher than Monday?) not absolute figures.
+
+## Privacy considerations
+
+The question regulators care about: are cookieless pings personal data?
+
+Google's position: pings sent without cookies and with IP dropped at collection do not constitute personal data under GDPR because they cannot be used to identify or single out an individual.
+
+The opposing view (some DPAs): even aggregate signals, when combined with other data Google holds, may constitute personal data when they flow to Google's infrastructure.
+
+**Practical guidance**:
+- If your legal counsel or DPA guidance permits Advanced mode, use it — you get significantly better data
+- If you are in a jurisdiction with aggressive enforcement (some German federal states, Netherlands, France CNIL) and have not received explicit clearance, Basic mode is the more defensible choice
+- Document your legal basis for Advanced mode if you use it
+
+<Aside type="caution">
+This documentation cannot provide legal advice. The permissibility of Advanced Consent Mode cookieless pings varies by jurisdiction and is subject to ongoing regulatory interpretation. Consult your legal team.
+</Aside>
+
+## Configuring Advanced Consent Mode
+
+Advanced Consent Mode is the default behavior — there is no setting to "enable" it. If you set consent defaults and the tags load, they will send cookieless pings in the denied state.
+
+To implement Advanced mode:
+1. Set default consent state to `denied` before GTM loads (see [Consent Mode GTM Setup](/consent/consent-mode/consent-mode-gtm-setup/))
+2. Let your CMP update consent state when the user makes a choice
+3. Tags will automatically operate in Advanced mode — sending pings when denied, full data when granted
+
+To implement Basic mode instead, see [Basic Consent Mode](/consent/consent-mode/basic-consent-mode/).
+
+## Verifying Advanced mode is working
+
+**Network tab verification:**
+
+1. Open DevTools → Network
+2. Filter for requests to `google-analytics.com`
+3. With `analytics_storage: denied`, you should see requests to `/g/collect` that include `&gcs=G100` (or `G110` if `ad_storage` is granted)
+4. The request should contain minimal parameters — no `_ga` client ID, no event-specific data
+5. After granting consent, subsequent requests should switch to `&gcs=G111` with full parameters
+
+**What you should NOT see with denied consent:**
+- `&_ga=` parameter (client ID)
+- `&_gid=` parameter (session ID)
+- `&en=` parameter containing custom event names
+- `&ep.` parameters (event parameters)
+
+If you see any of these with denied consent, your implementation has a problem.
+
+## Google Ads and conversion modeling
+
+Advanced Consent Mode also enables **conversion modeling** for Google Ads. When `ad_storage` is denied, Ads tags send aggregated signals that Google uses to model conversions attributable to denied-consent users.
+
+This modeling feeds into:
+- Smart Bidding: conversion value estimates include modeled conversions
+- Attribution reports: modeled conversions appear in the conversion column
+- Audience expansion: signals help identify similar users
+
+Conversion modeling requires `ad_user_data` to be properly configured as well. If `ad_user_data` is denied, the modeling signals are weaker.
+
+## Common mistakes
+
+**Thinking "Advanced" means more complex to set up.** Advanced Consent Mode is actually the default. Basic mode requires additional configuration to suppress pings. If you implement the default consent state correctly, you are already running Advanced mode.
+
+**Checking for the absence of cookies as proof of compliance.** Advanced mode does send data (pings) without consent — just without cookies. Checking cookies alone does not tell you whether pings are firing. Check the Network tab.
+
+**Confusing the absence of behavioral modeling data with a broken implementation.** If your site has fewer than 1,000 daily consenting users, modeling will not appear in reports. This is expected behavior, not a bug.
+
+---
+
+<CardGrid>
+  <LinkCard title="Basic Consent Mode" href="/consent/consent-mode/basic-consent-mode/" description="When to use Basic mode and how it differs from Advanced." />
+  <LinkCard title="Consent Mode GTM Setup" href="/consent/consent-mode/consent-mode-gtm-setup/" description="Step-by-step configuration for implementing either mode correctly." />
+  <LinkCard title="Testing Consent" href="/consent/advanced/testing-consent/" description="How to verify pings are firing correctly in denied consent state." />
+</CardGrid>
