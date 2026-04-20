@@ -22,6 +22,7 @@ export default defineConfig({
       },
       components: {
         Head: './src/components/Head.astro',
+        ThemeProvider: './src/components/ThemeProvider.astro',
       },
       plugins: [
         starlightLlmsTxt({
@@ -40,6 +41,10 @@ export default defineConfig({
         themes: ['dracula', 'github-light'],
       },
       head: [
+        // Tell browsers (and crawlers like Lighthouse/PageSpeed) that dark
+        // is the preferred color scheme. Pairs with the dark-default in
+        // src/components/ThemeProvider.astro.
+        { tag: 'meta', attrs: { name: 'color-scheme', content: 'dark light' } },
         // Structured data — site-level. Per-page OpenGraph/Twitter image
         // tags are emitted by src/components/Head.astro.
         {
