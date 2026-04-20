@@ -28,6 +28,10 @@
   --sl-color-bg: #0f172a;
   --sl-color-bg-nav: #0c1524;
   --sl-color-bg-sidebar: #0c1524;
+  /* Brighten muted text (LinkCard descriptions, edit-page link, etc.) so it
+     hits WCAG AAA 7:1 contrast against the dark background. Default
+     gray-3 is hsl(224 6% 56%) ≈ #888c96 → 5.3:1. New value is ~7.5:1. */
+  --sl-color-gray-3: hsl(224, 10%, 72%);
 }
 
 .sl-markdown-content {
