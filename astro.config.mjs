@@ -3,9 +3,11 @@ import starlight from '@astrojs/starlight';
 import tailwindcss from '@tailwindcss/vite';
 import react from '@astrojs/react';
 import sitemap from '@astrojs/sitemap';
+import starlightLlmsTxt from 'starlight-llms-txt';
 
 export default defineConfig({
   site: 'https://taggingdocs.com',
+  trailingSlash: 'always',
   vite: {
     plugins: [tailwindcss()],
   },
@@ -18,6 +20,16 @@ export default defineConfig({
       locales: {
         root: { label: 'English', lang: 'en' },
       },
+      components: {
+        Head: './src/components/Head.astro',
+      },
+      plugins: [
+        starlightLlmsTxt({
+          projectName: 'TaggingDocs',
+          description: 'The GTM & GA4 reference that should have existed from the start.',
+          rawContent: true,
+        }),
+      ],
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/mrwbranch/taggingdocs' },
       ],
@@ -182,6 +194,18 @@ export default defineConfig({
       ],
     }),
     react(),
-    sitemap(),
+    sitemap({
+      changefreq: 'weekly',
+      priority: 0.7,
+      lastmod: new Date(),
+      serialize(item) {
+        const path = new URL(item.url).pathname;
+        const depth = path.split('/').filter(Boolean).length;
+        if (path === '/') item.priority = 1.0;
+        else if (depth === 1) item.priority = 0.9;
+        else if (depth === 2) item.priority = 0.8;
+        return item;
+      },
+    }),
   ],
 });

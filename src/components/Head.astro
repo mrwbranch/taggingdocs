@@ -1,0 +1,43 @@
+---
+import Default from '@astrojs/starlight/components/Head.astro';
+
+const { entry } = Astro.locals.starlightRoute;
+const pageUrl = new URL(Astro.url.pathname, Astro.site).href;
+const isHome = Astro.url.pathname === '/';
+
+const segments = Astro.url.pathname.split('/').filter(Boolean);
+const breadcrumbs = [
+  { '@type': 'ListItem', position: 1, name: 'Home', item: Astro.site?.href },
+  ...segments.map((seg, i) => ({
+    '@type': 'ListItem',
+    position: i + 2,
+    name: seg.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+    item: new URL(segments.slice(0, i + 1).join('/') + '/', Astro.site).href,
+  })),
+];
+
+const article = {
+  '@context': 'https://schema.org',
+  '@type': 'TechArticle',
+  headline: entry.data.title,
+  description: entry.data.description,
+  url: pageUrl,
+  inLanguage: 'en',
+  isPartOf: { '@type': 'WebSite', name: 'TaggingDocs', url: 'https://taggingdocs.com' },
+  author: { '@type': 'Organization', name: 'TaggingDocs', url: 'https://taggingdocs.com' },
+  publisher: { '@type': 'Organization', name: 'TaggingDocs', url: 'https://taggingdocs.com' },
+};
+
+const breadcrumb = {
+  '@context': 'https://schema.org',
+  '@type': 'BreadcrumbList',
+  itemListElement: breadcrumbs,
+};
+---
+<Default><slot /></Default>
+{!isHome && (
+  <>
+    <script type="application/ld+json" set:html={JSON.stringify(article)} is:inline />
+    <script type="application/ld+json" set:html={JSON.stringify(breadcrumb)} is:inline />
+  </>
+)}
