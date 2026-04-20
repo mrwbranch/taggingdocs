@@ -33,11 +33,80 @@ const breadcrumb = {
   '@type': 'BreadcrumbList',
   itemListElement: breadcrumbs,
 };
+
+// HowTo schema for /recipes/{category}/{slug}/ pages with a <Steps> block.
+function extractHowToSteps(body: string | undefined) {
+  if (!body) return null;
+  const block = body.match(/<Steps>([\s\S]*?)<\/Steps>/);
+  if (!block) return null;
+  const inner = block[1];
+  // Split on lines that begin a numbered item (1. , 2. , etc.) at column 0.
+  const itemRegex = /^(\d+)\.[ \t]+([\s\S]*?)(?=^\d+\.[ \t]|\Z)/gm;
+  const steps: { '@type': string; position: number; name: string; text: string }[] = [];
+  for (const m of inner.matchAll(itemRegex)) {
+    const raw = m[2].trim();
+    const firstLine = raw.split('\n')[0].trim();
+    const cleanName = firstLine
+      .replace(/\*\*(.*?)\*\*/g, '$1')
+      .replace(/\*(.*?)\*/g, '$1')
+      .replace(/`(.*?)`/g, '$1')
+      .replace(/\[(.*?)\]\([^)]+\)/g, '$1')
+      .slice(0, 110);
+    const cleanText = raw
+      .replace(/```[\s\S]*?```/g, '')
+      .replace(/\*\*(.*?)\*\*/g, '$1')
+      .replace(/\*(.*?)\*/g, '$1')
+      .replace(/`(.*?)`/g, '$1')
+      .replace(/\[(.*?)\]\([^)]+\)/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 500);
+    steps.push({
+      '@type': 'HowToStep',
+      position: parseInt(m[1], 10),
+      name: cleanName,
+      text: cleanText || cleanName,
+    });
+  }
+  return steps.length >= 2 ? steps : null;
+}
+
+const isRecipe =
+  Astro.url.pathname.startsWith('/recipes/') && segments.length >= 3;
+const howToSteps = isRecipe ? extractHowToSteps(entry.body) : null;
+const howTo = howToSteps && {
+  '@context': 'https://schema.org',
+  '@type': 'HowTo',
+  name: entry.data.title,
+  description: entry.data.description,
+  step: howToSteps,
+};
+
+// Per-page OpenGraph image. Brand image for the homepage; auto-generated card
+// (via astro-og-canvas at /open-graph/<slug>.png) for everything else.
+const slug = entry.id.replace(/\.mdx?$/, '');
+const ogImage = isHome
+  ? new URL('/og-image.png', Astro.site).href
+  : new URL(`/open-graph/${slug}.png`, Astro.site).href;
+const ogImageAlt = isHome
+  ? 'TaggingDocs — The GTM & GA4 reference'
+  : `${entry.data.title} — TaggingDocs`;
 ---
 <Default><slot /></Default>
+
+<meta property="og:image" content={ogImage} />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content={ogImageAlt} />
+<meta name="twitter:image" content={ogImage} />
+<meta name="twitter:image:alt" content={ogImageAlt} />
+
 {!isHome && (
   <>
     <script type="application/ld+json" set:html={JSON.stringify(article)} is:inline />
     <script type="application/ld+json" set:html={JSON.stringify(breadcrumb)} is:inline />
   </>
+)}
+{howTo && (
+  <script type="application/ld+json" set:html={JSON.stringify(howTo)} is:inline />
 )}

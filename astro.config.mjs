@@ -40,14 +40,8 @@ export default defineConfig({
         themes: ['dracula', 'github-light'],
       },
       head: [
-        // OpenGraph
-        { tag: 'meta', attrs: { property: 'og:image', content: 'https://taggingdocs.com/og-image.png' } },
-        { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
-        { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
-        { tag: 'meta', attrs: { property: 'og:image:alt', content: 'TaggingDocs — The GTM & GA4 reference' } },
-        // Twitter
-        { tag: 'meta', attrs: { name: 'twitter:image', content: 'https://taggingdocs.com/og-image.png' } },
-        // Structured data
+        // Structured data — site-level. Per-page OpenGraph/Twitter image
+        // tags are emitted by src/components/Head.astro.
         {
           tag: 'script',
           attrs: { type: 'application/ld+json' },
