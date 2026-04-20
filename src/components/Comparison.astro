@@ -23,13 +23,13 @@ const labelColors = {
 
 <div class="not-content my-6 grid grid-cols-1 md:grid-cols-2 gap-4">
   <div class:list={['rounded-lg border p-4', colors[leftType]]}>
-    <h4 class:list={['text-sm font-semibold uppercase tracking-wider m-0 mb-3', labelColors[leftType]]}>{leftTitle}</h4>
+    <p class:list={['text-sm font-semibold uppercase tracking-wider m-0 mb-3', labelColors[leftType]]}>{leftTitle}</p>
     <div class="comparison-content text-sm">
       <slot name="left" />
     </div>
   </div>
   <div class:list={['rounded-lg border p-4', colors[rightType]]}>
-    <h4 class:list={['text-sm font-semibold uppercase tracking-wider m-0 mb-3', labelColors[rightType]]}>{rightTitle}</h4>
+    <p class:list={['text-sm font-semibold uppercase tracking-wider m-0 mb-3', labelColors[rightType]]}>{rightTitle}</p>
     <div class="comparison-content text-sm">
       <slot name="right" />
     </div>

@@ -37,3 +37,17 @@
 .sl-markdown-content {
   line-height: 1.75;
 }
+
+/* Inline links inside body copy need a non-color distinguisher to satisfy
+   WCAG 1.4.1 — the cyan accent only hits 2.22:1 against the body text.
+   Subtle 50%-alpha underline; full opacity on hover. */
+.sl-markdown-content a:not(:where(.not-content *)) {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in oklab, var(--sl-color-text-accent) 50%, transparent);
+  text-underline-offset: 0.2em;
+  transition: text-decoration-color 0.15s ease;
+}
+.sl-markdown-content a:hover:not(:where(.not-content *)) {
+  text-decoration-color: var(--sl-color-text-accent);
+}

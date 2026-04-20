@@ -8,6 +8,7 @@ import starlightLlmsTxt from 'starlight-llms-txt';
 export default defineConfig({
   site: 'https://taggingdocs.com',
   trailingSlash: 'always',
+  build: { inlineStylesheets: 'auto' },
   vite: {
     plugins: [tailwindcss()],
   },
