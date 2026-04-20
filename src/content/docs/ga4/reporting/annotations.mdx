@@ -1,0 +1,209 @@
+---
+title: "Annotations"
+description: "GA4 annotations — adding contextual notes to report timelines for deployments, campaign launches, and data-quality incidents. Permissions, visibility, and comparison with UA."
+sidebar:
+  order: 8
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+*Valid as of April 2026, GA4 property interface.*
+
+Annotations returned to GA4 in 2024, after years of their absence being one of the most frequent feature requests from analysts migrating from Universal Analytics. They let you pin contextual notes to specific dates (or date ranges) on a GA4 property, so that the traffic dip in week 34 is accompanied by a visible label saying "staging CDN rollout caused JS errors" instead of a Slack search through last year's incident channel.
+
+They are the most valuable feature most GA4 users still have not configured.
+
+## What annotations are for
+
+An annotation is a short note tied to a date on the property timeline. When anyone with property access views a report chart that crosses that date, the note is visible as a marker with the annotation text on hover.
+
+Good annotation candidates:
+
+| Category | Examples |
+|----------|----------|
+| Deployments | Site redesign go-live, checkout refactor, CMP update |
+| Tagging changes | GTM container publish, consent-mode enable, new custom dimension |
+| Marketing | TV spot run, podcast sponsorship live, influencer drop |
+| External events | Black Friday, product launch, competitor outage |
+| Data-quality incidents | Gtag broken for 6h, DNS misrouted, duplicate events in staging |
+| Policy changes | iOS Safari ITP update, Chrome cookie deprecation milestone |
+| Google changes | GA4 feature release that changed a metric definition |
+
+The rule of thumb: if someone looking at this chart in 12 months would be confused by a spike or a dip, annotate it now while the context is fresh.
+
+## Permissions
+
+Annotations are property-level. Creating, editing, and deleting require specific roles:
+
+| Role | Can view annotations | Can create/edit/delete |
+|------|---------------------|------------------------|
+| Viewer | Yes | No |
+| Analyst | Yes | No |
+| Marketer | Yes | Yes |
+| Editor | Yes | Yes |
+| Administrator | Yes | Yes |
+
+Marketer is the lowest role that can write annotations. If your org lets agencies or marketing contractors into GA4 with Analyst role, they can see annotations but cannot add their own — promote to Marketer if you want them contributing context.
+
+<Aside type="tip">
+Annotations are not scoped to individual users. Every annotation created on a property is visible to every user of that property. There is no private-annotation option. Treat the annotation log as shared team notes, not personal bookmarks.
+</Aside>
+
+## Creating an annotation
+
+<Steps>
+1. Open **Reports** in the left nav.
+
+2. Navigate to any report with a time-series chart (Reports Snapshot, Acquisition, Engagement, etc.).
+
+3. Click the chart at the date you want to annotate, or click the **Annotations** button above the chart.
+
+4. Click **+ Create annotation**.
+
+5. Fill in:
+   - **Title** — short label shown on hover (keep under 40 characters for readability).
+   - **Description** — optional longer context.
+   - **Date** or **Date range** — single day or a span.
+   - **Color** — one of six categorical colors (Blue, Green, Purple, Pink, Orange, Yellow). Use the colors consistently across the team to build visual taxonomy (e.g., blue = deployment, orange = incident, green = campaign).
+
+6. Save.
+</Steps>
+
+The annotation appears immediately on every chart spanning the selected date(s) for every user on the property.
+
+## Where annotations appear
+
+| Surface | Annotations visible |
+|---------|---------------------|
+| Standard reports (time-series charts) | Yes |
+| Reports Snapshot cards | Yes |
+| Explorations | No |
+| Realtime report | No |
+| Advertising reports | Yes |
+| Data API | Yes, via the `annotations` resource |
+| BigQuery export | No (annotations are metadata, not event data) |
+| Data Studio (GA4 connector) | Not directly — pull via the Data API or mirror manually |
+
+The Data API exposure is important for teams that build their own dashboards: you can pull the annotation list and render the markers yourself on a custom chart, preserving the same context across internal and GA4 views.
+
+## Managing annotations at scale
+
+There is no bulk import/export in the UI. For teams that need to batch-load annotations (e.g., migrating 200 historical notes from an internal incident log), the Admin API supports programmatic creation:
+
+```
+POST https://analyticsadmin.googleapis.com/v1beta/properties/123456789/annotations
+
+{
+  "title": "GTM container v48 published",
+  "description": "Added scroll-depth trigger at 50% and 75%.",
+  "color": "BLUE",
+  "annotationDate": {
+    "year": 2026, "month": 4, "day": 14
+  }
+}
+```
+
+List existing annotations with a `GET` on the same endpoint. Delete with `DELETE` on the annotation name. The API respects the same role-based permissions as the UI.
+
+## Color conventions that scale
+
+Six colors is enough for a working taxonomy. A suggested scheme used on several analytics teams:
+
+| Color | Category | Examples |
+|-------|----------|----------|
+| Blue | Site / product change | Deployments, redesigns, feature launches |
+| Green | Marketing activity | Campaign start/end, email sends, PR mentions |
+| Orange | Incident / data quality | Tagging outage, duplicate events, bad release |
+| Pink | External event | Holiday, competitor news, market event |
+| Purple | Analytics config change | New custom dimension, GA4 feature enable, consent config |
+| Yellow | Unknown / investigation | "Spike here, cause TBD" — updated once root-caused |
+
+Document the scheme somewhere discoverable (wiki, team README) and reference it when onboarding new GA4 users.
+
+## Comparison with Universal Analytics annotations
+
+UA had annotations from its earliest days. GA4 shipped without them, relied on explorations-first positioning, and eventually brought them back with notable differences:
+
+| Feature | Universal Analytics | GA4 |
+|---------|--------------------|------|
+| Scope | View-level | Property-level |
+| Private annotations | Yes (user-only) | No |
+| Shared annotations | Yes | Yes (all annotations are shared) |
+| Star annotations | Yes | No |
+| Color coding | No | Yes (6 colors) |
+| Date-range annotations | No (single day only) | Yes |
+| API support | Yes | Yes (Admin API) |
+| Character limit | 160 | Higher (title 40, description 4000) |
+| Visibility on charts | All reports | Standard reports and Advertising only |
+
+The loss of private annotations is the one regression — some analysts used them as personal reminders. In GA4, use dashboard tools, ticketing systems, or a shared doc for private notes; use annotations for team-visible context.
+
+## What annotations do not do
+
+- They do not affect data processing, attribution, or any numbers in reports. They are purely visual metadata.
+- They do not filter or segment reports. You cannot "show me data excluding annotated days."
+- They do not sync across properties. Each property has its own annotation set. If you run staging and production as separate properties, annotate both.
+- They do not appear in Explorations. If your team relies heavily on Explorations, the context lives only in standard reports.
+- They do not notify anyone. Creating an annotation does not send Slack, email, or any other alert.
+
+## Worked example
+
+A weekly stakeholder report shows a 40% drop in sessions on Tuesday that recovered by Thursday. Without annotations, this is a forensic exercise: who deployed what, was there an outage, did something break?
+
+With a disciplined annotation practice, the chart already shows:
+
+| Date | Color | Title |
+|------|-------|-------|
+| Monday 18:00 | Orange | Tag Manager publish v92 — broken on Safari |
+| Tuesday 10:30 | Orange | Rolled back to v91 |
+| Wednesday 14:00 | Blue | Deployed Safari fix in v93 |
+
+The stakeholder reads the chart, sees the annotations, understands the story in 10 seconds, and the meeting moves on.
+
+## Common mistakes
+
+### Annotating only incidents
+
+The first time a team adopts annotations, the only notes tend to be data-quality incidents. Campaign starts, redesigns, and planned deployments are equally valuable context. Build the habit of annotating good changes as well as bad ones.
+
+### Too-long titles
+
+Titles over ~40 characters truncate on chart hover. Put detail in the description, keep the title scannable.
+
+### Not annotating tagging changes
+
+The category most often omitted is tagging changes — the thing that actually changes what the numbers mean. Every GTM container publish that affects collection, every new custom dimension, every consent-mode config change deserves an annotation. Your future self debugging a metric definition change will thank you.
+
+### Using annotations as an audit log
+
+Annotations are not version history. Do not try to use them to track every GTM change or every ticket. Keep them for changes that a chart-viewer would want context about. A dedicated change-log lives elsewhere.
+
+### Forgetting that annotations are property-wide
+
+An annotation you add viewing the Acquisition report also appears on Engagement, Monetization, and every dashboard. Write the title as context that makes sense across reports, not only in the one you were looking at.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Standard Reports"
+    description="The reports where annotations appear."
+    href="/ga4/reporting/standard-reports/"
+  />
+  <LinkCard
+    title="Data Discrepancies"
+    description="Diagnose the events your annotations are explaining."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+  <LinkCard
+    title="Data Quality Validation"
+    description="Spot the dips and spikes that deserve annotation."
+    href="/ga4/troubleshooting/data-quality-validation/"
+  />
+  <LinkCard
+    title="Audiences"
+    description="Segment and label users the way annotations label time."
+    href="/ga4/configuration/audiences/"
+  />
+</CardGrid>

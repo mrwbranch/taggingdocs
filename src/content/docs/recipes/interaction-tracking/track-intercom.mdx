@@ -1,0 +1,171 @@
+---
+title: "Track Intercom Messenger"
+description: "Track Intercom chat widget opens, conversation starts, unread counts, and contact identification in GA4 via GTM using the Intercom JavaScript API."
+sidebar:
+  order: 27
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Intercom is one of the most common on-site chat widgets, and its JavaScript API exposes clean lifecycle hooks for every interaction — open, close, conversation started, unread count changes, and contact identification. Wiring those into the dataLayer gives you a chat funnel in GA4 without relying on Intercom's own reporting.
+
+*Valid as of April 2026, Intercom Messenger JavaScript API.*
+
+## Problem
+
+Intercom's dashboard shows chat activity in isolation. It can't tell you which page triggered the conversation, what the user's GA4 `client_id` was, or whether the chat correlated with a conversion. Sending every widget event to GA4 closes that loop — and lets you build a single audience across `intercom_conversation_started` users.
+
+## Solution
+
+Attach listeners to the `Intercom` function once it's available on the page. Each listener pushes a dedicated event to the dataLayer, and a single GTM Custom Event trigger (or one per event name) routes them to a GA4 event tag.
+
+## How Intercom loads
+
+Intercom ships a small loader snippet that queues calls to `window.Intercom` until the full widget script arrives. You don't need to wait for `Intercom` to be a "real" function — the queue handles early calls for you. You only need to make sure the snippet has run before your listener code.
+
+<DataLayerExample event="intercom_widget_open" description="Attach all listeners in one Custom HTML tag. The Intercom queue absorbs calls until the widget is ready.">
+```javascript
+(function() {
+  if (typeof window.Intercom !== 'function') {
+    // Intercom loader hasn't run yet — bail and let a later tag retry
+    return;
+  }
+
+  function push(payload) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(payload);
+  }
+
+  // Widget opened (user clicked the launcher)
+  window.Intercom('onShow', function() {
+    push({
+      event: 'intercom_widget_open',
+      intercom_action: 'open',
+      page_path: window.location.pathname
+    });
+  });
+
+  // Widget closed
+  window.Intercom('onHide', function() {
+    push({
+      event: 'intercom_widget_close',
+      intercom_action: 'close',
+      page_path: window.location.pathname
+    });
+  });
+
+  // Unread count changed — fires when an inbound message arrives
+  window.Intercom('onUnreadCountChange', function(count) {
+    push({
+      event: 'intercom_unread_change',
+      intercom_action: 'unread_change',
+      intercom_unread_count: count
+    });
+  });
+
+  // User opened a specific conversation
+  window.Intercom('onShowConversation', function() {
+    push({
+      event: 'intercom_conversation_started',
+      intercom_action: 'conversation_started',
+      page_path: window.location.pathname
+    });
+  });
+})();
+```
+</DataLayerExample>
+
+## Tracking contact identification
+
+If your app calls `Intercom('boot', {...})` or `Intercom('update', {...})` with a known user, mirror that into the dataLayer so GA4 knows when an anonymous visitor became identified.
+
+```javascript
+// Wrap Intercom() to observe boot and update calls
+(function() {
+  var original = window.Intercom;
+  if (typeof original !== 'function') return;
+
+  window.Intercom = function() {
+    var args = Array.prototype.slice.call(arguments);
+    var cmd = args[0];
+    var data = args[1] || {};
+
+    if ((cmd === 'boot' || cmd === 'update') && data.user_id) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'intercom_user_identified',
+        intercom_action: 'identified',
+        intercom_user_id_hash: data.user_hash ? 'present' : 'absent'
+      });
+    }
+
+    return original.apply(this, args);
+  };
+})();
+```
+
+<Aside type="caution">
+Never push `email`, `user_id`, or any raw identifier into the dataLayer. Send a boolean or a hash indicator like the example above.
+</Aside>
+
+## GTM setup
+
+<Steps>
+1. **Add the listener script as a Custom HTML tag**
+   - Trigger: **Window Loaded** — Intercom's loader normally runs well before this
+   - If Intercom loads via consent management, add a second trigger on your consent-granted event
+
+2. **Create one Custom Event trigger per event name** (or a single regex trigger)
+   - Trigger type: **Custom Event**
+   - Event name regex: `^intercom_(widget_open|widget_close|conversation_started|unread_change|user_identified)$`
+   - Use regex matching: **true**
+
+3. **Create Data Layer Variables**
+   - `DLV - intercom_action` → `intercom_action`
+   - `DLV - intercom_unread_count` → `intercom_unread_count`
+
+4. **Create a GA4 Event Tag**
+   - Event name: `{{Event}}` (uses the dataLayer event name directly)
+   - Parameters:
+     - `intercom_action` → `{{DLV - intercom_action}}`
+     - `page_path` → `{{Page Path}}`
+   - Trigger: the Custom Event trigger above
+</Steps>
+
+<TagConfig
+  name="GA4 - intercom_events"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - intercom_* (regex)"
+  variables={["DLV - intercom_action", "DLV - intercom_unread_count", "Page Path"]}
+/>
+
+## Test it
+
+1. Open GTM Preview and load a page that has Intercom installed
+2. Click the Intercom launcher — confirm `intercom_widget_open` in the Summary pane
+3. Close the widget — confirm `intercom_widget_close`
+4. Start a new conversation — confirm `intercom_conversation_started`
+5. In GA4 DebugView, verify all four events arrive with the correct `intercom_action` parameter
+6. Send a test inbound message from your Intercom dashboard — confirm `intercom_unread_change` fires with `intercom_unread_count >= 1`
+
+## Common gotchas
+
+**Widget not present on every page.** Intercom is often disabled for logged-out users, on marketing pages, or behind feature flags. The `typeof window.Intercom !== 'function'` guard at the top of the script prevents errors on those pages — don't remove it.
+
+**`onShow` fires on every open, including programmatic ones.** If you call `Intercom('show')` from your own code (for example after a CTA click), `onShow` still fires. That's usually fine, but if you need to distinguish, push a separate event from your CTA handler and filter by source.
+
+**Consent gating.** If Intercom is loaded only after consent, the listener tag must fire after consent too. A Window Loaded trigger is too early in consent-first setups — use your consent-granted custom event as the trigger instead.
+
+**Identification timing.** The `Intercom('boot', { user_id: ... })` call often happens before your listener wrapper is installed. Put the wrapper as high in the `<head>` as possible, or push `intercom_user_identified` from your own identification code instead of wrapping Intercom.
+
+**Multiple Intercom workspaces.** If your site embeds Intercom for two different apps (rare, but happens on multi-brand sites), the second loader overwrites the first `window.Intercom`. The wrapper pattern above needs to be applied after both loaders.
+
+<CardGrid>
+  <LinkCard title="Track Drift Chat" href="/recipes/interaction-tracking/track-drift/" description="Same pattern for Drift's SDK events." />
+  <LinkCard title="Track Zendesk Messaging" href="/recipes/interaction-tracking/track-zendesk-chat/" description="Zendesk Web Widget and Messaging events." />
+  <LinkCard title="Custom HTML Tags" href="/client-side/tags/custom-html-tags/" description="The tag type used to attach these listeners." />
+  <LinkCard title="JavaScript for Tag Managers" href="/resources/javascript-for-tag-managers/" description="Refresher on queue patterns and event wrapping." />
+</CardGrid>

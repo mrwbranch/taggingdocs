@@ -1,0 +1,188 @@
+---
+title: "Same-Origin Subfolder Deployment"
+description: "Running sGTM under example.com/metrics/ instead of metrics.example.com — the strongest first-party cookie scoping available, with routing patterns for Cloudflare Workers, Nginx, and Vercel."
+sidebar:
+  order: 9
+---
+
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Most sGTM deployments use a subdomain: `sgtm.example.com`, `metrics.example.com`, `collect.example.com`. That works, and with a [Cloudflare proxy in front](/server-side/operations/cloudflare-proxy-setup/) it even survives Safari ITP reasonably well. But there is a stricter deployment topology that survives ITP better: serving sGTM as a subfolder of the main site — `example.com/metrics/*` — so there is literally one origin, one cookie scope, and no subdomain relationship for the browser to treat as tracker-adjacent.
+
+Subfolder deployment is more operational work. You need a reverse proxy (Cloudflare Worker, Nginx, Vercel rewrite, Next.js middleware) that routes `/metrics/*` to the sGTM origin and everything else to the main site. In return you get:
+
+- **Strongest cookie scoping.** Cookies live on `example.com` with `Path=/` and `Domain=example.com`, same as any other first-party cookie the site sets. ITP treats them exactly like the site's own session cookies.
+- **No CORS.** sGTM requests are same-origin with the page. No preflight, no `Access-Control-Allow-Origin` negotiation.
+- **Simpler CMP integration.** Your cookie banner rules a single hostname. No subdomain exception.
+- **Better first-party signal in ad-platform algorithms.** Some platforms weight "same-registrable-domain first-party" signals higher than subdomain first-party signals. Whether that matters materially is disputed, but it's a free upside.
+
+The trade-offs are real: more infrastructure, a routing layer that becomes a dependency, potential path conflicts with your app's own routes, and extra latency per request.
+
+## When to choose subfolder over subdomain
+
+| Situation | Recommended topology |
+|---|---|
+| Standard sGTM on Stape / GCP with Cloudflare in front | Subdomain (simpler, good enough) |
+| Safari-heavy traffic and cross-visit attribution matters | Subfolder |
+| Ecommerce with 30+ day purchase cycles | Subfolder |
+| Complex multi-team site where operations can't own a reverse proxy | Subdomain |
+| Already running Cloudflare Workers or Vercel with rewrites | Subfolder (marginal additional effort) |
+
+## Reverse-proxy patterns
+
+<Tabs>
+<TabItem label="Cloudflare Worker">
+```javascript
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (url.pathname.startsWith('/metrics/')) {
+      // Strip /metrics prefix, route to sGTM origin
+      const sgtmUrl = new URL(request.url);
+      sgtmUrl.hostname = env.SGTM_ORIGIN; // e.g. gtm-xxxxxx-xx.a.run.app
+      sgtmUrl.pathname = url.pathname.replace(/^\/metrics/, '');
+
+      // Forward with original headers — critical for geo and consent
+      return fetch(sgtmUrl.toString(), {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        redirect: 'manual',
+      });
+    }
+
+    // Everything else — pass through to the main origin
+    return fetch(request);
+  },
+};
+```
+
+Deploy with `wrangler deploy` and add a route rule in Cloudflare Dashboard → Workers → Routes: `example.com/metrics/*` → worker name.
+</TabItem>
+<TabItem label="Nginx">
+```nginx
+# inside your main site's server block
+location /metrics/ {
+    # Strip /metrics prefix before forwarding
+    rewrite ^/metrics/(.*)$ /$1 break;
+
+    proxy_pass https://gtm-xxxxxx-xx.a.run.app;
+    proxy_ssl_server_name on;
+    proxy_set_header Host gtm-xxxxxx-xx.a.run.app;
+
+    # Preserve geo and consent headers
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header CF-IPCountry $http_cf_ipcountry;
+
+    # Don't cache tagging traffic
+    proxy_cache off;
+    proxy_buffering off;
+
+    # sGTM can take longer for some transforms
+    proxy_read_timeout 30s;
+}
+```
+
+Reload: `nginx -t && nginx -s reload`.
+</TabItem>
+<TabItem label="Vercel / Next.js">
+`vercel.json`:
+
+```json
+{
+  "rewrites": [
+    {
+      "source": "/metrics/:path*",
+      "destination": "https://gtm-xxxxxx-xx.a.run.app/:path*"
+    }
+  ]
+}
+```
+
+Or in Next.js middleware for more control (conditional routing, header manipulation):
+
+```javascript
+// middleware.ts
+import { NextResponse } from 'next/server';
+
+export function middleware(request) {
+  const { pathname } = request.nextUrl;
+
+  if (pathname.startsWith('/metrics/')) {
+    const sgtmUrl = new URL(request.url);
+    sgtmUrl.hostname = 'gtm-xxxxxx-xx.a.run.app';
+    sgtmUrl.pathname = pathname.replace(/^\/metrics/, '');
+    return NextResponse.rewrite(sgtmUrl);
+  }
+
+  return NextResponse.next();
+}
+```
+</TabItem>
+</Tabs>
+
+## Configuring GTM for subfolder
+
+<Steps>
+1. **Server container URL** — in GTM, set the server container URL to `https://example.com/metrics` (no trailing slash). This is what the client-side Google Tag uses when posting events.
+
+2. **Client-side Google Tag configuration** — in the GA4 Configuration tag or gtag.js config, set `server_container_url` to `https://example.com/metrics`. This is the toggle that makes client-side events flow through your sGTM.
+
+3. **CMP integration** — your cookie banner should treat `example.com` cookies as first-party (it already does). No special exception needed for subdomains, because there aren't any.
+
+4. **Verification** — open DevTools, fire a test event. The outbound request should go to `https://example.com/metrics/g/collect`, not to a subdomain. The `_ga` cookie should be set by `example.com` with the full 2-year expiry.
+</Steps>
+
+## Path-conflict risks
+
+If your application already uses `/metrics` for something (a Prometheus endpoint, an internal dashboard, a URL path that happens to be an analytics term), pick a different prefix. `/s`, `/i`, `/t` are all reasonable short options. `/analytics` is tempting but high-profile path names get flagged by ad-blockers more often than generic ones — the whole point of subfolder deployment is partly to be unremarkable. Short and generic wins.
+
+If you pick `/metrics` and then later add a Prometheus endpoint at `/metrics/prometheus`, the routing rule intercepts it. Either be careful about prefix exclusivity or make the rule more specific:
+
+```nginx
+# Only match sGTM's actual paths, not everything under /metrics
+location ~ ^/metrics/(g/collect|j/collect|gtm\.js|gtag/js) {
+    # ... forward to sGTM
+}
+```
+
+## Common mistakes
+
+**Forgetting to strip the path prefix in the rewrite.** sGTM expects requests at `/g/collect`, not `/metrics/g/collect`. If the prefix isn't stripped, sGTM returns 404s and the cause is invisible from the browser (which just sees a 404 response without detail).
+
+**Not forwarding headers.** Geo enrichment relies on `CF-IPCountry` (or `X-Forwarded-For`). Consent logic may rely on custom headers. If your reverse proxy strips headers by default, both features silently break.
+
+**Caching the rewritten responses.** The reverse proxy must not cache sGTM responses. Cloudflare caches by default on many tiers — add an explicit bypass for `/metrics/*`. Nginx has `proxy_cache off` per location; Vercel does not cache rewritten responses by default.
+
+**Setting the wrong Host header.** Cloud Run routes by Host header. If the reverse proxy forwards the original `example.com` Host, Cloud Run sees an unexpected host and may reject the request. Set `Host: gtm-xxxxxx-xx.a.run.app` (or your custom domain mapping) explicitly.
+
+**Assuming Edge routing is free performance-wise.** A Cloudflare Worker adds ~5–20ms per request. A same-region Nginx proxy adds ~1–3ms. Vercel rewrites are essentially free at the edge. Measure — don't assume — and decide if the latency is acceptable for your setup.
+
+**Losing the mapping when infrastructure changes.** The reverse-proxy rule is now a load-bearing piece of your tagging infrastructure. Document it in your runbook. When someone migrates the main site to a new platform, the subfolder rewrite has to move with it — otherwise sGTM goes silently offline.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Cloudflare Proxy Setup"
+    description="The simpler precursor — subdomain with Cloudflare in front, which many teams never need to graduate beyond."
+    href="/server-side/operations/cloudflare-proxy-setup/"
+  />
+  <LinkCard
+    title="Custom Domain Setup"
+    description="The subdomain-style first-party setup, and when that's good enough."
+    href="/server-side/setup/custom-domain-setup/"
+  />
+  <LinkCard
+    title="FPID Cookie Management"
+    description="What you're optimising for with subfolder deployment — first-party ID survival."
+    href="/privacy/fpid-cookie-management/"
+  />
+  <LinkCard
+    title="Cross-Domain Server-Side"
+    description="The multi-origin extension — when one subfolder serves more than one domain."
+    href="/server-side/advanced/cross-domain-server-side/"
+  />
+</CardGrid>

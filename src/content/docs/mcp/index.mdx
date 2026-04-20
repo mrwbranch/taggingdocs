@@ -1,0 +1,104 @@
+---
+title: TaggingDocs MCP Server
+description: Connect Claude, ChatGPT, or Cursor to TaggingDocs. Search 330+ GTM and GA4 articles, audit containers, and manage Google Tag Manager with natural language.
+template: splash
+hero:
+  title: TaggingDocs MCP Server
+  tagline: Ask Claude, ChatGPT, or Cursor about Google Tag Manager — and let them run it for you. One URL, 30-second setup.
+  actions:
+    - text: Connect your AI client
+      link: /mcp/connect/
+      icon: right-arrow
+      variant: primary
+    - text: See tools & prompts
+      link: /mcp/tools-and-prompts/
+      variant: secondary
+---
+
+import { Card, CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
+
+## What it gives you
+
+`mcp.taggingdocs.com` is a hosted [Model Context Protocol](https://modelcontextprotocol.io) server. Add it once to your AI client and every future conversation gets two new capabilities: instant access to the full TaggingDocs library, and a safe handle on your Google Tag Manager containers.
+
+<CardGrid>
+  <Card title="Ask the full library" icon="open-book">
+    Every article on TaggingDocs is indexed and searchable from inside Claude, ChatGPT, or Cursor. No login needed for docs tools. "What does taggingdocs recommend for ecommerce tracking?" just works.
+  </Card>
+  <Card title="Manage GTM with AI" icon="setting">
+    31 tools covering accounts, containers, workspaces, tags, triggers, variables, folders, versions, and publish. Sign in once with Google, then audit, edit, or deploy by describing what you want.
+  </Card>
+  <Card title="Guided workflows" icon="rocket">
+    Six prebuilt prompts wrap TaggingDocs best practices into one-shot flows: container audit, GA4 ecommerce setup, Consent Mode v2, UA→GA4 migration, tracking-plan generation, and more.
+  </Card>
+</CardGrid>
+
+## Example prompts
+
+All of these work once the connector is installed — the first two need no login at all.
+
+- *"What does TaggingDocs recommend for ecommerce tracking?"* — no login
+- *"Look up the GA4 `purchase` event spec."* — no login
+- *"List all my GTM containers."* — requires Google sign-in
+- *"Audit this container following TaggingDocs best practices."*
+- *"Set up GA4 ecommerce tracking with all events."*
+- *"Set up Consent Mode v2 with Cookiebot."*
+
+## Connect in 30 seconds
+
+<CardGrid>
+  <Card title="Claude.ai / Claude Desktop" icon="puzzle">
+    Customize (sidebar) → Connectors → **Add custom connector**
+
+    Paste: `https://mcp.taggingdocs.com/mcp`
+  </Card>
+
+  <Card title="Claude Code" icon="seti:powershell">
+    ```bash
+    claude mcp add -t http gtm https://mcp.taggingdocs.com/mcp
+    ```
+  </Card>
+
+  <Card title="ChatGPT" icon="puzzle">
+    Settings → Connectors → **Add custom MCP**
+
+    Paste: `https://mcp.taggingdocs.com/mcp`
+  </Card>
+
+  <Card title="Cursor & other stdio MCP clients" icon="seti:powershell">
+    Add to your client's MCP config (e.g. `~/.cursor/mcp.json`):
+
+    ```json
+    {
+      "mcpServers": {
+        "taggingdocs": {
+          "command": "npx",
+          "args": ["mcp-remote", "https://mcp.taggingdocs.com/mcp"]
+        }
+      }
+    }
+    ```
+  </Card>
+</CardGrid>
+
+<LinkCard
+  title="Full setup guide per AI client"
+  description="Step-by-step instructions, screenshots, and troubleshooting for every supported client."
+  href="/mcp/connect/"
+/>
+
+## Auth model
+
+Documentation tools need no login — anyone can search and read articles through the connector. GTM tools require you to sign in with a Google account that already has access to the containers you want to manage. The server asks for Google's standard Tag Manager OAuth scopes (read, edit, and publish) and stores only the refresh token needed to stay connected between sessions.
+
+You can revoke access any time at [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+
+## Self-hosting
+
+Prefer to run your own instance? The server is open source under MIT. Clone, configure Google OAuth credentials, and `docker compose up`.
+
+<LinkCard
+  title="taggingdocs-mcp on GitHub"
+  description="Source, Dockerfile, docker-compose, and setup notes."
+  href="https://github.com/mrwbranch/taggingdocs-mcp"
+/>

@@ -1,0 +1,390 @@
+---
+title: "Building Custom Clients: A Tutorial"
+description: "Write your own sGTM client from scratch — request claiming, Event Model construction, response lifecycle, authentication, and a worked CRM webhook receiver."
+sidebar:
+  order: 20
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+The built-in GA4 client covers one shape of incoming traffic: browser-originated Measurement Protocol v2 hits to `/g/collect` and `/mp/collect`. Everything else — a CRM webhook from HubSpot, a server-to-server ping from your own backend, a mobile SDK emitting a proprietary schema, a third-party event stream — needs a client you write yourself.
+
+This article is the tutorial. [What Are Clients?](/server-side/clients/what-are-clients/) explains the concept; [Custom Clients](/server-side/clients/custom-clients/) is the reference. Here, we walk through building one end-to-end, with the lifecycle made explicit and a worked CRM receiver you can adapt.
+
+*Valid as of April 2026, Server-side GTM container version 2.0+.*
+
+<Aside type="tip">
+Prerequisites: a working sGTM container, comfort with the [Sandboxed JavaScript API](/templates/sandboxed-javascript/), and a rough understanding of [Client Claiming](/server-side/clients/client-claiming/). If any of those are unfamiliar, read those first — this page assumes them.
+</Aside>
+
+## The client lifecycle
+
+A client template executes in three phases, and the phase boundaries matter. If you put logic in the wrong phase — especially if you call `claimRequest()` too late or `returnResponse()` too early — the request hangs, double-fires, or silently drops.
+
+### Phase 1: Claim (synchronous)
+
+Everything before `claimRequest()` is the claiming decision. The client reads request metadata — path, method, headers, sometimes body — and decides whether this request belongs to it.
+
+```javascript
+const claimRequest = require('claimRequest');
+const getRequestPath = require('getRequestPath');
+const getRequestMethod = require('getRequestMethod');
+
+// Decision: is this our request?
+if (getRequestPath() !== '/webhooks/crm' || getRequestMethod() !== 'POST') {
+  return; // Not ours — exit; next client in priority order evaluates.
+}
+
+// Claim it. No other client will be evaluated.
+claimRequest();
+```
+
+`claimRequest()` must be called **synchronously** — not inside an `sendHttpGet` callback, not inside `runContainer`'s completion handler. Once called, the request is yours and yours alone.
+
+### Phase 2: Parse and build the Event Model
+
+Read the body, parse it, map its fields into a plain object that becomes the Event Model. The Event Model is not a class or a protected structure — it is a JavaScript object passed to `runContainer()`. Conventionally it has `event_name`, `client_id`, and whatever other fields your downstream tags need, but the runtime does not enforce a schema.
+
+```javascript
+const getRequestBody = require('getRequestBody');
+const JSON = require('JSON');
+
+const raw = getRequestBody();
+let payload;
+try {
+  payload = JSON.parse(raw);
+} catch (e) {
+  // Invalid body — respond 400 and stop.
+  return respondWith(400, 'Invalid JSON');
+}
+
+const eventModel = {
+  event_name: mapCrmType(payload.type),
+  client_id: payload.ga_client_id || ('crm_' + payload.contact_id),
+  contact_id: payload.contact_id,
+  // ...map other fields you care about
+};
+```
+
+### Phase 3: Run the container, respond
+
+Hand the Event Model to `runContainer()`. Inside its completion callback, send the HTTP response. **If you do not call `returnResponse()`, the connection hangs until Cloud Run's request timeout (60 seconds by default)** — the webhook sender sees a timeout and retries.
+
+```javascript
+const runContainer = require('runContainer');
+const setResponseStatus = require('setResponseStatus');
+const setResponseBody = require('setResponseBody');
+const returnResponse = require('returnResponse');
+
+runContainer(eventModel, () => {
+  setResponseStatus(200);
+  setResponseBody(JSON.stringify({received: true}));
+  returnResponse();
+});
+```
+
+```
+Request arrives
+    │
+    ▼
+Phase 1  Claim         claimRequest() — synchronous
+    │
+    ▼
+Phase 2  Build         Parse body, construct event model object
+    │
+    ▼
+Phase 3  Run + respond runContainer(..., () => { ...; returnResponse(); })
+```
+
+Those three phases are the entire template contract. The rest is detail.
+
+## When to write a client vs. use the GA4 client
+
+Do not build a custom client reflexively. Each one adds code to maintain, a permissions surface to audit, and a priority slot to coordinate. The GA4 client handles more cases than people assume.
+
+| Scenario | GA4 client | Custom client |
+|---|---|---|
+| CRM webhook (HubSpot, Salesforce, Pipedrive) | No | Yes |
+| Stripe, Shopify, other payment/commerce webhooks | No | Yes |
+| Mobile SDK sending standard GA4 Measurement Protocol | **Yes** | No |
+| Your own backend emitting Measurement Protocol | **Yes** | No |
+| Non-standard Measurement Protocol dialect | Prefer wrapping to standard MP in the emitter | Yes if you can't change the emitter |
+| Two sources sharing `/events`, discriminated by header | No | Yes (with body or header discrimination) |
+| Browser-originated request to `/g/collect` | **Yes (default)** | Only override if you have a specific reason |
+
+If your emitter can be modified to send standard Measurement Protocol, that is almost always the cheaper path. Build a custom client when the emitter's format is fixed (third-party webhooks) or when the format genuinely needs different processing.
+
+## Request pattern matching
+
+Claiming logic decides which requests a client handles. Four patterns, in rough order of specificity.
+
+**Path-based.** The common case. Match a fixed path or a prefix.
+
+```javascript
+if (getRequestPath() !== '/webhooks/hubspot') return;
+claimRequest();
+```
+
+**Method + path.** Reject everything except the expected method. Prevents `GET /webhooks/hubspot` (browser curiosity, link-preview bots) from accidentally claiming.
+
+```javascript
+if (getRequestPath() !== '/webhooks/hubspot' || getRequestMethod() !== 'POST') return;
+claimRequest();
+```
+
+**Header-based discrimination.** When two sources share a path.
+
+```javascript
+const source = getRequestHeader('x-event-source');
+if (getRequestPath() !== '/events' || source !== 'hubspot') return;
+claimRequest();
+```
+
+**Body-shape discrimination.** The last resort. You have to parse the body before claiming, which wastes work if another client would have claimed first. Use only when headers and paths genuinely cannot discriminate.
+
+```javascript
+if (getRequestPath() !== '/events') return;
+const body = getRequestBody();
+let parsed;
+try { parsed = JSON.parse(body); } catch (e) { return; }
+if (parsed.schema !== 'my-crm/v1') return;
+claimRequest();
+// Continue with the already-parsed body.
+```
+
+## Authentication and signature validation
+
+Webhook endpoints are publicly addressable. If anyone can POST to `/webhooks/stripe` and fire your conversion tags, anyone can poison your attribution data. Validate before claiming anything that runs `runContainer()`.
+
+**Shared-secret header.** Cheapest option. Fine for low-stakes internal services.
+
+```javascript
+const getRequestHeader = require('getRequestHeader');
+
+const auth = getRequestHeader('x-auth-token');
+if (auth !== data.sharedSecret) {
+  claimRequest();
+  setResponseStatus(401);
+  returnResponse();
+  return;
+}
+```
+
+**HMAC signature.** The standard for third-party webhooks. sGTM exposes `computeHmac` for this. Full signature handling is covered in [Webhook Integrations](/server-side/advanced/webhook-integrations/) — the short version:
+
+```javascript
+const computeHmac = require('computeHmac');
+
+const body = getRequestBody();
+const received = getRequestHeader('x-signature');
+const expected = computeHmac('SHA-256', data.webhookSecret, body, 'hex');
+
+if (expected !== received) {
+  claimRequest();
+  setResponseStatus(401);
+  returnResponse();
+  return;
+}
+```
+
+<Aside type="caution">
+The short-circuit `===` comparison above is not constant-time. For adversarial contexts, implement an XOR-over-bytes compare. For most webhook-from-partner scenarios, the timing side-channel is theoretical.
+</Aside>
+
+**IP allowlisting.** The caller's IP is in `x-forwarded-for`. Cloud Run may prepend its own hops, so parse carefully — the caller is typically the *first* entry, not the last.
+
+```javascript
+const xff = getRequestHeader('x-forwarded-for') || '';
+const callerIp = xff.split(',')[0].trim();
+if (!STRIPE_IP_RANGES.some(function(cidr) { return ipInCidr(callerIp, cidr); })) {
+  claimRequest();
+  setResponseStatus(403);
+  returnResponse();
+  return;
+}
+```
+
+## Worked example: CRM webhook client
+
+A full client template for receiving CRM events. POST-only, HMAC-authenticated, maps CRM event types to GA4 event names, builds an Event Model with identity fields, and logs a structured line to Cloud Logging on every claim.
+
+**Required template fields:**
+- `webhookSecret` (text, `canBeSensitive: true`) — the shared signing secret.
+- `expectedPath` (text, default `/webhooks/crm`) — the path this client claims.
+
+**Required permissions:**
+- `read_request` (path, method, body, headers)
+- `access_response` (status, body)
+- `return_response`
+- `run_container`
+- `logging`
+- `compute_hmac` (SHA-256)
+
+```javascript
+const claimRequest = require('claimRequest');
+const getRequestBody = require('getRequestBody');
+const getRequestHeader = require('getRequestHeader');
+const getRequestMethod = require('getRequestMethod');
+const getRequestPath = require('getRequestPath');
+const runContainer = require('runContainer');
+const returnResponse = require('returnResponse');
+const setResponseBody = require('setResponseBody');
+const setResponseStatus = require('setResponseStatus');
+const logToConsole = require('logToConsole');
+const computeHmac = require('computeHmac');
+const getTimestampMillis = require('getTimestampMillis');
+const JSON = require('JSON');
+
+// --- Phase 1: claiming decision ----------------------------------------
+
+if (getRequestPath() !== data.expectedPath) return;
+if (getRequestMethod() !== 'POST') return;
+
+const rawBody = getRequestBody();
+const receivedSig = getRequestHeader('x-signature');
+const expectedSig = computeHmac('SHA-256', data.webhookSecret, rawBody, 'hex');
+
+claimRequest();
+
+if (!receivedSig || expectedSig !== receivedSig) {
+  logToConsole(JSON.stringify({
+    level: 'error', client: 'crm_webhook', reason: 'signature_mismatch'
+  }));
+  setResponseStatus(401);
+  setResponseBody('Invalid signature');
+  returnResponse();
+  return;
+}
+
+// --- Phase 2: parse and build Event Model -----------------------------
+
+let payload;
+try {
+  payload = JSON.parse(rawBody);
+} catch (e) {
+  setResponseStatus(400);
+  setResponseBody('Invalid JSON');
+  returnResponse();
+  return;
+}
+
+if (!payload.type || (!payload.contact_id && !payload.email_sha256)) {
+  setResponseStatus(422);
+  setResponseBody('Missing type or identity');
+  returnResponse();
+  return;
+}
+
+const EVENT_NAME_MAP = {
+  'contact.lifecycle.customer': 'crm_customer_created',
+  'deal.closed_won':            'crm_deal_closed',
+  'contact.marketing.consent':  'crm_consent_granted'
+};
+
+const eventName = EVENT_NAME_MAP[payload.type];
+if (!eventName) {
+  // Acknowledge unknown types without firing tags — stops retries.
+  setResponseStatus(200);
+  setResponseBody('Unmapped event type');
+  returnResponse();
+  return;
+}
+
+const eventModel = {
+  event_name: eventName,
+  client_id: payload.ga_client_id || ('crm_' + payload.contact_id),
+  user_data: {
+    email_sha256: payload.email_sha256,
+    external_id:  payload.contact_id
+  },
+  crm_source: 'hubspot',
+  deal_value: payload.deal && payload.deal.amount_usd,
+  currency: 'USD',
+  event_time: Math.floor(getTimestampMillis() / 1000)
+};
+
+logToConsole(JSON.stringify({
+  level: 'info', client: 'crm_webhook',
+  event_name: eventName, contact_id: payload.contact_id
+}));
+
+// --- Phase 3: run container and respond --------------------------------
+
+runContainer(eventModel, () => {
+  setResponseStatus(200);
+  setResponseBody(JSON.stringify({received: true, event: eventName}));
+  returnResponse();
+});
+```
+
+## Error paths you must handle
+
+Every custom client has a matrix of failure modes. Map each one to a specific response code and log level.
+
+| Condition | Response | Log level | Why |
+|---|---|---|---|
+| Invalid JSON body | 400 | warn | Malformed input; sender's problem |
+| Signature mismatch | 401 | error | Possible attack, or rotated secret |
+| Missing required field | 422 | warn | Sender sent unexpected schema |
+| Unknown event type | 200 | info | Acknowledge; don't trigger retries |
+| Tag failure inside container | (already 200) | error in tag | Handle in tag via `addEventCallback` |
+| sendHttpRequest to downstream times out | (already 200) | error in tag | Webhook sender already ack'd |
+
+The trap to avoid: calling `returnResponse()` after `runContainer()` finishes but before the downstream tag has actually forwarded the event. That is the right design for webhook acknowledgement — you want to ack fast — but it means downstream failures never propagate back to the sender. Log them; don't hope the sender will retry.
+
+## Testing
+
+<Steps>
+1. **Enable sGTM Preview.** Copy the `x-gtm-server-preview` header value.
+
+2. **Send a test request via curl** with the preview header:
+
+   ```bash
+   curl -X POST https://collect.yoursite.com/webhooks/crm \
+     -H "Content-Type: application/json" \
+     -H "X-Signature: $(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | awk '{print $2}')" \
+     -H "X-GTM-Server-Preview: ZW52LTF8..." \
+     -d "$BODY"
+   ```
+
+3. **Watch the Preview panel.** You should see: client matched, Event Model built, triggers evaluated, tags fired. If the panel shows "No client claimed", your claiming logic rejected the request — check path, method, and signature in that order.
+
+4. **Unit test with `mock()`** per [Testing Custom Templates](/templates/testing-custom-templates/). Mock `getRequestPath`, `getRequestBody`, `computeHmac`, and assert that `claimRequest` and `runContainer` are called with the right arguments.
+</Steps>
+
+## Common mistakes
+
+**Calling `claimRequest()` inside a callback.** `claimRequest()` must be synchronous. If you place it inside a `sendHttpGet` or `runContainer` callback, by the time the callback fires, the request router has moved on. No other client has claimed either, so the request returns a default 200 with no processing — a silent drop.
+
+**Forgetting `returnResponse()`.** If `claimRequest()` runs but `returnResponse()` never does, the caller waits 60 seconds and times out. The webhook sender retries. You will see this as "why are conversions doubled every minute" three weeks after deployment.
+
+**Reusing the GA4 client's `client_id` namespace for CRM contacts.** GA4 `client_id` values look like `1711900000.1234567890`. If you generate `client_id: '42'` for contact ID 42, you create identity collisions with real GA4 clients whose random number happened to be 42. Prefix CRM-derived IDs: `'crm_42'`.
+
+**Hardcoding the webhook secret.** Put it in a template field, mark it `canBeSensitive: true`, and store the actual secret in the client configuration. Template code is version-controlled and exportable; secrets in code are secrets in the export.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Clients Reference"
+    description="The reference page — concepts, APIs, shorter examples."
+    href="/server-side/clients/custom-clients/"
+  />
+  <LinkCard
+    title="Sandboxed JavaScript"
+    description="The full sandbox API reference — every require()-able function."
+    href="/templates/sandboxed-javascript/"
+  />
+  <LinkCard
+    title="Client Claiming"
+    description="Priority ordering, evaluation logic, and debugging unclaimed requests."
+    href="/server-side/clients/client-claiming/"
+  />
+  <LinkCard
+    title="Webhook Integrations"
+    description="Stripe, HubSpot, and other webhook signature patterns in depth."
+    href="/server-side/advanced/webhook-integrations/"
+  />
+</CardGrid>

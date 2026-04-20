@@ -1,0 +1,76 @@
+---
+title: "Why GA4 Shows 'Unassigned' Traffic"
+description: "Six reasons sessions land in Unassigned in GA4 — consent race conditions, missing UTMs, referrer loss, channel grouping drift, and banner timing."
+sidebar:
+  order: 6
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+If you're seeing a large block of sessions in the **Unassigned** channel in GA4 acquisition reports, here are the most common causes and how to fix them. Unassigned means GA4 received the session but couldn't match it to any channel rule — not Direct, not Organic, not Paid, not anything. Fixing it almost always requires tracing what the first event in the session actually contained.
+
+<Aside type="note">
+A small percentage of Unassigned traffic (1-3%) is normal — edge cases, malformed UTMs, unusual referrers. If Unassigned is 10%+ of your traffic, one of the issues below is active.
+</Aside>
+
+## 1. Consent denied before `session_start` — channel signals lost
+
+**Verify.** When consent is denied at the Consent Mode default state, GA4 uses cookieless pings without the full suite of campaign parameters in some configurations. Sessions that start under denied consent often land Unassigned because source/medium/campaign aren't propagated through the modeling.
+
+**Fix.** This is the biggest driver of Unassigned in 2025-2026 for sites with strict consent defaults. You have two levers: improve opt-in rates (fewer denied sessions), and accept that denied-consent sessions will be modeled rather than deterministic. See [Consent Mode v2](/consent/consent-mode/consent-mode-v2/).
+
+## 2. UTM parameters missing from inbound links
+
+**Verify.** GA4 → Reports → **Traffic acquisition** → drill into Unassigned → compare to Direct. Filter by landing page. Many Unassigned sessions will have a clear external landing page (from an email, social post, or campaign) but no UTM parameters. Check your email service, ad platform tag templates, and organic social posts — campaigns that forgot UTMs land in Unassigned when the referrer also doesn't match a known source.
+
+**Fix.** Add UTM parameters to every non-organic inbound link. Your email platform, your ad platform auto-tagging settings (GCLID/DCLID/MSCLKID), and your QR code generator all need to tag outbound URLs. Use a URL builder template internally to prevent malformed UTMs.
+
+## 3. Referrer lost in redirect chain
+
+**Verify.** The inbound traffic has a legitimate source (LinkedIn, Reddit, an email client), but a redirect in the middle strips the `Referer` header. Open DevTools → Network → Preserve log → visit a tracked link. Every redirect hop should carry `Referer`. If a hop is missing it, that's where the source signal dies.
+
+**Fix.** Depends on the redirect. Link shorteners are the usual culprit — bit.ly, t.co, lnkd.in. Some of them intentionally strip referrers for privacy. You cannot fix the shortener, but you can add UTMs to the underlying URL before shortening, which survive the redirect. For your own redirects, remove `Referrer-Policy: no-referrer`.
+
+## 4. Channel grouping rules not matching
+
+**Verify.** GA4 → Admin → **Channel groups** → open your default group. Look at the rules for each channel. If your ad platform labels itself `source=linkedin-ads` and `medium=paidsocial`, but the channel rule expects `source matches regex ^(linkedin|facebook)$` and `medium = cpc`, your sessions land Unassigned because no rule matched.
+
+**Fix.** Either standardise your UTM conventions to match the default channel group definitions, or create a Custom channel group that aligns with your actual UTM patterns. Google's default group is strict about medium vocabulary — `cpc`, `ppc`, `paid`, `display`, `social`, `email`, `affiliate`, `referral`, `organic`. Outside these, expect Unassigned.
+
+## 5. Default channel group evolved — your old rules don't match anymore
+
+**Verify.** Google periodically updates the Default Channel Group definitions. Most recent changes: tightening of Cross-Network criteria, Paid Shopping/Paid Video breakouts, and "Organic Shopping" vs "Organic" splits. If your Unassigned spiked after a specific date in the last 6-12 months and nothing changed on your side, this is likely the cause.
+
+**Fix.** Check the current Default Channel Group definitions in Google's documentation. Create a Custom channel group that matches your historical expectations, and set it as the default view for your reports. The DCG changes retroactively, so historical comparisons using DCG will shift too.
+
+## 6. Cookie banner fires before `page_view`
+
+**Verify.** In Preview, watch the event order. If your CMP renders a modal that somehow triggers a `page_view` (or prevents the Google Tag from reading the URL when the modal is open), the initial pageview either doesn't fire or fires with missing `page_location`/`page_referrer`. When `page_referrer` is blank and there are no UTMs, GA4 falls back to Direct or Unassigned.
+
+**Fix.** Ensure the Google Tag fires at Consent Initialization (not Page View behind the banner). Ensure `page_location` and `page_referrer` are set explicitly on the Google Tag, not inferred from a potentially-obscured document state. Test by manually denying consent and confirming a `page_view` still arrives (Consent Mode cookieless ping).
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Consent Mode v2"
+    description="The underlying mechanics — consent denied sessions, modeled data, and channel signal loss."
+    href="/consent/consent-mode/consent-mode-v2/"
+  />
+  <LinkCard
+    title="Why GA4 Shows '(not set)'"
+    description="The related problem for event parameters specifically."
+    href="/recipes/troubleshooting/why-ga4-shows-not-set/"
+  />
+  <LinkCard
+    title="Data Discrepancies"
+    description="When Unassigned rates differ between GA4 UI and BigQuery export — what's real."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+  <LinkCard
+    title="Cross-Domain Tracking Not Working"
+    description="A frequent secondary cause of Unassigned — broken cross-domain inflates self-referral and strips UTMs."
+    href="/recipes/troubleshooting/cross-domain-not-working/"
+  />
+</CardGrid>

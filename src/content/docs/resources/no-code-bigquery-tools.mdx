@@ -24,7 +24,7 @@ GA4SQL is a visual query builder specifically designed for GA4 BigQuery data. Yo
 **Strengths:**
 - No GA4 SQL experience needed — you think in terms of "I want event count by event_name" and it translates that to the correct subquery pattern
 - Built-in understanding of GA4 schema oddities (nested events, user_properties structure, repeated fields)
-- Exports to Google Sheets and Looker Studio
+- Exports to Google Sheets and Data Studio
 - Genuinely free with no limits
 
 **Best for:**
@@ -121,14 +121,14 @@ Once you understand the GA4 schema and a few patterns (how events are nested, ho
 
 ## Integration Patterns
 
-### Exporting to Looker Studio
+### Exporting to Data Studio
 
-Both GA4SQL and GA4BQ can export query results directly to Looker Studio:
+Both GA4SQL and GA4BQ can export query results directly to Data Studio:
 
 1. Run your query in the no-code tool
-2. Click "Export to Looker Studio"
+2. Click "Export to Data Studio"
 3. Accept the connection request
-4. Use the exported table as a data source in Looker Studio
+4. Use the exported table as a data source in Data Studio
 
 This is an effective way to build dashboards without writing any SQL yourself: use no-code tools to validate data, then connect the results directly to visualization.
 
@@ -140,7 +140,7 @@ Once you have a SQL query you want to run repeatedly:
 2. Click **Schedule query** (top right)
 3. Set frequency (daily, weekly, monthly)
 4. Write results to a new table
-5. Connect that table to Looker Studio
+5. Connect that table to Data Studio
 
 This creates a managed reporting pipeline without needing to write any scheduling code.
 

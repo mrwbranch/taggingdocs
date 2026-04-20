@@ -1,0 +1,255 @@
+---
+title: "Response Header Manipulation"
+description: "Writing response headers from clients and tags — CORS, Set-Cookie for first-party IDs, cache directives, debug headers, and the security pitfalls that matter."
+sidebar:
+  order: 23
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+sGTM's response to the caller is fully controllable. The browser, webhook sender, or mobile SDK receiving your response sees the status code, headers, and body that your client or tags constructed. This is how first-party cookies get written, how CORS negotiation works, and how you expose debugging hooks that don't poison production traffic.
+
+Response header manipulation is also where many sGTM deployments silently leak internals, mis-scope cookies, or accidentally disable CORS. The APIs are simple; the gotchas are in the timing and the security implications.
+
+*Valid as of April 2026, Server-side GTM container version 2.0+.*
+
+## The response-building APIs
+
+The core set, all sandbox-required via `require()`:
+
+```javascript
+const setResponseStatus = require('setResponseStatus');
+const setResponseHeader = require('setResponseHeader');
+const setResponseBody   = require('setResponseBody');
+const setCookie         = require('setCookie');
+const setPixelResponse  = require('setPixelResponse');
+const returnResponse    = require('returnResponse');
+```
+
+- **`setResponseStatus(code)`** — sets the HTTP status. Call any time before `returnResponse()`.
+- **`setResponseHeader(name, value)`** — sets a header. A second call with the same name overrides the first (except `Set-Cookie`, see below).
+- **`setResponseBody(body)`** — sets the body as a string. Binary responses are not supported from the sandbox.
+- **`setCookie(name, value, options)`** — a higher-level wrapper that writes a correctly-formatted `Set-Cookie` header under the hood. Multiple calls produce multiple cookies.
+- **`setPixelResponse()`** — a convenience that sets a 1x1 transparent GIF body with the right `Content-Type` and a `no-store` cache directive. Useful for pixel-style endpoints.
+- **`returnResponse()`** — sends the response. Anything after this point is a no-op.
+
+Permissions: `access_response` for status/header/body, `set_cookies` with specific cookie names declared for `setCookie`, `return_response` for `returnResponse`.
+
+## Who can set response headers, and when
+
+This is the subtlety that catches people. Response headers can be set from **clients** (in claiming and processing logic) and from **tags**, but the client's `returnResponse()` call is a hard boundary — anything that runs after it cannot affect the response.
+
+The typical sequence in a client template:
+
+```
+claimRequest()
+    │
+    ▼
+[ optional: set early headers — e.g., CORS, server identification ]
+    │
+    ▼
+runContainer(eventModel, () => {
+    │
+    ▼
+  [ tags fire here — tags CAN setResponseHeader here ]
+    │
+    ▼
+  [ client sets final headers + body ]
+  returnResponse()              ← boundary; nothing after this matters
+});
+```
+
+A tag that runs inside `runContainer` can legitimately call `setResponseHeader`. A tag that runs asynchronously — say, one that calls `sendHttpRequest` and then sets a header in the callback — usually cannot, because the client's `returnResponse()` has already fired. For tags that genuinely need to influence the response, use `addEventCallback` to hook into the right phase, or set headers early in the client before `runContainer`.
+
+<Aside type="tip">
+Rule of thumb: set response headers either in the client before `runContainer`, or from tags that complete synchronously within `runContainer`. Headers set from async tag callbacks are usually too late.
+</Aside>
+
+## Use case 1: Setting first-party ID cookies
+
+The cleanest use of `setCookie`: a client generates or confirms a first-party identifier and writes it back as a cookie on a first-party domain. Browsers honour it as first-party; ITP applies the lenient lifetime rules; subsequent requests include it automatically.
+
+```javascript
+const setCookie = require('setCookie');
+const getCookieValues = require('getCookieValues');
+const generateRandom = require('generateRandom');
+const getTimestampMillis = require('getTimestampMillis');
+
+const existing = getCookieValues('_fpid');
+let id = existing.length ? existing[0] : undefined;
+
+if (!id) {
+  id = 'fp_' + generateRandom(1, 1e12) + '_' + getTimestampMillis();
+  setCookie('_fpid', id, {
+    domain:    '.yoursite.com',
+    path:      '/',
+    secure:    true,
+    'max-age': 60 * 60 * 24 * 365 * 2, // 2 years
+    samesite:  'Lax',
+    httpOnly:  false
+  });
+}
+```
+
+`httpOnly: false` is intentional here — if you want client-side JavaScript to read `_fpid` for its own tracking, the cookie must be script-readable. For cookies used exclusively for server-side identity, prefer `httpOnly: true`. See [Server-Side Cookies](/server-side/advanced/server-side-cookies/) for the full design space.
+
+<Aside type="caution">
+`domain: '.yoursite.com'` makes the cookie available on all subdomains. That is usually the point (same-origin subfolder deployments share it), but it also means any XSS on any subdomain exposes it. Scope tightly if you don't need subdomain sharing.
+</Aside>
+
+## Use case 2: CORS headers
+
+When a browser on `https://www.yoursite.com` calls `https://collect.yoursite.com/events` with a credentialed `fetch`, the browser requires CORS approval from the response. A client serving cross-origin traffic must set the appropriate headers.
+
+```javascript
+const getRequestHeader = require('getRequestHeader');
+const setResponseHeader = require('setResponseHeader');
+
+const origin = getRequestHeader('origin');
+const ALLOWED_ORIGINS = [
+  'https://www.yoursite.com',
+  'https://app.yoursite.com'
+];
+
+if (origin && ALLOWED_ORIGINS.indexOf(origin) !== -1) {
+  setResponseHeader('Access-Control-Allow-Origin', origin);
+  setResponseHeader('Access-Control-Allow-Credentials', 'true');
+  setResponseHeader('Vary', 'Origin');
+}
+```
+
+Three points worth calling out:
+
+- **Reflect, don't wildcard.** `Access-Control-Allow-Origin: *` is rejected by browsers when paired with `Access-Control-Allow-Credentials: true`. Always reflect a specific allowed origin.
+- **`Vary: Origin` is mandatory** if any CDN or proxy caches the response. Without it, a cached response for origin A gets served to origin B with A's headers, and the browser rejects it.
+- **OPTIONS preflight is separate.** This example handles only the main request. For full CORS handling including preflight, see [Preflight and CORS](/server-side/advanced/preflight-and-cors/).
+
+## Use case 3: Cache directives
+
+Cache behaviour depends on the endpoint type. Proxied assets want cacheable responses; tracking endpoints want no-store.
+
+| Endpoint | `Cache-Control` | Why |
+|---|---|---|
+| Proxied `/gtm.js` | `public, max-age=900, stale-while-revalidate=60` | Container publishes must propagate within minutes; see [Custom gtm.js Loader](/server-side/advanced/custom-gtm-loader/) |
+| Proxied `/gtag/js` | `public, max-age=3600` | Runtime, changes less often |
+| Tracking endpoints (`/g/collect`, `/webhooks/*`) | `no-store` | Every event is distinct; caching is incoherent |
+| Admin or debug endpoints | `no-store, private` | Should never be cached |
+
+```javascript
+// For a tracking endpoint:
+setResponseHeader('Cache-Control', 'no-store');
+
+// For a proxied asset:
+setResponseHeader('Cache-Control', 'public, max-age=900, stale-while-revalidate=60');
+setResponseHeader('Vary', 'Accept-Encoding');
+```
+
+<Aside type="danger">
+Never set a long `max-age` on a tracking endpoint. Even one intermediate proxy that honours the cache will short-circuit subsequent tracking pings for the cache's lifetime. We have debugged "why is conversion volume cut in half" down to a `max-age=3600` on `/g/collect`.
+</Aside>
+
+## Use case 4: Debug headers
+
+In non-production environments, headers that expose internal state turn "something failed" into "this client matched, this event name was built, this container version was running". Gate them on environment, never ship to production:
+
+```javascript
+if (data.environment !== 'prod') {
+  setResponseHeader('X-Sgtm-Client-Matched', 'crm_webhook_v2');
+  setResponseHeader('X-Sgtm-Event-Name', getEventData('event_name') || 'none');
+  setResponseHeader('X-Sgtm-Container-Version', '2026-04-20');
+  setResponseHeader('X-Sgtm-Transformations-Applied',
+    JSON.stringify(appliedTransformations));
+}
+```
+
+Production should be opaque. `X-*` headers that leak which client handled a request, which tags fired, or what container version is deployed give attackers reconnaissance value. The same data belongs in Cloud Logging where it's structured and access-controlled.
+
+## Security considerations
+
+**Header injection via reflected request data.** The classic mistake: taking a request header and writing it back without validation.
+
+<Comparison leftTitle="Unsafe" rightTitle="Safe" leftType="bad" rightType="good">
+  <Fragment slot="left">
+    ```javascript
+    // If the incoming X-Custom contains \r\n,
+    // you've just allowed header injection.
+    setResponseHeader(
+      'X-Echoed-Custom',
+      getRequestHeader('x-custom')
+    );
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```javascript
+    const raw = getRequestHeader('x-custom') || '';
+    // Whitelist to printable ASCII only
+    if (/^[\x20-\x7E]{0,200}$/.test(raw)) {
+      setResponseHeader('X-Echoed-Custom', raw);
+    }
+    ```
+  </Fragment>
+</Comparison>
+
+sGTM's `setResponseHeader` has been observed (as of April 2026, reverse-engineered) to strip CR/LF characters before writing the header, but this is not documented behaviour and should not be relied on.
+
+**Overly permissive CORS.** `Access-Control-Allow-Origin: *` combined with `Access-Control-Allow-Credentials: true` is not only rejected by browsers — it's also a signal that the author misunderstood the security model. If you need cross-origin credentials, you need an allowlist.
+
+**Stack-revealing headers.** `Server: sgtm/2.0`, `X-Powered-By: Google Cloud Run`, or even the default response headers that Google Cloud infrastructure sometimes adds can reveal more than you want. Strip or override defensively:
+
+```javascript
+setResponseHeader('Server', '');
+setResponseHeader('X-Powered-By', '');
+```
+
+**Insecure cookie defaults.** Every cookie that carries identity, session, or tracking data should have `Secure: true` and an explicit `SameSite`. For auth and consent cookies, prefer `SameSite=Strict` unless cross-site contexts need them. `SameSite=None; Secure` is required for cross-site credentialed requests but should be the conscious exception, not the default.
+
+## Header precedence and overwrites
+
+`setResponseHeader(name, value)` is a set, not an append. Two calls to the same name produce only the last value. The exception is `Set-Cookie` — each `setCookie` call produces a separate `Set-Cookie` entry, which is exactly what the browser needs to accept multiple cookies from one response.
+
+Observed behaviour (reverse-engineered, April 2026):
+
+- Client-set headers before `runContainer` are baseline.
+- Tag-set headers inside `runContainer` override client-set headers with the same name.
+- After `returnResponse()`, further calls are silently ignored.
+
+For `Cache-Control`, this means a client setting `public, max-age=900` followed by a tag setting `no-store` results in `no-store`. Deliberate use of this ordering is fine; accidental reliance on it is a recipe for confusion. Document which layer owns which header.
+
+## Common mistakes
+
+**Calling `setResponseHeader` after `returnResponse`.** Silent no-op. The tag thinks it set the header; the response goes out without it. If a tag's response-mutation logic depends on firing before the client's `returnResponse`, its trigger must ensure synchronous completion within `runContainer`.
+
+**Forgetting `Vary: Origin` on reflected CORS responses.** Any caching layer between your sGTM and the browser will cache the first response it sees and serve it to every subsequent origin. Browsers then reject the cross-origin responses. `Vary: Origin` tells the cache to key by origin.
+
+**Using `httpOnly: true` on first-party cookies that client JS must read.** `httpOnly` hides the cookie from `document.cookie`. For cookies used by the GA4 client tag in the browser to pass `_ga` back to sGTM, `httpOnly: false` is required. For cookies used only server-to-server, `httpOnly: true` hardens against XSS.
+
+**Hardcoding the origin allowlist in template code.** Marketing owns the list of frontend origins; engineering owns the client template. A template field driven by a configuration variable lets the operations team update the allowlist without re-publishing template code.
+
+**Setting `Set-Cookie` manually with `setResponseHeader`.** Use `setCookie` instead. The wrapper handles escaping, attribute formatting, and the `canBeSensitive` permission flow. Manually constructed `Set-Cookie` strings are a source of subtle attribute bugs.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Preflight and CORS in sGTM"
+    description="Full CORS treatment including OPTIONS preflight, credentialed requests, and preflight-handler clients."
+    href="/server-side/advanced/preflight-and-cors/"
+  />
+  <LinkCard
+    title="Custom gtm.js Loader"
+    description="Where cache headers and response body manipulation matter most."
+    href="/server-side/advanced/custom-gtm-loader/"
+  />
+  <LinkCard
+    title="Server-Side Cookies"
+    description="First-party cookie strategy, lifetime, and ITP considerations."
+    href="/server-side/advanced/server-side-cookies/"
+  />
+  <LinkCard
+    title="Building Custom Clients"
+    description="Where response header manipulation fits in the client lifecycle."
+    href="/server-side/advanced/building-custom-clients/"
+  />
+</CardGrid>

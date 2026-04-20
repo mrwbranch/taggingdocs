@@ -208,7 +208,7 @@ An analyst exploring "what happened to traffic in 2022?" running an unoptimized 
 
 ### Not building derived tables for dashboards
 
-A Looker Studio dashboard that runs direct BigQuery queries on raw events every time it refreshes will scan the same large tables repeatedly. Build derived tables and connect dashboards to those instead.
+A Data Studio dashboard that runs direct BigQuery queries on raw events every time it refreshes will scan the same large tables repeatedly. Build derived tables and connect dashboards to those instead.
 
 ### Forgetting that intraday tables add cost
 
@@ -228,8 +228,8 @@ If streaming export is on, the intraday table for today is included in `events_*
     href="/ga4/bigquery/dataform-workflows/"
   />
   <LinkCard
-    title="Looker Studio Patterns"
+    title="Data Studio Patterns"
     description="Connect dashboards to derived tables rather than raw events."
-    href="/ga4/bigquery/looker-studio-patterns/"
+    href="/ga4/bigquery/data-studio-patterns/"
   />
 </CardGrid>

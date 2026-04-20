@@ -1,0 +1,172 @@
+---
+title: "Track Contact Form 7 Submissions"
+description: "Track Contact Form 7 submissions in GTM using the native wpcf7mailsent DOM event — and avoid the wpcf7submit trap that counts failed validations."
+sidebar:
+  order: 21
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Contact Form 7 dispatches four native DOM events — only one of them means "the email was actually sent." This recipe picks the right one, wires it to the dataLayer, and sends a GA4 event with the form ID and unit tag so you can disambiguate multiple CF7 forms on the same page.
+
+*Valid as of April 2026, Contact Form 7 5.9.x.*
+
+## The success signal
+
+Contact Form 7 fires four custom events on `document`:
+
+| Event | When it fires | Use for conversions? |
+|---|---|---|
+| `wpcf7submit` | Any submit attempt, successful or not | No |
+| `wpcf7invalid` | Validation failed | No |
+| `wpcf7spam` | Marked as spam (Akismet/honeypot) | No |
+| `wpcf7mailfailed` | Validation passed but mail send failed | No |
+| `wpcf7mailsent` | Mail sent successfully | **Yes** |
+
+Listening to `wpcf7submit` is the single most common mistake — it fires on every attempt including validation errors, which will massively inflate your lead count.
+
+<Aside type="caution">
+Do not listen to `wpcf7submit`. It fires before validation and mail send, so failed submissions will register as conversions. Always use `wpcf7mailsent`.
+</Aside>
+
+## dataLayer push pattern
+
+CF7 events are plain DOM CustomEvents — no jQuery needed:
+
+<DataLayerExample event="form_submission" description="Fires only when CF7's mailer confirms the message was sent.">
+```javascript
+document.addEventListener('wpcf7mailsent', function (event) {
+  var contactFormId = event.detail.contactFormId;
+  var unitTag = event.detail.unitTag;
+  var $form = event.target;
+  var formTitle = $form && $form.getAttribute('aria-label')
+    || document.querySelector('[id="' + unitTag + '"] .wpcf7-form-title')
+    && document.querySelector('[id="' + unitTag + '"] .wpcf7-form-title').textContent.trim()
+    || 'cf7_' + contactFormId;
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_vendor: 'contact_form_7',
+    form_id: String(contactFormId),
+    form_title: formTitle,
+    form_unit_tag: unitTag
+  });
+});
+```
+</DataLayerExample>
+
+The `unitTag` (for example `wpcf7-f42-p15-o1`) uniquely identifies the specific form instance on the page. If the same CF7 form is embedded twice on one page, `contactFormId` is identical but `unitTag` differs.
+
+## GTM setup
+
+<Steps>
+1. **Create a Custom Event trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `form_submission`
+   - This fires: **Some Custom Events** → `DLV - form_vendor` **equals** `contact_form_7`
+
+2. **Create Data Layer Variables**
+
+   - `DLV - form_vendor` → `form_vendor`
+   - `DLV - form_id` → `form_id`
+   - `DLV - form_title` → `form_title`
+   - `DLV - form_unit_tag` → `form_unit_tag`
+
+3. **Create a GA4 Event Tag**
+
+   - Event name: `generate_lead`
+   - Parameters:
+     - `form_vendor` → `{{DLV - form_vendor}}`
+     - `form_id` → `{{DLV - form_id}}`
+     - `form_title` → `{{DLV - form_title}}`
+     - `form_unit_tag` → `{{DLV - form_unit_tag}}`
+   - Trigger: the Custom Event trigger above
+
+4. **Test in Preview mode**
+
+   Submit a CF7 form with valid data. Confirm the `form_submission` event appears once per submission in the Summary pane.
+</Steps>
+
+<TagConfig
+  name="GA4 - generate_lead (CF7)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - form_submission (contact_form_7)"
+  variables={["DLV - form_vendor", "DLV - form_id", "DLV - form_title", "DLV - form_unit_tag"]}
+/>
+
+## Tracking failed submissions (optional)
+
+If you want to see how often forms fail validation or mail-send, listen to the other events and push a separate event:
+
+```javascript
+['wpcf7invalid', 'wpcf7spam', 'wpcf7mailfailed'].forEach(function (eventName) {
+  document.addEventListener(eventName, function (event) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_error',
+      form_vendor: 'contact_form_7',
+      form_id: String(event.detail.contactFormId),
+      error_type: eventName.replace('wpcf7', '')
+    });
+  });
+});
+```
+
+Create a separate GA4 tag `form_error` with an `error_type` parameter. Useful for surfacing SMTP misconfiguration — if `mailfailed` is non-zero, your server is failing to send even though users see success.
+
+## Capturing submitted field values
+
+The `event.detail.inputs` array contains every submitted field:
+
+```javascript
+document.addEventListener('wpcf7mailsent', function (event) {
+  var fields = {};
+  (event.detail.inputs || []).forEach(function (input) {
+    fields[input.name] = input.value;
+  });
+  // fields['your-email'], fields['your-name'], etc.
+});
+```
+
+<Aside type="caution">
+Do not push raw PII (email, name, phone) to GA4. If you need email for lead attribution, hash it client-side with SHA-256 first, or send it server-side via the Measurement Protocol with user consent.
+</Aside>
+
+## Test it
+
+<Steps>
+1. Open GTM **Preview mode** on a page containing a CF7 form.
+2. Submit the form with valid data. Confirm `form_submission` appears in the Summary pane with the correct `form_id` and `form_unit_tag`.
+3. Verify **Tags Fired** lists the GA4 tag.
+4. In GA4 → **DebugView**, confirm `generate_lead` arrives within 15 seconds.
+5. **Test failure path**: submit with an invalid email format. Confirm `wpcf7invalid` appears in the dataLayer (if you added error tracking) but **no** `form_submission` fires.
+6. **Test spam path**: if you have Akismet enabled, submit known spam content and verify `wpcf7spam` is dispatched.
+</Steps>
+
+## Common gotchas
+
+**Listening to `wpcf7submit`.** This is the number one CF7 tracking bug. It fires on every attempt. Use `wpcf7mailsent`.
+
+**Multiple CF7 forms on one page.** `contactFormId` is shared if it is the same CF7 form embedded twice; only `unitTag` is unique. Report on both.
+
+**Confirmation redirect via on_sent_ok.** The deprecated `on_sent_ok` hook redirected on success and suppressed the DOM event. CF7 removed it in 5.0. If you see legacy code using it, upgrade — the current pattern is `wpcf7mailsent` plus a redirect inside your listener.
+
+**Flamingo plugin.** Flamingo stores submissions in the database but does not interfere with `wpcf7mailsent`. You can safely use both.
+
+**Forms loaded via AJAX.** If a CF7 form is injected into the page after initial load (for example inside a modal fetched via AJAX), the listener on `document` still works because it is delegated. No re-binding needed.
+
+**`event.detail` is undefined in old browsers.** CF7 uses `CustomEvent` which IE11 supported only with a polyfill. If you must support IE11 (you probably don't in 2026), include the CustomEvent polyfill before your listener.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard title="Track Form Submissions" href="/recipes/interaction-tracking/track-form-submissions/" description="Generic form-submission patterns across native, AJAX, and third-party forms." />
+  <LinkCard title="form_submission custom event" href="/datalayer/custom-events/form-submission/" description="The canonical dataLayer schema for form submission events." />
+  <LinkCard title="WordPress dataLayer integration" href="/datalayer/platforms/wordpress/" description="WordPress-specific dataLayer patterns and plugin gotchas." />
+  <LinkCard title="Form triggers reference" href="/client-side/triggers/form-triggers/" description="When GTM's built-in form triggers work — and when they don't." />
+</CardGrid>

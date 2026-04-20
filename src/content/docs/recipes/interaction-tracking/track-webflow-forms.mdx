@@ -1,0 +1,209 @@
+---
+title: "Track Webflow Form Submissions"
+description: "Track Webflow native form submissions in GTM across all three success modes — inline message, redirect, and custom redirect — with a MutationObserver pattern."
+sidebar:
+  order: 26
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Webflow's native forms have three success modes — inline message (the default), redirect to a URL, and redirect with query parameters. Each mode needs a slightly different tracking strategy. This recipe uses a MutationObserver for the inline-message mode (the most common), and falls back to a thank-you page push for redirect modes.
+
+*Valid as of April 2026, Webflow hosted.*
+
+## The success signal
+
+Webflow submits forms via AJAX to Webflow's own endpoint. On success it toggles the `.w-form-done` element to visible and hides `.w-form` (the form body). There is no public JavaScript event — you have to observe the DOM.
+
+For redirect-mode forms, Webflow navigates to a configurable URL after success, so the signal is "page loaded with that URL."
+
+| Mode | Detection strategy |
+|---|---|
+| Inline success message (default) | MutationObserver on the form wrapper |
+| Redirect to URL | Thank-you page dataLayer push |
+| Redirect with custom query | Thank-you page push + parse query params |
+
+## dataLayer push pattern
+
+<Tabs>
+<TabItem label="Inline success message">
+
+Add this as a Project Settings → Custom Code → Footer Code snippet. It observes every Webflow form on the page and fires once when the success message becomes visible.
+
+<DataLayerExample event="form_submission" description="MutationObserver watches for Webflow's success state to become visible.">
+```html
+<script>
+(function () {
+  function observeForm(wrapper) {
+    var form = wrapper.querySelector('form');
+    var done = wrapper.querySelector('.w-form-done');
+    if (!form || !done) return;
+
+    var fired = false;
+    var observer = new MutationObserver(function () {
+      if (fired) return;
+      var visible = done.style.display === 'block'
+        || window.getComputedStyle(done).display === 'block';
+      if (!visible) return;
+
+      fired = true;
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'form_submission',
+        form_vendor: 'webflow',
+        form_name: form.getAttribute('data-name') || form.getAttribute('name') || 'unnamed',
+        form_id: form.id || '',
+        form_destination: 'inline_message'
+      });
+    });
+
+    observer.observe(done, { attributes: true, attributeFilter: ['style'] });
+  }
+
+  function init() {
+    document.querySelectorAll('.w-form').forEach(observeForm);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+```
+</DataLayerExample>
+
+</TabItem>
+<TabItem label="Redirect mode">
+
+If your form is configured to redirect on success (Form Settings → After sending → Redirect to another page), add an inline script on the destination page before the GTM snippet:
+
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_vendor: 'webflow',
+    form_name: 'contact_form',
+    form_destination: 'redirect'
+  });
+</script>
+```
+
+If you appended query parameters to the redirect URL (for example `?form=contact`), parse them for `form_name`:
+
+```html
+<script>
+  var params = new URLSearchParams(window.location.search);
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_vendor: 'webflow',
+    form_name: params.get('form') || 'unknown',
+    form_destination: 'redirect'
+  });
+</script>
+```
+
+</TabItem>
+</Tabs>
+
+## GTM setup
+
+<Steps>
+1. **Create a Custom Event trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `form_submission`
+   - This fires: **Some Custom Events** → `DLV - form_vendor` **equals** `webflow`
+
+2. **Create Data Layer Variables**
+
+   - `DLV - form_vendor` → `form_vendor`
+   - `DLV - form_name` → `form_name`
+   - `DLV - form_id` → `form_id`
+   - `DLV - form_destination` → `form_destination`
+
+3. **Create a GA4 Event Tag**
+
+   - Event name: `generate_lead`
+   - Parameters:
+     - `form_vendor` → `{{DLV - form_vendor}}`
+     - `form_name` → `{{DLV - form_name}}`
+     - `form_id` → `{{DLV - form_id}}`
+     - `form_destination` → `{{DLV - form_destination}}`
+   - Trigger: the Custom Event trigger above
+
+4. **Test in Preview mode**
+
+   Submit a Webflow form and confirm the event fires with the right `form_name`.
+</Steps>
+
+<TagConfig
+  name="GA4 - generate_lead (Webflow)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - form_submission (webflow)"
+  variables={["DLV - form_vendor", "DLV - form_name", "DLV - form_id", "DLV - form_destination"]}
+/>
+
+## Naming forms properly
+
+Webflow assigns `data-name="Email Form"` by default, which gives every form on the site the same name. Fix this in the Designer: select the form wrapper → Element settings → set a unique Name like `contact_form` or `newsletter_signup`. The `data-name` attribute follows that value.
+
+You can also set an HTML ID on the form element itself (Element settings → ID). Prefer setting both — `data-name` for human-readable identifiers and `id` for CSS/JS targeting.
+
+## Handling CMS-bound forms
+
+Webflow CMS Collection pages often embed the same form template per item (for example a contact form on every product page). The `form_name` will be identical across all pages. To disambiguate, add the CMS item slug to the dataLayer:
+
+```javascript
+window.dataLayer.push({
+  event: 'form_submission',
+  form_vendor: 'webflow',
+  form_name: 'product_enquiry',
+  form_id: form.id,
+  cms_slug: window.location.pathname.split('/').pop()
+});
+```
+
+Register `cms_slug` as a custom dimension in GA4 to break down submissions per product.
+
+## Test it
+
+<Steps>
+1. Open GTM **Preview mode** on a Webflow page with a form.
+2. Submit the form with valid data. Confirm `form_submission` appears in the Summary pane with the correct `form_name`.
+3. Verify **Tags Fired** lists the GA4 tag.
+4. In GA4 **DebugView**, confirm `generate_lead` arrives within 15 seconds.
+5. **Test failure path**: disconnect your network and submit. Webflow shows the `.w-form-fail` element instead. Confirm no `form_submission` event fires.
+6. **Test redirect mode**: change the form's After-sending setting to Redirect, submit, and confirm the thank-you page push fires instead.
+7. For CMS-bound forms, submit from two different CMS item pages and confirm `cms_slug` differs between the two events.
+</Steps>
+
+## Common gotchas
+
+**Custom Code not loading on all pages.** Project Settings → Custom Code → Footer applies site-wide, but Page-level Custom Code overrides it on that page. If your observer script is only in Project Settings, check that no page has page-level code overriding it.
+
+**Webflow's jQuery is namespaced.** Webflow vendors jQuery under `Webflow.require` internally. Do not rely on `window.jQuery` being present — use vanilla JS as shown above.
+
+**Form inside a tabs/accordion component.** If the form wrapper is inside a Webflow Tabs component that lazy-renders tab panes, the `.w-form` may not exist at DOMContentLoaded. Re-run `init()` on Webflow's `tab-change` event, or use a broader MutationObserver on `document.body` watching for added `.w-form` nodes.
+
+**Duplicate forms on one page.** Each `.w-form` wrapper gets its own observer — no double-fires. But Webflow's default `data-name="Email Form"` gives both the same name. Rename them in the Designer.
+
+**Form export (exported HTML/CSS).** If you export a Webflow site and self-host, Webflow's form AJAX endpoint no longer works — forms either submit to a custom backend or fail. The `.w-form-done` pattern still applies if your custom backend mimics Webflow's success state, but often you will replace it with a first-party form handler.
+
+**Multi-step forms.** Webflow does not have native multi-step forms. Solutions typically use a community library (Finsweet Attributes or custom JS). Track steps via a separate `form_step` event from the step-handler code — follow the multi-step pattern in the generic form submissions recipe.
+
+**reCAPTCHA blocking.** If Webflow's reCAPTCHA setting is on but the user fails the challenge, `.w-form-fail` appears — not `.w-form-done`. Your observer correctly ignores this.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard title="Track Form Submissions" href="/recipes/interaction-tracking/track-form-submissions/" description="Generic form-submission patterns across native, AJAX, and third-party forms." />
+  <LinkCard title="form_submission custom event" href="/datalayer/custom-events/form-submission/" description="The canonical dataLayer schema for form submission events." />
+  <LinkCard title="Form triggers reference" href="/client-side/triggers/form-triggers/" description="When GTM's built-in form triggers work — and when they don't." />
+</CardGrid>

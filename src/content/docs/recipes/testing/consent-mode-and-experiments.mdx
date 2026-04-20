@@ -1,0 +1,156 @@
+---
+title: "Consent Mode and Experiments"
+description: "Does analytics_storage=denied block your A/B test? Cookieless variant assignment, modelling impact on test power, and what to keep running for deny-state users."
+sidebar:
+  order: 8
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Consent Mode introduces a specific question that client-side testing tools don't obviously answer: when a user has denied analytics storage, should your A/B test run for them? Can it? Does the data they produce count?
+
+The answer isn't one-size-fits-all. It depends on *where* you're storing variant assignment, *what* you're measuring, and *which* consent signals apply to the storage. This page walks through the interactions and gives you a defensible default posture.
+
+## Is variant assignment "storage"?
+
+Under GDPR and the ePrivacy Directive, storing information on the user's device requires consent unless the storage is strictly necessary for a service the user explicitly requested. A/B test variant assignment is almost never strictly necessary.
+
+Consent Mode's `analytics_storage` signal specifically controls *analytics* cookies. `ad_storage` controls *advertising* cookies. Experiment assignment cookies typically sit in a grey zone — they're not analytics in the reporting sense, but they're also not directly advertising. Most legal interpretations put them under `analytics_storage` because the purpose is to improve the site experience through measurement.
+
+Three postures are defensible, depending on your risk tolerance:
+
+1. **Conservative**: treat the experiment cookie as requiring `analytics_storage=granted`. Users who deny get the control, always. Simplest, but excludes a material fraction of your traffic from tests.
+2. **Balanced**: assign variants server-side and store them in `sessionStorage` or a very short-lived first-party cookie that expires at session end. Argue that this is not "storage" in the regulatory sense because it doesn't persist beyond the user's immediate visit.
+3. **Permissive**: run assignment for all users with a persistent cookie, but strip identifying information (no `ip_override`, no `user_id`) from the `experiment_impression` event when `analytics_storage=denied`. Argue that anonymous exposure tracking is not personal data.
+
+Your Legal or DPO should make the call. Whatever you pick, document it. What follows assumes the balanced default and explains the mechanics.
+
+## What GA4 does when `analytics_storage=denied`
+
+With Consent Mode v2 and `analytics_storage=denied`:
+
+- GA4 client-side tags still fire, but with cookies disabled.
+- Events are sent to GA4 as cookieless pings — no `client_id` cookie, no user-linkable identifiers.
+- GA4 uses **behavioral modeling** to estimate the aggregate behavior of the deny-state cohort. The modeled data shows up in reports but is less reliable than measured data, particularly for per-user or per-session metrics.
+- `experiment_impression` events still fire and reach GA4, but without a client_id they cannot be joined to the same user's later conversion events.
+
+The practical effect on your A/B test:
+
+- Control and variant impressions are still counted in aggregate.
+- Primary-metric events (purchase, signup) are also counted but cannot be linked back to the user who saw the impression.
+- You end up with aggregate funnel data but lose the user-level join that statistical inference depends on.
+
+## Cookieless variant assignment approaches
+
+<details>
+<summary>Approach 1: `sessionStorage` with in-memory mirror</summary>
+
+Assign the variant at first page view of the session. Store it in `sessionStorage` (which expires on browser close — less "stored" than a cookie under most interpretations). Also keep it in a JavaScript variable in memory for the duration of the page:
+
+```javascript
+// Early in the page, before any variant-dependent code runs
+(function() {
+  const expId = 'checkout-v2';
+  const variants = ['control', 'variant_a'];
+
+  let variant = sessionStorage.getItem('exp_' + expId);
+  if (!variant) {
+    variant = variants[Math.floor(Math.random() * variants.length)];
+    sessionStorage.setItem('exp_' + expId, variant);
+  }
+
+  window.__currentExperiment = { id: expId, variant: variant };
+})();
+```
+
+Pros: no persistent storage, survives the session, clean on tab close. Cons: variant changes between visits — users see a different variant each time they return. For fast-conversion tests (same-session conversion) this is fine. For delayed-conversion tests it's noise.
+</details>
+
+<details>
+<summary>Approach 2: URL-token-based assignment (no storage at all)</summary>
+
+Pass the variant in the URL as a token, server-side-assigned on the initial navigation:
+
+```
+https://example.com/checkout?_v=a
+```
+
+Variant comes entirely from the URL. No cookie, no storage. Pros: zero storage concerns. Cons: URLs get dirty, the token travels with the page via `document.referrer`, and users can trivially override their variant by editing the URL.
+
+Only practical for narrow, specific test flows — a single-page checkout experiment, not a site-wide test.
+</details>
+
+<details>
+<summary>Approach 3: Consent-gated cookie</summary>
+
+Write the variant cookie only when `analytics_storage=granted`. For `analytics_storage=denied`, fall back to in-memory assignment that re-rolls each page view:
+
+```javascript
+function assignVariant() {
+  const consent = getConsentState(); // your CMP's API
+  const expId = 'checkout-v2';
+
+  if (consent.analytics_storage === 'granted') {
+    // Persistent cookie assignment — as usual
+    return getOrAssignCookieVariant(expId);
+  } else {
+    // In-memory only, re-rolls per page view
+    return pickRandomVariant(expId);
+  }
+}
+```
+
+This preserves test quality for consenting users and produces high-noise but countable exposure data for deny-state users. Two cohorts, but at least both are measured.
+</details>
+
+## Impact on test power
+
+Running a test that only applies to consenting users effectively reduces your sample size in proportion to your consent rate. If 60% of users consent, a test that needs 30,000 exposures per variant needs the same 30,000 per variant but only gets them from 60% of traffic — so the test takes 1.67× as long.
+
+That's the same math regardless of which cookieless-assignment approach you use. The alternative — running assignment for all users but measuring less reliably for the deny cohort — gets you more test data but noisier data, which on net may or may not improve statistical power depending on how much worse the deny-cohort measurement is.
+
+**Practical guidance**: if your consent rate is above ~80%, run the conservative posture (consent-only). If it's lower, use the balanced cookieless approach for deny-state users and accept higher variance on that cohort.
+
+## What to watch in GA4 reports
+
+When you launch a test with mixed consent handling, compare these two cohorts in the first few days:
+
+1. **Variant exposure counts** between consent=granted and consent=denied users. They should be roughly proportional to the consent rate. A big asymmetry means the variant isn't applying correctly for one group.
+2. **Conversion rate per variant** within each consent cohort. The deny cohort will be noisier, but the direction of any effect should match the consent cohort. If the consent cohort shows +5% lift and the deny cohort shows −3%, something in the variant interacts with cookie availability — worth investigating before trusting the consent-cohort result.
+
+## Common mistakes
+
+**Running client-side tests for deny-state users without modification.** By default, client-side testing tools set a cookie regardless of consent state. That's a compliance problem in most jurisdictions. Either configure the tool to respect `analytics_storage` or switch to a cookieless-capable assignment.
+
+**Excluding deny-state users entirely and not noticing the volume hit.** If 50% of your users deny analytics and you exclude all of them, your test runs at half traffic without the team realising. Monitor the exclusion rate — if it's material, invest in cookieless assignment.
+
+**Assuming Google's behavioral modeling "fixes" denied consent.** Modeling gives you aggregate conversion trends, not user-level data. It is not a substitute for being able to link an impression to a conversion in the same user.
+
+**Using the user_id field to bypass consent.** Setting `user_id` on events from deny-state users is a compliance issue — you're attaching a persistent identifier to analytics data that the user explicitly denied. The whole reason they said no is that they didn't want to be tracked across sessions.
+
+**Forgetting to document the posture.** Legal review of experimentation setups typically asks one question: "what does your testing do under each consent state?" You should be able to answer in one paragraph. Write it down.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Google Consent Mode"
+    description="The underlying mechanism — what analytics_storage, ad_storage, and consent signals control."
+    href="/client-side/setup/google-consent-mode/"
+  />
+  <LinkCard
+    title="Server-Side Consent"
+    description="Enforcing consent rules inside sGTM transforms, including for experiment events."
+    href="/consent/advanced/server-side-consent/"
+  />
+  <LinkCard
+    title="Server-Side Experiments"
+    description="Assignment patterns that pair well with consent-aware testing."
+    href="/recipes/testing/server-side-experiments/"
+  />
+  <LinkCard
+    title="Consent Mode v2"
+    description="Advanced consent signals and how they apply to experimentation."
+    href="/consent/consent-mode/consent-mode-v2/"
+  />
+</CardGrid>

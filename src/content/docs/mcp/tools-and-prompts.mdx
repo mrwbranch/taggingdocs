@@ -1,0 +1,124 @@
+---
+title: MCP tools and prompts reference
+description: Complete reference of the 35 tools and 6 guided prompt workflows exposed by the TaggingDocs MCP server.
+sidebar:
+  label: Tools & prompts
+  order: 2
+---
+
+import { LinkCard, Aside } from '@astrojs/starlight/components';
+
+The server exposes **35 tools** (4 documentation + 31 Google Tag Manager) and **6 guided prompt workflows**. Documentation tools work without authentication; GTM tools require a Google sign-in with the matching Tag Manager scope.
+
+## Documentation tools
+
+No login required — anyone can use these.
+
+| Tool | What it does |
+|------|--------------|
+| `search_taggingdocs` | Full-text search across every TaggingDocs article, ranked by relevance. Optional section filter. |
+| `read_taggingdocs_page` | Fetch a full article by slug (e.g. `datalayer/ecommerce/purchase`). Used after a search. |
+| `list_taggingdocs_sections` | Browse the library by section — Foundations, Client-Side, DataLayer, GA4, Consent, Integrations, Recipes, and more. |
+| `lookup_event` | Quick lookup for a GA4 event (e.g. `purchase`, `add_to_cart`). Returns the dataLayer spec and related guides. |
+
+## Google Tag Manager tools
+
+All GTM tools require Google sign-in. Read operations need `tagmanager.readonly`; anything that writes adds `tagmanager.edit.containers` on top; versioning and publishing layer in `tagmanager.edit.containerversions` and `tagmanager.publish`. Full scope breakdown is on the [Connect page](/mcp/connect/#auth-model).
+
+### Accounts & containers
+
+| Tool | What it does |
+|------|--------------|
+| `list_accounts` | List every GTM account you have access to. |
+| `list_containers` | List containers in a specific account. |
+| `get_container` | Read a single container's configuration. |
+| `create_container` | Create a new container in an account (web, Android, iOS, AMP, server). |
+
+### Workspaces
+
+| Tool | What it does |
+|------|--------------|
+| `list_workspaces` | List all workspaces in a container. |
+| `get_workspace` | Read a workspace's details. |
+| `create_workspace` | Create a new workspace to stage changes. |
+| `get_workspace_status` | See pending changes in a workspace. |
+
+### Tags
+
+| Tool | What it does |
+|------|--------------|
+| `list_tags` | List every tag in a workspace. |
+| `get_tag` | Read a single tag's configuration. |
+| `create_tag` | Create a tag from a JSON GTM Tag resource. |
+| `update_tag` | Update an existing tag. |
+| `delete_tag` | Delete a tag. |
+
+### Triggers
+
+| Tool | What it does |
+|------|--------------|
+| `list_triggers` | List every trigger in a workspace. |
+| `get_trigger` | Read a trigger's configuration. |
+| `create_trigger` | Create a trigger from a JSON GTM Trigger resource. |
+| `update_trigger` | Update a trigger. |
+| `delete_trigger` | Delete a trigger. |
+
+### Variables
+
+| Tool | What it does |
+|------|--------------|
+| `list_variables` | List user-defined variables in a workspace. |
+| `get_variable` | Read a variable's configuration. |
+| `create_variable` | Create a variable from a JSON GTM Variable resource. |
+| `update_variable` | Update a variable. |
+| `delete_variable` | Delete a variable. |
+
+### Folders
+
+| Tool | What it does |
+|------|--------------|
+| `list_folders` | List folders (for tag/trigger/variable organization). |
+| `create_folder` | Create a new folder. |
+
+### Versions & publishing
+
+| Tool | What it does |
+|------|--------------|
+| `list_versions` | List all container versions. |
+| `create_version` | Freeze a workspace's changes into a version for review. |
+| `publish_version` | Publish a version — your changes go live. |
+
+### Utility
+
+| Tool | What it does |
+|------|--------------|
+| `list_built_in_variables` | List enabled built-in variables (Click URL, Page Path, etc.). |
+| `list_templates` | List custom Tag and Variable templates in the container. |
+| `list_user_permissions` | List account-level user permissions. |
+
+## Guided prompt workflows
+
+Each prompt wraps a multi-step TaggingDocs best-practice flow into a single ask. Invoke them by name in your AI client — e.g. *"Run the `audit_container` prompt on account 12345, container 67890, workspace 1."*
+
+| Prompt | What it does |
+|--------|--------------|
+| `audit_container` | Comprehensive GTM container audit following TaggingDocs best practices. Checks naming conventions, orphaned triggers, duplicate tags, folder organization, consent setup, and more. |
+| `setup_ga4_ecommerce` | Create a complete GA4 ecommerce tracking setup — all standard events, triggers, and variables — following TaggingDocs specifications. |
+| `generate_tracking_plan` | Generate a tracking plan document from the current container state, documenting all events, triggers, variables, and their relationships. |
+| `setup_consent_mode` | Implement Google Consent Mode v2 in a GTM container following TaggingDocs best practices. Supports Cookiebot, CookieYes, OneTrust, and custom CMPs. |
+| `migrate_ua_to_ga4` | Analyze a container for Universal Analytics remnants and create equivalent GA4 tags. |
+| `lookup_best_practice` | Look up TaggingDocs best practices for a specific GTM / GA4 topic — naming conventions, consent mode, ecommerce tracking, cross-domain, debugging, and more. |
+
+<Aside type="tip" title="Not sure which to use?">
+Start with `audit_container` on an existing container — it surfaces most issues and usually points you at the next prompt worth running.
+</Aside>
+
+## Self-host your own instance
+
+Need custom scopes, an allow-list of Google accounts, or to run the server inside your own cloud? The full source is on GitHub.
+
+<LinkCard
+  title="taggingdocs-mcp on GitHub"
+  description="Source, Dockerfile, docker-compose, and env template — MIT licensed."
+  href="https://github.com/mrwbranch/taggingdocs-mcp"
+/>

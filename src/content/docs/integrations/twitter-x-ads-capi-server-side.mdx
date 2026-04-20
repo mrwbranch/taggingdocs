@@ -1,0 +1,192 @@
+---
+title: "X (Twitter) Ads CAPI (Server-Side)"
+description: "X Ads Conversions API via sGTM — OAuth 1.0a setup, twclid handling, conversion event UUIDs, identifiers, and deduplication with the X Pixel."
+sidebar:
+  order: 15
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+X's Conversions API (still commonly called "Twitter CAPI" in older docs) is the most painful of the major-platform CAPIs to implement. OAuth 1.0a request signing, confusing field naming (where `event_id` means something different than on every other platform), and lower rate limits than competitors. That said, if you are spending meaningfully on X ads — particularly B2B, developer tools, or crypto — CAPI recovers conversions the client-side pixel loses on Safari and to blockers.
+
+*Valid as of April 2026, X Ads API v12.*
+
+## Why server-side for X
+
+X's audience skews heavily toward desktop Safari and privacy-conscious mobile users — both cohorts where the client-side pixel underreports. Add in the general click-ID volatility that affects every platform (URL parameter stripping by corporate proxies, in-app browsers, etc.) and you have meaningful lift potential.
+
+**When it is not worth it:** if X is less than 5% of your paid spend, the OAuth 1.0a signing effort is disproportionate. Start with pixel only, add CAPI later if spend grows. For everyone else, CAPI is worth it but expect a full day of implementation effort even for engineers who have shipped Meta CAPI before.
+
+## The event model
+
+X's CAPI is structured around **conversion events** you configure in Ads Manager. Each conversion event (e.g., "Website Purchase") has its own UUID. You POST to the pixel endpoint with that conversion event UUID in the `event_id` field — which is the single most confusing part of X's API.
+
+<Aside type="caution">
+On X, `event_id` means the **UUID of the conversion event configured in Ads Manager** — not a per-event dedup identifier. Your per-event dedup key is `conversion_id`. This inverts the convention used by Meta, TikTok, Pinterest, and nearly every other platform. Triple-check this mapping before shipping, because getting it wrong produces events that route to the wrong conversion or fail to dedup.
+</Aside>
+
+**Required per event:**
+
+| Field | Notes |
+|---|---|
+| `conversion_time` | ISO 8601 timestamp |
+| `event_id` | UUID of the Ads Manager conversion event (not a dedup key) |
+| `conversion_id` | Your per-event dedup key |
+| `identifiers[]` | Array with at least one of `twclid`, `hashed_email`, `hashed_phone_number` |
+
+**Supported conversion event categories in Ads Manager:** Site Visit, Page View, Purchase, Lead, Sign Up, Download, Custom. Each category you use requires a corresponding conversion event record in Ads Manager.
+
+**Match keys:**
+
+| Field | Hashed? |
+|---|---|
+| `hashed_email` | SHA-256 (lowercase, trimmed) |
+| `hashed_phone_number` | SHA-256 (E.164 first) |
+| `twclid` | No (click identifier from URL) |
+
+## Setup in sGTM
+
+<Steps>
+1. Create an X developer app at developer.x.com. Apply for the Ads API product tier — this requires manual review and can take several days. You cannot call the X CAPI endpoints without Ads API approval.
+
+2. Generate OAuth 1.0a credentials:
+   - Consumer key + consumer secret (app-level)
+   - Access token + access token secret (user-level, with Ads API write scope)
+   - Store all four as sGTM Constant variables
+
+3. In Ads Manager → Conversions → your pixel, create a conversion event (e.g., "Website Purchase"). Note the UUID — this is what goes in the `event_id` field of your CAPI requests.
+
+4. In sGTM, create a Custom Template. OAuth 1.0a signing is the hard part — the sGTM sandbox supports `hmacSha256`, `sha256Sync`, and `generateRandom` but you will need to implement the OAuth 1.0a signing base string and signature manually, or use a community template that wraps this.
+
+5. Configure the tag with:
+   - **Pixel ID** and **Conversion Event UUID** (one per event type you are firing)
+   - **OAuth credentials** (all four)
+   - **Conversion ID:** `{{Event Data - event_id}}`
+   - **twclid:** from a Cookie Variable (`_twclid`, set on landing from the URL param)
+
+6. Firing trigger on the relevant GA4 events.
+</Steps>
+
+**Raw HTTP shape:**
+
+```http
+POST https://ads-api.twitter.com/12/measurement/conversions/<pixel_id>
+Authorization: OAuth oauth_consumer_key="...", oauth_nonce="...", oauth_signature="...", oauth_signature_method="HMAC-SHA1", oauth_timestamp="...", oauth_token="...", oauth_version="1.0"
+Content-Type: application/json
+```
+
+```json
+{
+  "conversions": [{
+    "conversion_time": "2026-04-20T12:34:56.000Z",
+    "event_id": "<conversion_event_uuid_from_ads_manager>",
+    "identifiers": [
+      {"twclid": "<twclid value>"},
+      {"hashed_email": "<sha256 of email>"},
+      {"hashed_phone_number": "<sha256 of phone>"}
+    ],
+    "conversion_id": "evt-ORDER-123-1713571200",
+    "conversion_value": "79.99",
+    "conversion_currency": "USD",
+    "number_items": 2,
+    "content_ids": ["SKU-A", "SKU-B"],
+    "content_type": "product"
+  }]
+}
+```
+
+<Aside type="note">
+Older X docs referenced `value_micros` (value × 1,000,000 as an integer). The v12 API accepts `conversion_value` as a decimal string with `conversion_currency` as the ISO 4217 code, which is what you should use. `value_micros` is still accepted for backward compatibility but is inconsistent across docs and easy to miscalculate.
+</Aside>
+
+## Event mapping from the X Pixel
+
+| GA4 event | X conversion category | Notes |
+|---|---|---|
+| `page_view` | Site Visit / Page View | Optional server-side |
+| `view_item` | Page View (custom) | |
+| `add_to_cart` | Custom | X has no native AddToCart — create a Custom event |
+| `begin_checkout` | Custom (Checkout) | |
+| `purchase` | Purchase | Carry `order_id`, `value`, `currency` |
+| `sign_up` | Sign Up | |
+| `generate_lead` | Lead | |
+| `file_download` | Download | |
+
+Each row maps to a separate conversion event record in Ads Manager, each with its own UUID that goes in the `event_id` field.
+
+## Deduplication with the X Pixel
+
+X dedups by `conversion_id` plus `event_id` (conversion event UUID) within a 24-hour window. Both the client-side pixel and the server-side CAPI must send the same `conversion_id` against the same conversion event UUID for dedup to work.
+
+**Client-side (X Pixel):** pass `conversion_id` in the `twq()` options:
+
+```javascript
+twq('event', 'tw-<pixel_id>-<conversion_event_uuid>', {
+  value: 79.99,
+  currency: 'USD',
+  conversion_id: 'evt-ORDER-123-1713571200',
+  email_address: '<sha256 of email>'
+});
+```
+
+**sGTM CAPI:** map `event.event_id` from the sGTM Event Model to the CAPI tag's `conversion_id` field (remembering that `event_id` on the wire is the Ads Manager conversion UUID, not your event's dedup key).
+
+## Testing and validation
+
+X Ads Manager → Conversions → your pixel → Events shows inbound events with a source breakdown. Latency: 5–15 minutes.
+
+X does not have a test-events mode equivalent to Meta's Test Event Code. Your options:
+
+1. Use a dedicated test pixel/conversion event in a test Ads account.
+2. Monitor the Events panel with timestamp filtering during test windows.
+3. Watch sGTM Preview mode for the HTTP 200 response from the CAPI endpoint.
+
+Common response codes: 401 (OAuth signing wrong — almost always the problem), 403 (Ads API not approved for your app), 429 (rate limit hit — X's limits are a few hundred requests per second per app).
+
+## Common mistakes
+
+### OAuth 1.0a signing errors
+
+By far the most common failure mode. OAuth 1.0a requires a carefully constructed base string (HTTP method + URL + sorted params) and HMAC-SHA1 signature. A single character off and every request is 401. Use a vetted community template or a reference implementation — do not write the signing logic from scratch unless you enjoy pain.
+
+### Confusing `event_id` and `conversion_id`
+
+On X, `event_id` is the Ads Manager conversion event UUID (static, one per conversion type). `conversion_id` is the per-event dedup key (dynamic, unique per firing). Every other major platform uses `event_id` as the dedup key. Label your sGTM variables clearly — e.g., `X - Purchase Event UUID` vs. `DL - event_id (dedup)` — to avoid mixing them up.
+
+### Missing Ads API approval
+
+You cannot call X CAPI endpoints without the Ads API product tier on your developer account. If your test requests return 403 before you even get to OAuth signing debates, that is the cause. Apply early.
+
+### Sending `value_micros` inconsistently
+
+If half your events send `conversion_value: "79.99"` and the other half send `value_micros: 79990000`, your reports show mismatched values and campaign optimization degrades. Pick `conversion_value` (the current recommendation) and stick with it across all events.
+
+### Rate limit blindness
+
+X's CAPI rate limits are much lower than Meta's. A Black Friday sale with 500 purchases/minute will hit the limit. Batch events on the server side if volume exceeds a few hundred per minute, or contact X for a quota increase before a major campaign.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Twitter/X Pixel (Client-Side)"
+    description="The client-side pixel that CAPI supplements — base tag, standard events, and twclid capture."
+    href="/integrations/twitter-x-pixel/"
+  />
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="The reference CAPI implementation — cleaner tooling and simpler auth."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Event Deduplication Across Client & Server"
+    description="Cross-platform cheat sheet clarifying X's unusual event_id/conversion_id naming."
+    href="/integrations/event-deduplication-across-client-server/"
+  />
+  <LinkCard
+    title="Server-Side GTM Overview"
+    description="Setting up the sGTM infrastructure required before attempting X CAPI."
+    href="/server-side/"
+  />
+</CardGrid>

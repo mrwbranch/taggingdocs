@@ -1,0 +1,234 @@
+---
+title: "Pinterest CAPI (Server-Side)"
+description: "Pinterest Conversions API via sGTM — access token setup, event mapping, hashed match keys, click_id handling, and deduplication with the Pinterest Tag."
+sidebar:
+  order: 12
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The Pinterest Conversions API (CAPI) sends events from your server directly to Pinterest Ads, sidestepping the browser restrictions that increasingly blind the client-side Pinterest Tag. For any advertiser running meaningful Pinterest spend — especially in shopping categories where Safari and mobile web traffic is significant — CAPI is the difference between attribution you can trust and attribution that drifts downward every quarter.
+
+*Valid as of April 2026, Pinterest Conversions API v5.*
+
+## Why server-side for Pinterest
+
+Pinterest's audience skews heavily toward iOS and mobile web — exactly the cohort most affected by Safari's Intelligent Tracking Prevention and by content/ad blockers. The client-side Pinterest Tag is missing events for a meaningful share of converters long before you notice it in reporting.
+
+The three concrete problems CAPI solves:
+
+1. **ITP caps client-side cookies at 7 days** on Safari, shortening Pinterest's attribution window for a large slice of its audience.
+2. **Shopping-category ad blockers** (uBlock, Brave) routinely block `s.pinimg.com` pixel loads.
+3. **Pinterest's click identifier (`epik`)** is sometimes stripped by corporate proxies, so click-side attribution quietly fails without CAPI as a fallback.
+
+**When it is not worth it:** If Pinterest is less than ~5% of your paid spend and your sGTM container doesn't already exist for another platform, the marginal attribution lift probably doesn't justify the setup effort. Run the client-side tag alone and revisit when spend grows.
+
+## The event model
+
+Pinterest CAPI v5 accepts a batch of events at a per-ad-account endpoint. Every event needs a name, an `action_source`, a timestamp, and at least one user match key.
+
+**Required per event:**
+
+| Field | Notes |
+|---|---|
+| `event_name` | One of Pinterest's standard names (see below) or `custom` |
+| `action_source` | `web`, `app_android`, `app_ios`, or `offline` |
+| `event_time` | Unix epoch seconds |
+| `user_data` | At least one hashed identifier OR IP + UA |
+
+**Standard event names:** `page_visit`, `view_category`, `search`, `add_to_cart`, `checkout`, `signup`, `lead`, `watch_video`, `custom`.
+
+**Match keys (all SHA-256 hashed, lowercase trimmed, UTF-8):**
+
+| Field | Source | Hashed? |
+|---|---|---|
+| `em` | Email | Yes |
+| `ph` | Phone (E.164 first) | Yes |
+| `external_id` | Your internal user ID | Yes |
+| `hashed_maids` | Mobile advertising IDs | Yes |
+| `client_ip_address` | Request header | No |
+| `client_user_agent` | Request header | No |
+| `click_id` | `epik` URL param or `_epik` cookie | No |
+
+The `click_id` is Pinterest's equivalent of Meta's `fbc` — it travels from an ad click through the URL and into the landing page cookie. Preserving it through to the server-side event is the single biggest quality lever.
+
+<Aside type="caution">
+Pinterest's endpoint puts the **Ad Account ID in the URL path**, not the request body. If the ad account is wrong you get a 404, not a silent drop — which is actually helpful for debugging, but make sure your sGTM variable holds the ad account ID (not the Pinterest Tag ID) in the right field.
+</Aside>
+
+## Setup in sGTM
+
+<Steps>
+1. Generate a Conversion Access Token: Pinterest Business → Conversions → API access → Create token. Store it in an sGTM User-Defined Variable of type "Constant." Do not hardcode it in tag templates.
+
+2. Get your Ad Account ID from the Pinterest Business → Business manager URL (the numeric ID after `/accounts/`). Store it as a second constant variable.
+
+3. In your sGTM container, go to Tags → New → Community Template Gallery. Search "Pinterest Conversions API" and install Pinterest's official template. If your region does not have the template, use a Custom Template with the HTTP shape shown below.
+
+4. Configure the tag:
+   - **Ad Account ID:** your stored variable
+   - **Conversion Access Token:** your stored variable
+   - **Event Name:** mapped from GA4 event name (see mapping table)
+   - **Event ID:** mapped from the `event_id` event parameter
+
+5. Add user data variables: Cookie Variable for `_epik`, Request Header Variable for `X-Forwarded-For` and `user-agent`, and Event Data variables for any hashed `em` / `ph` / `external_id` pushed into the GA4 event.
+
+6. Set the firing trigger on the relevant GA4 events (`purchase`, `add_to_cart`, `view_item`, `generate_lead`, `sign_up`).
+</Steps>
+
+**Raw HTTP shape (for custom templates or debugging):**
+
+```http
+POST https://api.pinterest.com/v5/ad_accounts/<ad_account_id>/events
+Authorization: Bearer <conversion_access_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "data": [{
+    "event_name": "checkout",
+    "action_source": "web",
+    "event_time": 1713571200,
+    "event_id": "evt-ORDER-12345-1713571200",
+    "event_source_url": "https://example.com/thank-you",
+    "user_data": {
+      "em": ["<sha256 of email>"],
+      "ph": ["<sha256 of phone>"],
+      "external_id": ["<sha256 of user id>"],
+      "client_ip_address": "203.0.113.45",
+      "client_user_agent": "Mozilla/5.0 ...",
+      "click_id": "dj0yJnU9..."
+    },
+    "custom_data": {
+      "currency": "USD",
+      "value": "79.99",
+      "order_id": "ORDER-12345",
+      "content_ids": ["SKU-A", "SKU-B"],
+      "num_items": 2
+    }
+  }]
+}
+```
+
+## Event mapping from the Pinterest Tag
+
+Pinterest's server-side names mostly match the client-side tag, with a few quirks: `checkout` (not `purchase`) is the purchase event, and there is no explicit `BeginCheckout`.
+
+| GA4 event | Pinterest CAPI event | Notes |
+|---|---|---|
+| `page_view` | `page_visit` | Optional server-side if client covers it |
+| `view_item` | `page_visit` with `content_ids` | Or `custom` if you want a distinct event |
+| `view_item_list` | `view_category` | Pass category name in `custom_data` |
+| `search` | `search` | Pass `search_string` |
+| `add_to_cart` | `add_to_cart` | |
+| `begin_checkout` | `custom` (name: `BeginCheckout`) | Pinterest has no native BeginCheckout |
+| `purchase` | `checkout` | The critical one — value, order_id, content_ids |
+| `generate_lead` | `lead` | |
+| `sign_up` | `signup` | |
+
+**Parameter mapping for `checkout` (purchase):**
+
+```javascript
+// sGTM event data variables mapped into the Pinterest CAPI tag
+{
+  event_name: "checkout",
+  event_id: eventData.event_id,                 // from dataLayer
+  event_time: Math.floor(eventData.timestamp_ms / 1000),
+  event_source_url: eventData.page_location,
+  custom_data: {
+    currency: eventData.ecommerce.currency,
+    value: String(eventData.ecommerce.value),   // Pinterest prefers stringified decimals
+    order_id: eventData.ecommerce.transaction_id,
+    content_ids: eventData.ecommerce.items.map(i => i.item_id),
+    num_items: eventData.ecommerce.items.length
+  }
+}
+```
+
+## Deduplication with the Pinterest Tag
+
+Pinterest deduplicates by `event_id` plus `event_name`. If both the client-side Pinterest Tag and the CAPI event carry the same `event_id` for the same event name, Pinterest counts them once.
+
+The dedup window is approximately 7 days — generous compared to Meta's 48 hours, but do not rely on the slack: generate fresh `event_id` values per event firing.
+
+**Propagation flow:**
+
+1. Your frontend generates a stable event ID and pushes it with the purchase event:
+
+```javascript
+dataLayer.push({ ecommerce: null });
+dataLayer.push({
+  event: 'purchase',
+  event_id: 'pin-' + order.id + '-' + Date.now(),
+  ecommerce: {
+    transaction_id: order.id,
+    currency: 'USD',
+    value: 79.99,
+    items: [...]
+  }
+});
+```
+
+2. Client-side GTM maps `{{DL - event_id}}` to the Pinterest Tag's `event_id` parameter.
+3. The GA4 tag sends the same `event_id` to sGTM as an event parameter.
+4. The sGTM Pinterest CAPI tag reads `event_id` from the Event Model and sends it on.
+
+<Aside type="note">
+Pinterest accepts `value` as either a number or a stringified decimal. The v5 docs recommend string ("79.99"). Both work, but be consistent — once you pick one, never mix them, because mixed types make CSV exports harder to work with.
+</Aside>
+
+## Testing and validation
+
+Pinterest Ads Manager → Conversions → Tag Health shows inbound events broken down by source (Tag, CAPI, both). After you deploy:
+
+1. Fire a test purchase on staging with real `event_id` propagation.
+2. Wait ~5 minutes — CAPI events typically appear within 2–5 minutes; tag events within 1 minute.
+3. In Tag Health, confirm the event shows under both "Pinterest Tag" and "Conversions API."
+4. Check the "Match Quality" score Pinterest displays — below 5 means you are not sending enough match keys.
+
+Pinterest does not offer a "test event code" mechanism like Meta, so test events go into your real data. Use a staging ad account if you have one, or at minimum filter by timestamp in Tag Health during test windows.
+
+## Common mistakes
+
+### Sending page_visit from both Tag and CAPI without dedup
+
+The Pinterest Tag fires `page_visit` on every page load automatically. If your sGTM also sends `page_visit` for every GA4 `page_view` event with a different `event_id`, you double-count page views. Either skip `page_visit` server-side entirely, or propagate the same `event_id` for both.
+
+### Forgetting to normalize phone numbers before hashing
+
+Pinterest expects phone in E.164 (`+15551234567`) normalized to lowercase — `ph: sha256("+15551234567")`. Hashing `(555) 123-4567` gives a different hash, and the match fails silently. Normalize on the server before hashing.
+
+### Using Pinterest Tag ID instead of Ad Account ID
+
+The endpoint path takes the Ad Account ID (from Business Manager), not the Pinterest Tag ID (which is a separate numeric value used in the client-side pixel). Mixing them up gives a 404 on every request.
+
+### Sending `value` without `currency`
+
+`value` without `currency` is treated as unknown and silently excluded from ROAS reporting. Always send both together.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Pinterest Tag (Client-Side)"
+    description="The client-side pixel that CAPI supplements — base tag, standard events, and Enhanced Match."
+    href="/integrations/pinterest-tag/"
+  />
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="The reference CAPI implementation — many concepts transfer directly to Pinterest."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Event Deduplication Across Client & Server"
+    description="Cross-platform cheat sheet for dedup field names, windows, and stable ID generation."
+    href="/integrations/event-deduplication-across-client-server/"
+  />
+  <LinkCard
+    title="Data Redaction & PII Hashing"
+    description="How to hash match keys correctly in sGTM without leaking PII downstream."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+</CardGrid>

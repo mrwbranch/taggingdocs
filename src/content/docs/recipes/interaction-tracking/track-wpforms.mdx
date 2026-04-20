@@ -1,0 +1,150 @@
+---
+title: "Track WPForms Submissions"
+description: "Track WPForms lead submissions reliably in GTM using WPForms' native jQuery success events — no fragile DOM scraping."
+sidebar:
+  order: 19
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+WPForms submits via AJAX by default, so GTM's native Form Submission trigger never fires on success. The reliable path is to hook WPForms' own jQuery success event and push to the dataLayer only after the server confirms. This recipe wires that up and sends a GA4 `generate_lead` event.
+
+*Valid as of April 2026, WPForms 1.9.x.*
+
+## The success signal
+
+WPForms dispatches two relevant jQuery events:
+
+- `wpformsBeforeFormSubmit` — fires on submit click, **before** the server accepts the submission. Do not use this for conversion tracking.
+- `wpformsSubmitSuccess` — fires after WPForms' AJAX endpoint returns a success response. This is the one you want.
+
+Non-AJAX forms (a deprecated setting in WPForms Pro) reload to a confirmation page, in which case you push from the thank-you page instead. Most installs are AJAX.
+
+<Aside type="note">
+WPForms bundles jQuery. If you strip jQuery from your theme, the event fires through WPForms' own jQuery instance — your listener must use the same reference (`window.jQuery` or `window.wpforms.jQuery`).
+</Aside>
+
+## dataLayer push pattern
+
+Add this to your theme's footer, or via a GTM Custom HTML tag firing on **All Pages** with priority 10:
+
+<DataLayerExample event="form_submission" description="Push only inside wpformsSubmitSuccess — never wpformsBeforeFormSubmit.">
+```javascript
+(function () {
+  if (!window.jQuery) return;
+
+  window.jQuery(document).on('wpformsSubmitSuccess', function (event, $form, formData) {
+    var formId = $form.data('formid') || $form.attr('id');
+    var formTitle = $form.find('.wpforms-form-name').text().trim()
+      || $form.find('.wpforms-title').text().trim()
+      || 'wpforms_' + formId;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submission',
+      form_vendor: 'wpforms',
+      form_id: String(formId),
+      form_title: formTitle,
+      wpforms_submission_id: (formData && formData.id) || undefined
+    });
+  });
+})();
+```
+</DataLayerExample>
+
+## GTM setup
+
+<Steps>
+1. **Create a Custom Event trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `form_submission`
+   - This fires: **Some Custom Events** → `Event` **equals** `form_submission` **AND** `DLV - form_vendor` **equals** `wpforms`
+
+2. **Create Data Layer Variables**
+
+   - `DLV - form_vendor` → Data Layer Variable name: `form_vendor`
+   - `DLV - form_id` → Data Layer Variable name: `form_id`
+   - `DLV - form_title` → Data Layer Variable name: `form_title`
+   - `DLV - wpforms_submission_id` → Data Layer Variable name: `wpforms_submission_id`
+
+3. **Create a GA4 Event Tag**
+
+   - Tag type: **Google Analytics: GA4 Event**
+   - Event name: `generate_lead`
+   - Parameters:
+     - `form_vendor` → `{{DLV - form_vendor}}`
+     - `form_id` → `{{DLV - form_id}}`
+     - `form_title` → `{{DLV - form_title}}`
+     - `submission_id` → `{{DLV - wpforms_submission_id}}`
+   - Trigger: the Custom Event trigger above
+
+4. **Test in Preview mode**
+
+   Submit a WPForms form successfully. The `form_submission` event should appear in the Summary pane with `form_vendor: wpforms`, your form ID, and the form title.
+</Steps>
+
+<TagConfig
+  name="GA4 - generate_lead (WPForms)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - form_submission (wpforms)"
+  variables={["DLV - form_vendor", "DLV - form_id", "DLV - form_title", "DLV - wpforms_submission_id"]}
+/>
+
+## Handling multiple forms on one page
+
+If the page has more than one WPForms form, `wpformsSubmitSuccess` fires with the specific `$form` reference, so `form_id` disambiguates automatically. You do not need separate listeners per form.
+
+If you want different GA4 event names per form (for example `generate_lead` for the contact form and `newsletter_signup` for the newsletter form), add a Lookup Table variable:
+
+| Input (`{{DLV - form_id}}`) | Output |
+|---|---|
+| `42` | `generate_lead` |
+| `87` | `newsletter_signup` |
+| Default | `form_submission` |
+
+Wire the Lookup Table output into the GA4 tag's **Event Name** field.
+
+## Non-AJAX forms (page-reload confirmations)
+
+If the form setting **Disable AJAX form submission** is enabled, WPForms reloads the page to a confirmation URL. The jQuery event never fires on that page. Two options:
+
+1. **Thank-you page push.** Add an inline script before the GTM snippet on the confirmation page with the same `form_submission` event payload.
+2. **Referrer-based trigger.** Create a Page View trigger: `Page URL` **contains** `wpforms_form_id` **AND** `Referrer` **contains** your form page path. Less precise, avoid if option 1 is available.
+
+## Test it
+
+<Steps>
+1. Open GTM in **Preview mode** and navigate to a page with a WPForms form.
+2. Fill out and submit the form successfully.
+3. In the Summary pane, find the `form_submission` event. Click it and verify the Variables tab shows `form_vendor: wpforms` and the correct `form_id`.
+4. Verify **Tags Fired** lists the GA4 tag.
+5. In GA4 → **Admin → DebugView**, confirm the `generate_lead` event appears within 15 seconds with all parameters.
+6. **Test the failure path**: trigger a validation error (leave a required field empty). Confirm no `form_submission` event fires.
+</Steps>
+
+<Aside type="caution">
+Always test the failure path. A misconfigured listener that fires on `wpformsBeforeFormSubmit` will inflate your lead count with every failed submit attempt.
+</Aside>
+
+## Common gotchas
+
+**Elementor-embedded WPForms init late.** When a WPForms block is inside an Elementor widget, the form's jQuery event binding may happen after `DOMContentLoaded`. Put your listener in a `setTimeout(..., 500)` wrapper or delegate from `document` (as shown above — `jQuery(document).on(...)` already delegates).
+
+**Modal lightbox re-initialises.** If you use WPForms' popup/lightbox add-on, each open binds new handlers. The delegated listener on `document` survives this, but if you bind directly to the form element you will see duplicate fires.
+
+**Multiple jQuery instances.** Some themes load a second jQuery. WPForms uses whichever is registered under `window.jQuery` at init time. If your listener uses a different instance, events will not reach it. Always listen via `window.jQuery`, not a bundled copy.
+
+**Conversational Forms add-on.** WPForms' Conversational Forms layout fires `wpformsSubmitSuccess` at the end, but the form DOM is rebuilt as the user steps through. Use the delegated listener on `document` — not on `.wpforms-form`.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard title="Track Form Submissions" href="/recipes/interaction-tracking/track-form-submissions/" description="Generic form-submission patterns across native, AJAX, and third-party forms." />
+  <LinkCard title="form_submission custom event" href="/datalayer/custom-events/form-submission/" description="The canonical dataLayer schema for form submission events." />
+  <LinkCard title="WordPress dataLayer integration" href="/datalayer/platforms/wordpress/" description="WordPress-specific dataLayer patterns and plugin gotchas." />
+  <LinkCard title="Form triggers reference" href="/client-side/triggers/form-triggers/" description="When GTM's built-in form triggers work — and when they don't." />
+</CardGrid>

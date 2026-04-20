@@ -1,0 +1,84 @@
+---
+title: "Duplicate Events in GA4"
+description: "Six reasons GA4 events fire twice — client plus server duplication, SPA virtual pageviews, retry loops, multiple Config tags, and purchase dedup failures."
+sidebar:
+  order: 4
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+If you're seeing `event_count = 2` (or higher) for events that should be unique, here are the most common causes and how to fix them. Duplicate events corrupt conversion counts, inflate engagement metrics, and ruin funnels. Fix them before building any downstream reporting.
+
+<Aside type="caution">
+For `purchase` events specifically, duplication directly inflates revenue and conversion-rate metrics. Treat any purchase duplication as a P1 bug, not a cleanup task.
+</Aside>
+
+## 1. Client-side and server-side firing in parallel
+
+**Verify.** Check your outbound requests. If you see requests going to both `www.google-analytics.com/g/collect` AND `collect.yoursite.com/g/collect` for the same event, you're double-sending. This happens most often during a sGTM migration when the old client-side GA4 Event tags weren't paused.
+
+**Fix.** Decide on one path. If server-side is the target, pause the client-side GA4 Event tags (keep the Google Tag itself firing, because it still handles cookies and session state). If you need both during migration, send them with distinct `event_name` suffixes and dedup in reporting — never send the same name from both sides.
+
+## 2. Trigger attached to the tag twice
+
+**Verify.** Open the tag in GTM. Scroll to Triggering. If two triggers are listed (or worse, a trigger and a duplicate of itself), the tag fires once per matching trigger. A Page View trigger plus a Custom Event trigger that both match the same pageload = 2 events.
+
+**Fix.** Remove the redundant trigger. If both are intentional for different conditions, combine them into one trigger using an OR condition, or put the differentiating logic inside the trigger.
+
+## 3. SPA virtual pageview + GA4 Enhanced Measurement pageview
+
+**Verify.** GA4 → Admin → Data Stream → **Enhanced Measurement**. If "Page changes based on browser history events" is enabled AND you have a GTM tag firing `page_view` on your SPA's own route-change event, both fire. Check DebugView — you'll see two `page_view` events 10-50 ms apart on every SPA navigation.
+
+**Fix.** Pick one. For SPAs, disabling the Enhanced Measurement history-change handler and using your own GTM-driven `page_view` is the reliable option — you control exactly when the view fires, after the route's title and content are ready. See [SPA Tracking](/recipes/cross-domain-setup/single-page-app-tracking/).
+
+## 4. Retry logic in a custom template duplicating requests
+
+**Verify.** If you have a Custom HTML or Custom Template that retries failed Measurement Protocol calls, check whether it retries on 200 responses too (a common bug). Look in Cloud Logging / server logs for repeated identical `event_id` values arriving within seconds.
+
+**Fix.** Retry only on 5xx or network errors, never on 2xx. Include an `event_id` (unique per logical event) so the receiver can dedup even if retries do happen. GA4 deduplicates on `event_id` when it's present.
+
+## 5. Multiple GA4 Configuration tags (or Google Tags) in one container
+
+**Verify.** GTM → Tags → filter by type **Google Tag** or **Google Analytics: GA4 Configuration**. If more than one tag with the same Measurement ID fires on the same page, every event tag sends twice — each configuration fires its own session/page-view pair.
+
+**Fix.** Consolidate to exactly one Google Tag per Measurement ID per container. If you need to send to two properties, that's fine — two tags with two different IDs. But never two tags with the same ID.
+
+## 6. `transaction_id` missing on purchase — deduplication can't save you
+
+**Verify.** GA4 automatically deduplicates `purchase` events when they share the same `transaction_id`. If `transaction_id` is empty, missing, or set to `undefined`, every duplicate hit counts as a separate purchase. Check a recent BigQuery export row for `purchase` — `ecommerce.transaction_id` should be a non-empty string.
+
+**Fix.** Make `transaction_id` a required field in your purchase tag. Map it from `{{DLV - ecommerce.transaction_id}}` or equivalent. If the dataLayer genuinely doesn't have one at the event moment (e.g. thank-you page with no order reference), generate a stable ID from order attributes rather than letting it be blank. See [Duplicate Transaction Prevention](/recipes/ecommerce-conversions/duplicate-transaction-prevention/).
+
+## Solution patterns
+
+**Add a `debug_mode` audit before launch.** Run your full user journey with DebugView open. Count every event. If you see the same event name twice in under 2 seconds, investigate.
+
+**Use `event_id` for every important event.** Set a `transaction_id`-style unique identifier on purchases, signups, and any conversion. GA4's dedup windows are generous — 24 hours or longer — so even delayed retries dedup cleanly.
+
+**Quarantine Enhanced Measurement for SPAs.** Enhanced Measurement is designed for classic page-loads. For SPAs, turn off the overlapping handlers (page changes, outbound clicks if you track these in GTM, form interactions if you handle forms explicitly) and own those events from your container.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Duplicate Transaction Prevention"
+    description="The full recipe for preventing duplicate purchase events, including client-side and server-side patterns."
+    href="/recipes/ecommerce-conversions/duplicate-transaction-prevention/"
+  />
+  <LinkCard
+    title="GA4 Event Not Appearing"
+    description="The opposite problem — when events don't fire at all."
+    href="/recipes/troubleshooting/ga4-event-not-appearing/"
+  />
+  <LinkCard
+    title="Single-Page App Tracking"
+    description="How to avoid duplicate pageviews on SPAs specifically."
+    href="/recipes/cross-domain-setup/single-page-app-tracking/"
+  />
+  <LinkCard
+    title="Missing Revenue in GA4"
+    description="When the opposite happens — purchases aren't counted at all."
+    href="/recipes/troubleshooting/missing-revenue-in-ga4/"
+  />
+</CardGrid>

@@ -2,14 +2,35 @@
 title: "A/B Test Tracking"
 description: "Track A/B test variants in GA4 via GTM — pushing variant assignment to the dataLayer, GA4 custom dimensions, and user-scoped properties."
 sidebar:
-  order: 1
+  order: 5
 ---
 
 import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
 import TagConfig from '../../../../components/TagConfig.astro';
 import DataLayerExample from '../../../../components/DataLayerExample.astro';
 
-When you run an A/B test using an external tool (Google Optimize's replacement, VWO, Optimizely, Kameleoon), you need to send the test assignment to GA4 so you can split your conversion data by variant. This recipe covers the dataLayer integration for any testing tool, plus how to model the data correctly in GA4.
+When you run an A/B test using an external tool (VWO, Optimizely, Kameleoon, AB Tasty) or a feature-flag platform (LaunchDarkly, Statsig, GrowthBook), you need to send the test assignment to GA4 so you can split your conversion data by variant. This recipe covers the dataLayer integration for any testing tool, plus how to model the data correctly in GA4.
+
+<Aside type="note">
+**Google Optimize was deprecated in September 2023.** Google's replacement guidance points to third-party testing tools for client-side testing, **Google Ads Experiments** for ad-campaign tests, and **Firebase Remote Config** for app experimentation. There is no single Google-branded successor for on-site A/B testing. For new implementations, we recommend either a dedicated testing platform (Statsig, GrowthBook, VWO) or [server-side assignment via sGTM](/recipes/testing/server-side-experiments/) — both avoid Optimize's flicker problems and don't depend on a product Google could deprecate next.
+</Aside>
+
+## The GA4 event and parameter contract
+
+GA4 has **no reserved event name or parameter for experiments**. Every convention below is something you define in your container and register in GA4 Admin. We recommend the following canonical shape across all testing tools:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `experiment_impression` | Event name | Fires once per user per session when the variant is applied |
+| `experiment_id` | Event parameter (string) | Stable identifier for the test (e.g. `checkout-copy-v2`) |
+| `experiment_name` | Event parameter (string, optional) | Human-readable name |
+| `variant_id` | Event parameter (string) | The assigned variant (`control`, `A`, `B`) |
+| `variant_name` | Event parameter (string, optional) | Human-readable variant name |
+| `active_experiment` | **User property** | `{experiment_id}_{variant_id}` — rides on every subsequent event |
+
+The user property is the load-bearing part. Event parameters only exist on the impression event. The user property rides on every downstream event (`purchase`, `sign_up`, custom conversions), which is what makes test-to-conversion attribution work. See [Forwarding Variant to Conversions](/recipes/testing/forwarding-variant-to-conversions/) for why that matters and how to do it right.
+
+Register all four event parameters and the user property in GA4 Admin → Custom Definitions before launching. Unregistered parameters don't appear in reports.
 
 ## The dataLayer pattern
 

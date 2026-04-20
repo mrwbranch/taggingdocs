@@ -1,0 +1,205 @@
+---
+title: "Google Tag Gateway"
+description: "Google's first-party gateway product — a Google-managed server-side proxy for gtag.js that gives you ITP mitigation without running sGTM yourself."
+sidebar:
+  order: 7.7
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Google announced Tag Gateway in 2024 as a lightweight alternative to self-hosted server-side GTM. It sits between the browser and Google's tracking endpoints — but Google runs the server. You register a subdomain, point it at Google's infrastructure via CNAME, and `gtag.js` plus all its collection traffic flows through your own origin.
+
+For a large class of sites — the ones whose entire tagging stack is Google — this is the right answer. You get the ITP mitigation benefits of first-party serving without running a single container or paying a cloud bill.
+
+*Valid as of April 2026, Google Tag Gateway.*
+
+## What Google Tag Gateway is
+
+A managed proxy, owned and operated by Google, served under a subdomain of your choice.
+
+- The loader, `gtag.js`, is served from `https://metrics.example.com/gtag/js?id=...` instead of `googletagmanager.com`
+- Measurement requests to `/g/collect` (GA4), `/ccm/collect` (conversions), and the Ads/Floodlight endpoints are routed through the same subdomain
+- Cookies set by the gateway are technically and legally first-party, with the 400-day cap that ITP allows for `document.cookie`-set cookies
+
+Google handles the TLS, the autoscaling, the egress, and the forwarding to their internal collection endpoints. You handle a CNAME record.
+
+## Benefits
+
+Four things you get for the price of a DNS change.
+
+**First-party serving of `gtag.js`.** The loader script no longer comes from a known tracking domain. Some ad-blocker lists target `googletagmanager.com` directly; routing through your subdomain sidesteps those lists. Other lists do content-based blocking and are unaffected.
+
+**First-party serving of measurement traffic.** The `POST /g/collect` requests hit your subdomain. ITP heuristics that penalize "third-party-linked" requests have less to latch onto. Practical effect: `_ga` cookie durability on Safari improves from roughly 7 days to closer to the full first-party cap.
+
+**Lower client-side weight.** Google can issue a smaller bootstrap when it controls both ends of the request. The gateway handles some of what the loader used to do inline.
+
+**No infrastructure to maintain.** Compared to running sGTM on Cloud Run or App Engine, the ops burden is zero. No container image, no version upgrades, no monitoring dashboard.
+
+## How it compares to sGTM
+
+This is the question that drives the decision. Tag Gateway and server-side GTM solve overlapping problems, but the feature ceilings are wildly different.
+
+<Comparison leftTitle="Tag Gateway (Google-managed)" rightTitle="Server-Side GTM (self-managed)" leftType="neutral" rightType="neutral">
+  <Fragment slot="left">
+    **Control**: None. Google decides what the proxy does.
+
+    **Custom tags / transforms**: Not supported. You cannot enrich, redact, or transform payloads in flight.
+
+    **Non-Google destinations**: Not supported. The gateway forwards to Google endpoints only.
+
+    **Cost**: Bundled in Google's free tier for most sites; enterprise volumes may incur charges.
+
+    **Ops burden**: CNAME setup and verification. No runtime maintenance.
+
+    **Consent enforcement**: Client-side only. The gateway honors whatever `gtag.js` sends.
+  </Fragment>
+  <Fragment slot="right">
+    **Control**: Full. You own the container runtime.
+
+    **Custom tags / transforms**: Yes. Custom clients, variables, tags, request enrichment, PII redaction.
+
+    **Non-Google destinations**: Yes. Meta CAPI, TikTok Events API, Reddit, LinkedIn, etc.
+
+    **Cost**: Cloud hosting fees — typically $50–$500/month depending on volume and region.
+
+    **Ops burden**: Container versioning, image upgrades, monitoring, on-call.
+
+    **Consent enforcement**: Server-side. You can strip PII, block requests, or route conditionally based on consent flags.
+  </Fragment>
+</Comparison>
+
+The taxonomy matters: Tag Gateway is a *proxy*, sGTM is a *container runtime*. They both touch the same network path, but the gateway has no programmable surface. Stape has a good write-up of this distinction in their post "sGTM vs Gateways" — worth reading if you are still deciding.
+
+## When to use which
+
+The decision tree is short but load-bearing.
+
+<Tabs>
+<TabItem label="Use Tag Gateway">
+
+Your stack is Google-only: GA4, Google Ads, maybe Floodlight or Campaign Manager. You want ITP mitigation. You do not want to run infrastructure.
+
+- You are a small or mid-sized site.
+- You do not need to enrich events server-side.
+- You do not need server-side Meta CAPI or other non-Google vendors.
+- You want the setup done in a day, not a quarter.
+
+This is the majority of sites.
+
+</TabItem>
+<TabItem label="Use sGTM">
+
+You need control over what leaves your server.
+
+- Server-side Meta CAPI, TikTok Events API, or other vendor APIs.
+- PII redaction or hashing in flight (e.g., stripping query parameters from `page_location`).
+- Conditional routing based on consent state at the server.
+- Custom clients (non-Google vendors that send data to your sGTM endpoint).
+- Data sovereignty requirements that mandate a specific region or cloud.
+
+This is the right answer for enterprises, regulated industries, and any stack with more than one advertising vendor.
+
+</TabItem>
+<TabItem label="Use both">
+
+Rare but valid. Tag Gateway for the browser-side Google fan-out, sGTM in parallel for non-Google vendors.
+
+Your `gtag.js` loads from `metrics.example.com` (gateway). Your Meta Pixel and TikTok Pixel push to `sgtm.example.com` (your sGTM). Two subdomains, two proxies, distinct purposes.
+
+The complexity is in keeping the consent configuration consistent between them.
+
+</TabItem>
+</Tabs>
+
+## How setup works
+
+The exact UI path in the Google Tag admin shifts — Google has moved it between Google Ads admin, GA4 admin, and the standalone Tag Manager UI more than once. The high-level flow is stable.
+
+<Steps>
+1. **Pick a subdomain.** Something neutral — `metrics.example.com`, `t.example.com`, `gtm.example.com`. Do not use a subdomain that users might type into an ad-blocker allowlist by name.
+
+2. **Register the subdomain in the Google Tag admin.** Find the Tag ID you want to route through the gateway and open its settings. There is a first-party serving / Tag Gateway section.
+
+3. **Verify domain ownership.** Google uses the same DNS TXT or HTML-file verification as other products.
+
+4. **Google provisions the gateway.** You receive a CNAME target. Point your subdomain at it.
+
+5. **Wait for certificate issuance.** Google provisions TLS via their managed certificate pipeline. This typically takes under an hour.
+
+6. **Update your `gtag.js` loader.** The inline snippet on your site needs its `src` changed from `https://www.googletagmanager.com/gtag/js?id=...` to `https://metrics.example.com/gtag/js?id=...`. Deploy this change.
+
+7. **Validate with Tag Assistant.** Confirm the loader and collection requests are hitting your subdomain, not `googletagmanager.com`.
+</Steps>
+
+<Aside type="caution">
+Step 6 is a code deploy. Until you update the snippet, the gateway is provisioned but unused. A common failure mode is to finish setup in the admin UI, assume it is "on," and not realize weeks later that traffic is still routing through `googletagmanager.com`.
+</Aside>
+
+## How it fits with Google Tag auto-loading
+
+The gateway proxies everything that flows through `gtag.js`. That includes the auto-loaded destinations — if you have linked Ads and Floodlight to your Tag ID, their traffic also flows through your subdomain.
+
+This is a meaningful ITP benefit for Ads. The `_gcl_au` cookie, historically clamped hard by Safari, gets the same first-party durability as `_ga` because both are set from the same origin.
+
+It also means that *all* the collection endpoints for the fan-out are routed. You do not get to opt one destination out. If you do not want Ads traffic going through the gateway, you need to un-link Ads from the Tag ID entirely.
+
+## Trade-offs
+
+<Aside type="caution">
+What you give up, in rough order of importance:
+
+- **No custom tags.** The proxy runs Google's code, not yours. You cannot attach middleware.
+- **No transforms.** You cannot modify payloads in flight — no redaction, no enrichment, no filtering.
+- **No inspection.** The gateway does not expose logs. You cannot see what it forwarded or dropped.
+- **Egress IP is Google-controlled.** If your backend firewalls or monitoring depends on a stable client IP range, you need to use Google's published ranges.
+- **Coverage is Google-only.** Meta, TikTok, LinkedIn, Reddit, Pinterest — none of these route through Tag Gateway.
+</Aside>
+
+## Status and availability
+
+Tag Gateway rolled out regionally through 2024 and 2025. As of early 2026 it is generally available in most markets Google serves, with pricing and quotas that shift for high-volume properties. Google's current Tag Gateway documentation is the canonical source for the exact availability, quotas, and any tier-specific costs — treat the numbers in third-party articles (including this one) as directional.
+
+## Common mistakes
+
+### CNAME pointed at the wrong target
+
+Google issues a specific CNAME target. Copy-paste errors here are common. Symptoms: the subdomain resolves but TLS fails, or the loader 404s. Re-check the target in the admin UI.
+
+### Leaving the old snippet in place
+
+After provisioning, teams sometimes add the new snippet to new pages but forget the existing pages. The site ends up half-gatewayed. Audit every template.
+
+### Assuming Tag Gateway handles non-Google vendors
+
+It does not. Your Meta Pixel still posts to `facebook.com/tr`. Your TikTok Pixel still posts to `analytics.tiktok.com`. The gateway only routes Google traffic. If you need first-party serving for non-Google vendors, that is an sGTM problem.
+
+### Conflating Tag Gateway with First-Party Mode
+
+First-Party Mode is the user-facing feature name Google used at the July 2024 launch. Tag Gateway is the broader productization that followed. Both describe the same underlying infrastructure — a managed proxy under your subdomain — but the branding has been inconsistent. If you are reading Google's docs and see both terms, assume they mean the same thing unless context suggests otherwise.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="The New Google Tag"
+    description="The configuration model that the gateway proxies — Tag IDs, linked destinations, and fan-out behaviour."
+    href="/foundations/the-new-google-tag/"
+  />
+  <LinkCard
+    title="Server-Side Tagging"
+    description="The full sGTM alternative — when you need custom tags, non-Google vendors, or server-side consent enforcement."
+    href="/server-side/"
+  />
+  <LinkCard
+    title="Hosting Comparison"
+    description="Cloud Run, App Engine, self-hosted — where to run sGTM when Tag Gateway is not enough."
+    href="/server-side/operations/hosting-comparison/"
+  />
+  <LinkCard
+    title="First-Party Mode for Google Tags"
+    description="The consent-architecture angle on the same infrastructure — ITP mitigation and Consent Mode v2 interaction."
+    href="/consent/advanced/first-party-mode/"
+  />
+</CardGrid>

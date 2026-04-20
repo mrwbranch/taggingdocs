@@ -1,0 +1,204 @@
+---
+title: "Track YouTube IFrame Player API"
+description: "Track YouTube player states, percent-progress milestones, and video metadata in GA4 via GTM using the IFrame Player API — deeper than GTM's built-in trigger."
+sidebar:
+  order: 30
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+GTM's built-in YouTube trigger covers most cases. When it doesn't — custom progress thresholds, non-standard embeds, per-player metadata, or a need to unify YouTube events with Vimeo and Wistia under one `video_engagement` event — you drop down to the IFrame Player API directly.
+
+*Valid as of April 2026, YouTube IFrame Player API.*
+
+<Aside type="tip">
+If your needs are standard (start, pause, progress at fixed percentages, complete), use the built-in trigger documented in [Track Video Engagement](/recipes/interaction-tracking/track-video-engagement/). Come back here when you need custom progress milestones, manual title extraction, or a non-standard embed.
+</Aside>
+
+## Problem
+
+The built-in trigger fires `gtm.video` events with a fixed schema and only fires for embeds that already have `enablejsapi=1`. If you embed YouTube via a third-party CMS, a privacy-enhanced iframe (`youtube-nocookie.com`), or a custom React component, the trigger may miss half your players.
+
+## Solution
+
+Load the IFrame Player API yourself, wrap every YouTube iframe on the page into a `YT.Player` instance, and bind an `onStateChange` handler plus a percent-progress poll. Push a `video_engagement` event for each state — the same event name the generic recipe uses, so dashboards stay clean.
+
+## Load the IFrame API
+
+<DataLayerExample event="video_engagement" description="Load the API, wait for the global ready callback, then wrap each YouTube iframe. Put this in a Custom HTML tag with a Window Loaded trigger.">
+```javascript
+(function() {
+  // Load the IFrame API only once
+  if (!window.YT) {
+    var tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(tag);
+  }
+
+  var players = [];
+
+  // YouTube calls this global when the API is ready
+  window.onYouTubeIframeAPIReady = function() {
+    var iframes = document.querySelectorAll(
+      'iframe[src*="youtube.com/embed"], iframe[src*="youtube-nocookie.com/embed"]'
+    );
+
+    iframes.forEach(function(iframe, index) {
+      // Give the iframe an id so YT.Player can target it
+      if (!iframe.id) iframe.id = 'yt-player-' + index;
+
+      // Ensure enablejsapi=1 is present
+      if (iframe.src.indexOf('enablejsapi=1') === -1) {
+        iframe.src += (iframe.src.indexOf('?') === -1 ? '?' : '&') + 'enablejsapi=1';
+      }
+
+      var player = new YT.Player(iframe.id, {
+        events: {
+          onStateChange: function(e) { onStateChange(e, player); }
+        }
+      });
+      players.push({ player: player, milestones: {} });
+    });
+  };
+
+  // Map YT state codes to readable actions
+  var STATE = {
+    '-1': 'unstarted',
+    '0': 'complete',
+    '1': 'playing',
+    '2': 'pause',
+    '3': 'buffering',
+    '5': 'cued'
+  };
+
+  function onStateChange(event, playerInstance) {
+    var action = STATE[String(event.data)];
+    if (!action || action === 'buffering' || action === 'cued' || action === 'unstarted') return;
+
+    var data = event.target.getVideoData() || {};
+    var duration = event.target.getDuration();
+    var currentTime = event.target.getCurrentTime();
+    var percent = duration ? Math.round((currentTime / duration) * 100) : 0;
+
+    push({
+      event: 'video_engagement',
+      video_provider: 'youtube',
+      video_action: action === 'playing' ? 'start' : action,
+      video_title: data.title,
+      video_url: data.video_id ? 'https://www.youtube.com/watch?v=' + data.video_id : undefined,
+      video_duration: Math.round(duration),
+      video_current_time: Math.round(currentTime),
+      video_percent: percent
+    });
+
+    // Start progress polling once playback begins
+    if (action === 'playing') {
+      startProgressPoll(event.target, playerInstance);
+    }
+  }
+
+  function startProgressPoll(player, playerInstance) {
+    var entry = players.filter(function(p) { return p.player === playerInstance; })[0];
+    if (!entry) return;
+    if (entry.pollId) return; // already polling
+
+    var thresholds = [25, 50, 75, 100];
+
+    entry.pollId = setInterval(function() {
+      if (typeof player.getPlayerState !== 'function') return;
+      var state = player.getPlayerState();
+      if (state !== 1) return; // only while playing
+
+      var duration = player.getDuration();
+      var current = player.getCurrentTime();
+      var percent = duration ? Math.round((current / duration) * 100) : 0;
+
+      thresholds.forEach(function(t) {
+        if (percent >= t && !entry.milestones[t]) {
+          entry.milestones[t] = true;
+          var data = player.getVideoData() || {};
+          push({
+            event: 'video_engagement',
+            video_provider: 'youtube',
+            video_action: 'progress_' + t,
+            video_title: data.title,
+            video_url: data.video_id ? 'https://www.youtube.com/watch?v=' + data.video_id : undefined,
+            video_percent: t,
+            video_duration: Math.round(duration)
+          });
+        }
+      });
+    }, 1000);
+  }
+
+  function push(payload) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(payload);
+  }
+})();
+```
+</DataLayerExample>
+
+## GTM setup
+
+<Steps>
+1. **Add the script as a Custom HTML tag**
+   - Trigger: **Window Loaded** — the API needs the iframes to exist first
+   - Do **not** combine with GTM's built-in YouTube trigger on the same pages; you'll get duplicate events
+
+2. **Create a Custom Event trigger**
+   - Trigger type: **Custom Event**
+   - Event name: `video_engagement`
+
+3. **Create Data Layer Variables**
+   - `DLV - video_provider` → `video_provider`
+   - `DLV - video_action` → `video_action`
+   - `DLV - video_title` → `video_title`
+   - `DLV - video_url` → `video_url`
+   - `DLV - video_percent` → `video_percent`
+   - `DLV - video_duration` → `video_duration`
+
+4. **Create a GA4 Event Tag**
+   - Event name: `video_engagement`
+   - Parameters: all six DLVs above, plus `page_path` → `{{Page Path}}`
+   - Trigger: the Custom Event trigger
+</Steps>
+
+<TagConfig
+  name="GA4 - video_engagement (YouTube)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - video_engagement"
+  variables={["DLV - video_provider", "DLV - video_action", "DLV - video_title", "DLV - video_percent"]}
+/>
+
+## Test it
+
+1. Open GTM Preview on a page with a YouTube embed
+2. Press Play — confirm `video_engagement` with `video_action: start` and a populated `video_title`
+3. Pause at around 30% — confirm `video_action: pause` with `video_percent` near 30
+4. Let playback pass 25, 50, 75, 100 — confirm four `progress_*` events fire, each once
+5. In GA4 DebugView, verify all events share `video_provider: youtube` and a non-empty title
+
+## Common gotchas
+
+**Multiple players on the same page.** State must be per-player. The `players` array plus per-entry `milestones` map in the code above handles this — don't collapse to a single shared map or you'll lose the second video's milestones.
+
+**Autoplay muted counts as a start.** Some embeds autoplay muted on load. That fires `video_action: start` immediately, without user intent. If you need to distinguish, set a flag when the document has received a user gesture (pointerdown, keydown) and only emit `start` after that.
+
+**Privacy-enhanced embeds.** `youtube-nocookie.com/embed/` works identically with the IFrame API, as long as `enablejsapi=1` is present. The selector in the code covers both domains — keep it as-is.
+
+**The `onYouTubeIframeAPIReady` global is a single slot.** If some other script on the page already assigns to `window.onYouTubeIframeAPIReady`, your assignment overwrites it (or theirs overwrites yours). Preserve any existing callback: store the previous value and call it from your own function.
+
+**Players added after page load.** SPAs and lazy-loaded players won't exist when the ready callback fires. Re-run the iframe discovery on a custom "video_mounted" dataLayer event from your component, or use a MutationObserver on the container.
+
+**Don't run alongside the built-in trigger.** GTM's built-in YouTube trigger injects its own IFrame API wrapper. Running both produces doubled events. Choose one approach per container.
+
+<CardGrid>
+  <LinkCard title="Track Video Engagement" href="/recipes/interaction-tracking/track-video-engagement/" description="The generic video recipe — YouTube built-in trigger, Vimeo, and HTML5 in one page." />
+  <LinkCard title="Track Vimeo Player" href="/recipes/interaction-tracking/track-vimeo-player/" description="Deeper Vimeo Player SDK integration." />
+  <LinkCard title="Track Wistia" href="/recipes/interaction-tracking/track-wistia/" description="The _wq queue pattern for Wistia embeds." />
+  <LinkCard title="Custom HTML Tags" href="/client-side/tags/custom-html-tags/" description="The tag type used to attach the IFrame API." />
+</CardGrid>

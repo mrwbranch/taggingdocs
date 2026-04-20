@@ -1,0 +1,208 @@
+---
+title: "User Acquisition vs. Traffic Acquisition"
+description: "The perennial GA4 disambiguation — User Acquisition reports first-touch source, Traffic Acquisition reports session source. When to use which, with a worked example."
+sidebar:
+  order: 6
+lastUpdated: 2026-04-20
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+*Valid as of April 2026, GA4 property interface.*
+
+Two GA4 reports live next to each other under **Reports → Acquisition**. Their names differ by one word, they use nearly identical column layouts, and they almost always return different numbers for the same date range. This is the most frequently asked disambiguation in GA4: which report should I be looking at?
+
+The short answer: **User Acquisition** groups users by the source that first brought them to your site. **Traffic Acquisition** groups sessions by the source that started each session. They answer different questions and neither is "the right one" — the right one depends on what you want to know.
+
+## The one-sentence difference
+
+| Report | Groups by | Assigned to |
+|--------|-----------|-------------|
+| User Acquisition | Users | Source of the user's **first** session (first-touch) |
+| Traffic Acquisition | Sessions | Source of **each** session (per-session, last non-direct click) |
+
+Both reports use last non-direct click attribution regardless of your property's attribution settings. Changing the attribution model in **Admin → Attribution settings** does not change what these reports show. That setting only affects the Advertising section and the Data API.
+
+## Worked example: a single user, three visits
+
+Consider one real user over the course of a week.
+
+<Comparison leftTitle="User Acquisition view" rightTitle="Traffic Acquisition view" leftType="neutral" rightType="neutral">
+  <Fragment slot="left">
+    ```
+    Monday:    Google / organic  (first visit)
+    Thursday:  (direct) / (none)
+    Saturday:  (direct) / (none)  — converts
+
+    User is attributed to:
+    → google / organic
+
+    All events, revenue, and conversions
+    from this user roll up to
+    google / organic in User Acquisition
+    reports for weeks to come.
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```
+    Monday:    google / organic     → 1 session
+    Thursday:  (direct) / (none)    → 1 session
+    Saturday:  (direct) / (none)    → 1 session, 1 purchase
+
+    Traffic Acquisition splits the
+    three sessions across two source
+    rows:
+    → google / organic: 1 session, 0 revenue
+    → (direct) / (none): 2 sessions, $89 revenue
+    ```
+  </Fragment>
+</Comparison>
+
+Same user. Same three visits. Same one purchase. In User Acquisition the purchase and all three sessions are credited to `google / organic`. In Traffic Acquisition the purchase is credited to `(direct) / (none)` because that was the source of the converting session.
+
+This is not a bug and it is not a data quality problem. The reports are answering two different questions.
+
+## Which question are you asking?
+
+<CardGrid>
+  <LinkCard
+    title="Use User Acquisition when…"
+    description="You want to evaluate channels as user-acquisition investments. 'Where did my customers originally come from?' Marketing-mix and lifetime-value questions live here."
+    href="#user-acquisition-use-cases"
+  />
+  <LinkCard
+    title="Use Traffic Acquisition when…"
+    description="You want to evaluate what is driving on-site activity right now. 'Which channel drove this week's sessions and conversions?' Campaign pacing and weekly reporting live here."
+    href="#traffic-acquisition-use-cases"
+  />
+</CardGrid>
+
+### User Acquisition use cases
+
+- Evaluating long-term channel performance — which channels bring users who convert eventually, even if they return directly later.
+- LTV analysis — revenue per acquired user, segmented by the channel that acquired them.
+- Content marketing and SEO ROI — users who first found you via organic search and later converted through any channel.
+- Paid social justification — users who discovered the brand via a Meta campaign and purchased weeks later via direct traffic.
+
+### Traffic Acquisition use cases
+
+- Weekly marketing dashboards — session volume by channel this week.
+- Campaign pacing — is the new paid search campaign pulling its weight in sessions?
+- Conversion-rate benchmarking per channel — conversion rate of sessions starting from email vs. paid vs. organic.
+- Page-level and landing-page analysis — the Traffic Acquisition dimensions (session source, session medium, session campaign) are the ones joined into landing-page reports.
+
+<Aside type="tip">
+If your stakeholder asks "is our paid search working?" and you only have time for one report, open **Traffic Acquisition**. If they ask "are we growing our organic user base?", open **User Acquisition**. The common mistake is using Traffic Acquisition for both and then wondering why the organic story looks flat even though SEO is doing well — organic's downstream direct-return sessions are landing in the direct row.
+</Aside>
+
+## The dimension names give it away
+
+The two reports use different default primary dimensions, and once you learn the prefix convention you can tell them apart in any custom report or exploration.
+
+| Prefix | Meaning | Used in |
+|--------|---------|---------|
+| `First user …` | First-touch attribution (first session ever) | User Acquisition |
+| `Session …` | Session-scoped (the session that is being measured) | Traffic Acquisition, landing-page reports |
+
+Examples of the same concept across both scopes:
+
+| User Acquisition dimension | Traffic Acquisition dimension |
+|---------------------------|------------------------------|
+| First user source | Session source |
+| First user medium | Session medium |
+| First user campaign | Session campaign |
+| First user source / medium | Session source / medium |
+| First user default channel group | Session default channel group |
+
+In Explorations, you will see both families in the dimension picker. Choosing `First user source` against a session-scoped metric like **Sessions** produces a valid but often counterintuitive report: sessions from returning users are grouped under the channel that originally acquired them.
+
+## Metric scope interacts with dimension scope
+
+The scope mismatch between dimension and metric is where many mis-reads originate.
+
+| Metric | Natural scope | Works with first-user dimensions? |
+|--------|--------------|----------------------------------|
+| Total users | User | Yes — native fit |
+| New users | User | Yes — native fit |
+| Sessions | Session | Works, but sessions are grouped by first-touch channel of the user |
+| Engaged sessions | Session | Same caveat |
+| Key events | Event | Groups events by the user's first-touch channel |
+| Total revenue | Event | Groups revenue by the user's first-touch channel |
+
+Mixing scopes is not wrong — it is often what you want (e.g., "revenue per acquired user, by acquisition channel") — but you need to read the result with the scope combination in mind.
+
+## Direct traffic inflation in Traffic Acquisition
+
+Traffic Acquisition uses **last non-direct click**. This means a session with no campaign parameters and no referrer inherits the most recent non-direct source, up to the lookback window. So a user who arrived via `google / organic` on Monday and returns with no referrer on Thursday is credited to `google / organic` in Traffic Acquisition on Thursday — not to direct.
+
+The direct row therefore only contains sessions where GA4 cannot find any prior non-direct source in the lookback window. Users are:
+- Genuinely new, with no referrer (typed URL, bookmark, dark-social paste).
+- Returning after their last non-direct source aged out of the 90-day lookback.
+- Victims of lost campaign tagging — missing UTMs on a paid campaign, broken referrer policies, or unlinked Google Ads accounts.
+
+If direct traffic spikes, check the date range for a tagging regression before assuming users suddenly memorized your URL.
+
+## How each report handles User ID and Google signals
+
+User Acquisition depends on stable user identity. If a user clears cookies and returns, GA4 sees a new `user_pseudo_id`, which counts as a brand-new user and a brand-new first-touch channel. User Acquisition numbers therefore drift over time as cookie churn reshuffles which channel "acquired" each user.
+
+User ID implementation mitigates this: logged-in users are stitched across devices and browsers, and their first-touch channel is preserved. Properties without User ID see more volatility in User Acquisition than in Traffic Acquisition, because Traffic Acquisition re-derives the source from each session's own signals.
+
+## Differences from Universal Analytics
+
+Universal Analytics had a single **Acquisition → All Traffic → Source/Medium** report that used last non-direct click at the session level — closest in behavior to GA4's Traffic Acquisition. UA's Users metric in that report was "users who had at least one session from this source," not "users whose first session came from this source."
+
+GA4's split into two reports is the genuine improvement here: you can now ask first-touch and session-touch questions without leaving the standard report set. The tradeoff is that stakeholders used to the UA number sometimes read one report and think it should equal the other.
+
+## Validating the difference in BigQuery
+
+The split is easy to replicate in BigQuery. Each event row carries two families of traffic fields:
+
+- `traffic_source.source`, `traffic_source.medium`, `traffic_source.name` — first-touch (User Acquisition analog).
+- `collected_traffic_source.*` — the collected source at the time of the event, which drives session-scoped Traffic Acquisition once resolved through last non-direct click.
+
+For session-level work, group by `user_pseudo_id` + `ga_session_id` and pick the source from the session's starting event. For user-level first-touch, group by `user_pseudo_id` and pick the minimum-timestamp session's source, or use the `traffic_source` struct directly. See [Common BigQuery Queries](/ga4/bigquery/common-queries/) for worked patterns.
+
+## Common mistakes
+
+### Comparing the two reports' totals and calling it a discrepancy
+
+The total users in User Acquisition and the total users in Traffic Acquisition are usually the same (both count distinct users who had any session in the range). But the per-channel breakdowns will never match, because the grouping dimensions are different. "Organic search in User Acquisition says 1,200 users, but in Traffic Acquisition it says 800" is not a problem — it is the expected shape of the data.
+
+### Using Traffic Acquisition for cohort analysis
+
+Cohorts are a user-scoped concept. Building a retention or LTV cohort using `Session source / medium` as the cohort dimension produces results that re-shuffle users into channels each session. Use `First user source / medium` for cohort and retention analysis.
+
+### Expecting attribution-model changes to affect these reports
+
+Switching your property attribution from last click to data-driven does not change either of these reports. Both always use last non-direct click at their respective scopes. To see data-driven attribution, open the **Advertising → Attribution** reports.
+
+### Forgetting the 90-day lookback
+
+A user whose last non-direct source was 100 days ago shows up as direct in Traffic Acquisition. This is invisible unless you think about the lookback window.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Sessions and Attribution"
+    description="How GA4 defines sessions and applies attribution — the foundation for both reports."
+    href="/ga4/fundamentals/sessions-and-attribution/"
+  />
+  <LinkCard
+    title="Data Model"
+    description="Why everything is an event and how first-touch and session-touch are derived."
+    href="/ga4/fundamentals/data-model/"
+  />
+  <LinkCard
+    title="Data Discrepancies"
+    description="Other cases where GA4 numbers do not line up with expectations."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+  <LinkCard
+    title="Common BigQuery Queries"
+    description="Rebuild both acquisition views in SQL."
+    href="/ga4/bigquery/common-queries/"
+  />
+</CardGrid>

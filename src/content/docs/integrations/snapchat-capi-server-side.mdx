@@ -1,0 +1,208 @@
+---
+title: "Snap CAPI (Server-Side)"
+description: "Snap Conversions API via sGTM — access token setup, event mapping, hashed match keys, sc_click_id handling, and deduplication with the Snap Pixel using client_dedup_id."
+sidebar:
+  order: 14
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The Snap Conversions API (CAPI) sends events from your server to Snapchat Ads, recovering the sizable share of conversions the Snap Pixel misses on iOS — which, for Snapchat, is most of the audience. If you are running Snap ads at any serious spend level, CAPI is not optional.
+
+*Valid as of April 2026, Snap Conversions API v3.*
+
+## Why server-side for Snap
+
+Snap's user base is overwhelmingly mobile and overwhelmingly iOS-heavy. That means:
+
+1. **App Tracking Transparency** decimated IDFA availability starting iOS 14.5. CAPI gives Snap server-side signals that are not tied to IDFA.
+2. **Safari ITP on iOS web** caps the client-side pixel's cookies at 7 days, shrinking attribution windows for anyone who converts on the Snap in-app browser.
+3. **In-app browser quirks** — Snap's in-app browser sometimes strips URL parameters on redirect, which breaks `sc_click_id` (ScCid) capture client-side. A server-side read from the request URL is more reliable.
+
+For Snap specifically, running pixel + CAPI in parallel typically lifts reported conversions by 20–40% once deduplication is working, which is one of the larger CAPI lifts across ad platforms.
+
+## The event model
+
+Snap CAPI v3 accepts one event per request at a single endpoint. Batching is available via a separate `v3/conversion/validate` batch endpoint, but the single-event path is simpler and what most sGTM templates use.
+
+**Required per event:**
+
+| Field | Notes |
+|---|---|
+| `event_name` | UPPERCASE — see standard names below |
+| `event_time` | **Unix milliseconds** (v3 changed from seconds) |
+| `action_source` | `website`, `mobile_app`, `offline`, `crm` |
+| `pixel_id` | UUID of your Snap Pixel |
+| `client_dedup_id` | Dedup key (Snap's name for event_id) |
+| At least one identifier in `user_data` | See match keys below |
+
+**Standard event names (uppercase):** `PAGE_VIEW`, `VIEW_CONTENT`, `ADD_CART`, `START_CHECKOUT`, `ADD_BILLING`, `PURCHASE`, `SIGN_UP`, `SUBSCRIBE`, `SEARCH`, `ADD_TO_WISHLIST`, `LIST_VIEW`, `COMPLETE_TUTORIAL`, `INVITE`, `LOGIN`, `SHARE`, `RESERVE`, `ACHIEVEMENT_UNLOCKED`, `SPENT_CREDITS`, `RATE`, `START_TRIAL`, `AD_CLICK`, `AD_VIEW`, `CUSTOM_EVENT_1` through `CUSTOM_EVENT_5`.
+
+**Match keys:**
+
+| Field | Hashed? | Source |
+|---|---|---|
+| `em` | SHA-256 | Email (lowercase, trimmed) |
+| `ph` | SHA-256 | Phone (E.164 first) |
+| `idfv` | No | iOS IDFV |
+| `idfa` | No | iOS IDFA |
+| `ga` | No | Google AAID |
+| `sc_click_id` | No | URL `ScCid` param |
+| `sc_cookie1` | No | Raw `_scid` cookie |
+| `client_ip_address` | No | Request header |
+| `client_user_agent` | No | Request header |
+
+<Aside type="note">
+Both `sc_click_id` and `sc_cookie1` are Snap-specific signals and both improve match rate. Send both when available — `sc_click_id` from the `ScCid` URL parameter (when users arrive from a Snap ad click) and `sc_cookie1` from the raw `_scid` cookie value.
+</Aside>
+
+## Setup in sGTM
+
+<Steps>
+1. Generate a long-lived access token: Snap Ads Manager → Events Manager → your pixel → Settings → Conversions API → Generate access token. Store it as an sGTM Constant variable.
+
+2. In sGTM, Tags → New → Community Template Gallery. Search "Snap Conversions API" — Snap maintains an official template.
+
+3. Configure the tag:
+   - **Pixel ID:** your Snap Pixel UUID
+   - **Access Token:** your stored variable
+   - **Event Name:** mapped from GA4 event (e.g., `purchase` → `PURCHASE`)
+   - **Event Time:** `{{Event Timestamp (ms)}}` — sGTM provides this as a built-in variable
+   - **Client Dedup ID:** `{{Event Data - event_id}}`
+
+4. Add user data variables:
+   - Cookie Variable: `_scid` → pass as `sc_cookie1`
+   - Event Data variable reading `sc_click_id` (sourced from the URL parameter `ScCid` captured on landing)
+   - Request Header variables for `X-Forwarded-For` and `user-agent`
+   - Hashed email and phone from GA4 event parameters (hash server-side, never in the browser)
+
+5. Firing trigger: the GA4 events you want to mirror (`purchase`, `begin_checkout`, `add_to_cart`, `view_item`, `sign_up`).
+</Steps>
+
+**Raw HTTP shape:**
+
+```http
+POST https://tr.snapchat.com/v3/conversion
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "event_name": "PURCHASE",
+  "event_time": 1713571200000,
+  "action_source": "website",
+  "pixel_id": "00000000-0000-0000-0000-000000000000",
+  "event_source_url": "https://example.com/thank-you",
+  "client_dedup_id": "evt-ORDER-123-1713571200",
+  "user_data": {
+    "em": ["<sha256 of email>"],
+    "ph": ["<sha256 of phone>"],
+    "client_ip_address": "203.0.113.45",
+    "client_user_agent": "Mozilla/5.0 ...",
+    "sc_click_id": "<ScCid value>",
+    "sc_cookie1": "<_scid cookie value>"
+  },
+  "custom_data": {
+    "currency": "USD",
+    "value": "79.99",
+    "order_id": "ORDER-123",
+    "content_ids": ["SKU-A", "SKU-B"],
+    "num_items": 2
+  }
+}
+```
+
+## Event mapping from the Snap Pixel
+
+| GA4 event | Snap event_name | Notes |
+|---|---|---|
+| `page_view` | `PAGE_VIEW` | Optional server-side |
+| `view_item` | `VIEW_CONTENT` | Pass `content_ids`, `item_category`, `price` |
+| `add_to_cart` | `ADD_CART` | |
+| `begin_checkout` | `START_CHECKOUT` | |
+| `add_payment_info` | `ADD_BILLING` | |
+| `purchase` | `PURCHASE` | Must include `transaction_id` as `order_id` |
+| `sign_up` | `SIGN_UP` | Pass `sign_up_method` in `custom_data` |
+| `search` | `SEARCH` | Pass `search_string` |
+| `generate_lead` | `CUSTOM_EVENT_1` (or similar) | Snap has no native Lead event |
+
+## Deduplication with the Snap Pixel
+
+Snap's dedup key is `client_dedup_id` — not `event_id` as with Meta/TikTok/Pinterest. Window: 24 hours (tighter than most).
+
+**In the client-side Snap Pixel:** pass `client_dedup_id` in the track call options. The Snap Pixel library accepts it on any standard event:
+
+```javascript
+snaptr('track', 'PURCHASE', {
+  transaction_id: 'ORDER-123',
+  price: 79.99,
+  currency: 'USD',
+  item_ids: ['SKU-A', 'SKU-B'],
+  number_items: 2,
+  client_dedup_id: 'evt-ORDER-123-1713571200'  // same as CAPI
+});
+```
+
+**In sGTM CAPI:** map the incoming `event_id` event parameter to the CAPI tag's `client_dedup_id` field.
+
+**Propagation:** the dataLayer generates the `event_id`, client-side GTM maps it both to the Snap Pixel's `client_dedup_id` AND to the GA4 event parameter; sGTM reads it and maps it back to `client_dedup_id` on the CAPI event.
+
+## Testing and validation
+
+Snap Ads Manager → Events Manager → your pixel → Test Events:
+
+1. Enter a test website URL.
+2. Navigate the site, fire conversions.
+3. Events appear in the Test Events panel within seconds, with source labeled "Pixel" or "Conversions API."
+4. Verify `client_dedup_id` matches between the two sources.
+
+Snap also shows a "Match Quality" indicator per pixel. Scores below 5 indicate you are missing hashed identifiers; scores of 7+ are good.
+
+<Aside type="caution">
+Snap v3 uses Unix **milliseconds** for `event_time`. The older v2 endpoint used seconds. If your events are showing up 50+ years in the past in Events Manager, you are sending seconds to v3 — multiply by 1000 or use the sGTM built-in `{{Event Timestamp (ms)}}`.
+</Aside>
+
+## Common mistakes
+
+### Lowercase event names
+
+`PURCHASE`, not `purchase` or `Purchase`. Snap's pixel is case-sensitive on event names. Lowercase events fire (HTTP 200), but Snap does not recognize them as standard events, so campaign optimization cannot use them.
+
+### Mismatched `event_time` units
+
+v3 uses milliseconds; v2 used seconds. Sending seconds to v3 stuffs your events into 1970 and they are silently dropped from active attribution windows.
+
+### Passing unhashed email in `em`
+
+`em` must be SHA-256 hashed, lowercase, trimmed. The field name accepts plaintext technically (Snap will not 400 you) but match rate craters. Hash server-side in sGTM with the built-in `sha256Sync` API.
+
+### Forgetting `client_dedup_id` on one side
+
+If the pixel sends `client_dedup_id` but the CAPI event omits it (or vice versa), Snap counts the conversion twice. Generate the ID in the dataLayer, wire it through both tags, and verify in Events Manager that events show a single matched pair, not two separate rows.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Snapchat Pixel (Client-Side)"
+    description="The client-side pixel that CAPI supplements — base tag, standard events, and Advanced Matching."
+    href="/integrations/snapchat-pixel/"
+  />
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="The reference CAPI implementation — same architecture, different field names."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Event Deduplication Across Client & Server"
+    description="Cross-platform cheat sheet covering Snap's client_dedup_id vs. everyone else's event_id."
+    href="/integrations/event-deduplication-across-client-server/"
+  />
+  <LinkCard
+    title="Data Redaction & PII Hashing"
+    description="How to hash match keys correctly in sGTM without leaking PII."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+</CardGrid>

@@ -1,0 +1,221 @@
+---
+title: "Consent Mode v2 with Usercentrics"
+description: "Step-by-step Google Consent Mode v2 integration with Usercentrics CMP via GTM — UC_UI API, ucEvent data layer, service-level consent, and the native Consent Mode connector."
+sidebar:
+  order: 7
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Usercentrics is a German enterprise Consent Management Platform popular with DACH publishers, SaaS companies, and regulated industries. It differs from most CMPs by tracking consent at the **service** level (one record per individual tool: GA4, Google Ads, Hotjar, etc.) rather than at the category level. It ships a native Google Consent Mode v2 connector that can be enabled without writing callback code. This playbook covers both the connector path and a custom integration.
+
+Valid as of April 2026, Usercentrics Browser SDK v3 / Consent Mode v2.
+
+<Aside type="caution">
+Usercentrics has two product lines: the original **Usercentrics CMP** (DACH-focused, service-level) and **Usercentrics Cookiebot** (the rebranded Cookiebot acquisition, category-level). This playbook covers the original Usercentrics CMP. For Cookiebot, see the Cookiebot recipe.
+</Aside>
+
+## Overview
+
+Usercentrics communicates consent through:
+
+1. The `UC_UI` global API — available after the SDK is ready, exposes `getServicesBaseInfo()`, `acceptAllConsents()`, and preference-centre controls.
+2. The `ucEvent` data-layer events — pushed to `window.dataLayer` on every consent action (CMP shown, save, accept all, deny all).
+3. The **Google Consent Mode v2 connector** — a dashboard toggle that emits `gtag('consent', …)` automatically, without custom code.
+
+## Prerequisites
+
+- Usercentrics account with a configured **Settings ID** (per-domain) and an active GDPR or CCPA rule set.
+- Services configured in the Usercentrics dashboard: at minimum **Google Analytics**, **Google Ads**, and any consent-required marketing tools. Each must be assigned to a category (Essential, Functional, Marketing, Statistics).
+- GTM container installed on the site.
+
+## Step 1 — Set default consent state
+
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+
+  gtag('consent', 'default', {
+    ad_storage: 'denied',
+    analytics_storage: 'denied',
+    ad_user_data: 'denied',
+    ad_personalization: 'denied',
+    functionality_storage: 'denied',
+    personalization_storage: 'denied',
+    security_storage: 'granted',
+    wait_for_update: 500
+  });
+</script>
+```
+
+<Aside type="note">
+The native Consent Mode connector can emit its own `gtag('consent','default', …)` call. If you enable the connector, either remove the inline defaults or make sure the connector is loaded before GTM. Do not have both sources of truth active at once.
+</Aside>
+
+## Step 2 — Install the Usercentrics loader
+
+Paste in `<head>` **after** the consent defaults, before GTM. Replace `YOUR_SETTINGS_ID`:
+
+```html
+<script
+  id="usercentrics-cmp"
+  src="https://app.usercentrics.eu/browser-ui/latest/loader.js"
+  data-settings-id="YOUR_SETTINGS_ID"
+  async
+></script>
+```
+
+## Step 3 — Usercentrics category mapping
+
+Usercentrics ships with four default categories, but each service can be moved between them:
+
+| Usercentrics category | Google Consent Signal |
+|---|---|
+| Essential | Always granted |
+| Functional | `functionality_storage`, `personalization_storage` |
+| Statistics | `analytics_storage` |
+| Marketing | `ad_storage`, `ad_user_data`, `ad_personalization` |
+
+<Aside type="note">
+Usercentrics exposes consent **per service**, not just per category. When you use the custom integration below, you can look up the consent status of a specific Google service rather than assuming every Statistics-category service behaves identically.
+</Aside>
+
+## Step 4 — Integration path A: native Consent Mode connector
+
+<Steps>
+1. In the Usercentrics Admin Interface, open your setting → **Implementation → Consent Mode**.
+2. Enable **Google Consent Mode v2**.
+3. Map each Usercentrics category (Essential, Functional, Statistics, Marketing) to the relevant Consent Mode signals.
+4. Enable **Advanced** mode so tags fire cookieless before consent (recommended for EU traffic).
+5. Save and republish the setting. Clear browser cache and reload your site.
+6. The connector now emits both `gtag('consent', 'default', …)` and `gtag('consent', 'update', …)` automatically.
+</Steps>
+
+## Step 5 — Integration path B: custom UC_UI callback
+
+Use this path if you need non-default mapping, additional dataLayer events for other tools, or service-level granularity that the connector doesn't expose. Add a Custom HTML tag in GTM on **Consent Initialization — All Pages** with priority 10:
+
+```html
+<script>
+  // Fires on every Usercentrics CMP lifecycle event
+  window.addEventListener('UC_UI_CMP_EVENT', function(event) {
+    var type = event.detail && event.detail.type;
+
+    // Only act on the events that represent a resolved consent state
+    var consentEvents = ['CMP_SHOWN', 'SAVE_CC', 'ACCEPT_ALL', 'DENY_ALL'];
+    if (consentEvents.indexOf(type) === -1) return;
+
+    if (!window.UC_UI) return;
+
+    pushConsentToGtag();
+  });
+
+  // Also handle the initial resolve for returning visitors
+  window.addEventListener('UC_UI_INITIALIZED', function() {
+    pushConsentToGtag();
+  });
+
+  function pushConsentToGtag() {
+    var services = window.UC_UI.getServicesBaseInfo();
+
+    var categoryHasConsent = function(slug) {
+      return services
+        .filter(function(s) { return s.categorySlug === slug; })
+        .some(function(s) { return s.consent && s.consent.status === true; });
+    };
+
+    var analytics = categoryHasConsent('analytics') || categoryHasConsent('statistics');
+    var marketing = categoryHasConsent('marketing');
+    var functional = categoryHasConsent('functional');
+
+    gtag('consent', 'update', {
+      analytics_storage: analytics ? 'granted' : 'denied',
+      ad_storage: marketing ? 'granted' : 'denied',
+      ad_user_data: marketing ? 'granted' : 'denied',
+      ad_personalization: marketing ? 'granted' : 'denied',
+      functionality_storage: functional ? 'granted' : 'denied',
+      personalization_storage: functional ? 'granted' : 'denied'
+    });
+
+    window.dataLayer.push({
+      event: 'usercentrics_consent_ready',
+      uc_services: services.map(function(s) {
+        return { name: s.name, category: s.categorySlug, granted: !!(s.consent && s.consent.status) };
+      })
+    });
+  }
+</script>
+```
+
+## Step 6 — Service-level consent for non-Google tags
+
+For non-Google marketing tools, gate firing on the specific service, not the category. Example trigger for a Hotjar tag:
+
+```javascript
+// Custom JavaScript variable — returns true if Hotjar consent is granted
+function() {
+  if (!window.UC_UI) return false;
+  var services = UC_UI.getServicesBaseInfo();
+  var hotjar = services.filter(function(s) { return s.name === 'Hotjar'; })[0];
+  return !!(hotjar && hotjar.consent && hotjar.consent.status);
+}
+```
+
+Use this variable in a trigger condition so the tag fires only when the user has granted consent to Hotjar specifically, even if the Statistics category as a whole is granted for other services.
+
+## Step 7 — GTM configuration
+
+<Steps>
+1. Name the Custom HTML tag `CMP - Usercentrics - Consent Update`. Trigger: **Consent Initialization — All Pages**, priority **10**.
+2. Open the **Google Tag** → Advanced Settings → Consent Settings. Require `analytics_storage`.
+3. For **Google Ads** conversion tags, require `ad_storage` and `ad_user_data`.
+4. For non-Google tags, use the service-level variables above as trigger conditions.
+5. Publish the container.
+</Steps>
+
+## Testing
+
+### GTM Preview Mode
+
+<Steps>
+1. Clear cookies, open GTM Preview, visit the site.
+2. The Usercentrics banner appears. Consent tab: all denied.
+3. Click **Accept All**. `CMP - Usercentrics - Consent Update` fires, Consent tab flips to granted.
+4. Reload. `UC_UI_INITIALIZED` fires within 100–300ms with the stored state.
+</Steps>
+
+### Console check
+
+```javascript
+// After Usercentrics has loaded
+UC_UI.getServicesBaseInfo();
+// Returns an array of { id, name, categorySlug, consent: { status, type } }
+
+UC_UI.getSettings();
+// Returns the full settings configuration for the active rule set
+```
+
+### GA4 DebugView
+
+Before consent: cookieless pings with `gcs=G100`. After granting Statistics: full events with `gcs=G111`.
+
+## Common gotchas
+
+**Multi-setting deployments.** International sites often use a different Usercentrics Settings ID per region (e.g. one for the EU under GDPR, one for the US under CCPA). Service names and category slugs can differ between settings. Test each region end-to-end rather than assuming the EU configuration applies globally.
+
+**Connector version drift.** Usercentrics rolls out connector updates periodically. After a platform update, verify the emitted `gtag('consent', …)` calls still match your expectations — newer connector versions occasionally adjust the default mapping. Pin your expected behaviour with a GTM Preview smoke test after every Usercentrics release.
+
+**`ucEvent` race with initial pageview.** The `ucEvent` dataLayer events can arrive either before or after `gtm.js` depending on SDK load speed. Do not build triggers that require `ucEvent` to arrive first — use `UC_UI_INITIALIZED` or the `UC_UI_CMP_EVENT` listeners, both of which replay the current state regardless of timing.
+
+**Service vs. category mismatch.** Because consent is tracked per service, a category-level grant does not guarantee every service in that category is granted — the user may have toggled individual services off in the preference centre. If you rely on `categoryHasConsent(...)` returning true, check whether you actually need service-level granularity instead.
+
+**Non-EU traffic.** Usercentrics can be configured to show no banner outside the EU. In that case consent events never fire, and your `denied` defaults persist. Either set a region-specific `gtag('consent', 'default', …)` block at the edge or configure Usercentrics to implicit-grant non-EU visitors (subject to your legal review).
+
+<CardGrid>
+  <LinkCard title="Consent Mode v2 Explained" href="/consent/consent-mode/consent-mode-v2/" description="The seven consent types and why defaults must come before GTM." />
+  <LinkCard title="CMP Integration Overview" href="/consent/cmp-integration/cmp-integration/" description="Integration patterns across all major CMPs." />
+  <LinkCard title="Server-Side Consent" href="/consent/advanced/server-side-consent/" description="Forwarding consent to server-side GTM and downstream tools." />
+  <LinkCard title="Consent Mode v2 with Didomi" href="/consent/cmp-integration/didomi/" description="The same process for Didomi users." />
+</CardGrid>

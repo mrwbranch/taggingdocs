@@ -1,0 +1,165 @@
+---
+title: "MCP use cases for GTM and GA4"
+description: "Concrete tasks the TaggingDocs MCP server unlocks — debugging misfiring tags, generating event schemas, auditing containers, translating requirements to tag config, and drafting BigQuery queries."
+sidebar:
+  order: 4
+lastUpdated: 2026-04-20
+---
+
+import { Aside, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Once the connector is installed, you have a GTM engineer with perfect documentation recall sitting in your chat window. That is the abstract pitch. This page is the concrete version — five specific tasks teams use the MCP server for every week, with real prompts and what to expect back.
+
+*Valid as of April 2026, MCP spec version 2025-06-18, for the TaggingDocs MCP server v1.x.*
+
+None of these replace human review. The point is that the grunt work — finding the broken tag, transcribing a dataLayer example into a JSON schema, writing the first draft of a SQL query — compresses from an hour to a minute. You then review, correct, and ship.
+
+## 1. Debug a misfiring tag
+
+The highest-leverage use case. Instead of clicking through Preview mode and staring at the Network tab, describe the symptom and let the model pull the container, read the relevant tag, and form a hypothesis.
+
+**Example prompt:**
+
+> *"In account 123456, container GTM-ABC123, workspace 14, the `GA4 - purchase` tag is firing in Preview but I'm seeing no purchase events in the GA4 DebugView. Pull the tag config, its trigger, and every variable it references. Tell me what's likely wrong."*
+
+**What the model does:**
+
+1. Calls `get_tag` on the purchase tag.
+2. Notes which variables it references (Measurement ID, ecommerce items, transaction_id).
+3. Calls `get_variable` on each and `get_trigger` on the firing trigger.
+4. Reads the tag's event parameters and compares them against the TaggingDocs `purchase` event spec.
+
+**Expected output shape:** a prioritised list of likely root causes — e.g. "The `Transaction ID` variable reads `{{DLV - ecommerce.transaction_id}}`, but your dataLayer push nests it one level deeper at `ecommerce.purchase.transaction_id`. That field is resolving to `undefined`, which GA4 silently drops." Plus the dataLayer shape the tag actually expects.
+
+<Aside type="tip">
+Pair this with a live dataLayer snapshot from the browser console. Paste the snapshot into the chat so the model can compare what the tag expects to what the page sends. A 30-second task.
+</Aside>
+
+## 2. Generate a GA4 event schema from a dataLayer example
+
+You have a dataLayer push from the developers. You need a GA4 event tag, plus every custom dimension and parameter mapped correctly. Normally a 20-minute job of clicking through the GTM UI.
+
+**Example prompt:**
+
+> *"Here's a dataLayer push our devs just added:*
+>
+> ```js
+> dataLayer.push({
+>   event: 'lead_submitted',
+>   lead: {
+>     source: 'pricing_page',
+>     form_variant: 'enterprise',
+>     qualified: true,
+>     estimated_arr: 45000
+>   },
+>   user_tier: 'anonymous'
+> });
+> ```
+>
+> *Generate the GA4 event tag, trigger, and all required dataLayer variables for my container. Match TaggingDocs naming conventions."*
+
+**Expected output shape:**
+
+- One GA4 event tag with `event_name: lead_submitted` and parameters mapped to the four lead fields plus `user_tier`.
+- One Custom Event trigger listening for `lead_submitted`.
+- Five dataLayer variables (`dlv.lead.source`, `dlv.lead.form_variant`, `dlv.lead.qualified`, `dlv.lead.estimated_arr`, `dlv.user_tier`), each named per the convention in the audit checklist.
+- A note about which parameters should be registered as custom dimensions in GA4 itself, and which fit better as user properties.
+
+The model returns the full JSON resources. Review them, then say *"create those in workspace 14"* and it calls the appropriate `create_*` tools. Human-in-the-loop stays intact because you see every resource before it writes.
+
+## 3. Audit a container for deprecated APIs
+
+Containers accumulate cruft. Universal Analytics tags that nobody removed. Custom HTML using old sandboxed-JS APIs. Triggers that reference elements that no longer exist on the site. An LLM with container-read access catches most of this in one pass.
+
+**Example prompt:**
+
+> *"Run the `audit_container` prompt on account 123456, container GTM-ABC123, workspace 1. Specifically flag: UA tags still present, deprecated `gtag.js` legacy event syntax, custom HTML tags that don't have try/catch, and any trigger referencing a click class that doesn't appear anywhere else in the container."*
+
+**Expected output shape:** a structured report grouped by severity. Something like:
+
+| Severity | Finding | Count | Example |
+|----------|---------|-------|---------|
+| High | Universal Analytics tags still firing | 4 | `UA - Pageview (All Pages)` |
+| High | Custom HTML without try/catch | 7 | `HTML - Hotjar bootstrap` |
+| Medium | Orphaned triggers (no tag uses them) | 11 | `Click - old checkout button` |
+| Medium | Duplicate GA4 config tags | 2 | `GA4 Config - legacy`, `GA4 Config - v2` |
+| Low | Tags missing folders | 19 | various |
+
+Each line includes the tag/trigger ID so you can jump to it in the UI. The audit prompt is tuned to follow the patterns in the [Audit Checklist](/resources/audit-checklist/).
+
+## 4. Translate a plain-English requirement into tag, trigger, and variable config
+
+A stakeholder asks for something in a Slack message. You want to turn that into deployable config without transcribing it into the GTM UI by hand.
+
+**Example prompt:**
+
+> *"Marketing wants to fire a Meta CAPI conversion whenever a user scrolls past 75% of a blog post AND they came from a paid campaign (utm_medium = cpc). Set this up in container GTM-ABC123, workspace 14. Create everything in a folder called `Blog engagement - Q2 2026`."*
+
+**What the model does:**
+
+1. Creates (or reuses) a Scroll Depth trigger firing at 75%.
+2. Creates a URL query-parameter variable for `utm_medium`.
+3. Adds the medium-equals-cpc condition to the trigger.
+4. Creates the Meta CAPI tag using the existing Meta pixel ID variable.
+5. Places all new resources in the named folder.
+6. Returns a summary showing which tools it called and what it created.
+
+<Aside type="caution">
+Stop the model before it calls `publish_version`. The pattern we recommend: the model creates everything in a workspace, you review in the GTM UI's Preview mode, a human hits publish. The MCP server exposes the publish tool but human-in-the-loop on production publishes is non-negotiable. See [MCP security considerations](/mcp/mcp-security-considerations/).
+</Aside>
+
+## 5. Draft a BigQuery SQL query against the GA4 export
+
+GA4 → BigQuery export tables have a nested schema that is genuinely hard to write queries against from memory. LLMs write the first draft well; you correct the field paths and run it.
+
+**Example prompt:**
+
+> *"Using TaggingDocs' patterns for the GA4 BigQuery export, write me a query that returns daily unique users, sessions, and total purchase revenue for the last 30 days, split by `traffic_source.medium`. My dataset is `acme-analytics.analytics_298374562`."*
+
+**Expected output shape:** a single runnable query that:
+
+- Uses `_TABLE_SUFFIX BETWEEN` to scan only 30 days of daily tables (not `*` — that would scan everything).
+- Unnests `event_params` correctly to pull `ga_session_id` for session counts.
+- Unnests `items` from the `purchase` event for revenue.
+- Aggregates by `traffic_source.medium` and event date.
+- Casts `event_date` from `YYYYMMDD` string to `DATE`.
+
+The model should also include one line flagging that `user_pseudo_id` is what it's counting for "unique users" — not a signed-in user ID — and suggest using the `user_id` field instead if the client sends one.
+
+<Aside type="tip">
+For any query the model writes, run `EXPLAIN` or use BigQuery's dry-run mode before executing. LLMs sometimes generate queries that scan the entire dataset because they forget `_TABLE_SUFFIX`. The [No-code BigQuery tools](/resources/no-code-bigquery-tools/) page covers alternatives for non-SQL users.
+</Aside>
+
+## When not to use MCP
+
+The MCP server gives the model hands. That is usually good, but four situations where you should not reach for it:
+
+- **You do not have staging.** Every non-trivial change should flow through a workspace, a version, Preview, and then a human publish. If your team publishes straight from one workspace with no review, an LLM making changes magnifies the blast radius.
+- **You are asking about consent or legal requirements.** LLMs generate plausible-sounding but wrong answers about jurisdiction-specific consent rules. Use the docs tools to retrieve the relevant article, read it yourself, and apply it.
+- **The question is a data-contract design question.** LLMs match patterns. If your event taxonomy doesn't exist yet, designing it is a human job — the model doesn't know what your business cares about measuring.
+- **You need to know what actually happened in production.** The MCP server reads container configuration, not runtime data. For "did this tag fire when customer X converted," you need GA4 / BigQuery / server logs, not the container definition.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Connect your AI client"
+    description="Set up the MCP connector in Claude, ChatGPT, or Cursor in 30 seconds."
+    href="/mcp/connect/"
+  />
+  <LinkCard
+    title="Tools & prompts reference"
+    description="The 35 tools and 6 guided prompt workflows the server exposes."
+    href="/mcp/tools-and-prompts/"
+  />
+  <LinkCard
+    title="Writing prompts for GTM"
+    description="Prompt patterns that stop the model from hallucinating tag APIs."
+    href="/mcp/writing-prompts-for-gtm/"
+  />
+  <LinkCard
+    title="Glossary"
+    description="MCP, LLM, RAG, Hallucination, Token — the terminology used in this section."
+    href="/foundations/glossary/"
+  />
+</CardGrid>

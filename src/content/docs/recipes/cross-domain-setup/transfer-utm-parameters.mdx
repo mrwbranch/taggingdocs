@@ -1,0 +1,163 @@
+---
+title: "Transfer UTM Parameters Across Pages"
+description: "Preserve utm_source, utm_medium, utm_campaign, utm_term, and utm_content from entry page through internal navigation, payment redirects, and sGTM enrichment."
+sidebar:
+  order: 7
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+UTM parameters live on the first URL the visitor lands on. The moment they click an internal link, those parameters disappear. For single-page conversions this never matters — GA4 already parsed the campaign data on page view. For anything longer (multi-step forms, payment redirects, multi-domain funnels) you often need the UTM values available on later pages too, either for the GA4 conversion event, for CRM handoff, or for enriching a server-side event.
+
+This recipe captures UTMs on first landing, persists them for the session (and optionally longer), and re-attaches them to events that fire later.
+
+## The problem
+
+A visitor arrives via `?utm_source=newsletter-apr&utm_medium=email&utm_campaign=spring-sale`. They read a case study, request a demo on the pricing page, and submit the form. Your GA4 `generate_lead` event fires on `/demo-requested` — a URL with no query string.
+
+GA4 itself attributes the session correctly from the initial page view, but the `generate_lead` event does not carry the UTM values as event parameters. Your sGTM container cannot forward them to HubSpot or Salesforce. Your Data Studio report that joins events to campaign cannot do a simple parameter lookup.
+
+The same pattern breaks when a payment processor strips UTMs during redirect, or when your internal router rewrites URLs to clean paths.
+
+## The canonical pattern
+
+<Steps>
+1. On first page load with UTM parameters present, write each value into a first-party cookie (session lifetime by default, 30–90 days if attribution windows demand it).
+2. On subsequent page loads, if no UTM parameter is in the URL, fall back to the stored cookie values.
+3. Expose the cookie values to GTM as variables.
+4. Attach them to conversion events, CRM pushes, and server-side enrichment.
+</Steps>
+
+<Aside type="note">
+Body-line: GA4's own session attribution still runs off the initial page view — this pattern is strictly about making UTM values reachable as event parameters on later events, not about replacing GA4's built-in attribution.
+</Aside>
+
+## Step 1 — Capture on first landing
+
+Create a **Custom HTML** tag that fires on **All Pages** at priority `200` (runs before conversion tags at the default priority of 0).
+
+```html
+<script>
+(function () {
+  var KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id'];
+  var params = new URLSearchParams(window.location.search);
+  var hasAny = KEYS.some(function (k) { return params.has(k); });
+  if (!hasAny) return;
+
+  // First-touch: only write if cookies not already set for the session.
+  // Last-touch: always overwrite. Pick ONE model below.
+  var MODEL = 'last-touch'; // or 'first-touch'
+
+  KEYS.forEach(function (key) {
+    var value = params.get(key);
+    if (!value) return;
+
+    var existing = document.cookie.split('; ').find(function (c) {
+      return c.indexOf('_utm_' + key + '=') === 0;
+    });
+
+    if (MODEL === 'first-touch' && existing) return;
+
+    document.cookie =
+      '_utm_' + key + '=' + encodeURIComponent(value) +
+      '; Max-Age=' + (60 * 60 * 24 * 30) + // 30 days
+      '; Path=/; SameSite=Lax; Secure';
+  });
+})();
+</script>
+```
+
+Pick **first-touch** for brand-awareness campaigns where the original source is what matters. Pick **last-touch** for bottom-of-funnel attribution. Running both in parallel is legitimate — use different cookie prefixes (`_utmf_*` and `_utml_*`).
+
+## Step 2 — Expose cookies as GTM variables
+
+Create a **First-Party Cookie** variable for each captured UTM. Optionally, consolidate into one Custom JavaScript variable that returns an object:
+
+```javascript
+function () {
+  var out = {};
+  ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id']
+    .forEach(function (k) {
+      var match = document.cookie.match(new RegExp('(?:^|; )_utm_' + k + '=([^;]*)'));
+      if (match) out[k] = decodeURIComponent(match[1]);
+    });
+  return out;
+}
+```
+
+Name it `UTM - Stored (object)`.
+
+## Step 3 — Enrich later events
+
+On events that fire after navigation away from the landing URL (for example `generate_lead`, `purchase`, `begin_checkout`), read the stored values. GA4 accepts campaign-specific parameters directly:
+
+- `campaign_source` → `{{Cookie - utm_source}}`
+- `campaign_medium` → `{{Cookie - utm_medium}}`
+- `campaign_name` → `{{Cookie - utm_campaign}}`
+- `campaign_term` → `{{Cookie - utm_term}}`
+- `campaign_content` → `{{Cookie - utm_content}}`
+
+<Aside type="tip">
+Using the reserved `campaign_*` parameter names means GA4 treats them as part of its campaign schema rather than as custom dimensions — no extra setup in GA4 Admin needed.
+</Aside>
+
+## Step 4 — Re-append UTMs to outbound internal links (optional)
+
+If your internal redirects strip query strings (some CMSes rewrite `/?utm_source=...` to `/`), re-append the UTMs on outbound links during the same session:
+
+```javascript
+document.querySelectorAll('a[href^="https://checkout.example.com"]').forEach(function (a) {
+  try {
+    var u = new URL(a.href);
+    ['utm_source', 'utm_medium', 'utm_campaign'].forEach(function (k) {
+      var m = document.cookie.match(new RegExp('(?:^|; )_utm_' + k + '=([^;]*)'));
+      if (m && !u.searchParams.has(k)) {
+        u.searchParams.set(k, decodeURIComponent(m[1]));
+      }
+    });
+    a.href = u.toString();
+  } catch (e) { /* ignore malformed */ }
+});
+```
+
+Combine this with the cross-domain `_gl` linker — they are complementary, not alternatives.
+
+## Step 5 — Server-side enrichment
+
+In sGTM, read the cookies from the incoming request and add them to the outbound event data. Create a **Cookie Value** variable for each UTM key, then set the event parameters on the GA4 / Google Ads / Meta tag.
+
+This is especially important for:
+
+- **Offline conversion imports**: the campaign values that travelled with the click ID are what close the loop. See [Offline Conversion Import](/recipes/ecommerce-conversions/offline-conversion-import/).
+- **Geo-preserving IP anonymization** flows where the event is rebuilt from scratch on the server.
+
+## Testing
+
+<Steps>
+1. Open incognito and visit `https://example.com/?utm_source=test&utm_medium=email&utm_campaign=spring`.
+2. In DevTools → Application → Cookies, confirm `_utm_utm_source`, `_utm_utm_medium`, `_utm_utm_campaign` are set.
+3. Navigate to `/pricing`. Confirm the cookies still exist.
+4. Submit a lead form. In GA4 DebugView, verify the event carries `campaign_source`, `campaign_medium`, `campaign_name`.
+5. Arrive again with different UTMs. Confirm last-touch overwrites (or first-touch preserves) as intended.
+</Steps>
+
+## Common gotchas
+
+**Internal links carrying UTMs.** If your team hard-codes UTM parameters on internal links (for example, a sidebar promo), you will overwrite the real campaign with "internal-promo". Strip UTMs from internal links, or use a different parameter prefix for internal attribution (`int_source`, not `utm_source`).
+
+**`utm_id` and GA4 attribution.** GA4 prioritises `utm_id` over the other UTMs when matching to a Google Ads or manual campaign. Capture it the same way — the cookie pattern above already includes it.
+
+**Payment processors scrub query strings.** Many processors (Stripe Checkout, Adyen HPP) redirect back to a clean return URL. The cookie-based fallback is the recovery path.
+
+**Cookie size creep.** Six UTM cookies plus other trackers can push you past the 4 KB per-domain ceiling. Consolidate into one JSON cookie if you have more than a dozen first-party cookies already.
+
+**Consent.** UTM cookies should sit under `analytics_storage` or a dedicated `marketing` purpose in your CMP, not as strictly necessary. They are clearly for attribution.
+
+<CardGrid>
+  <LinkCard title="Click ID Preservation" href="/recipes/cross-domain-setup/click-id-preservation/" description="Same pattern for gclid / fbclid / msclkid / ttclid." />
+  <LinkCard title="Cross-Domain Tracking Setup" href="/recipes/cross-domain-setup/cross-domain-setup/" description="The `_gl` linker that passes GA4 session info across domains." />
+  <LinkCard title="Cross-Domain Tracking" href="/client-side/tracking/cross-domain-tracking/" description="How GA4 handles cross-domain sessions end-to-end." />
+  <LinkCard title="Offline Conversion Import" href="/recipes/ecommerce-conversions/offline-conversion-import/" description="Upload the stored UTM+click-ID combo back into Google Ads." />
+  <LinkCard title="IP Anonymization Preserving Geo" href="/server-side/operations/ip-anonymization-preserving-geo/" description="Server-side rebuild flows where UTM enrichment matters most." />
+</CardGrid>

@@ -1,0 +1,315 @@
+---
+title: "JavaScript for Tag Managers"
+description: "The JavaScript language fundamentals you need to read and write Custom HTML tags, Custom JavaScript Variables, and sandboxed templates — closures, array methods, promises, destructuring, postMessage — all illustrated with tagging examples."
+sidebar:
+  order: 12
+---
+
+import { Aside, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Most tagging work doesn't require JavaScript. GTM's UI handles tags, triggers, and variables declaratively; GA4 configuration is point-and-click. But the moment you need a Custom HTML tag, a Custom JavaScript Variable, or a custom template, you're writing code — and the pages in this documentation that cover those features ([Custom HTML Tags](/client-side/tags/custom-html-tags/), [JavaScript Variables](/client-side/variables/javascript-variables/), [Sandboxed JavaScript](/templates/sandboxed-javascript/)) assume you already know JavaScript.
+
+This page is the shortest JavaScript primer that's actually useful for tagging work. It skips the language features you don't need (classes, iterators, generators) and goes deep on the ones you will hit repeatedly. Every example comes from real tagging work — no `foo`/`bar`/`baz`.
+
+<Aside type="tip">
+This page teaches the JavaScript language. For the GTM-specific patterns (IIFE wrappers, try/catch for safety, the Debug Mode check), read [Custom HTML Tags](/client-side/tags/custom-html-tags/) after this. For the permission-and-sandbox version, read [Sandboxed JavaScript](/templates/sandboxed-javascript/).
+</Aside>
+
+## Scope and closures
+
+JavaScript has function-level scope (for `var`) and block-level scope (for `let` and `const`). The practical implication for tagging: variables declared inside a function don't leak out, but variables declared at the top of a Custom HTML tag *do* leak to the global `window` unless you wrap them.
+
+```javascript
+// DON'T — pollutes window
+var productData = { id: 'SKU-123', price: 29.99 };
+window.dataLayer.push({ event: 'add_to_cart', product: productData });
+
+// DO — IIFE scopes everything locally
+(function() {
+  var productData = { id: 'SKU-123', price: 29.99 };
+  window.dataLayer.push({ event: 'add_to_cart', product: productData });
+})();
+```
+
+A **closure** is a function that remembers variables from the scope where it was defined, even after that scope has exited. This is useful for tagging patterns like "fire this tag once, and remember what was already fired":
+
+```javascript
+(function() {
+  var firedEvents = {}; // Closed over by the function below
+
+  window.safeFireOnce = function(eventName, data) {
+    if (firedEvents[eventName]) return; // Already fired, skip
+    firedEvents[eventName] = true;
+    window.dataLayer.push(Object.assign({ event: eventName }, data));
+  };
+})();
+
+// Later, from anywhere on the page:
+window.safeFireOnce('experiment_impression', { variant_id: 'A' });
+window.safeFireOnce('experiment_impression', { variant_id: 'A' }); // No-op — already fired
+```
+
+`firedEvents` lives inside the closure. It's not visible on `window`, can't be tampered with by other code, and persists across calls to `safeFireOnce`.
+
+## Truthy, falsy, and optional chaining
+
+JavaScript's type coercion is famously loose. Any value that isn't `false`, `0`, `""`, `null`, `undefined`, or `NaN` is "truthy" in a boolean context. This makes defensive checks compact but occasionally surprising:
+
+```javascript
+// Works — empty string is falsy, skips the push
+var productId = someVariableThatMightBeEmpty();
+if (productId) {
+  window.dataLayer.push({ event: 'view_item', id: productId });
+}
+
+// Gotcha — the product_id "0" is a valid ID but evaluates as falsy
+if (productId !== undefined && productId !== null) {
+  window.dataLayer.push({ event: 'view_item', id: productId });
+}
+```
+
+**Optional chaining** (`?.`) is the modern replacement for the old `obj && obj.property && obj.property.method()` pattern. It short-circuits to `undefined` if any link in the chain is nullish:
+
+```javascript
+// Old
+var price = product && product.pricing && product.pricing.sale && product.pricing.sale.amount;
+
+// New
+var price = product?.pricing?.sale?.amount;
+```
+
+Useful for reading nested dataLayer values without hitting `Cannot read property 'X' of undefined` errors.
+
+## Array methods: `.map()`, `.filter()`, `.reduce()`
+
+These three methods replace the three patterns of `for` loops almost completely. Learning them is the single biggest JavaScript-fluency upgrade for tagging work.
+
+**`.map()` — transform each element.**
+
+```javascript
+// Convert raw cart items to the GA4 ecommerce shape
+var rawItems = cart.items; // [{sku, name, price, qty}, ...]
+
+var ga4Items = rawItems.map(function(item) {
+  return {
+    item_id: item.sku,
+    item_name: item.name,
+    price: item.price,
+    quantity: item.qty
+  };
+});
+
+window.dataLayer.push({
+  event: 'add_to_cart',
+  ecommerce: { items: ga4Items }
+});
+```
+
+**`.filter()` — keep only elements matching a condition.**
+
+```javascript
+// Only track paid items, exclude free samples
+var paidItems = rawItems.filter(function(item) {
+  return item.price > 0;
+});
+```
+
+**`.reduce()` — collapse an array to a single value.** This is the one most people struggle with and the one most worth learning. It's a generalised loop that builds up a result.
+
+```javascript
+// Sum cart value
+var cartTotal = rawItems.reduce(function(sum, item) {
+  return sum + (item.price * item.qty);
+}, 0);
+
+// Group items by category
+var byCategory = rawItems.reduce(function(groups, item) {
+  groups[item.category] = groups[item.category] || [];
+  groups[item.category].push(item);
+  return groups;
+}, {});
+
+// Build a query string from a params object (classic one-liner)
+var queryString = Object.keys(params).reduce(function(acc, key) {
+  return acc + (acc ? '&' : '?') + key + '=' + encodeURIComponent(params[key]);
+}, '');
+```
+
+The second argument to `.reduce()` is the initial value of the accumulator. Forgetting it causes bugs (the first array element gets used as initial value, which is rarely what you want for sum/grouping patterns).
+
+## Promises and async/await
+
+Older Custom HTML tags used callbacks or `XMLHttpRequest` for async work. Modern tagging work uses `fetch()` and promises. Understanding the two forms — `.then()` chaining and `async/await` — is essential for anything that talks to an external API.
+
+```javascript
+// .then() form — traditional, still common
+fetch('https://api.example.com/enrich?id=' + userId)
+  .then(function(response) {
+    return response.json();
+  })
+  .then(function(data) {
+    window.dataLayer.push({
+      event: 'user_enriched',
+      user_tier: data.tier,
+      ltv_bucket: data.ltv_bucket
+    });
+  })
+  .catch(function(error) {
+    // Network or parsing error — log but don't break the tag
+    if (window.dataLayer.hide) window.dataLayer.hide.end();
+  });
+
+// async/await form — modern, cleaner when you have multiple awaits
+(async function() {
+  try {
+    var response = await fetch('https://api.example.com/enrich?id=' + userId);
+    var data = await response.json();
+
+    window.dataLayer.push({
+      event: 'user_enriched',
+      user_tier: data.tier,
+      ltv_bucket: data.ltv_bucket
+    });
+  } catch (error) {
+    // Same error handling — fall through
+  }
+})();
+```
+
+Key facts about promises:
+
+- `fetch()` returns a promise. Calling `.then()` on it registers a callback for when the request completes.
+- A promise that's rejected (network error, thrown exception) must be caught with `.catch()` or the error propagates silently.
+- `async`/`await` is syntactic sugar over promises — the function is declared `async` and `await` pauses execution until the promise resolves. It doesn't change what's happening; it changes how the code reads.
+
+<Aside type="caution">
+Custom HTML tags that fetch data *block nothing* — they fire, make the request, and move on. The user's page continues rendering. Any dataLayer push that depends on the fetch result happens *later*, possibly after the user has navigated away. Plan accordingly, or use a [Tag Sequencing setup tag](/client-side/tags/tag-sequencing/) if the dependent tag must wait.
+</Aside>
+
+## postMessage for iframes
+
+Cross-origin iframes can't read each other's DOM or cookies. `postMessage` is the browser-native way to send structured data between an iframe and its parent.
+
+```javascript
+// Parent page — listen for messages from an iframe
+window.addEventListener('message', function(event) {
+  // Always verify origin — anyone can postMessage to anyone
+  if (event.origin !== 'https://widget.example.com') return;
+
+  // Process the message
+  if (event.data.type === 'form_submit') {
+    window.dataLayer.push({
+      event: 'iframe_form_submit',
+      form_id: event.data.form_id
+    });
+  }
+});
+
+// Inside the iframe — send a message to the parent
+window.parent.postMessage({
+  type: 'form_submit',
+  form_id: 'contact-us'
+}, 'https://example.com');
+```
+
+The origin check is load-bearing for security. Without it, any site that embeds your iframe can send fake events. Always verify `event.origin` against an allow-list.
+
+## Destructuring and template literals
+
+Modern JavaScript has two small syntactic features that make dataLayer code dramatically more readable.
+
+**Destructuring** extracts fields from objects in one expression:
+
+```javascript
+// Old
+var item = event.product;
+var id = item.id;
+var name = item.name;
+var price = item.price;
+
+// New
+var { id, name, price } = event.product;
+```
+
+Works for arrays too: `var [first, second] = someArray;`.
+
+**Template literals** are strings with embedded expressions:
+
+```javascript
+// Old
+var url = 'https://api.example.com/track?event=' + eventName + '&value=' + value;
+
+// New
+var url = `https://api.example.com/track?event=${eventName}&value=${value}`;
+```
+
+Backticks, not quotes. Multi-line strings are supported natively.
+
+## Safely overriding `dataLayer.push()`
+
+An advanced pattern: intercept every dataLayer push to add validation, logging, or transformation. This *must* be done without breaking GTM's own use of `dataLayer.push()`, which is tricky.
+
+```javascript
+(function() {
+  // Ensure dataLayer exists before we touch it
+  window.dataLayer = window.dataLayer || [];
+
+  // Preserve the original push method
+  var originalPush = window.dataLayer.push;
+
+  // Override with a wrapper
+  window.dataLayer.push = function() {
+    // `arguments` is array-like — convert to real array
+    var args = Array.prototype.slice.call(arguments);
+
+    // Inspect/modify args as needed
+    args.forEach(function(arg) {
+      if (arg && typeof arg === 'object' && arg.event) {
+        // Example: attach a timestamp
+        arg.ts = Date.now();
+      }
+    });
+
+    // Call the original push with the (possibly modified) args
+    return originalPush.apply(window.dataLayer, args);
+  };
+})();
+```
+
+Common mistakes with this pattern: forgetting to return the original's return value (GTM uses it), not handling multiple arguments (GTM can push multiple objects in one call), running the override before `dataLayer` exists (depends on tag order). Do this only when necessary and test thoroughly.
+
+## Where to apply all of this
+
+Every example above is shaped to be useful in one of these contexts:
+
+- **[Custom HTML Tags](/client-side/tags/custom-html-tags/)** — arbitrary browser JavaScript, the most common place to write code in GTM.
+- **[Custom JavaScript Variables](/client-side/variables/javascript-variables/)** — function-shaped variables that return a value to tags and triggers.
+- **[Sandboxed JavaScript](/templates/sandboxed-javascript/)** — template code that runs in GTM's restricted sandbox (different APIs, similar language).
+- **[Building Tag Templates](/templates/building-tag-templates/)** and [Building Variable Templates](/templates/building-variable-templates/) — authoring reusable templates for your organisation or the Community Gallery.
+
+Each of those pages has its own patterns on top of the language — IIFE wrapping, try/catch, Debug Mode gating, sandbox permission declarations. This page covers the language; those cover the patterns.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom HTML Tags"
+    description="Power-user patterns for Custom HTML — IIFE, error handling, performance."
+    href="/client-side/tags/custom-html-tags/"
+  />
+  <LinkCard
+    title="JavaScript Variables"
+    description="Custom JavaScript Variables — when and how to use them safely."
+    href="/client-side/variables/javascript-variables/"
+  />
+  <LinkCard
+    title="Sandboxed JavaScript"
+    description="The GTM template sandbox — what's available, what's not, and why."
+    href="/templates/sandboxed-javascript/"
+  />
+  <LinkCard
+    title="SQL for GA4 BigQuery"
+    description="The other language primer — minimum SQL needed to query the GA4 BigQuery export."
+    href="/ga4/bigquery/sql-primer/"
+  />
+</CardGrid>

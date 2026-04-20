@@ -1,0 +1,122 @@
+---
+title: "Sample Size and MDE"
+description: "Computing the sample size your A/B test actually needs — minimum detectable effect, statistical power, peeking bias, and when you can and cannot stop early."
+sidebar:
+  order: 2
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Every A/B test has a sample size it needs to reliably detect a given effect. Too few users and you will miss real improvements ("low power"). Too few and you will also be tempted to peek at the dashboard mid-test, notice random noise that looks like a trend, and stop early on a false positive. The fix is to compute the sample size before the test launches, commit to it, and let the test run.
+
+## The four inputs
+
+Every sample-size calculator asks for four numbers:
+
+| Input | What it means | Typical value |
+|---|---|---|
+| **Baseline conversion rate** | Current rate of the primary metric in the control | 2% for ecommerce purchase, 10% for email signup, etc. |
+| **Minimum detectable effect (MDE)** | Smallest lift worth detecting | +5% relative (i.e. 2% → 2.1%), or sometimes +1 percentage point absolute |
+| **Significance level (α)** | Acceptable false-positive rate | 0.05 (conventional) |
+| **Statistical power (1 − β)** | Acceptable false-negative rate | 0.80 (conventional) |
+
+These four together determine the sample size required per variant.
+
+**Significance (α)** is your tolerance for declaring a winner when there is no real effect. α = 0.05 means a 5% chance of a false positive.
+
+**Power (1 − β)** is your tolerance for missing a real effect. 80% power means that if the variant really does produce the MDE lift, you'll detect it 80% of the time.
+
+The two interact: tightening significance or power both require larger samples. The conventional 0.05/0.80 trade-off is not a law of nature — it's a compromise that has stuck. For high-stakes changes (pricing, checkout flow) consider 0.01/0.90; for low-stakes iteration, 0.10/0.70 is defensible.
+
+## Worked example
+
+You sell widgets. Your current purchase conversion rate (sessions → purchase) is 2.5%. You're testing a new checkout flow and hope to lift it by 10% relative (to 2.75%). You want 95% confidence (α = 0.05) and 80% power.
+
+- **Baseline**: 0.025
+- **MDE (relative)**: 0.10 (i.e. target is 0.025 × 1.10 = 0.0275)
+- **α**: 0.05
+- **Power**: 0.80
+
+Plugging these into a standard two-proportion sample-size calculator yields **approximately 30,000 sessions per variant** — 60,000 total. If your site gets 5,000 daily sessions, a 50/50 test needs 12 days to reach the required sample.
+
+Now try a smaller expected lift — 5% relative (2.5% → 2.625%). With the same α and power: **~120,000 sessions per variant**. Same site would need 48 days.
+
+The relationship is approximately **sample size scales as 1/MDE²**. Halving the MDE you want to detect quadruples the sample size. This is why "we just want to see if it moves the needle" tests usually need far more traffic than people estimate.
+
+## Free calculators
+
+- **Evan Miller's calculator** (evanmiller.org/ab-testing/sample-size.html) — the classic. Two-proportion, fixed-horizon. No frills, does the job.
+- **Optimizely's sample size calculator** (optimizely.com/sample-size-calculator) — same math, nicer UI.
+- **Statsig / GrowthBook / LaunchDarkly** all include calculators in their paid products if you're using those platforms for feature flagging.
+
+Use any of them. The math is identical. What matters is running the calculation *before* the test, not after.
+
+## The peeking problem
+
+The single most common way experimentation programmes corrupt themselves: checking the test dashboard mid-run, seeing a lift that looks significant, and stopping.
+
+Fixed-horizon significance tests (the kind every calculator above computes) assume you look at the result once — at the end of the declared duration. If you peek daily and stop as soon as the result crosses 0.05, you're running a different test with a much higher false-positive rate. In practice, **daily peeking with a 0.05 stopping rule produces a false-positive rate closer to 30% than 5%** over a month-long test.
+
+The industry-standard fixes are:
+
+1. **Don't peek.** Commit to the duration. Set up the dashboard, do not look at it before the end date.
+2. **Use a method designed for continuous monitoring.** Sequential probability ratio tests (mSPRT), always-valid p-values (from the work of Johari et al.), or Bayesian posteriors all let you check the dashboard as often as you want without inflating false positives. These are what Statsig, GrowthBook, and modern experimentation platforms implement under the hood.
+
+If you're running tests via simple GA4 impressions-and-conversions math in BigQuery or Sheets, you are running fixed-horizon tests and should not peek. If you're using a dedicated experimentation platform, check which method it uses — the platform is either always-valid (peek freely) or fixed-horizon (don't peek even though the UI lets you).
+
+## When you can actually stop early
+
+**You can stop if the duration is complete.** This is the only unambiguously safe early-stop condition, and "early" is a misnomer — you're stopping on time.
+
+**You can stop if a guardrail metric blows past its threshold.** If refund rate is up 2 percentage points, that's material regardless of whether the primary metric is significant. Roll back, investigate, decide whether to rerun.
+
+**You can stop early if you're using a method designed for it.** Always-valid p-values, Bayesian posteriors with pre-committed decision rules, sequential tests. If that's not the framework you're using, you can't.
+
+**You should not stop** because:
+
+- Results look "clearly" positive or negative at day 3 of a 14-day test. They don't — you're looking at noise.
+- You need the winning variant shipped for a campaign. Pick a test that can complete in time, or don't test it.
+- "It's taking too long." This is the cost of reliable testing. Reduce it by testing larger changes (higher expected MDE) or increasing traffic share, not by shortening the horizon.
+
+## The real cost of underpowered tests
+
+A test with 30% power has a 70% chance of missing a real effect of the target MDE. Run 10 underpowered tests, find 3 "winners", and most of those 3 are either false positives or are effects much larger than the true effect (because you only detected the lucky runs at the top of the distribution).
+
+The compounding effect is that an underpowered testing programme appears *more successful* than a well-powered one in the short run (shorter tests, more ships) while producing lower actual lift (because the ships don't replicate). Teams that shift from "fast, underpowered" to "slow, well-powered" testing almost always report a drop in the apparent win rate and an increase in cumulative lift from the wins that do ship.
+
+## Common mistakes
+
+**Computing sample size on total sessions, not the segment under test.** If only 40% of traffic qualifies for your experiment, your effective sample size is 40% of total traffic, not 100%.
+
+**Using absolute MDE when relative is more intuitive, or vice versa.** +1 percentage point on a 2% baseline is a 50% relative lift — enormous. +5% relative on a 2% baseline is a 0.1 percentage point lift — modest. Be explicit about which framing you're using; calculators accept either.
+
+**Assuming day-of-week and seasonality don't matter.** A 3-day test starting Thursday catches Friday + weekend, which don't look like Tuesday. Run for at least one full business cycle.
+
+**Ignoring the 1-sided vs. 2-sided distinction.** If your hypothesis is "variant B is better than A" (1-sided), the sample size is smaller than for "variant B is different from A" (2-sided). Most calculators default to 2-sided. Use 1-sided only if you genuinely would not ship a negative variant regardless of significance — which is almost always true for launch-style experiments.
+
+**Testing something with an expected effect smaller than your MDE.** If your MDE is +5% relative and the change you're testing realistically moves the metric by +1%, you will not detect it. You are literally running a test designed not to find the effect you're looking for. Either test a bigger change or wait until you have the traffic for a smaller MDE.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Experimentation Fundamentals"
+    description="The upstream question — what are you actually testing and why?"
+    href="/recipes/testing/experimentation-fundamentals/"
+  />
+  <LinkCard
+    title="A/B Test Tracking"
+    description="Getting the variant assignment into GA4 once you've committed to a design."
+    href="/recipes/testing/ab-test-tracking/"
+  />
+  <LinkCard
+    title="Forwarding Variant to Conversions"
+    description="Making sure the variant is on every downstream event so the primary metric is computable."
+    href="/recipes/testing/forwarding-variant-to-conversions/"
+  />
+  <LinkCard
+    title="Server-Side Experiments"
+    description="How to get more power at the same traffic by eliminating flicker-loss."
+    href="/recipes/testing/server-side-experiments/"
+  />
+</CardGrid>

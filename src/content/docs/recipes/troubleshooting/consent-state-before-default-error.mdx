@@ -1,0 +1,109 @@
+---
+title: "Fix: 'A Tag Read Consent State Before a Default Was Set'"
+description: "The Consent Mode v2 error about consent state ordering — five causes and the exact GTM configuration that fixes it."
+sidebar:
+  order: 8
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+If you're seeing the error "A tag read consent state before a default was set" in GTM Preview's Errors tab or in browser console warnings, here are the most common causes and how to fix them. This is a Consent Mode v2 guardrail: Google's telemetry noticed at least one tag tried to check consent before any `default` command had run, so every tag on the page is now in an undefined consent state for that session.
+
+<Aside type="caution">
+This is not cosmetic. Tags that check consent before a default exists may fall back to Google's implicit defaults (usually `granted` for legacy, `denied` for EEA regions under Consent Mode v2), which can mean you're tracking when you shouldn't — or not tracking when you should.
+</Aside>
+
+## The ordering rule
+
+Exactly one `gtag('consent', 'default', ...)` call must execute before any Google tag reads consent. The read happens automatically the moment the Google Tag / GA4 / Google Ads tag initialises. So the default must be set earlier in the page than any of those tags — not "in the same event loop tick," but strictly before.
+
+## 1. Default command missing entirely
+
+**Verify.** DevTools Console: `window.dataLayer.filter(d => Array.isArray(d) && d[0] === 'consent' && d[1] === 'default')`. If this returns `[]`, no default was ever set. Every tag that read consent got the implicit default, and the error fires.
+
+**Fix.** Add a Consent Initialization in GTM. Create a tag of type **Consent Mode (Google)** (or a Custom HTML with the `gtag('consent', 'default', {...})` snippet) and set its trigger to **Consent Initialization - All Pages**. This trigger runs before everything else, guaranteeing the default is set first.
+
+## 2. Default set after GTM loads
+
+**Verify.** Your CMP calls `gtag('consent', 'default', ...)` from a script tag further down the page, or from a `<script defer>` / `<script async>` that resolves after GTM. By then, GTM has already initialised the Google Tag, which already read consent, which produced the error.
+
+**Fix.** Move the default call into GTM as a Consent Initialization tag — not into the CMP's own script. The CMP handles `update` calls (on accept/reject), GTM handles the `default`. This removes the race.
+
+## 3. CMP initialisation timing — async CMP loads after first tag
+
+**Verify.** Your CMP is loaded `<script async src="...">`. Browser fetches it, parses, initialises. Meanwhile the GTM snippet (synchronous or at top of body) has already run and initialised the Google Tag. Everything after the CMP's initialisation sees consent correctly; everything before sees undefined.
+
+**Fix.** Either:
+- Load the CMP synchronously and before GTM (preferred — it's a tiny script).
+- Or move the `default` call into GTM (as in cause 2) so timing is controlled by the Consent Initialization trigger, not by the CMP script's async load.
+
+## 4. Multiple CMPs racing
+
+**Verify.** You have two consent scripts on the page — maybe a legacy cookie banner you forgot to remove plus the new CMP. Both try to call `gtag('consent', 'default', ...)` with different values. Whichever runs last wins, but whichever tag read first saw the loser's state or no state at all.
+
+**Fix.** Remove the legacy script entirely. Have exactly one source of truth for consent state. If you're mid-migration, make the new CMP's Consent Initialization tag in GTM the only writer, and strip the legacy script's default/update calls.
+
+## 5. Pre-GTM `gtag('consent', 'default', ...)` inline snippet
+
+**Verify.** You followed an older Google guide that recommended putting the default call inline in the `<head>`, before GTM. This still works — *if* the snippet runs before the GTM snippet. If the GTM snippet got moved up later, or the inline snippet is inside a deferred block, you have the error.
+
+**Fix.** Either ensure the inline snippet executes before the GTM snippet (same synchronous block, same script tag), or migrate to the GTM-based pattern (next section).
+
+## The GTM-based fix (recommended)
+
+<Steps>
+1. In GTM, go to **Tags** → **New** → **Consent Mode (Google)** template.
+
+2. Configure default states. For a conservative EEA-compliant default:
+   - `ad_storage`: **Denied**
+   - `ad_user_data`: **Denied**
+   - `ad_personalization`: **Denied**
+   - `analytics_storage`: **Denied**
+   - `functionality_storage`: **Granted**
+   - `personalization_storage`: **Denied**
+   - `security_storage`: **Granted**
+   - `wait_for_update`: 500 (milliseconds)
+
+3. Set Trigger: **Consent Initialization - All Pages**. Do not use All Pages or Page View.
+
+4. Region-scope if needed: use Regions field to apply these defaults only for EEA + UK. Other regions can have `granted` defaults.
+
+5. Save → Submit → Publish.
+
+6. In Preview, verify the error is gone: Preview → Errors tab should be empty of consent-ordering errors.
+</Steps>
+
+Once the default is handled by GTM's Consent Initialization trigger, the CMP only needs to call `gtag('consent', 'update', {...})` after user acceptance — which happens later and no longer has ordering constraints.
+
+## Verification checklist
+
+- Consent Initialization trigger fires before every other tag in Preview timeline.
+- Console shows the `default` command in `dataLayer` before any `page_view`.
+- Errors tab in Preview is clean.
+- DebugView in GA4 shows events arriving with expected `analytics_storage` state.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Consent Mode v2"
+    description="The complete Consent Mode v2 reference, including EEA requirements."
+    href="/consent/consent-mode/consent-mode-v2/"
+  />
+  <LinkCard
+    title="Consent Mode GTM Setup"
+    description="Step-by-step Consent Mode configuration in GTM."
+    href="/consent/consent-mode/consent-mode-gtm-setup/"
+  />
+  <LinkCard
+    title="Advanced Consent Mode"
+    description="Cookieless pings, ad_data_redaction, and EEA-region targeting."
+    href="/consent/consent-mode/advanced-consent-mode/"
+  />
+  <LinkCard
+    title="GTM Tag Not Firing Checklist"
+    description="Consent gates are a frequent cause of non-firing tags — cross-reference."
+    href="/recipes/troubleshooting/gtm-tag-not-firing-checklist/"
+  />
+</CardGrid>

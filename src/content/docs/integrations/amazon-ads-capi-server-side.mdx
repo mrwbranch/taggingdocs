@@ -1,0 +1,234 @@
+---
+title: "Amazon Ads CAPI (Server-Side)"
+description: "Amazon Ads Conversions API via sGTM — LWA OAuth, conversion types, hashed match keys, clientDedupeId, and how it fits alongside Amazon Attribution and DSP pixels."
+sidebar:
+  order: 18
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Amazon's Conversions API — officially the Amazon Ads Events Manager Conversions API — is newer, narrower, and less widely available than Meta's or TikTok's. It targets a specific use case: sellers running Amazon DSP or Sponsored Display campaigns who want to attribute **off-Amazon** conversions (purchases on your own website, not on Amazon.com) back to Amazon ad exposure.
+
+If you don't sell on Amazon or advertise via Amazon DSP, skip this page. If you do, CAPI lets Amazon close the loop on traffic it drove to your site.
+
+*Valid as of April 2026, Amazon Ads Events Manager Conversions API v1.*
+
+## Why server-side for Amazon
+
+Amazon's client-side options are deliberately thin — the Attribution tag is a passive observer, and the DSP pixel fires simple image beacons with no event-level detail. Neither has any concept of deduplication, hashed identifiers, or enhanced matching.
+
+The Conversions API fills exactly one gap: pushing rich, attributable off-Amazon conversion events (with hashed user data) to Amazon so Amazon's DSP bidding can optimize toward real outcomes on your own site.
+
+What this means in practice:
+
+1. **It is not a replacement for the DSP pixel.** The DSP pixel still fires browser-side for audience building and view-through attribution. CAPI adds a parallel server-side signal.
+2. **It is not a replacement for Amazon Attribution** (the on-Amazon.com purchase correlation tool). That remains a separate, passive mechanism.
+3. **Access is not self-serve.** Amazon whitelists CAPI on a per-advertiser basis, typically for advertisers with meaningful DSP spend. Request access through your Amazon Ads rep or AWS support.
+
+**When it is not worth it:** if your Amazon spend is only Sponsored Products on Amazon.com (not DSP off-Amazon), CAPI offers nothing — your conversions happen on Amazon's own properties and Amazon already has them.
+
+## The event model
+
+**Required per event:**
+
+| Field | Notes |
+|---|---|
+| `name` | Your event name — often matches `eventType` |
+| `eventType` | One of Amazon's supported conversion types |
+| `eventActionSource` | `WEBSITE`, `OFFLINE`, `APP_ANDROID`, `APP_IOS` |
+| `countryCode` | ISO 3166-1 alpha-2 |
+| `timestamp` | ISO 8601 |
+| `clientDedupeId` | Dedup key (camelCase, exactly this spelling) |
+| `matchKeys[]` | At least one match key |
+
+**Supported `eventType` values:** `ADD_TO_SHOPPING_CART`, `APPLICATION`, `CHECKOUT`, `CONTACT`, `DETAIL_PAGE_VIEW`, `LEAD`, `OFF_AMAZON_PURCHASES`, `MOBILE_APP_FIRST_START`, `PAGE_VIEW`, `SEARCH`, `SIGN_UP`, `SUBSCRIBE`, `OTHER`.
+
+**Match keys (`type` values in `matchKeys`):**
+
+| type | Hashed? | Source |
+|---|---|---|
+| `EMAIL` | SHA-256 (lowercase, trimmed) | User email |
+| `PHONE` | SHA-256 (E.164 first) | User phone |
+| `FIRST_NAME` | SHA-256 | User first name |
+| `LAST_NAME` | SHA-256 | User last name |
+| `ADDRESS` | SHA-256 | Street address |
+| `CITY` | SHA-256 | |
+| `STATE` | SHA-256 | |
+| `POSTAL` | SHA-256 | |
+| `MAID` | No | Mobile ad ID |
+
+## Setup in sGTM
+
+<Steps>
+1. Request CAPI access through your Amazon Ads account team. This is not self-serve; approval can take several business days.
+
+2. Set up Login With Amazon (LWA) OAuth:
+   - Create an LWA security profile at developer.amazon.com.
+   - Configure your OAuth redirect URI.
+   - Generate a refresh token using the LWA OAuth flow.
+   - Exchange the refresh token for an access token on each CAPI request (access tokens expire after 1 hour).
+   - Store the LWA client ID, client secret, and refresh token as sGTM Constant variables.
+
+3. Identify your **Profile ID** in Amazon Ads → API access. This is a numeric ID that goes into the `Amazon-Advertising-API-Scope` header (confusing because it's called "scope" but it's really the profile).
+
+4. In sGTM, create a Custom Template. Skeleton:
+
+   ```javascript
+   const sendHttpRequest = require('sendHttpRequest');
+   const getAllEventData = require('getAllEventData');
+   const JSON = require('JSON');
+
+   const event = getAllEventData();
+   const payload = {
+     eventData: [{
+       name: data.eventName,
+       eventType: data.eventType,
+       eventActionSource: 'WEBSITE',
+       countryCode: event.country_code || 'US',
+       timestamp: new Date(event.timestamp_ms).toISOString(),
+       clientDedupeId: event.event_id,
+       value: event.ecommerce && event.ecommerce.value,
+       currencyCode: event.ecommerce && event.ecommerce.currency,
+       unitsSold: event.ecommerce && event.ecommerce.items && event.ecommerce.items.length,
+       matchKeys: [
+         event.user_data && event.user_data.email_hash && {
+           type: 'EMAIL',
+           values: [event.user_data.email_hash]
+         },
+         event.user_data && event.user_data.phone_hash && {
+           type: 'PHONE',
+           values: [event.user_data.phone_hash]
+         }
+       ].filter(Boolean)
+     }]
+   };
+
+   sendHttpRequest('https://advertising-api.amazon.com/events/v1/conversions', {
+     method: 'POST',
+     headers: {
+       'Authorization': 'Bearer ' + data.accessToken,
+       'Amazon-Advertising-API-ClientId': data.lwaClientId,
+       'Amazon-Advertising-API-Scope': data.profileId,
+       'Content-Type': 'application/vnd.amcconversionevent.v1+json'
+     }
+   }, JSON.stringify(payload));
+   ```
+
+5. Firing trigger: GA4 purchase / add_to_cart / lead events you want to mirror.
+</Steps>
+
+**Raw HTTP shape:**
+
+```http
+POST https://advertising-api.amazon.com/events/v1/conversions
+Authorization: Bearer <lwa_access_token>
+Amazon-Advertising-API-ClientId: <lwa_client_id>
+Amazon-Advertising-API-Scope: <profile_id>
+Content-Type: application/vnd.amcconversionevent.v1+json
+```
+
+```json
+{
+  "eventData": [{
+    "name": "OFF_AMAZON_PURCHASES",
+    "eventType": "OFF_AMAZON_PURCHASES",
+    "eventActionSource": "WEBSITE",
+    "countryCode": "US",
+    "timestamp": "2026-04-20T12:34:56Z",
+    "clientDedupeId": "evt-ORDER-123-1713571200",
+    "value": 79.99,
+    "currencyCode": "USD",
+    "unitsSold": 2,
+    "matchKeys": [
+      {"type": "EMAIL", "values": ["<sha256 of email>"]},
+      {"type": "PHONE", "values": ["<sha256 of phone>"]}
+    ]
+  }]
+}
+```
+
+## Event mapping from Amazon client-side tags
+
+Amazon's client-side story doesn't map cleanly to CAPI — the DSP pixel and Attribution tag aren't event-taxonomy-based. Map GA4 events directly to CAPI `eventType` values:
+
+| GA4 event | Amazon CAPI `eventType` | Notes |
+|---|---|---|
+| `view_item` | `DETAIL_PAGE_VIEW` | |
+| `add_to_cart` | `ADD_TO_SHOPPING_CART` | |
+| `begin_checkout` | `CHECKOUT` | |
+| `purchase` | `OFF_AMAZON_PURCHASES` | The critical one — off-site purchase |
+| `generate_lead` | `LEAD` | |
+| `sign_up` | `SIGN_UP` | |
+| `search` | `SEARCH` | |
+| `contact` (any "contact us" action) | `CONTACT` | |
+
+## Deduplication with the DSP pixel
+
+This is where Amazon's story gets thin. `clientDedupeId` deduplicates **against other CAPI events** — if you send the same `clientDedupeId` twice to CAPI within 48 hours, Amazon counts one conversion. But the DSP pixel has no corresponding dedup key, so CAPI and DSP pixel events for the same user purchase are counted separately.
+
+**In practice, this means one of two strategies:**
+
+1. **CAPI-only for purchase events.** Stop firing the DSP pixel's purchase beacon and rely entirely on CAPI's server-side event. DSP pixel continues firing for page views and add-to-cart (lower-funnel audience building).
+
+2. **Accept modest double-counting.** DSP pixel + CAPI both fire purchase events. Reported conversions are roughly 1.2–1.5× the true number (depending on how much CAPI recovers vs. how much DSP pixel already captures). Use the gap to gauge CAPI lift, but adjust your ROAS targets accordingly.
+
+Strategy 1 is cleaner for advertisers with sGTM in place. Strategy 2 is fine if you're piloting CAPI and don't want to touch the client-side setup yet.
+
+## Testing and validation
+
+Amazon Ads → Measurement → Conversions Builder → API Events tab shows inbound CAPI events. Latency is 10–30 minutes, slower than Meta or TikTok.
+
+sGTM Preview mode shows the HTTP response immediately:
+
+- HTTP 207 Multi-Status: normal response — check the individual event results inside the response body for partial failures.
+- HTTP 401: access token expired. LWA tokens are only 1 hour; make sure your template refreshes on each call (or caches with a short TTL).
+- HTTP 403: profile ID (scope) wrong, or CAPI not enabled for this account.
+- HTTP 400: malformed payload — most commonly missing `countryCode` or a `matchKeys` entry with no `values` array.
+
+## Common mistakes
+
+### Wrong header for `Amazon-Advertising-API-Scope`
+
+The header expects the **Profile ID** (numeric, per-region), not the customer ID or the seller ID. Amazon uses "scope" in the header name but that's not an OAuth scope — it's their term for "which ad profile are we acting against." Requests with the wrong scope return 403.
+
+### Sending plaintext email in match keys
+
+Every string match key (`EMAIL`, `PHONE`, `FIRST_NAME`, etc.) must be SHA-256 hashed, lowercased, and trimmed before hashing. Amazon's API silently accepts plaintext strings and the events are recorded — but they never match. Hash server-side in the sGTM template.
+
+### Using `eventActionSource: OFFLINE` for website events
+
+Website conversions use `WEBSITE`. `OFFLINE` is for true offline events (in-store, call center). Misusing `OFFLINE` routes events to the wrong optimization model.
+
+### Short LWA token TTL
+
+LWA access tokens expire every 1 hour. If your sGTM template uses a hardcoded access token, it starts returning 401 within the first day. Either cache-and-refresh in your template (call the LWA token endpoint when needed) or use a token manager that refreshes tokens centrally.
+
+### Assuming CAPI replaces Amazon Attribution
+
+Amazon Attribution is a separate, passive tag that correlates your website visits to subsequent Amazon.com purchases. CAPI is for off-Amazon purchases on your own site. They solve different problems and should coexist — CAPI does not make Attribution redundant for sellers.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Amazon Attribution & Ads (Client-Side)"
+    description="The client-side Attribution tag and DSP pixel that CAPI supplements."
+    href="/integrations/amazon-ads/"
+  />
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="The reference CAPI implementation — richer event taxonomy and simpler auth."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Event Deduplication Across Client & Server"
+    description="Cross-platform cheat sheet — including Amazon's partial dedup story."
+    href="/integrations/event-deduplication-across-client-server/"
+  />
+  <LinkCard
+    title="How Programmatic Advertising Works"
+    description="Background on DSPs, SSPs, and Amazon DSP's place in the programmatic ecosystem."
+    href="/integrations/how-programmatic-advertising-works/"
+  />
+</CardGrid>

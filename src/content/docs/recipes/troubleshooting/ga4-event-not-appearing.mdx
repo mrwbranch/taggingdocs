@@ -1,0 +1,96 @@
+---
+title: "GA4 Event Not Appearing"
+description: "Ten reasons a GA4 event never shows up in DebugView or reports — ranked by frequency with verification and fix steps."
+sidebar:
+  order: 2
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+If you're seeing an event fire in GTM Preview but nothing in GA4, here are the most common causes and how to fix them. Split the problem first: the event either (a) never reached GA4, (b) reached GA4 but was rejected, or (c) arrived but isn't where you're looking. This list covers all three.
+
+## 1. Debug mode is off — you're checking DebugView with no debug signal
+
+**Verify.** Open GA4 → **Admin** → **DebugView**. If the device list is empty, no session is sending `debug_mode=1`. Preview alone doesn't enable it — you need either the GTM Preview to be connected (which auto-injects `debug_mode`), the GA4 Debugger Chrome extension, or an explicit `debug_mode` parameter on the GA4 tag.
+
+**Fix.** Reopen Preview from GTM (not a stale Preview session). Or add a parameter `debug_mode = true` to your GA4 Configuration/Event tag temporarily. Events arrive in DebugView within 10 seconds.
+
+## 2. Wrong Measurement ID
+
+**Verify.** DevTools Network tab → filter `collect`. Look at the `tid` parameter on the outgoing request. Compare to the Measurement ID in your GA4 property (Admin → Data Streams). A single-character typo sends events into the void — or worse, a different property you don't own.
+
+**Fix.** Correct the Measurement ID in the GA4 Configuration tag (or Google Tag). For staging vs. production, put the ID in a Lookup Table variable keyed on hostname so it can never go wrong.
+
+## 3. Consent denied — the tag never fired
+
+**Verify.** Preview timeline → click the event → **Consent** tab. If `analytics_storage` is denied and the tag is gated on it, it was blocked, not sent. DebugView shows nothing because no hit was sent.
+
+**Fix.** This is often correct behaviour. If you want the event tracked in a consent-denied state, enable Consent Mode (Advanced) on the tag — the tag will still fire, cookieless, with `ads_data_redaction` applied. See [Consent Mode v2](/consent/consent-mode/consent-mode-v2/).
+
+## 4. Data stream filter is excluding the event
+
+**Verify.** GA4 → Admin → **Data Filters**. Look for active filters with state **Active** (not Testing). An "Internal Traffic" filter with a wildcard IP range, or a Developer Traffic filter for `debug_mode=1`, silently drops events.
+
+**Fix.** Either narrow the filter definition, or toggle it to **Testing** while you verify, then back to Active. Filter changes apply immediately to new events but never retroactively.
+
+## 5. Reserved event name conflict
+
+**Verify.** Check your event name against Google's reserved list: `ad_activeview`, `ad_click`, `ad_exposure`, `ad_impression`, `ad_query`, `app_clear_data`, `app_install`, `first_open`, `first_visit`, `in_app_purchase`, `session_start`, `user_engagement`, etc. If you sent `session_start` as a custom event, GA4 silently drops it.
+
+**Fix.** Rename. `my_session_start`, `checkout_session_start`, anything non-reserved. The full list is in Google's "Reserved names" documentation — treat it as fixed.
+
+## 6. Parameter name over 40 characters
+
+**Verify.** GA4 enforces a 40-character limit on parameter names. `very_long_descriptive_parameter_name_that_exceeds_the_limit` is dropped without warning. The event still arrives but without that field.
+
+**Fix.** Shorten the name. Value limits matter too: 100 characters for event parameter string values, 500 for `user_properties`. Trim at source.
+
+## 7. Too many parameters — 25-parameter cap hit
+
+**Verify.** GA4 accepts up to 25 event parameters per event (items array items don't count; item-level parameters have their own separate 10-parameter cap). Events with more have parameters silently dropped, typically in insertion order past 25.
+
+**Fix.** Audit what you're sending. Consolidate (`product_category_1`, `product_category_2`, `product_category_3` → a single `product_path`). Promote high-value items to `user_properties` if they're user-scoped rather than event-scoped.
+
+## 8. user_engagement prerequisite missing
+
+**Verify.** Your event relies on `session_start` having fired, but your page-view tag is held back (consent, race condition with the CMP, or a blocker). Without a prior `session_start`, events can land in a session GA4 treats as not-engaged and some engagement-derived reports hide them.
+
+**Fix.** Make sure the Google Tag / GA4 Configuration tag fires on `Initialization - All Pages` or `Consent Initialization`, earlier than any custom events. It must fire first for session_start to be emitted.
+
+## 9. Tag fired but the network request was blocked
+
+**Verify.** DevTools Network tab → filter `google-analytics.com` or `analytics.google.com`. If you see no request, the hit never left the browser. Check for `net::ERR_BLOCKED_BY_CLIENT` — that's an ad blocker. Check corporate proxy / firewall / EasyList DNS filtering.
+
+**Fix.** For user-side blockers, no fix client-side. Server-side GTM is the proper answer — your first-party endpoint won't be on consumer block-lists. See [Server-Side GTM Setup](/server-side/setup/cloud-run-setup/).
+
+## 10. Processing lag — it will appear later
+
+**Verify.** DebugView is near real-time (seconds). Realtime report lags 1-3 minutes. Standard reports can lag 24-48 hours, especially for brand-new events on brand-new properties. BigQuery export (daily) can lag up to 72 hours.
+
+**Fix.** Wait. If the event appears in DebugView and Realtime, it's being collected correctly — standard reports just haven't caught up. If after 48 hours a Realtime-visible event still isn't in standard reports, then escalate.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="DebugView"
+    description="How to use DebugView correctly — most of the fixes above require it."
+    href="/ga4/troubleshooting/debugview/"
+  />
+  <LinkCard
+    title="Data Discrepancies"
+    description="When the event does arrive but the numbers don't match another source."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+  <LinkCard
+    title="Why GA4 Shows '(not set)'"
+    description="The event arrived but a specific parameter is missing or blank."
+    href="/recipes/troubleshooting/why-ga4-shows-not-set/"
+  />
+  <LinkCard
+    title="Duplicate Events in GA4"
+    description="The opposite problem — the event fires, but twice."
+    href="/recipes/troubleshooting/duplicate-events-in-ga4/"
+  />
+</CardGrid>

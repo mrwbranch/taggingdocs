@@ -1,0 +1,156 @@
+---
+title: "Flicker and FOUC Prevention"
+description: "The anti-flicker snippet explained line by line — how it races GTM, how to tune the timeout, and why server-side variant assignment is the real fix."
+sidebar:
+  order: 3
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Client-side A/B tests have a fundamental problem: the page arrives in the browser as the control, the browser begins rendering it, and then JavaScript modifies it to become the variant. For a brief window — often 100–500ms, sometimes longer — users see the control. On fast connections it's a visible flash. On slow connections it's a full render of the wrong page. Either way, users in the variant group get a worse experience than users in the control, which biases your test results against the variant you're trying to measure.
+
+The workaround is the **anti-flicker snippet**: a tiny script placed at the top of the `<head>` that hides the `<body>` until the variant is applied (or until a timeout expires, whichever comes first). It's an ugly hack. It's also the industry-standard fix for client-side testing, used by Google Optimize (before it was deprecated), VWO, Optimizely, AB Tasty, and every other tool in the space.
+
+If flicker is bad enough that you're reading this page, the real answer may be [server-side experiments](/recipes/testing/server-side-experiments/) — but the anti-flicker snippet is what you use until you get there.
+
+## The snippet explained
+
+This is the standard pattern, inherited from Google Optimize's reference implementation:
+
+```html
+<!-- Anti-flicker: hide body until variant is applied -->
+<style id="anti-flicker">.async-hide { opacity: 0 !important }</style>
+<script>
+(function(a,s,y,n,c,h,i,d,e){
+  s.className+=' '+y;
+  h.start=1*new Date;
+  h.end=i=function(){s.className=s.className.replace(RegExp(' ?'+y),'')};
+  (a[n]=a[n]||[]).hide=h;
+  setTimeout(function(){i();h.end=null},c);
+  a.dataLayer=a.dataLayer||[];
+})(window,document.documentElement,'async-hide','dataLayer',3000,{});
+</script>
+```
+
+Readable version of the same logic:
+
+```javascript
+(function() {
+  var html = document.documentElement;
+  var className = 'async-hide';
+  var timeout = 3000; // milliseconds
+
+  // 1. Add the class that sets opacity: 0
+  html.className += ' ' + className;
+
+  // 2. Record start time (used for reporting in some tools)
+  var hide = { start: Date.now() };
+
+  // 3. Define the end function — removes the class, revealing the page
+  hide.end = function() {
+    html.className = html.className.replace(new RegExp(' ?' + className), '');
+  };
+
+  // 4. Register the hide object on dataLayer so the testing tool can call .end()
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.hide = hide;
+
+  // 5. Failsafe: reveal the page after the timeout no matter what
+  setTimeout(function() {
+    hide.end();
+    hide.end = null; // prevent double-call
+  }, timeout);
+})();
+```
+
+The mechanics:
+
+1. The CSS rule `.async-hide { opacity: 0 !important }` makes the page invisible but still takes up space (layout is preserved, rendering continues, only paint is suppressed).
+2. The class is added to `<html>` immediately — before the browser has painted any body content.
+3. The variant-application code (run by your testing tool or by your own JavaScript) calls `window.dataLayer.hide.end()` when the variant has been applied. That removes the class and reveals the page.
+4. If the variant-application code doesn't run within the timeout (default 3 seconds), the failsafe removes the class anyway. Users see the page — as the control — rather than staring at a blank screen.
+
+## The race with GTM
+
+The anti-flicker snippet must load before GTM, because GTM loads asynchronously and will not apply the variant until it has finished loading the container definition. A standard head looks like:
+
+```html
+<head>
+  <!-- 1. Anti-flicker snippet (sync, blocks render) -->
+  <style id="anti-flicker">.async-hide { opacity: 0 !important }</style>
+  <script>/* snippet */</script>
+
+  <!-- 2. GTM snippet (async) -->
+  <script>(function(w,d,s,l,i){/* GTM loader */})(window,document,'script','dataLayer','GTM-XXXXXX');</script>
+
+  <!-- 3. Rest of the head -->
+</head>
+```
+
+GTM loads the container definition from Google's CDN (usually 50–200ms). The container fires the variant-assignment tag. The variant-assignment tag modifies the DOM. The variant-assignment tag calls `hide.end()`. Only then does the page become visible.
+
+If any step in that chain is slow, the 3-second failsafe fires and the user sees the control. Every request slower than 3 seconds is a lost variant exposure — effectively silent data loss that inflates control counts and depresses variant counts in your test.
+
+## Tuning the timeout
+
+The default 3-second timeout is a trade-off:
+
+- **Too short**: variant doesn't finish applying in time, failsafe fires, user sees the control, your test under-counts variant exposures.
+- **Too long**: GTM fails (bad container, network issue, ad-blocker), users stare at a blank page for 8 seconds before the failsafe kicks in.
+
+Practical guidance:
+
+- **Desktop, fast-connection audience**: 2 seconds is usually enough. Most GTM loads complete in under 500ms on desktop.
+- **Mobile / global audience**: 3 seconds is the default for a reason. Mobile networks in developing markets can make GTM load take 1.5+ seconds by itself.
+- **If you're seeing high failsafe rates** (measurable as GA4 events that fire without an `experiment_impression`): investigate what's slow before extending the timeout. Usually the fix is lighter variant-application code, not more time.
+
+## When anti-flicker is not enough
+
+Anti-flicker helps but doesn't eliminate the underlying problem. A few scenarios where the pattern breaks down:
+
+**Large layout shifts.** If the variant moves an element from the top of the page to halfway down, the reveal animation is still visible — it just happens after the class is removed. Users notice the page "settle." Core Web Vitals (CLS specifically) degrade.
+
+**Variants that require data from an API.** If your variant needs to fetch a price or a content block from a server before rendering, you're adding another network round-trip to the critical path. The 3-second failsafe will often fire.
+
+**SEO-sensitive changes.** Search bots do not execute testing-tool JavaScript reliably. Bots crawl the control. If your variant changes visible content (headlines, copy), you are testing on humans while bots see only the control — which is probably fine but worth understanding.
+
+**Fast-scrolling users.** Users who scroll before the variant applies see the control above the fold, then the variant as they scroll. The contrast is often more jarring than a flash.
+
+For any of these, consider graduating to [server-side experiments](/recipes/testing/server-side-experiments/). Server-side assignment eliminates flicker entirely because the HTML the browser receives is already the variant.
+
+## Common mistakes
+
+**Putting the anti-flicker snippet after GTM.** If GTM loads first and starts firing the variant tag, the variant applies to a page that hasn't been hidden — you get the flash you were trying to prevent. Anti-flicker must load first, synchronously, before any other script.
+
+**Forgetting to call `hide.end()`.** If your variant-application code applies the variant but doesn't call `hide.end()`, the page stays hidden until the failsafe fires. Users see nothing for 3 seconds. Every testing tool's reference implementation calls `hide.end()`, but custom client-side variant code written in a GTM Custom HTML tag is a common place to forget.
+
+**Using `display: none` instead of `opacity: 0`.** `display: none` removes the element from layout, causing other elements to reflow when the variant applies. This produces a visible layout shift on reveal. `opacity: 0` preserves layout and only affects paint — the reveal is invisible aside from the content appearing.
+
+**Testing without checking the failsafe rate.** In GA4, fire a simple `anti_flicker_failsafe` event from your variant-application code when `hide.end` is called before the timeout, and fire no event when the failsafe fires first (because your code never ran). Compare the fire rate to your expected variant exposures. A big gap indicates the snippet is timing out frequently.
+
+**Shipping anti-flicker and never removing it.** Every anti-flicker snippet you add is a little render-blocking snippet at the top of your head. If the tests that depended on it are long over, the snippet is paying LCP cost every page load for no reason. Audit quarterly and remove snippets for tests that have concluded.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="A/B Testing Without Tools"
+    description="The basic client-side testing pattern that the anti-flicker snippet supports."
+    href="/recipes/testing/ab-testing-without-tools/"
+  />
+  <LinkCard
+    title="Server-Side Experiments"
+    description="The architectural fix — assign variants before the HTML reaches the browser."
+    href="/recipes/testing/server-side-experiments/"
+  />
+  <LinkCard
+    title="Container Loading Strategies"
+    description="How GTM loading timing interacts with anti-flicker."
+    href="/client-side/setup/container-loading-strategies/"
+  />
+  <LinkCard
+    title="Redirect vs. Client-Side Tests"
+    description="When client-side is the wrong shape entirely and a redirect test is the right answer."
+    href="/recipes/testing/redirect-vs-client-side-tests/"
+  />
+</CardGrid>

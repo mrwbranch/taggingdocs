@@ -9,6 +9,10 @@ import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 Replace `project.analytics_PROPERTY_ID` with your actual BigQuery project and dataset throughout all queries. Always set `_TABLE_SUFFIX` date bounds to avoid scanning unnecessary data.
 
+<Aside type="tip">
+If the SQL patterns below look unfamiliar — `UNNEST`, `_TABLE_SUFFIX`, CTEs, window functions — start with the [SQL Primer for GA4 BigQuery](/ga4/bigquery/sql-primer/). It covers the minimum SQL you need to read these queries confidently.
+</Aside>
+
 ## Sessions and users
 
 ### Daily sessions and users

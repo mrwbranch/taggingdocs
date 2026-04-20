@@ -1,0 +1,304 @@
+---
+title: "Transformations Deep Dive"
+description: "sGTM Transformations — pre-tag Event Model mutation, ordering semantics, and patterns for IP anonymisation, PII scrubbing, enrichment, and conditional event dropping."
+sidebar:
+  order: 21
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+Transformations are the least-understood feature of server-side GTM. Google introduced them in 2023 as a first-class concept sitting between clients and triggers: they mutate the Event Model *before* any trigger evaluates and *before* any tag fires. Everything downstream — every trigger condition, every variable that reads event data, every tag — sees the transformed model, not the original.
+
+That single placement is what makes them powerful. Anything you want to enforce once for every event belongs in a transformation, not replicated across ten tag configurations.
+
+*Valid as of April 2026, Server-side GTM container version 2.0+.*
+
+## Where transformations fit
+
+The request lifecycle, with transformations made explicit:
+
+```
+Request arrives
+    │
+    ▼
+Client claims request, builds the initial Event Model
+    │
+    ▼
+Transformations run, IN ORDER, each mutating the Event Model
+    │
+    ▼
+Triggers are evaluated against the post-transformation Event Model
+    │
+    ▼
+Matching tags fire, reading the post-transformation Event Model
+```
+
+Two consequences are worth internalising:
+
+- **Triggers see transformed data.** A trigger that matches `event_name equals purchase` will match if a transformation renamed `buy` to `purchase`, even though the client emitted `buy`.
+- **Variables see transformed data.** An Event Data variable reading `user_data.email` reads whatever the final transformation wrote, not what the client originally built.
+
+Transformations are not a layer above tags — they are a layer below them. Tags are oblivious to transformations having run.
+
+## Authoring a transformation
+
+Transformations share the sandboxed JavaScript environment with variables and tags. The APIs you typically need:
+
+```javascript
+const getEventData = require('getEventData');
+const getAllEventData = require('getAllEventData');
+const setEventData = require('setEventData');
+const logToConsole = require('logToConsole');
+```
+
+A minimal transformation — derive a regional grouping from country:
+
+```javascript
+const country = getEventData('geo.country');
+if (country) {
+  setEventData('region_group',
+    (country === 'US' || country === 'CA') ? 'NA' :
+    (country === 'GB' || country === 'DE' || country === 'FR') ? 'EU' :
+    'INTL'
+  );
+}
+```
+
+No return value, no `data.gtmOnSuccess()`. A transformation's job is to call `setEventData` zero or more times and then end. The Transformations UI also offers a declarative mode for simple field copies and renames, which is fine for trivial cases and unmaintainable for anything with a condition.
+
+<Aside type="note">
+Transformations can read anything via `getAllEventData` but can only write via `setEventData`, which performs a shallow set at the given key path. Nested mutation requires reading the subtree, editing the copy, and writing the whole subtree back. We cover this in the PII pattern below.
+</Aside>
+
+## Ordering semantics
+
+Transformations run in the order you list them in the Transformations UI. Each one sees the mutations of every preceding one. The order is not alphabetical, not dependency-resolved, not parallel — it is the literal list order.
+
+This sounds unambiguous and produces subtle bugs. Example:
+
+<Comparison leftTitle="Wrong order" rightTitle="Right order" leftType="bad" rightType="good">
+  <Fragment slot="left">
+    ```
+    1. hash_email      →  hashes user_data.email
+    2. redact_email    →  replaces user_data.email with '[REDACTED]'
+
+    Downstream tag reads user_data.email
+    →  gets '[REDACTED]' (redacted AFTER hash, overwrites hash)
+    →  Meta CAPI rejects: invalid email hash
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```
+    1. redact_email    →  replaces raw email with '[REDACTED]'
+                          if in disallowed surface
+    2. hash_email      →  skips if value is '[REDACTED]'
+
+    Downstream tag reads user_data.email
+    →  gets redacted value or legitimate SHA-256
+    ```
+  </Fragment>
+</Comparison>
+
+The fix is not the ordering alone — it is also making each transformation idempotent enough to be safe if someone later reshuffles the list. A `hash_email` transformation that blindly hashes whatever it finds will re-hash an already-hashed value or hash `[REDACTED]` into a meaningless digest. Add a shape check: if the value matches `^[a-f0-9]{64}$`, it's already hashed; skip.
+
+<Aside type="caution">
+Document your intended order. We have seen containers with twelve transformations where the order was load-bearing but undocumented; a junior operator reshuffled them alphabetically and Meta CAPI match quality dropped by 40% overnight. A harmless-looking transformation named `_order_docs` (commented code, no mutations) at position 0 is a cheap defence.
+</Aside>
+
+## Pattern 1: IP anonymisation that preserves geo
+
+The standard approach: strip the last octet of IPv4 (the last 80 bits of IPv6), keeping enough of the address that geolocation still resolves to a city or region. Works well for analytics; complies with most interpretations of GDPR.
+
+```javascript
+const getEventData = require('getEventData');
+const setEventData = require('setEventData');
+
+const ip = getEventData('ip_override');
+if (!ip) return;
+
+let anonymised;
+if (ip.indexOf(':') === -1) {
+  // IPv4: zero the last octet
+  anonymised = ip.replace(/\.\d+$/, '.0');
+} else {
+  // IPv6: keep the first 48 bits, zero the rest
+  const parts = ip.split(':');
+  anonymised = parts.slice(0, 3).join(':') + '::';
+}
+
+setEventData('ip_override', anonymised);
+```
+
+Ordering note: any transformation that needs the full IP (abuse detection, bot filtering by known botnet ranges) must run *before* this one. See [IP Anonymization While Preserving Geo](/server-side/operations/ip-anonymization-preserving-geo/) for the full treatment including ipv6 subtleties.
+
+## Pattern 2: PII scrubbing
+
+PII that ends up in the Event Model typically lives in `page_location` query strings, `page_title`, or ad-hoc custom parameters. A single transformation can walk the Event Model and regex-strip email and phone patterns from every string field.
+
+```javascript
+const getAllEventData = require('getAllEventData');
+const setEventData = require('setEventData');
+
+const EMAIL_RE  = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g;
+const PHONE_RE  = /\+?\d[\d\s\-()]{9,15}\d/g;
+
+function scrub(value) {
+  if (typeof value !== 'string') return value;
+  return value.replace(EMAIL_RE, '[EMAIL]').replace(PHONE_RE, '[PHONE]');
+}
+
+function walk(obj, path) {
+  const keys = Object.keys(obj);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const v = obj[k];
+    const nextPath = path ? (path + '.' + k) : k;
+    if (typeof v === 'string') {
+      const scrubbed = scrub(v);
+      if (scrubbed !== v) setEventData(nextPath, scrubbed);
+    } else if (v && typeof v === 'object') {
+      walk(v, nextPath);
+    }
+  }
+}
+
+walk(getAllEventData(), '');
+```
+
+This is deliberately coarse — regex-matching on every string field is O(n) in total Event Model size and adds measurable latency at high event volumes. For low-volume containers it's fine. For anything above a few hundred events per second, narrow the walk to known-risky paths (`page_location`, `page_title`, `ecommerce.items`) rather than traversing the entire model.
+
+See [Data Redaction & PII](/server-side/advanced/data-redaction-pii/) for destination-specific redaction patterns where the same event gets different treatment per vendor.
+
+## Pattern 3: Enrichment
+
+Transformations are synchronous by design. Enrichment that can be computed from static data — a country-to-region map, a product-id-to-category lookup embedded in the template, a consent state derived from other fields — belongs in a transformation.
+
+```javascript
+const getEventData = require('getEventData');
+const setEventData = require('setEventData');
+const makeTableMap = require('makeTableMap');
+
+// data.countryToRegion is a template field holding a table
+const map = makeTableMap(data.countryToRegion, 'country', 'region');
+const country = getEventData('geo.country');
+if (country && map[country]) {
+  setEventData('region', map[country]);
+}
+```
+
+Enrichment requiring I/O — a Firestore lookup, an external API call, an auth-token exchange — does **not** belong in a transformation. Transformations cannot await. For async enrichment, use a Promise-returning variable ([Async Variables](/server-side/advanced/async-variables/)) and let each tag that needs the value opt into the latency cost.
+
+## Pattern 4: Conditional event dropping
+
+The awkward case. Transformations cannot cancel an event — there is no `dropEvent()` API. What you can do is set a sentinel field that every production trigger checks via an exception condition.
+
+```javascript
+const getEventData = require('getEventData');
+const setEventData = require('setEventData');
+
+const ua = getEventData('user_agent') || '';
+const isBot = /bot|crawler|spider|headless/i.test(ua);
+const isInternal = (getEventData('client_id') || '').indexOf('internal_') === 0;
+
+if (isBot || isInternal) {
+  setEventData('_drop', true);
+}
+```
+
+Then every trigger that fires production tags gets an exception: `_drop` equals `true` → do not fire. This centralises the drop decision in one transformation instead of scattering bot-detection conditions across every trigger. See [Bot Detection & Filtering](/server-side/advanced/bot-detection-filtering/) for the full approach to distinguishing real traffic.
+
+## A worked chain: four transformations in sequence
+
+Given the four patterns above, a realistic pipeline runs them in this order:
+
+```
+1. bot_flag       → reads user_agent, sets _is_bot (informational) and _drop
+2. pii_redact     → strips email/phone patterns from string fields
+3. ip_anonymise   → zeroes last octet of ip_override
+4. identity_hash  → hashes user_data.email if present and not redacted
+```
+
+Before transformations:
+
+```json
+{
+  "event_name": "purchase",
+  "client_id": "1711900000.1234567890",
+  "user_agent": "Mozilla/5.0 (Macintosh)...",
+  "page_location": "https://shop.example.com/checkout?email=alice%40example.com",
+  "ip_override": "203.0.113.42",
+  "user_data": { "email": "alice@example.com" }
+}
+```
+
+After transformations:
+
+```json
+{
+  "event_name": "purchase",
+  "client_id": "1711900000.1234567890",
+  "user_agent": "Mozilla/5.0 (Macintosh)...",
+  "page_location": "https://shop.example.com/checkout?email=[EMAIL]",
+  "ip_override": "203.0.113.0",
+  "user_data": { "email": "2bd8...SHA256...a9f1" },
+  "_is_bot": false
+}
+```
+
+Two subtleties in the output:
+
+- `user_data.email` was hashed, not redacted. Because `pii_redact` walks string fields but we excluded `user_data.email` from the scrub by narrowing the walk, the value reached `identity_hash` intact. If the scrubber had not been narrowed, the hash would be of `[EMAIL]` — a meaningless digest.
+- `_drop` is absent because `_is_bot` is false. If it were true, every production trigger would skip this event and nothing downstream would fire.
+
+## Warnings and anti-patterns
+
+**Do not put outbound HTTP in a transformation.** The transformation is synchronous and runs for every event. A `sendHttpRequest` inside it would either block (it cannot, in the current sandbox) or fire-and-forget (which loses the response). External lookups belong in tags or in async variables.
+
+**Do not stack ten narrow transformations when three coherent ones would do.** Each transformation is a separate evaluation of the Event Model and a separate unit of maintenance. Group related logic; keep the total count small enough that a human can hold the pipeline in their head.
+
+**Do not rely on `setEventData` deep-merging.** It does not. Writing `user_data` replaces the whole subtree; writing `user_data.email` updates only that leaf. To add a field to an existing object, read the subtree, mutate the copy, write it back:
+
+```javascript
+const ud = getEventData('user_data') || {};
+ud.region = 'NA';
+setEventData('user_data', ud);
+```
+
+**Do not treat transformations as a place to enforce consent.** Consent is a tag-level concern. Tags that require consent should check the consent fields in the Event Model themselves and opt out of firing. A transformation that unilaterally drops all events on missing consent breaks use cases that legitimately run without marketing consent (essential analytics, consent signalling itself).
+
+## Common mistakes
+
+**Reordering transformations without re-testing.** The pipeline is position-dependent. A harmless-looking reorder can silently change what downstream tags see. Maintain a test event that exercises the full pipeline and diff the output after any reorder.
+
+**Using transformations where a variable would do.** If only one tag needs the derived value, compute it in a variable. Transformations are for invariants across the whole container.
+
+**Forgetting that triggers see transformed data.** A trigger matching `event_name equals page_view` matches after a transformation renamed `pv` to `page_view`. This is usually desirable but occasionally surprising — e.g., a trigger meant to match only client-original `page_view` events will also match synthesised ones.
+
+**Writing `undefined` with `setEventData`.** The observed behaviour (reverse-engineered, as of April 2026) is that `setEventData(key, undefined)` leaves the field in place unchanged rather than deleting it. To remove a field, write an empty string or a sentinel and have downstream treat it accordingly — there is no documented delete operation.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Data Redaction & PII"
+    description="Per-destination redaction and hashing patterns that build on transformations."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+  <LinkCard
+    title="IP Anonymization Preserving Geo"
+    description="Deep dive on the ip_override field and geolocation preservation."
+    href="/server-side/operations/ip-anonymization-preserving-geo/"
+  />
+  <LinkCard
+    title="Bot Detection & Filtering"
+    description="The conditional-drop pattern applied to automated traffic."
+    href="/server-side/advanced/bot-detection-filtering/"
+  />
+  <LinkCard
+    title="Event Enrichment"
+    description="Synchronous enrichment in transformations vs. async enrichment in variables."
+    href="/server-side/advanced/event-enrichment/"
+  />
+</CardGrid>

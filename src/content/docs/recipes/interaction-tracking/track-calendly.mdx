@@ -1,0 +1,186 @@
+---
+title: "Track Calendly Bookings"
+description: "Track Calendly inline and popup bookings in GTM via postMessage — with event URIs that link back to the scheduled event in Calendly."
+sidebar:
+  order: 25
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Calendly bookings are not form submissions strictly speaking, but they are the conversion event for any service-business site using Calendly for discovery calls. Calendly's widget posts a message to the parent window on every step of the booking flow. This recipe captures the scheduled-event signal, filters by origin, and sends a GA4 `booking_scheduled`.
+
+*Valid as of April 2026, Calendly inline embed v2.*
+
+## The success signal
+
+Calendly's embed posts messages to the parent window on these events:
+
+| Event name | Meaning | Use for conversions? |
+|---|---|---|
+| `calendly.profile_page_viewed` | Visitor opened the Calendly profile | No |
+| `calendly.event_type_viewed` | Visitor selected a meeting type | No |
+| `calendly.date_and_time_selected` | Visitor picked a time slot | Funnel step |
+| `calendly.event_scheduled` | Booking confirmed | **Yes** |
+
+Only `calendly.event_scheduled` is the conversion. The other three are useful for a booking funnel (which many teams build: views → slot-selected → scheduled).
+
+<Aside type="caution">
+Always filter by `event.origin === 'https://calendly.com'`. The parent window receives messages from every iframe on the page — without an origin check, any script can spoof a `calendly.event_scheduled` event.
+</Aside>
+
+## dataLayer push pattern
+
+<DataLayerExample event="booking_scheduled" description="Filters by Calendly origin before trusting the payload.">
+```javascript
+(function () {
+  function isCalendlyEvent(event) {
+    return event.origin === 'https://calendly.com'
+      && event.data
+      && typeof event.data.event === 'string'
+      && event.data.event.indexOf('calendly.') === 0;
+  }
+
+  window.addEventListener('message', function (event) {
+    if (!isCalendlyEvent(event)) return;
+
+    var payload = event.data.payload || {};
+
+    if (event.data.event === 'calendly.date_and_time_selected') {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'booking_time_selected',
+        booking_vendor: 'calendly'
+      });
+      return;
+    }
+
+    if (event.data.event === 'calendly.event_scheduled') {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'booking_scheduled',
+        booking_vendor: 'calendly',
+        calendly_event_uri: payload.event && payload.event.uri,
+        calendly_invitee_uri: payload.invitee && payload.invitee.uri
+      });
+    }
+  });
+})();
+```
+</DataLayerExample>
+
+The URIs look like:
+
+```
+https://api.calendly.com/scheduled_events/GBGBDCAADAEDCRZ2
+https://api.calendly.com/scheduled_events/GBGBDCAADAEDCRZ2/invitees/A1B2C3D4E5
+```
+
+Both are queryable against the Calendly API for full event metadata including invitee email, meeting URL, and cancellation status.
+
+## GTM setup
+
+<Steps>
+1. **Create a Custom Event trigger for scheduled bookings**
+
+   - Trigger type: **Custom Event**
+   - Event name: `booking_scheduled`
+   - This fires: **Some Custom Events** → `DLV - booking_vendor` **equals** `calendly`
+
+2. **Create a Custom Event trigger for slot selection** (optional, for funnel)
+
+   - Event name: `booking_time_selected`
+   - Same vendor filter
+
+3. **Create Data Layer Variables**
+
+   - `DLV - booking_vendor` → `booking_vendor`
+   - `DLV - calendly_event_uri` → `calendly_event_uri`
+   - `DLV - calendly_invitee_uri` → `calendly_invitee_uri`
+
+4. **Create a GA4 Event Tag**
+
+   - Event name: `booking_scheduled`
+   - Parameters:
+     - `booking_vendor` → `{{DLV - booking_vendor}}`
+     - `calendly_event_uri` → `{{DLV - calendly_event_uri}}`
+     - `calendly_invitee_uri` → `{{DLV - calendly_invitee_uri}}`
+   - Trigger: the `booking_scheduled` trigger
+
+5. **Optionally create a `booking_time_selected` GA4 tag** for the funnel.
+</Steps>
+
+<TagConfig
+  name="GA4 - booking_scheduled (Calendly)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - booking_scheduled (calendly)"
+  variables={["DLV - booking_vendor", "DLV - calendly_event_uri", "DLV - calendly_invitee_uri"]}
+/>
+
+## Inline vs popup widgets
+
+Both widget types post identical messages. The only difference is that popup widgets are inserted dynamically — the listener on `window` is bound once and handles both.
+
+```html
+<!-- Inline widget -->
+<div class="calendly-inline-widget"
+     data-url="https://calendly.com/acme/discovery"
+     style="min-width:320px;height:700px;"></div>
+
+<!-- Popup -->
+<a href="" onclick="Calendly.initPopupWidget({url: 'https://calendly.com/acme/discovery'}); return false;">
+  Schedule a call
+</a>
+
+<script src="https://assets.calendly.com/assets/external/widget.js"></script>
+```
+
+No special handling per type — your existing listener handles both.
+
+## Enriching with Calendly API data (server-side)
+
+The dataLayer event only has URIs, not meeting details. To enrich GA4 with meeting duration, invitee email, or meeting type, route the event through a server:
+
+1. Use the `calendly_event_uri` as a client-side marker.
+2. Server-side (via GA4 Measurement Protocol or a webhook endpoint), call the Calendly API `GET /scheduled_events/{uuid}` with a Calendly personal access token.
+3. Enrich and send a server-side `booking_scheduled_enriched` event with sanitised fields.
+
+<Aside type="caution">
+Do not send invitee email to GA4. Hash it (SHA-256) if you need identity joins, or keep identity resolution entirely inside your CRM/warehouse.
+</Aside>
+
+## Test it
+
+<Steps>
+1. Open GTM **Preview mode** on a page with a Calendly embed.
+2. Open the Calendly widget and select a date and time — confirm `booking_time_selected` appears in the Summary pane.
+3. Complete the booking with a test email. Confirm `booking_scheduled` appears with populated `calendly_event_uri` and `calendly_invitee_uri`.
+4. Verify **Tags Fired** lists your GA4 tag.
+5. In GA4 **DebugView**, confirm `booking_scheduled` arrives within 15 seconds.
+6. Copy the `calendly_event_uri` from the Variables tab and verify via the Calendly API that the scheduled event exists (or check the Calendly dashboard's Scheduled Events list).
+7. **Test cancellation**: after booking, cancel the meeting via the invitee link. Calendly does not post a cancellation message to the parent — cancellation is detected server-side only (via webhooks).
+</Steps>
+
+## Common gotchas
+
+**Skipping the origin check.** Any iframe on the page can post to the parent. An `event.origin === 'https://calendly.com'` check is mandatory — otherwise ads or third-party widgets could spoof your conversions.
+
+**Localhost development.** Calendly's postMessage is only dispatched when the parent URL is allowlisted in Calendly's embed settings. For local dev, use `127.0.0.1` with a tunnel (ngrok, Cloudflare Tunnel) and add the tunnel URL to the allowlist.
+
+**`event.data.payload` is undefined on older widget versions.** The v2 widget (current as of April 2026) always includes payload. If you see undefined URIs, check which widget.js version is loaded.
+
+**Single-page-app navigation.** If your site is an SPA and the Calendly embed unmounts/remounts on route changes, the `window.addEventListener('message', ...)` listener persists — do not re-bind on route change or you will double-fire.
+
+**Popup closes before event fires.** The popup posts `calendly.event_scheduled` just before closing, and closes the iframe shortly after. Your listener runs synchronously on message receipt, so the dataLayer push completes before the iframe is destroyed. No race condition.
+
+**Embedded on a page with strict CSP.** If your Content Security Policy blocks `frame-src https://calendly.com`, the widget never loads and no events fire. Check the browser console for CSP violations before debugging the tracking.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard title="Track Form Submissions" href="/recipes/interaction-tracking/track-form-submissions/" description="Generic form-submission patterns — Calendly is a booking, but the wiring pattern is identical." />
+  <LinkCard title="form_submission custom event" href="/datalayer/custom-events/form-submission/" description="The canonical dataLayer schema for submission-style conversions." />
+  <LinkCard title="Form triggers reference" href="/client-side/triggers/form-triggers/" description="When GTM's built-in form triggers work — and when they don't." />
+</CardGrid>

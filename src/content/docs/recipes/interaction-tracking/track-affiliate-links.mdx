@@ -1,0 +1,200 @@
+---
+title: "Track Affiliate Links"
+description: "Two patterns: inbound affiliate referrals as a GA4 custom dimension, and outbound affiliate clicks as an affiliate_click event with destination, with deduplication."
+sidebar:
+  order: 20
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Affiliate tracking splits into two very different problems. **Inbound**: someone else's site sent the visitor with `?aff=partner-123` or `?ref=creator-slug`, and you need to attribute revenue to that partner. **Outbound**: your own site links to partner products (Amazon, a SaaS tool, an affiliate network) and you want to measure how often readers click those links and where they go.
+
+This recipe covers both, with a small amount of deduplication logic so a single user on a long journey is not counted twice.
+
+## The problem
+
+**Inbound.** Your partner dashboard shows `creator-alex` sent 1,200 clicks last month, but your internal `(direct)` channel in GA4 is bloated by 30%. Partners feel under-credited, you cannot decide who to renew, and finance cannot reconcile the commission invoice.
+
+**Outbound.** Your review blog has 400 external affiliate links. Readership is up, but you have no idea which posts drive the most clicks to partners, which destinations convert, or whether the "Amazon" button outperforms the "Walmart" button on the same product.
+
+## The canonical pattern
+
+<Steps>
+1. Inbound: on first landing, capture `aff`, `ref`, `partner` from the URL into a first-party cookie. Attach to every downstream GA4 event as `affiliate_id`.
+2. Outbound: listen for clicks on `<a>` elements that point to known affiliate domains (or carry `rel="sponsored"`). Fire a GA4 `affiliate_click` event with the destination and link context.
+3. Deduplicate repeat clicks within a short window.
+</Steps>
+
+<Aside type="note">
+Body-line: the outbound listener is a dataLayer push, so if you already use the pattern from [Track Button Clicks](/recipes/interaction-tracking/track-button-clicks/) you can reuse the same Custom Event trigger infrastructure.
+</Aside>
+
+## Part A — Inbound affiliate referrals
+
+### Step 1 — Capture partner parameters
+
+Create a **Custom HTML** tag firing on **All Pages**:
+
+```html
+<script>
+(function () {
+  var PARAM_NAMES = ['aff', 'ref', 'partner', 'pid'];
+  var params = new URLSearchParams(window.location.search);
+  var maxAge = 60 * 60 * 24 * 30; // 30-day attribution window
+
+  PARAM_NAMES.forEach(function (key) {
+    var value = params.get(key);
+    if (!value) return;
+    document.cookie =
+      '_aff_' + key + '=' + encodeURIComponent(value) +
+      '; Max-Age=' + maxAge +
+      '; Path=/; SameSite=Lax; Secure';
+  });
+})();
+</script>
+```
+
+Match the parameter names to whatever your affiliate program hands out. A 30-day window matches the Amazon and most SaaS affiliate norms; adjust to your actual agreement.
+
+### Step 2 — Expose to GTM
+
+Create First-Party Cookie variables:
+
+- `Cookie - affiliate_id` (reading `_aff_aff` — or your canonical parameter)
+- Consolidate multiple sources in a Custom JavaScript variable if you accept both `aff` and `ref`:
+
+```javascript
+function () {
+  var order = ['_aff_aff', '_aff_ref', '_aff_partner', '_aff_pid'];
+  for (var i = 0; i < order.length; i++) {
+    var m = document.cookie.match(new RegExp('(?:^|; )' + order[i] + '=([^;]*)'));
+    if (m) return decodeURIComponent(m[1]);
+  }
+  return undefined;
+}
+```
+
+### Step 3 — Attach to events
+
+Add `affiliate_id` → `{{Cookie - affiliate_id}}` as a parameter on your GA4 **purchase**, **generate_lead**, and **sign_up** tags. Register it as a **Custom Dimension** in GA4 Admin (Event scope) so it shows up in Explorations and Data Studio.
+
+### Step 4 — Dedupe against regular organic sessions
+
+If `affiliate_id` is present, GA4 will still parse the session medium from UTMs or referrer. Two clean conventions:
+
+- **Partners append UTMs as well.** `?aff=creator-alex&utm_source=creator-alex&utm_medium=affiliate` — then GA4 channel grouping handles the medium natively, and `affiliate_id` exists purely for CRM / finance joins.
+- **Create a custom channel group** in GA4 → Admin → Data display → Channel groups, with a rule: `First user source matches regex ^(creator|partner)-` → channel `Affiliate`.
+
+Keep partner-side reporting (the affiliate dashboard) as the commission source of truth; GA4 is your internal spend-effectiveness view.
+
+## Part B — Outbound affiliate clicks
+
+### Step 1 — Mark affiliate links
+
+Apply a marker you can match cleanly. Pick one:
+
+- **`rel="sponsored"`** — the semantic choice, also good for SEO disclosure.
+- **`data-affiliate="{network}"`** — when you need to distinguish Amazon vs Impact vs AWIN.
+- **A known destination domain allow-list** — used as a fallback in the listener.
+
+Example:
+
+```html
+<a href="https://amazon.com/dp/B0..." rel="sponsored" data-affiliate="amazon">
+  Buy on Amazon
+</a>
+```
+
+### Step 2 — Listen and push
+
+Add a single delegated click listener. Because this fires on every click anywhere on the page, keep it cheap:
+
+```html
+<script>
+(function () {
+  var AFFILIATE_DOMAINS = /(amazon\.|awin1\.com|shareasale\.com|impact\.com|partnerize\.com|rakuten\.|cj\.com)/i;
+  var recent = {}; // dedupe cache
+
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest && e.target.closest('a');
+    if (!a || !a.href) return;
+
+    var isAffiliate =
+      a.rel && /\bsponsored\b/.test(a.rel) ||
+      a.dataset.affiliate ||
+      AFFILIATE_DOMAINS.test(a.href);
+    if (!isAffiliate) return;
+
+    // Deduplicate: same href within 2 seconds counts once.
+    var now = Date.now();
+    if (recent[a.href] && now - recent[a.href] < 2000) return;
+    recent[a.href] = now;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'affiliate_click',
+      affiliate_network: a.dataset.affiliate || 'unknown',
+      affiliate_destination: a.href,
+      affiliate_destination_host: (function () {
+        try { return new URL(a.href).hostname; } catch (_) { return ''; }
+      })(),
+      link_text: (a.textContent || '').trim().slice(0, 120),
+      page_path: location.pathname
+    });
+  }, true);
+})();
+</script>
+```
+
+### Step 3 — GTM trigger and tag
+
+<Steps>
+1. **Custom Event trigger** — event name `affiliate_click`.
+2. Data Layer Variables: `DLV - affiliate_network`, `DLV - affiliate_destination`, `DLV - affiliate_destination_host`, `DLV - link_text`.
+3. **GA4 Event tag**:
+   - Event name: `affiliate_click`
+   - Parameters:
+     - `affiliate_network` → `{{DLV - affiliate_network}}`
+     - `destination_host` → `{{DLV - affiliate_destination_host}}`
+     - `link_text` → `{{DLV - link_text}}`
+     - `page_path` → `{{Page Path}}`
+   - Trigger: the Custom Event trigger above.
+4. Register `affiliate_network` and `destination_host` as **Custom Dimensions** in GA4 if you want them in Explorations and Data Studio.
+</Steps>
+
+### Step 4 — Deduplication against double-tracking
+
+If you also have broader outbound-link tracking enabled, the same click may push both `click` (from enhanced measurement) and `affiliate_click`. That is fine — they are distinct events — but filter your affiliate dashboards on `event_name = 'affiliate_click'` only, and skip `click`. See [Track Anchor Clicks](/recipes/interaction-tracking/track-anchor-clicks/) for the related enhanced measurement overlap.
+
+## Testing
+
+<Steps>
+1. **Inbound**: visit `https://example.com/?aff=partner-TEST`. DevTools → Cookies shows `_aff_aff=partner-TEST`. Complete a purchase. GA4 DebugView shows `purchase` with `affiliate_id=partner-TEST`.
+2. **Outbound**: click an `<a rel="sponsored">` link. GA4 DebugView fires `affiliate_click` with `destination_host` populated.
+3. **Deduplication**: rapid-click the same link three times within a second. Only one event should appear.
+4. **Inbound + outbound same session**: visit with `?aff=X`, click an outbound link. Both tracking paths should coexist cleanly.
+5. In GA4 Explorations, build a table with `destination_host` × `event_count` to verify the shape you expect.
+</Steps>
+
+## Common gotchas
+
+**Mixing inbound `ref` and `utm_source=referral`.** `ref` as a bare parameter is widespread but not standard. Prefer partners sending both `aff=X` and `utm_source=X` so GA4's built-in attribution and your custom dimension agree.
+
+**`target="_blank"` and the listener.** The delegated listener runs in the capture phase (third argument `true`), so it fires before the new-tab navigation. If you see missed events in some browsers, add `keydown` on Enter for keyboard navigation too.
+
+**Middle-click and context-menu open.** A middle-click on an affiliate link does not fire a `click` event in some browsers — use `auxclick` to cover it.
+
+**Client-side amateur-hour dedupe.** The `recent[a.href]` object grows without bound on heavy scrolling pages. For pages with hundreds of affiliate links, clear the cache periodically (`setInterval(() => recent = {}, 60000)`).
+
+**Commission parity.** The affiliate network is the commission truth. GA4 will undercount (consent-declined users, ad-blockers) and sometimes over-count (bot traffic). Reconcile monthly; do not expect perfect match.
+
+**Privacy and disclosure.** `rel="sponsored"` is a search-engine disclosure, not a consent signal. Outbound click tracking still needs the visitor's analytics consent.
+
+<CardGrid>
+  <LinkCard title="Track Anchor Clicks" href="/recipes/interaction-tracking/track-anchor-clicks/" description="General outbound link tracking — scope and conflict-of-events background." />
+  <LinkCard title="Transfer UTM Parameters" href="/recipes/cross-domain-setup/transfer-utm-parameters/" description="Same cookie mechanics, applied to UTMs." />
+  <LinkCard title="Click ID Preservation" href="/recipes/cross-domain-setup/click-id-preservation/" description="Capture gclid / fbclid / msclkid / ttclid with the same pattern." />
+  <LinkCard title="Offline Conversion Import" href="/recipes/ecommerce-conversions/offline-conversion-import/" description="Feed affiliate-attributed conversions back into Google Ads." />
+  <LinkCard title="Cross-Domain Tracking" href="/client-side/tracking/cross-domain-tracking/" description="When affiliate partners send through shared domains." />
+</CardGrid>

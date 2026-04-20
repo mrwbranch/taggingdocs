@@ -11,6 +11,10 @@ Custom JavaScript Variables are the escape hatch in GTM's variable system. When 
 
 They are powerful enough to do almost anything. That power is also the problem — poorly written Custom JavaScript Variables are one of the most common sources of silent errors, performance issues, and unmaintainable containers. Use them thoughtfully, keep them small, and always wrap them in error handling.
 
+<Aside type="tip">
+If you're not comfortable with JavaScript as a language — closures, optional chaining, array methods, promises — read [JavaScript for Tag Managers](/resources/javascript-for-tag-managers/) first. This page assumes that foundation and focuses on the Custom JavaScript Variable patterns built on top.
+</Aside>
+
 ## How Custom JavaScript Variables work
 
 A Custom JavaScript Variable is a function you write that returns a value. When GTM needs the variable's value, it calls your function and uses the return value.

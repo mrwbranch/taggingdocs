@@ -13,8 +13,14 @@ Quick definitions for every major term you will encounter across this documentat
 
 ## A
 
+**A/B test** (CRO)
+A controlled experiment comparing two variants — a control (A) and a treatment (B) — to measure the causal impact of a change on a primary metric. Users are randomly assigned to one variant, exposure is tracked, and the difference in outcomes is evaluated for statistical significance. In GA4, implemented by pushing the variant assignment to the dataLayer and setting a user property so downstream events carry the variant. See [A/B Test Tracking](/recipes/testing/ab-test-tracking/).
+
 **Abstract Data Model**
 GTM's internal state machine that processes and stores dataLayer values. It is distinct from the `window.dataLayer` array — the array is a message queue, while the Abstract Data Model is the merged state that results from processing all those messages. Understanding the difference is critical for debugging sticky variable behavior. See [How GTM Works](/foundations/how-gtm-works/).
+
+**Ad exchange**
+A digital marketplace where advertisers and publishers transact ad inventory programmatically, usually via real-time bidding. DSPs bid into exchanges on behalf of advertisers; SSPs sell inventory into exchanges on behalf of publishers. Google's Display Network and Xandr are examples. Tagging work rarely touches exchanges directly, but they determine which pixel a user sees on a given ad impression.
 
 **Ad Storage** (`ad_storage`)
 A Google Consent Mode consent type that controls whether cookies and identifiers can be used for advertising purposes. When denied, Google Ads tags switch to cookieless pings. See [Google Consent Mode](/client-side/setup/google-consent-mode/).
@@ -22,8 +28,14 @@ A Google Consent Mode consent type that controls whether cookies and identifiers
 **Ad User Data** (`ad_user_data`)
 A Google Consent Mode v2 consent type that controls whether user data can be sent to Google for advertising purposes. Required for EU users under the Google EU User Consent Policy. See [Google Consent Mode](/client-side/setup/google-consent-mode/).
 
+**Advertiser**
+The party paying to place ads. Operates demand-side tools (DSPs, Google Ads) to buy impressions from publishers via ad exchanges. Distinct from the publisher, who sells ad inventory. In tagging work, the advertiser is typically who owns the GTM container and the conversion tags.
+
 **Analytics Storage** (`analytics_storage`)
 A Google Consent Mode consent type that controls whether cookies can be used for analytics (GA4). When denied, GA4 still sends cookieless pings to enable behavioral modeling. See [Google Consent Mode](/client-side/setup/google-consent-mode/).
+
+**Attention mechanism** (AI)
+The architectural component inside a transformer that lets the model weight different parts of the input when producing each output token. The "attention is all you need" insight enabled modern LLMs by replacing recurrent processing with parallelizable attention. Relevant to technical marketers only as context — it explains why LLMs can answer questions about long documents without reading them sequentially.
 
 **Audience** (GA4)
 A segment of users defined by behavior, demographics, or custom conditions, usable for remarketing in Google Ads and Floodlight, and as a basis for comparisons in GA4 reports. Audiences are evaluated against historical data and update as users qualify or disqualify. See [Audiences](/ga4/configuration/audiences/).
@@ -72,8 +84,11 @@ The deployable GTM unit. A container contains all your tags, triggers, variables
 **Container Snippet**
 The two-part HTML code you install on your site to load GTM. The `<script>` tag in `<head>` loads the container asynchronously; the `<noscript>` tag after `<body>` provides an iframe fallback for non-JS environments. See [Container Installation](/client-side/setup/container-installation/).
 
+**Context window** (AI)
+The maximum amount of text (measured in tokens) an LLM can process in a single request. Modern models range from a few thousand to several million tokens. Once a conversation or document exceeds the window, the oldest content is truncated or summarized. Matters for tagging work if you're feeding documentation into an AI assistant — fitting the site's `llms.txt` into the window determines how well the assistant can reason about your setup. See [MCP Server](/mcp/).
+
 **Conversion** (GA4)
-An event marked as a conversion in GA4. Any event can be marked as a conversion in Admin → Events. Conversions appear in standard reports, can be imported into Google Ads, and are used for attribution. See [Conversions](/ga4/configuration/conversions/).
+An event marked as a conversion in GA4. Renamed to **Key Event** in March 2024; the terms refer to the same concept. Any event can be marked as a key event in Admin → Events. Key events appear in standard reports, can be imported into Google Ads, and are used for attribution. See [Key Events](/ga4/configuration/key-events/).
 
 **Core Web Vitals (CWV)**
 Three Google-defined page experience metrics: LCP (Largest Contentful Paint), INP (Interaction to Next Paint), and CLS (Cumulative Layout Shift). Used as ranking signals in Google Search and as indicators of real user experience. See [Browser APIs for Tracking](/foundations/browser-apis-for-tracking/).
@@ -94,17 +109,50 @@ A user-defined numeric measurement collected on events. Examples: scroll depth p
 
 ## D
 
+**Data broker**
+A company that collects personal data from many sources and sells or licenses it to other organizations. Distinct from data controllers (who collect data directly from users) and data processors (who handle data on behalf of controllers). Under GDPR and CCPA, data brokers face specific disclosure and opt-out requirements. Relevant when evaluating third-party enrichment vendors — the vendor's status as a broker changes what consent and contracts you need.
+
+**Data controller** (GDPR)
+Under GDPR, the party that determines the purposes and means of processing personal data. The controller is legally responsible for compliance with data protection law, even when processing is delegated to a processor. The website operator is almost always a controller for the data their tags collect. See [Consent & Privacy](/consent/).
+
+**Data lake**
+A storage system that holds raw data in its original format, without enforcing a schema on write. Contrast with a data warehouse, which stores structured data optimized for querying. GA4's BigQuery export behaves like a hybrid — raw events are streamed in, but the schema is known and enforced. See [BigQuery Export](/ga4/bigquery/).
+
 **Data Layer Variable** (GTM variable type)
 A GTM variable that reads a value from GTM's internal Abstract Data Model by key name. Use dot notation for nested values: `ecommerce.transaction_id` reads the `transaction_id` from inside the `ecommerce` object. This is the primary way tags access data pushed via `dataLayer.push()`. See [Data Layer Variables](/client-side/variables/datalayer-variables/).
 
+**Data management platform** (DMP)
+A system that aggregates audience data from multiple sources (first-party site data, third-party cookies, CRM) and makes it available for targeting in ad platforms. Cookie-based DMPs lost most of their power with Safari ITP and Chrome's third-party cookie deprecation. First-party-only audience platforms (sometimes marketed as CDPs) have taken the role for most practical purposes.
+
+**Data processor** (GDPR)
+Under GDPR, a party that processes personal data on behalf of a controller. Typical processors in a tagging context: Google (for GA4), Meta (for the Conversions API), your sGTM hosting provider. Processors must sign a Data Processing Agreement with the controller and can only process data within the controller's documented instructions. See [Consent & Privacy](/consent/).
+
 **Data Stream** (GA4)
 A source of data flowing into a GA4 property. Each website, iOS app, or Android app requires its own data stream. The Measurement ID (`G-XXXXXXXXXX`) belongs to a data stream, not to the property. See [Data Streams](/ga4/fundamentals/data-streams/).
+
+**Data Studio**
+Google's lightweight, free (and paid "Pro" tier) dashboarding product for visualising data from BigQuery, GA4, Google Sheets and other sources. Originally launched as Google Data Studio, renamed to Looker Studio in October 2022 to align with Google's Looker BI brand, then renamed back to Data Studio on 2026-04-11 when Google chose to differentiate Data Studio (self-service analytics) from Looker (governed enterprise BI). Same product throughout the naming cycle. See [Data Studio Patterns](/ga4/bigquery/data-studio-patterns/).
+
+**Data subject** (GDPR)
+Under GDPR, the individual whose personal data is being processed. Data subjects have rights to access, rectification, erasure, and portability of their data, exercised via a Data Subject Access Request (DSAR). In tagging, this maps to the end user of the site whose events are being collected.
+
+**Data subject access request** (DSAR)
+A formal request from a data subject exercising their GDPR or CCPA rights — typically to see what data has been collected about them, to correct it, or to delete it. GA4 provides a [User Deletion API](/ga4/apis/user-deletion-api/) for the deletion case; other parts of a DSAR (access, portability) require querying BigQuery directly or using the admin tooling of your sGTM hosting provider.
+
+**Data warehouse**
+A storage system that holds structured, schema-enforced data optimized for analytical queries. BigQuery is the data warehouse most relevant to tagging work — where GA4 exports flow and where cross-channel data gets joined for attribution and reporting. See [BigQuery Export](/ga4/bigquery/).
 
 **dataLayer**
 A JavaScript array on `window` that acts as a communication bus between your website and GTM. Code on your site pushes structured event objects into the array; GTM processes them and fires tags accordingly. The dataLayer persists across the page session and GTM merges its contents into an internal state model. See [DataLayer Deep Dive](/foundations/datalayer-deep-dive/).
 
 **Debug View** (GA4)
 A real-time event stream in GA4 that shows events as they arrive from a device in debug mode. Activated by the `debug_mode` parameter or the Google Analytics Debugger Chrome extension. Essential for validating GA4 event implementations. See [DebugView](/ga4/troubleshooting/debugview/).
+
+**Demand-side platform** (DSP)
+A system advertisers use to buy ad impressions programmatically across many ad exchanges and publishers. DSPs take an advertiser's targeting rules and bid strategy and execute them across the open web in real time. Google's DV360, The Trade Desk, and Amazon DSP are major players. Tagging work feeds DSPs audiences (via DMP or server-side events) and measures conversions back (via pixels or server-side conversion APIs).
+
+**Denormalize**
+To combine data from multiple related tables into a single, wider table — trading storage efficiency for query simplicity and speed. GA4's BigQuery export is heavily denormalized: each event row already contains the user, session, device, geo, and custom dimension fields, so analytical queries rarely need joins. See [BigQuery Schema](/ga4/bigquery/schema-reference/).
 
 ---
 
@@ -113,8 +161,14 @@ A real-time event stream in GA4 that shows events as they arrive from a device i
 **Ecommerce** (dataLayer)
 The standardized data structure in the dataLayer for ecommerce events, following Google's Enhanced Ecommerce specification. Contains an `items` array with product details and event-level fields like `value`, `currency`, and `transaction_id`. The `ecommerce` object should be cleared (`ecommerce: null`) before every new push. See [DataLayer Deep Dive](/foundations/datalayer-deep-dive/).
 
+**Embedding** (AI)
+A numeric vector representation of text (or images, audio) in a high-dimensional space where semantic similarity corresponds to geometric distance. Used in semantic search, RAG systems, and similarity-based recommenders. Appears in tagging work when building site-search analytics that understand intent rather than just keywords.
+
 **Environment** (GTM)
 A named deployment target that serves a specific container version. The built-in environments are Live (published), Latest (most recent version), and Now Editing (current workspace). Custom environments let you serve specific versions to staging or QA servers. See [Environments](/client-side/management/environments/).
+
+**ePrivacy Directive**
+EU legislation that governs cookies and other identifiers stored on users' devices, often summarized as "the cookie law." Separate from and predates GDPR. It's the legal basis that requires consent before dropping non-essential cookies — which is why your GTM consent banner exists at all. A replacement ePrivacy Regulation has been in draft since 2017. See [Consent & Privacy](/consent/).
 
 **Event** (GA4)
 The primary data unit in GA4. Everything is an event — page views, purchases, clicks, errors. Events have a name (up to 40 characters) and up to 25 parameters. Some event names are reserved by Google (`page_view`, `purchase`, `session_start`) and collect automatically in certain configurations. See [Events, Parameters & Properties](/ga4/fundamentals/events-parameters-properties/).
@@ -132,8 +186,14 @@ See *Blocking Trigger*.
 **First-Party Cookie**
 A cookie set on the same domain as the website the user is visiting, as opposed to a third-party cookie set by an external domain. GA4 and sGTM deployments can be configured to use first-party cookies, which are less affected by browser ITP/ETP restrictions. See [Cross-Domain Tracking](/client-side/tracking/cross-domain-tracking/).
 
+**Flicker** (CRO)
+Also called FOOC (flash of original content). The brief moment during an A/B test when the control variant is rendered before the treatment variant is applied, creating a visible flash as the page reflows. Prevented with an anti-flicker snippet that hides the body until the variant is applied, or by assigning variants server-side before the HTML is returned. See [Flicker and FOUC Prevention](/recipes/testing/flicker-and-fouc-prevention/).
+
 **Folder** (GTM)
 An organizational container within GTM for grouping related tags, triggers, or variables. Folders do not affect firing behavior — they are purely organizational. Use them to group by platform, feature, or status. See [Folder Organization](/client-side/management/folder-organization/).
+
+**Frontier model** (AI)
+Informal term for the largest, most capable LLMs at the current state of the art — Anthropic's Claude Opus, OpenAI's GPT, Google's Gemini Ultra, and equivalent models. Distinct from smaller, faster, cheaper models (Haiku, GPT-mini) that trade capability for speed and cost. Relevant when choosing which model to wire up to MCP for querying your site.
 
 ---
 
@@ -141,6 +201,12 @@ An organizational container within GTM for grouping related tags, triggers, or v
 
 **GA4** (Google Analytics 4)
 Google's current analytics platform, successor to Universal Analytics. GA4 uses an event-based data model (everything is an event), natively integrates with BigQuery, and is designed for a privacy-centric, cookieless future. See [GA4 section](/ga4/).
+
+**Generative AI**
+AI systems that produce new content (text, images, audio, code) rather than classifying or scoring existing content. Most relevant generative systems today are transformer-based LLMs. In tagging, generative AI shows up as coding assistants (for writing Custom HTML tags, SQL queries, regex patterns) and as consumers of your documentation via MCP or llms.txt. See [MCP Server](/mcp/).
+
+**Git**
+A distributed version control system created by Linus Torvalds in 2005. The standard tool for tracking changes to code. Relevant to tagging when managing GTM as code — your container configuration is exported to JSON and committed to a Git repository, which provides audit history, diffing, and rollback. See [GTM as Code](/resources/gtm-as-code/).
 
 **GTM ID** (also: Container ID)
 The unique identifier for a GTM container, in the format `GTM-XXXXXXX`. Used in the container snippet URL, in workspaces and version references, and to reference the container in the browser console (`google_tag_manager['GTM-XXXXXXX']`).
@@ -158,8 +224,17 @@ The built-in GTM event that fires when the window `load` event fires (all resour
 
 ## H
 
+**Hallucination** (AI)
+When an LLM produces content that sounds authoritative but is factually wrong — inventing library functions that don't exist, citing papers that were never published, or describing a GTM feature that doesn't work the way it claims. Always verify AI-generated tag code, SQL, and regex patterns against authoritative documentation before deploying.
+
 **History Change**
 A GTM trigger type that fires when the browser's URL changes without a full page load — the pattern used by SPAs (React, Vue, Angular applications). Responds to `pushState`, `replaceState`, and `hashchange` events. See [History Change Triggers](/client-side/triggers/history-change-triggers/).
+
+**HTTP request**
+A message sent from a client (browser, server) to a server requesting a resource or action. Every tag fire, every GA4 event, every sGTM call is an HTTP request. Understanding HTTP status codes (200/301/302/4xx/5xx) and headers (cookies, CORS, cache-control) is a prerequisite for debugging tagging infrastructure.
+
+**Hypothesis** (CRO)
+A testable prediction about how a change will affect user behavior, structured as "we believe [change] will cause [outcome] because [mechanism]." A well-formed hypothesis names the variant, the metric it's expected to move, the expected direction and size of the effect, and the mechanism you think produces the effect. Tests run without a hypothesis produce numbers but not learning. See [Experimentation Fundamentals](/recipes/testing/experimentation-fundamentals/).
 
 ---
 
@@ -170,10 +245,23 @@ The Core Web Vital that replaced FID (First Input Delay) in March 2024. INP meas
 
 ---
 
+## K
+
+**Knowledge cutoff** (AI)
+The date after which an LLM has no training data. A model with a January 2025 cutoff won't know about GA4 features released later, changes to Consent Mode, or GTM API endpoints that shipped after that date. Always check the cutoff when asking an AI about current tagging best practices — pair it with MCP or a recent documentation feed via llms.txt to fill the gap. See [MCP Server](/mcp/).
+
+---
+
 ## L
+
+**Large Language Model** (LLM)
+A transformer-based AI model trained on large text corpora to predict the next token given preceding context. Modern LLMs (Claude, GPT, Gemini) are useful for generating and explaining tagging code, SQL queries, and regex patterns. Their limitations — knowledge cutoffs, hallucinations, context-window limits — matter when you're trusting them with production configurations. See [MCP Server](/mcp/).
 
 **LCP** (Largest Contentful Paint)
 A Core Web Vital that measures when the largest image or text block in the viewport becomes visible. A score under 2.5 seconds is good. Large images loaded by GTM tags (tracking pixels, banner scripts) can delay LCP if they block render. See [Browser APIs for Tracking](/foundations/browser-apis-for-tracking/).
+
+**Library**
+A reusable piece of code that provides functionality to other programs. jQuery, React, Google's `gtag.js`, and Meta's `fbevents.js` are all libraries. Custom HTML tags often depend on libraries already loaded on the page; loading a library just for one tag is almost always the wrong choice. See [Custom HTML Tags](/client-side/tags/custom-html-tags/).
 
 **Lookup Table** (GTM variable type)
 A GTM variable that maps input values to output values. Provide an input variable and a table of input → output pairs. Useful for mapping page paths to section names, product IDs to category names, or any other enumerated mapping. See [Lookup Tables](/client-side/variables/lookup-tables/).
@@ -188,6 +276,12 @@ The identifier for a GA4 data stream, in the format `G-XXXXXXXXXX`. Used in GTM'
 **Measurement Protocol** (GA4)
 An HTTP API that lets you send events directly to GA4 from any environment — server, IoT device, or offline queue — without a browser. Used for server-side event deduplication, backend events (refunds, subscription cancellations), and offline conversion import.
 
+**Minimum detectable effect** (MDE)
+The smallest change in a metric an A/B test is powered to reliably detect, given its sample size, baseline conversion rate, and significance threshold. Tests with too-small sample sizes have high MDEs — they can only "see" large effects and will miss real but modest improvements. Computing the required sample size for a target MDE is the first step of test design. See [Sample Size and MDE](/recipes/testing/sample-size-and-mde/).
+
+**Multivariate test** (MVT)
+An experiment that varies multiple elements simultaneously (headline × button colour × hero image, for example) to measure their individual and combined effects. MVTs need dramatically larger sample sizes than simple A/B tests — every combination is effectively its own variant. Prefer sequential A/B tests unless you have the traffic and a clear reason to test interactions.
+
 **MutationObserver**
 A browser API that watches for DOM changes (added nodes, removed nodes, attribute changes). Useful in GTM Custom HTML tags for detecting dynamically loaded content that standard triggers would miss. See [Browser APIs for Tracking](/foundations/browser-apis-for-tracking/).
 
@@ -198,22 +292,64 @@ A browser API that watches for DOM changes (added nodes, removed nodes, attribut
 **Page View** (trigger type)
 GTM's earliest-firing built-in trigger type. Fires when GTM loads, before DOM Ready and Window Loaded. Page View triggers are appropriate for tags that need to fire as early as possible and do not depend on the DOM being available.
 
+**Partition** (BigQuery)
+A division of a table along a column (typically a date) so queries that filter on that column only scan the relevant partition instead of the full table. GA4's BigQuery export is partitioned by event date — queries that filter `_TABLE_SUFFIX BETWEEN 'YYYYMMDD' AND 'YYYYMMDD'` are dramatically cheaper and faster than unfiltered scans. See [SQL Primer](/ga4/bigquery/sql-primer/).
+
 **Preview Mode**
 GTM's built-in debugging environment. Activated via the "Preview" button, it connects Tag Assistant to your site and shows every event, trigger evaluation, and tag fire in real time — visible only in your browser session, not to real users. See [Preview Mode](/client-side/debugging/preview-mode/).
 
 **Priority** (tag firing priority)
 A numeric value (default 0) that determines tag execution order when multiple tags fire on the same trigger. Higher priority numbers fire first. Use priority carefully — it creates implicit dependencies that are hard to trace. See [Tag Firing Priority](/client-side/tags/tag-firing-priority/).
 
+**Prompt**
+The input text given to an LLM to elicit a response. In tagging work, prompts typically frame a task ("generate the GA4 event payload for..."), provide context (existing tag code, dataLayer structure), and specify output format. Well-crafted prompts are the difference between useful and useless AI assistance.
+
+**Protocol**
+A set of rules governing how data is exchanged between systems. HTTP is the protocol for web requests, HTTPS adds transport encryption, TLS is the underlying encryption protocol. In tagging, protocol mismatches (HTTP content on an HTTPS page, insecure tag URLs) are a common source of Mixed Content errors that silently drop events.
+
+**Publisher**
+The party selling ad inventory — the website, app, or channel where ads appear. Publishers use SSPs to sell inventory into ad exchanges, where DSPs bid on it for advertisers. Sites running GA4 for their own analytics are almost always publishers from an ad-tech perspective.
+
 ---
 
 ## R
 
+**Real-time bidding** (RTB)
+The programmatic mechanism by which ad impressions are auctioned and sold in milliseconds, between a user requesting a page and the ad rendering. Publishers send bid requests (through SSPs) into ad exchanges; advertisers' DSPs bid in response based on targeting rules. The winning bid's creative and tracking pixels render on the user's page. See [How Programmatic Advertising Works](/integrations/how-programmatic-advertising-works/).
+
+**Redirect test** (CRO)
+An A/B test implemented by redirecting a percentage of users to a different URL (for example, `example.com/pricing` vs `example.com/pricing-v2`). Distinct from client-side tests that mutate the same URL in the browser. Redirect tests handle heavy layout changes cleanly but introduce SEO considerations (canonical tags, `noindex` on variants) and attribution complications. See [Redirect vs. Client-Side Tests](/recipes/testing/redirect-vs-client-side-tests/).
+
 **Regex Table** (GTM variable type)
 Like a Lookup Table, but uses regular expressions as the input conditions. Useful for extracting category names from dynamic URL patterns, matching multiple URL variants to a single label, or any case where exact string matching is insufficient. See [Regex Tables](/client-side/variables/regex-tables/).
+
+**Relational** (database)
+A database model that organizes data into tables with defined relationships (foreign keys), enforced by a schema. Most operational databases (PostgreSQL, MySQL) are relational. BigQuery is technically relational but heavily denormalized — the GA4 export uses nested/repeated fields instead of joins across tables. See [BigQuery Schema](/ga4/bigquery/schema-reference/).
+
+**Render**
+The process by which a browser turns HTML, CSS, and JavaScript into the pixels a user sees. Tag timing interacts with render — tags that block the main thread delay render, tags loaded asynchronously avoid the delay but may fire after the user has already interacted. See [Container Loading Strategies](/client-side/setup/container-loading-strategies/).
+
+**Representative sample** (CRO)
+A subset of users whose characteristics reflect the full population you're making decisions about. A test that only exposes power users to the variant isn't representative — the results won't generalize. For experiments to give valid answers, the assignment mechanism must not correlate with the metric you're measuring.
+
+**Retrieval-Augmented Generation** (RAG)
+A pattern where an LLM is given access to a document store at inference time, retrieves relevant passages for the current query, and grounds its response in those passages. Reduces hallucinations and works around the knowledge cutoff. MCP tool calls are effectively a structured form of RAG — the model retrieves from your GTM container directly rather than relying on training data. See [MCP Server](/mcp/).
+
+**ROAS** (Return on ad spend)
+Revenue attributed to an ad campaign divided by the ad spend for that campaign. Usually expressed as a ratio (4× ROAS) or percentage (400%). Ad platforms' bidding algorithms optimize for ROAS when conversion value is tracked correctly, which is why reliable server-side conversion tracking with the correct `value` is so commercially important.
 
 ---
 
 ## S
+
+**Sample size** (CRO)
+The number of users required in each variant of an A/B test to reliably detect a given minimum detectable effect at a given significance level. Undersized tests either miss real effects (low power) or stop early on noise (peeking bias). Calculate sample size before launching, not after. See [Sample Size and MDE](/recipes/testing/sample-size-and-mde/).
+
+**Schema** (data)
+A formal definition of the structure of data — the fields, types, and relationships a dataset contains. Distinct from Schema.org, which is a vocabulary for annotating web pages with structured data for search engines. The GA4 BigQuery export has a fixed schema; custom dimensions appear as nested records inside `event_params`. See [BigQuery Schema](/ga4/bigquery/schema-reference/).
+
+**SDK** (Software Development Kit)
+A set of libraries, tools, and documentation that helps developers integrate with a platform or service. Google's `gtag.js`, Firebase SDK, Meta's `fbevents.js`, and Stripe.js are SDKs you'll encounter in tagging work. An SDK is not a GTM tag — but GTM tags often wrap SDK initialization for easier deployment.
 
 **sendBeacon**
 A browser API (`navigator.sendBeacon()`) that sends a small HTTP POST request asynchronously and reliably during page unload, without blocking navigation. Used for exit tracking, engagement reporting, and any data that needs to be delivered when the user is leaving the page. See [Browser APIs for Tracking](/foundations/browser-apis-for-tracking/).
@@ -227,6 +363,12 @@ A period of user activity on your site or app. A new session begins when a user 
 **Stale Variable**
 A dataLayer value that persists in GTM's internal model from a previous event and is read incorrectly on a subsequent event. Particularly common in SPAs where page transitions do not clear the dataLayer. The fix is explicitly pushing `null` or the new value on each route change. See [DataLayer Deep Dive](/foundations/datalayer-deep-dive/).
 
+**Statistical significance** (CRO)
+The probability that an observed difference between variants is not due to random chance, usually expressed as a p-value. A p-value below 0.05 (the conventional threshold) means there's less than a 5% chance the difference would appear by luck alone. Significance says nothing about the *size* of the effect — a statistically significant 0.1% lift may not be worth implementing. See [Sample Size and MDE](/recipes/testing/sample-size-and-mde/).
+
+**Supply-side platform** (SSP)
+A system publishers use to sell ad inventory programmatically across ad exchanges. The SSP's job is to get the publisher the highest price for each impression by soliciting bids from many DSPs simultaneously. Google Ad Manager, Magnite, and PubMatic are major SSPs.
+
 ---
 
 ## T
@@ -239,6 +381,18 @@ Google's Chrome extension and web-based tool for debugging GTM implementations. 
 
 **Tag Sequencing**
 A GTM feature that enforces firing order between tags. A tag can specify a "setup tag" (must fire before) and/or a "teardown tag" (fires after). Used for consent enforcement, data enrichment, or cleanup. See [Tag Sequencing](/client-side/tags/tag-sequencing/).
+
+**Technical debt**
+The implied cost of future rework caused by choosing a quick-but-suboptimal solution now instead of a better one that would take longer. In GTM: undocumented Custom HTML tags, inconsistent naming conventions, variables nobody knows are still referenced, orphaned triggers on paused tags. Debt compounds — the longer it sits, the more context is lost, the harder cleanup becomes.
+
+**Test coverage**
+The fraction of code paths exercised by automated tests. Low coverage means bugs hide in untested code. In tagging, coverage applies most directly to custom templates (where the built-in test runner supports `runCode()` and `mock()`) and to dataLayer implementations (where Playwright or Jest assertions validate that the right events fire with the right parameters). See [Testing Custom Templates](/templates/testing-custom-templates/).
+
+**Token** (AI)
+The unit an LLM processes and generates. A token is typically a word, subword, or punctuation mark — roughly 4 characters of English on average. Context windows, pricing, and speed are measured in tokens. A GA4 event name costs ~1-3 tokens; a full event payload might be ~50 tokens. Distinct from other kinds of tokens (CSRF, JWT) that appear in auth contexts.
+
+**Transformer**
+The neural-network architecture underlying modern LLMs, introduced in the 2017 "Attention is All You Need" paper. Transformers use self-attention to relate every token in the input to every other token, enabling them to handle long-range dependencies efficiently. What matters for tagging work is that transformer-based LLMs are what's actually being wired to your MCP server or consuming your llms.txt.
 
 **Trigger**
 An event listener with filter conditions. When an event occurs in the browser, GTM evaluates all triggers registered for that event type. Triggers whose conditions are met fire their associated tags. See [Tags, Triggers & Variables](/foundations/tags-triggers-variables/).
@@ -263,12 +417,21 @@ A named slot in GTM that resolves to a value at evaluation time. Variables make 
 **Version** (GTM)
 A snapshot of the container's full configuration at a given point in time, created when you publish a workspace. Versions are numbered sequentially and stored permanently. You can roll back to any version instantly from the Versions list. See [Version Control](/client-side/management/version-control/).
 
+**Version control**
+A system for tracking changes to files over time, allowing multiple contributors to coordinate and roll back to prior states. Git is the dominant version control system. GTM itself has an internal version concept (every publish creates a snapshot), but exporting the container to JSON and tracking it in Git adds diffing, PR review, and external audit history. See [GTM as Code](/resources/gtm-as-code/).
+
+**Viewport**
+The visible area of a web page in the browser — what the user can see without scrolling. Relevant in tagging when tracking element visibility (does the hero image enter the viewport before the user bounces?) and in responsive design decisions (does the mobile viewport trigger different tag behavior?). See [Element Visibility Trigger](/client-side/triggers/element-visibility-trigger/).
+
 **Virtual Pageview**
 An analytics hit that represents a page view in a single-page application, where no actual page reload occurred. Implemented by pushing a `page_view` event to the dataLayer after a client-side route change. See [SPA Setup](/client-side/setup/spa-setup/).
 
 ---
 
 ## W
+
+**Walled garden**
+An ad platform that keeps data inside its own ecosystem and doesn't share it with other systems. Google, Meta, and Amazon are the canonical walled gardens — you get conversion reporting inside their interfaces but can't export user-level data to your own warehouse. Walled gardens increasingly dominate ad spend because the data-rich, first-party nature of their platforms outperforms open-web RTB on almost every dimension.
 
 **Workspace**
 A draft environment inside a GTM container where you make configuration changes before publishing. Changes in a workspace are invisible to users until you submit (publish) the workspace. Multiple workspaces can exist simultaneously for parallel work. See [Workspaces](/client-side/management/workspaces/).

@@ -1,0 +1,277 @@
+---
+title: "Google Ads Data Manager API"
+description: "The new ingestion path for offline conversions, customer lists, and enhanced conversions for leads — how it replaces older upload paths and how to authenticate."
+sidebar:
+  order: 19
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+Google spent the last three years consolidating its data-ingestion APIs. What used to be a patchwork — `ConversionUploadService` in the Google Ads API for offline conversions, `OfflineUserDataJobService` for Customer Match, separate CSV upload flows in the Ads UI, and yet another endpoint for enhanced conversions — is now a single front door: the Data Manager API, generally available since 2024.
+
+If you are building CRM-to-Ads pipelines in 2026, this is the API you should be using. The older paths still work, but Google has signalled that all new ingestion features will land in Data Manager first, and some of them will not be backported.
+
+*Valid as of April 2026, Google Ads Data Manager API.*
+
+## What the Data Manager API is
+
+A single HTTP ingestion API for all the ways you push customer data to Google Ads:
+
+- Offline conversion import (conversions that happen off-site — phone calls, in-store purchases, SaaS signups that convert later)
+- Enhanced Conversions for Leads (hashed form-capture data matched to ad clicks at conversion time)
+- Customer Match audience list uploads (CRM segments pushed to Ads for targeting)
+- Audience membership updates (adding and removing users from Customer Match lists)
+- Conversion adjustments (retract or restate previously uploaded conversions)
+
+One API, one auth surface, one set of match-key conventions. That is the pitch, and it mostly holds.
+
+## How it differs from the legacy paths
+
+| Legacy path | Data Manager API |
+|---|---|
+| Google Ads API `ConversionUploadService` | Data Manager ingestion endpoints |
+| Customer Match via `OfflineUserDataJobService` | Data Manager audience endpoints |
+| Manual CSV upload in the Ads UI | API upload, same shape as programmatic |
+| Enhanced Conversions via Ads API or `gtag.js` | Data Manager ingestion with `enhanced_conversion` type |
+| Separate OAuth scopes per product | One scope covers all Data Manager operations |
+| Separate rate limits per surface | Unified quota across ingestion types |
+
+The legacy paths still work for existing integrations. Google has not announced a deprecation timeline. But the newer features — things like conversion value rules applied at ingestion time — only ship in Data Manager.
+
+## Use cases
+
+Four common jobs, one API surface.
+
+<Tabs>
+<TabItem label="Offline conversions">
+
+The classic use case. User clicks an ad, you capture the GCLID, they convert off-site (phone call, sales meeting, in-store purchase). Your CRM batches the conversions and uploads them to Google Ads overnight.
+
+Payload shape:
+
+```json
+{
+  "conversion_action": "customers/123/conversionActions/456",
+  "gclid": "Cj0KCQjw...",
+  "conversion_date_time": "2026-04-19 14:32:00+00:00",
+  "conversion_value": 1200.00,
+  "currency_code": "USD"
+}
+```
+
+You need the GCLID captured at ad-click time and stored against the eventual conversion. Without GCLID, you cannot do this kind of upload — you need Enhanced Conversions for Leads instead.
+
+</TabItem>
+<TabItem label="Enhanced Conversions for Leads">
+
+When you do not have a GCLID — the user filled out a form, you captured their email, they converted days later — hash the form-capture data and let Google match it to the original ad click.
+
+```json
+{
+  "conversion_action": "customers/123/conversionActions/456",
+  "user_identifiers": [
+    { "hashed_email": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }
+  ],
+  "conversion_date_time": "2026-04-19 14:32:00+00:00",
+  "conversion_value": 1200.00,
+  "currency_code": "USD"
+}
+```
+
+Match rates depend heavily on how normalized your hashes are. See the match-key section below.
+
+</TabItem>
+<TabItem label="Customer Match">
+
+Upload a CRM segment as a Customer Match audience list. Google matches hashed identifiers to signed-in Google accounts. Push a full list on initial upload, then add or remove members as your segment changes. Lists have a minimum match threshold (historically ~1,000 matched members) before they become targetable.
+
+</TabItem>
+<TabItem label="Conversion adjustments">
+
+Retract a previously uploaded conversion (refund) or restate its value (partial refund, upsell). Adjustments reference the original conversion by conversion action ID, timestamp, and order ID. They are not idempotent — send the same adjustment twice and it applies twice.
+
+</TabItem>
+</Tabs>
+
+## Required match keys
+
+Every identifier you send for matching must be SHA-256 hashed. Before hashing, you must normalize.
+
+<Comparison leftTitle="Correct: normalize, then hash" rightTitle="Wrong: hash without normalizing" leftType="good" rightType="bad">
+  <Fragment slot="left">
+    ```javascript
+    const norm = (s) => s.trim().toLowerCase();
+    const hash = (s) => sha256(s);
+
+    hash(norm('  User@Example.com '));
+    // Matches Google's normalized hash.
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```javascript
+    const hash = (s) => sha256(s);
+
+    hash('  User@Example.com ');
+    // Different hash entirely.
+    // Google normalizes on their side,
+    // so your hash never matches.
+    ```
+  </Fragment>
+</Comparison>
+
+Per-field normalization rules:
+
+- **`email`**: trim whitespace, lowercase the entire string, then SHA-256.
+- **`phone`**: convert to E.164 format (`+14155551234`), strip spaces and punctuation, then SHA-256.
+- **`first_name`** and **`last_name`**: trim, lowercase, strip diacritics, then SHA-256. Each hashed separately.
+- **`country_code`**: ISO 3166-1 alpha-2 (`US`, `GB`, `DE`). Not hashed.
+- **`postal_code`**: lowercase, trim, preserve format (do not strip spaces in UK postcodes). Then SHA-256.
+
+Address-based matching requires first name, last name, country code, *and* postal code together. Any one of them missing and the address block is unusable.
+
+<Aside type="caution">
+Google's API will accept hashes that were not properly normalized. It will just not match them. You will see a successful upload response and zero matched conversions. Always run a test batch with a known-matching email address (one you have used in a recent logged-in Google session) before trusting your normalization.
+</Aside>
+
+## Authentication
+
+Two patterns, depending on whether a human is in the loop.
+
+**OAuth 2.0 user credentials.** For interactive tools, dashboards, or anything where a user grants access on demand. Standard OAuth flow: redirect to Google, user authorizes, you receive a refresh token, you exchange it for access tokens on each request.
+
+**Service accounts.** For scheduled jobs, CRM batch uploads, and anything server-to-server. You create a service account in Google Cloud, grant it access to the Ads account by adding its email as an Ads user, and authenticate requests with a JWT signed by the service account's key.
+
+Scopes you will need:
+
+- `https://www.googleapis.com/auth/adsdatamanager` — the Data Manager API scope.
+- `https://www.googleapis.com/auth/adwords` — required alongside Data Manager for conversion action lookups on the legacy Ads API surface.
+
+The admin-side step that catches everyone out: granting the service account access to the Ads account. It is not automatic. In Google Ads, Tools & Settings → Access and security → add the service account email address as a standard user.
+
+## A minimal ingestion example
+
+This is shape-only. The exact endpoint paths and field names shift across API versions — use Google's current Data Manager API reference for production payloads.
+
+<Tabs>
+<TabItem label="curl">
+
+```bash
+TOKEN=$(gcloud auth print-access-token)
+curl -X POST "https://datamanager.googleapis.com/v1/conversions:ingest" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customer_id": "1234567890",
+    "conversions": [{
+      "conversion_action": "customers/1234567890/conversionActions/987",
+      "gclid": "Cj0KCQjw...",
+      "conversion_date_time": "2026-04-19 14:32:00+00:00",
+      "conversion_value": 1200.00,
+      "currency_code": "USD"
+    }]
+  }'
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```javascript
+import { GoogleAuth } from 'google-auth-library';
+import crypto from 'node:crypto';
+
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+const hashEmail = (e) => sha256(e.trim().toLowerCase());
+
+const auth = new GoogleAuth({
+  scopes: ['https://www.googleapis.com/auth/adsdatamanager']
+});
+const client = await auth.getClient();
+
+const res = await client.request({
+  url: 'https://datamanager.googleapis.com/v1/conversions:ingest',
+  method: 'POST',
+  data: {
+    customer_id: '1234567890',
+    conversions: [{
+      conversion_action: 'customers/1234567890/conversionActions/987',
+      user_identifiers: [{ hashed_email: hashEmail('user@example.com') }],
+      conversion_date_time: '2026-04-19 14:32:00+00:00',
+      conversion_value: 1200.00,
+      currency_code: 'USD'
+    }]
+  }
+});
+console.log(res.data);
+```
+
+</TabItem>
+</Tabs>
+
+## Rate limits and batch sizes
+
+The exact numbers change, but the shape is stable:
+
+- Batch size ceilings in the thousands of records per request, not millions. Split large uploads.
+- Per-minute and per-day quotas at the account level. A single runaway job can exhaust the daily quota for the whole Ads account.
+- 429 responses on quota exhaustion, 5xx on transient backend issues. Exponential backoff with jitter handles both.
+- Validation errors return 4xx with a response body describing the specific field that failed. Never retry 4xx — fix the payload.
+
+Stape has a detailed post walking through real-world Data Manager API usage patterns, including quota handling and error classification — worth reading if you are building a production pipeline.
+
+## How it fits with sGTM
+
+Different job. sGTM forwards *live* events from browser to server to vendor. The Data Manager API ingests *offline* data — things that happened elsewhere and need to be reconciled with ad attribution.
+
+You often need both: sGTM for browser-side conversion events with proper consent handling, Data Manager API for CRM-sourced offline conversions and Customer Match. An ecommerce site might fire purchase conversions via sGTM for same-session attribution and reconcile refunds and long-tail subscription conversions via Data Manager two weeks later.
+
+## Trade-offs
+
+- **You still handle PII.** Normalizing and hashing happens on your side. Secure path from CRM to hash to API.
+- **OAuth refresh token management is fiddly.** Service accounts avoid most of this, but some Ads features still require user OAuth.
+- **Latency is not real-time.** Conversions appear in Ads reports within 24–48 hours.
+- **No replay API.** Wrong value uploaded? You do not delete — you submit a conversion adjustment.
+
+## Common mistakes
+
+### Hashing before normalizing
+
+The single most common bug. Your hashes look fine — they are valid SHA-256 — but they match nothing on Google's side because Google normalized before hashing and you did not. Always: trim, lowercase, *then* hash.
+
+### Uploading plaintext emails
+
+Under some legacy endpoints, plaintext uploads silently failed with a successful response. Data Manager rejects them with a 4xx — which is an improvement, but the error message can be cryptic. If you see a `USER_IDENTIFIER_INVALID` error, your first check is whether the email is hashed.
+
+### Missing `conversion_time_zone`
+
+Default time zone handling varies. If you upload conversions without an explicit time zone on the timestamp, you can end up with attribution drift — conversions appearing in the wrong day in Ads reports. Always include the offset in `conversion_date_time`.
+
+### Treating validation errors as transient
+
+4xx responses on validation errors will keep failing forever. Build your retry logic to distinguish 4xx (fix the payload) from 429/5xx (retry with backoff). Always log the response body on 4xx — it tells you exactly which field failed.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Google Ads Conversion Tracking"
+    description="The client-side and GTM-side foundations that Data Manager complements — Conversion Linker, Enhanced Conversions, dynamic remarketing."
+    href="/integrations/google-ads/"
+  />
+  <LinkCard
+    title="Meta CAPI Server-Side"
+    description="The conceptual sibling for non-Google offline ingestion — Meta's Conversions API and how it differs in shape and scope."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Server-Side Tagging"
+    description="Where live-event forwarding lives, and how Data Manager's offline-ingest role fits alongside it."
+    href="/server-side/"
+  />
+  <LinkCard
+    title="Server-Side Consent"
+    description="Handling consent flags on uploaded records — what to do with users who denied ad personalization."
+    href="/consent/advanced/server-side-consent/"
+  />
+</CardGrid>

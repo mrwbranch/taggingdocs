@@ -12,6 +12,10 @@ Custom Templates in GTM run in a sandboxed JavaScript environment that deliberat
 
 The sandbox is not an obstacle. It is what makes templates auditable, testable, and safe to distribute. Understanding which APIs exist and how to use them is the foundation of template development.
 
+<Aside type="tip">
+The sandbox restricts the available JavaScript APIs, but the JavaScript *language* is the same — closures, array methods, promises, destructuring all work. If you're new to the language itself, read [JavaScript for Tag Managers](/resources/javascript-for-tag-managers/) first; this page assumes that foundation and focuses on what's different about the sandbox.
+</Aside>
+
 ## What's NOT available
 
 Before covering what is available, understanding the restrictions:

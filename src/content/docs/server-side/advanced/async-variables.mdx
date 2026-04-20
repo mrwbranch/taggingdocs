@@ -1,0 +1,304 @@
+---
+title: "Async Variables (Promise-Based Variables in sGTM)"
+description: "Promise-returning sGTM variables — the pattern, when it's appropriate, when it's wrong, error propagation, timing implications, and caching with templateDataStorage."
+sidebar:
+  order: 22
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+Most sGTM variables compute synchronously: read the Event Model, transform, return. That covers the vast majority of real uses. But sGTM also supports **Promise-returning variables** — if your variable template returns a Promise, the container waits for it to resolve before firing any tag that depends on the variable. This is the mechanism behind external identity lookups, async feature-flag decisions, and KMS-decrypted cookie reads.
+
+Async variables are documented but underused. They are also easy to misuse: a well-placed one improves match quality, a badly-placed one adds hundreds of milliseconds to every tag fire.
+
+*Valid as of April 2026, Server-side GTM container version 2.0+.*
+
+## The Promise contract
+
+The sandbox exposes a `Promise` factory via `require('Promise')`. Because the sandbox forbids `new`, there is no `new Promise(...)`. Instead:
+
+```javascript
+const Promise = require('Promise');
+const sendHttpRequest = require('sendHttpRequest');
+const JSON = require('JSON');
+
+return Promise.create((resolve, reject) => {
+  sendHttpRequest(
+    'https://enrichment.internal/user-type?uid=' + encodeUriComponent(uid),
+    (statusCode, headers, body) => {
+      if (statusCode === 200) {
+        const parsed = JSON.parse(body);
+        resolve(parsed.user_type);
+      } else {
+        // See §Error propagation below — usually prefer resolve over reject.
+        resolve(undefined);
+      }
+    },
+    {method: 'GET', timeout: 2000}
+  );
+});
+```
+
+`Promise.create(executor)` takes a function that receives `(resolve, reject)` and returns a Promise. The variable template's top-level `return` hands this Promise to the container, which waits on it.
+
+<Aside type="note">
+`.then()`, `.catch()`, and `.finally()` are available on the returned Promise; `async`/`await` syntax is not. The sandbox's JavaScript dialect does not support async functions. Chain callbacks with `.then` if you need composition.
+</Aside>
+
+## When async is the right choice
+
+Three cases where async variables earn their cost:
+
+**External identity enrichment.** A user with only an email comes in; you need their `external_id` from a Firestore or BigQuery lookup. The lookup is cheap (~30 ms warm) but not free, and the value is different for every user. A Promise-returning variable fetches it per-event.
+
+**Feature-flag or experiment decisions made server-side.** Your experimentation service assigns users to cohorts; the assignment is recorded in an external store; you want the cohort name in every analytics hit. Async variable, cached via `templateDataStorage` (see below).
+
+**Encrypted-value decryption.** A first-party cookie holds an encrypted customer ID. You need to call Cloud KMS to decrypt it. KMS is fast but not synchronous from the sandbox's perspective.
+
+## When async is the wrong choice
+
+**Reading from the Event Model.** The Event Model is already in memory, and `getEventData` is synchronous. A Promise wrapper adds latency for nothing.
+
+**Reading from `templateDataStorage`.** Also synchronous. Wrapping it in a Promise is pure overhead.
+
+**Values that rarely change.** If the lookup result is effectively static for the container instance — a feature-flag decision that changes hourly, a product-catalogue snapshot — fetch it once from a bootstrap tag into `templateDataStorage` and read synchronously from variables.
+
+**The "while I'm here" enrichment.** An async variable that enriches an event with data not strictly required for the downstream tag adds latency to every firing of every tag that reads it. The correct question: *which tags actually need this value?* If the answer is one tag, compute it inside that tag rather than in a shared variable.
+
+### What async costs you
+
+Rough numbers from a Cloud Run `europe-west1` deployment with an `europe-west1` Firestore backend:
+
+| Operation | P50 | P95 |
+|---|---|---|
+| Synchronous variable (Event Model read) | &lt;0.1 ms | &lt;0.5 ms |
+| `templateDataStorage` read (cache hit) | &lt;0.5 ms | &lt;1 ms |
+| Async variable, warm HTTP to internal service | ~20 ms | ~80 ms |
+| Async variable, cold HTTP to external vendor | ~150 ms | ~400 ms |
+| Async variable, Firestore document read | ~30 ms | ~120 ms |
+
+Those milliseconds add to every tag firing that depends on the variable — and because Cloud Run charges CPU time for the *duration* of the request, async variables cost compute money in addition to latency.
+
+## Error propagation
+
+If a Promise rejects, the consuming tag receives `undefined` as the variable value and the error is written to Cloud Logging as an unhandled rejection. The tag continues to fire. This is usually desirable — one failed enrichment shouldn't kill the whole event — but you need to choose your error strategy deliberately.
+
+Three options:
+
+**Graceful degrade (recommended for most cases).** Resolve with `undefined` on every failure path. Downstream tags see a missing field and send the event without it.
+
+```javascript
+return Promise.create((resolve) => {
+  sendHttpRequest(url, (status, headers, body) => {
+    if (status === 200) {
+      try {
+        resolve(JSON.parse(body).user_type);
+      } catch (e) {
+        resolve(undefined);
+      }
+    } else {
+      resolve(undefined);
+    }
+  }, {method: 'GET', timeout: 1500});
+});
+```
+
+**Fallback value.** For vendors that require a non-empty field. Resolve with a known default.
+
+```javascript
+resolve(status === 200 ? JSON.parse(body).cohort : (data.defaultCohort || 'control'));
+```
+
+**Hard fail.** Reject and expect the consuming tag to handle it via `data.gtmOnFailure()`. Rarely the right choice — it couples tag correctness to variable reliability. Only use when the downstream vendor's record is meaningless without the value (e.g., a conversion with no `transaction_id`).
+
+<Aside type="caution">
+A Promise that neither resolves nor rejects — because your callback path misses a branch — hangs until Cloud Run's request timeout. Always set an explicit `timeout` on `sendHttpRequest` and make sure every code path inside the callback calls `resolve` or `reject`.
+</Aside>
+
+## Timing implications for dependent tags
+
+The firing order, with async variables:
+
+<Steps>
+1. **Trigger evaluates.** Triggers are synchronous and do not resolve async variables. A trigger condition referencing an async variable compares against the unresolved state — typically `undefined`. This is a trap: use async variables only for tag field values, not for trigger conditions.
+
+2. **Matching tags are queued.** The container builds the list of tags to fire.
+
+3. **Variables resolve per tag.** For each tag, the container resolves all variables used in the tag's configuration. Synchronous variables resolve immediately; async ones start their Promises. The tag is held until all its variables settle.
+
+4. **Tag executes.** With resolved values in hand, the tag runs.
+</Steps>
+
+One implication worth underlining: a [setup/cleanup tag sequence](/foundations/how-gtm-works/) where the setup reads an async variable runs serially. If the setup has a 300 ms async variable, the main tag starts 300 ms later than it otherwise would. For conversion tags forwarded to multiple vendors, this quickly compounds.
+
+Second implication: variable evaluation is deduplicated within a single event. If five tags all read `{{Async User Cohort}}`, the underlying HTTP call happens once, and all five tags wait for it. This is helpful; it is also why async variables are more acceptable than async-tag patterns that would issue five separate lookups.
+
+## Caching with `templateDataStorage`
+
+`templateDataStorage` persists across tags within a container instance's lifetime — that is, across events served by the same Cloud Run instance, until the instance is recycled. Use it to dedupe async lookups that return the same value for a given input:
+
+```javascript
+const Promise = require('Promise');
+const templateDataStorage = require('templateDataStorage');
+const sendHttpRequest = require('sendHttpRequest');
+const JSON = require('JSON');
+const getTimestampMillis = require('getTimestampMillis');
+
+const userId = data.userId;
+const cacheKey = 'user_cohort:' + userId;
+const TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+const cached = templateDataStorage.getItemCopy(cacheKey);
+if (cached && cached.expires_at > getTimestampMillis()) {
+  // Synchronous hit — still return a Promise for API consistency.
+  return Promise.create((resolve) => resolve(cached.value));
+}
+
+return Promise.create((resolve) => {
+  sendHttpRequest(
+    'https://experiments.internal/cohort?uid=' + encodeUriComponent(userId),
+    (status, headers, body) => {
+      let value;
+      if (status === 200) {
+        try { value = JSON.parse(body).cohort; } catch (e) { value = undefined; }
+      }
+      if (value !== undefined) {
+        templateDataStorage.setItemCopy(cacheKey, {
+          value: value,
+          expires_at: getTimestampMillis() + TTL_MS
+        });
+      }
+      resolve(value);
+    },
+    {method: 'GET', timeout: 1500}
+  );
+});
+```
+
+Two caveats on caching:
+
+- `templateDataStorage` is per-instance. A cache hit on instance A does not help instance B. With Cloud Run's default concurrency of 80, this is usually fine: most users hit a warm instance.
+- Staleness matters. The TTL bounds how stale a cached value can be. Pick a TTL based on how quickly the source data changes, not on how long the network permits you to cache.
+
+## Worked example: Firestore identity enrichment
+
+A variable that takes a hashed email and returns the matching `external_id` from a Firestore collection. Hashed-email-to-external-id is exactly the kind of lookup ad platforms want served fast and consistently.
+
+**Template fields:**
+- `hashedEmailFieldPath` (text, default `user_data.email_sha256`)
+- `projectId` (text)
+- `collection` (text, default `identity`)
+
+**Permissions:**
+- `read_event_data` (specific path)
+- `send_http` (whitelist Firestore REST endpoint)
+- `use_google_auth`
+- `template_storage` (key prefix `identity:`)
+- `logging`
+
+```javascript
+const Promise = require('Promise');
+const getEventData = require('getEventData');
+const sendHttpRequest = require('sendHttpRequest');
+const getGoogleAuth = require('getGoogleAuth');
+const templateDataStorage = require('templateDataStorage');
+const getTimestampMillis = require('getTimestampMillis');
+const JSON = require('JSON');
+const logToConsole = require('logToConsole');
+
+const hashedEmail = getEventData(data.hashedEmailFieldPath);
+if (!hashedEmail) return undefined; // Nothing to look up; synchronous undefined.
+
+const cacheKey = 'identity:' + hashedEmail;
+const TTL_MS = 10 * 60 * 1000;
+
+const cached = templateDataStorage.getItemCopy(cacheKey);
+if (cached && cached.expires_at > getTimestampMillis()) {
+  return cached.value;
+}
+
+const url = 'https://firestore.googleapis.com/v1/projects/' +
+  encodeUriComponent(data.projectId) +
+  '/databases/(default)/documents/' +
+  encodeUriComponent(data.collection) + '/' +
+  encodeUriComponent(hashedEmail);
+
+const auth = getGoogleAuth({scopes: ['https://www.googleapis.com/auth/datastore']});
+
+return Promise.create((resolve) => {
+  sendHttpRequest(url,
+    (status, headers, body) => {
+      let externalId;
+      if (status === 200) {
+        try {
+          const doc = JSON.parse(body);
+          externalId = doc.fields && doc.fields.external_id &&
+                       doc.fields.external_id.stringValue;
+        } catch (e) { /* fall through to undefined */ }
+      } else if (status !== 404) {
+        logToConsole(JSON.stringify({
+          level: 'error', variable: 'firestore_identity',
+          status: status, hashed_email: hashedEmail
+        }));
+      }
+      templateDataStorage.setItemCopy(cacheKey, {
+        value: externalId,
+        expires_at: getTimestampMillis() + TTL_MS
+      });
+      resolve(externalId);
+    },
+    {method: 'GET', headers: {Authorization: auth}, timeout: 2000}
+  );
+});
+```
+
+Note that the 404 case caches `undefined` too — this prevents a cold-cache event from hammering Firestore for a hashed email that is simply not in the collection.
+
+## Debugging async variables
+
+sGTM Preview renders a variable's resolved value in the Variables tab of each request. For an async variable, Preview briefly shows "Resolving…" and then the resolved value. If it stays `undefined`, three causes, in order of likelihood:
+
+1. The Promise rejected or resolved with `undefined` — check Cloud Logging for errors from your template.
+2. The Promise exceeded the container's variable timeout — check whether `sendHttpRequest` has a `timeout` set below 5 seconds.
+3. The permission declaration is missing for the remote endpoint — the outbound request was blocked silently.
+
+For production, instrument the variable with `logToConsole` on every non-200 and every timeout. Ship structured JSON (as in [Proactive Monitoring](/server-side/operations/proactive-monitoring/)) so you can alert on lookup failure rate.
+
+## Common mistakes
+
+**Using `async`/`await` syntax.** The sandbox does not support it. Use `Promise.create` plus callbacks, or `.then()` chains.
+
+**Rejecting instead of resolving.** `reject` requires the consuming tag to handle the failure. Unless that is a deliberate design choice, prefer `resolve(undefined)` or `resolve(fallback)`.
+
+**Forgetting `timeout` on the underlying HTTP call.** Without it, the Promise can wait until Cloud Run's request timeout (60 s) before settling. Set explicit timeouts — 1500–3000 ms is a reasonable range.
+
+**Using an async variable where a transformation would do.** A [transformation](/server-side/advanced/transformations-deep-dive/) runs once per event and mutates the Event Model in place. If every tag in the container would read the value, the transformation is cheaper. Variables make sense when only specific tags need the value.
+
+**Referring to async variables from trigger conditions.** Triggers are synchronous — they do not wait for Promises. An async variable referenced in a trigger condition is evaluated as `undefined` and the trigger almost certainly does not match. Use async variables in tag field values, not in trigger logic.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Transformations Deep Dive"
+    description="The synchronous alternative — when to transform vs. when to async-enrich per-tag."
+    href="/server-side/advanced/transformations-deep-dive/"
+  />
+  <LinkCard
+    title="Event Enrichment"
+    description="End-to-end enrichment patterns, spanning transformations, variables, and tag-internal lookups."
+    href="/server-side/advanced/event-enrichment/"
+  />
+  <LinkCard
+    title="Sandboxed JavaScript"
+    description="The full sandbox API surface, including Promise, sendHttpRequest, and getGoogleAuth."
+    href="/templates/sandboxed-javascript/"
+  />
+  <LinkCard
+    title="Proactive Monitoring"
+    description="Alert on async-variable failure rate alongside downstream tag errors."
+    href="/server-side/operations/proactive-monitoring/"
+  />
+</CardGrid>

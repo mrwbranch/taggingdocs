@@ -1,0 +1,191 @@
+---
+title: "Track Gravity Forms Submissions"
+description: "Track Gravity Forms submissions in GTM using the gform_confirmation_loaded event — with patterns for AJAX, non-AJAX, and multi-page forms."
+sidebar:
+  order: 20
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Gravity Forms has two submission modes — AJAX and traditional page-reload — and a native jQuery event that fires only after the server accepts the submission. This recipe covers both modes, plus multi-page form step tracking.
+
+*Valid as of April 2026, Gravity Forms 2.8.x.*
+
+## The success signal
+
+Gravity Forms emits three jQuery events you can hook:
+
+- `gform_confirmation_loaded` — fires after an AJAX submission succeeds and the confirmation HTML has rendered. Passes `formId` as the second argument. **Use this for conversions.**
+- `gform_page_loaded` — fires when a multi-page form advances to a new page. Passes `formId` and `currentPage`. Use for funnel/step tracking.
+- `gform_post_render` — fires on form render, including initial load and after AJAX validation errors. Do not use for conversions.
+
+For non-AJAX forms, Gravity Forms reloads the page to a confirmation URL and none of these events fire. Use a thank-you page push or an entry-ID detection pattern.
+
+## dataLayer push pattern
+
+<Tabs>
+<TabItem label="AJAX forms">
+
+<DataLayerExample event="form_submission" description="Fires only on successful AJAX submissions — no false positives on validation errors.">
+```javascript
+(function () {
+  if (!window.jQuery) return;
+
+  window.jQuery(document).on('gform_confirmation_loaded', function (event, formId) {
+    var $confirmation = window.jQuery('#gform_confirmation_wrapper_' + formId);
+    var formTitle = window.jQuery('#gform_wrapper_' + formId + ' .gform_title').text().trim()
+      || 'gform_' + formId;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submission',
+      form_vendor: 'gravity_forms',
+      form_id: String(formId),
+      form_title: formTitle,
+      confirmation_type: $confirmation.length ? 'message' : 'redirect'
+    });
+  });
+
+  // Multi-page step tracking
+  window.jQuery(document).on('gform_page_loaded', function (event, formId, currentPage) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_step',
+      form_vendor: 'gravity_forms',
+      form_id: String(formId),
+      step_number: currentPage
+    });
+  });
+})();
+```
+</DataLayerExample>
+
+</TabItem>
+<TabItem label="Non-AJAX forms">
+
+Non-AJAX forms redirect to a confirmation URL or render a confirmation message via PHP. Add this on the confirmation page (via the theme or a Custom HTML tag triggered on the confirmation page path):
+
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_vendor: 'gravity_forms',
+    form_id: '42',
+    form_title: 'Contact Us',
+    confirmation_type: 'redirect'
+  });
+</script>
+```
+
+Or, if the confirmation is rendered inline on the same page after reload, use a Custom HTML tag with a trigger on `Page URL` **contains** `gform_confirmation=1` (Gravity Forms appends this query parameter by default on same-page confirmations).
+
+</TabItem>
+</Tabs>
+
+## GTM setup
+
+<Steps>
+1. **Create a Custom Event trigger for submissions**
+
+   - Trigger type: **Custom Event**
+   - Event name: `form_submission`
+   - This fires: **Some Custom Events** → `DLV - form_vendor` **equals** `gravity_forms`
+
+2. **Create a Custom Event trigger for steps** (optional)
+
+   - Event name: `form_step`
+   - Same vendor filter
+
+3. **Create Data Layer Variables**
+
+   - `DLV - form_vendor` → `form_vendor`
+   - `DLV - form_id` → `form_id`
+   - `DLV - form_title` → `form_title`
+   - `DLV - step_number` → `step_number`
+   - `DLV - confirmation_type` → `confirmation_type`
+
+4. **Create a GA4 Event Tag**
+
+   - Event name: `generate_lead`
+   - Parameters:
+     - `form_vendor` → `{{DLV - form_vendor}}`
+     - `form_id` → `{{DLV - form_id}}`
+     - `form_title` → `{{DLV - form_title}}`
+   - Trigger: `form_submission` Custom Event trigger
+
+5. **Create a GA4 step-tracking tag** (optional)
+
+   - Event name: `form_progress`
+   - Parameters: `form_id`, `step_number`
+   - Trigger: `form_step` Custom Event trigger
+</Steps>
+
+<TagConfig
+  name="GA4 - generate_lead (Gravity Forms)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - form_submission (gravity_forms)"
+  variables={["DLV - form_vendor", "DLV - form_id", "DLV - form_title"]}
+/>
+
+## Capturing the entry ID
+
+Gravity Forms does not expose the entry ID in `gform_confirmation_loaded`. To capture it, enable the **Entry ID** merge tag in your confirmation message:
+
+```
+Thanks — your entry number is {entry_id}.
+```
+
+Then extract it from the confirmation DOM:
+
+```javascript
+window.jQuery(document).on('gform_confirmation_loaded', function (event, formId) {
+  var $wrap = window.jQuery('#gform_confirmation_wrapper_' + formId);
+  var match = $wrap.text().match(/entry number is (\d+)/i);
+  var entryId = match ? match[1] : undefined;
+
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_vendor: 'gravity_forms',
+    form_id: String(formId),
+    gf_entry_id: entryId
+  });
+});
+```
+
+Prefer a hidden `data-entry-id` attribute on the confirmation wrapper if you can edit the confirmation HTML — far more robust than text matching.
+
+## Test it
+
+<Steps>
+1. Open GTM **Preview mode** and visit a page with a Gravity Form.
+2. Submit the form successfully. The `form_submission` event should appear in the Summary pane.
+3. For multi-page forms, advance through each page and verify a `form_step` event fires with the correct `step_number`.
+4. Click the event in the Summary pane and verify `form_id` and `form_title` in the Variables tab.
+5. Check **Tags Fired** for the GA4 tag, then confirm in GA4 DebugView.
+6. **Test failure path**: submit with a required field empty. No `form_submission` event should fire (but `gform_post_render` will — which is why we don't listen to it).
+</Steps>
+
+## Common gotchas
+
+**Confusing `gform_post_render` with success.** `gform_post_render` fires on every render including validation errors. Listening to it will count failed submissions as leads. Only `gform_confirmation_loaded` is the success signal.
+
+**Confirmation set to Redirect.** If your form's confirmation is a redirect to an external URL, `gform_confirmation_loaded` never fires — use a thank-you page push on the destination URL.
+
+**Conditional logic re-renders.** Fields hidden by conditional logic trigger `gform_post_render` without the form being submitted. This is exactly why you must not use `gform_post_render`.
+
+**Nested forms.** Gravity Forms' nested forms add-on fires the event for the child form when the parent is still mid-submission. Filter by parent `form_id` if you care about the outer conversion only.
+
+**Multiple forms on one page.** The event passes the specific `formId`, so your handler disambiguates correctly. Do not hard-code a single form ID in the listener.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard title="Track Form Submissions" href="/recipes/interaction-tracking/track-form-submissions/" description="Generic form-submission patterns across native, AJAX, and third-party forms." />
+  <LinkCard title="form_submission custom event" href="/datalayer/custom-events/form-submission/" description="The canonical dataLayer schema for form submission events." />
+  <LinkCard title="WordPress dataLayer integration" href="/datalayer/platforms/wordpress/" description="WordPress-specific dataLayer patterns and plugin gotchas." />
+  <LinkCard title="Form triggers reference" href="/client-side/triggers/form-triggers/" description="When GTM's built-in form triggers work — and when they don't." />
+</CardGrid>

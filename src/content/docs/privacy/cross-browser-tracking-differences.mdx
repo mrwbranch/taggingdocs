@@ -15,7 +15,7 @@ This article gives you the practical breakdown of each browser's current behavio
 
 Before diving into restrictions, understand the scale of impact by browser:
 
-Global browser market share in 2024 (desktop + mobile combined):
+Global browser market share (desktop + mobile combined, current as of 2026):
 - Chrome: ~65%
 - Safari: ~19%
 - Edge: ~5%
@@ -38,6 +38,8 @@ Safari's ITP is the most aggressive first-party tracking restriction of any majo
 **CNAME cloaking:** Detected and restricted since ITP 2.3. Cookies set by CNAME-cloaked origins are also capped.
 
 **localStorage and sessionStorage:** localStorage is subject to the same 7-day cap as cookies for classified origins. SessionStorage clears on session end as expected.
+
+**Link Tracking Protection (iOS 17+, expanded through iOS 26):** Safari strips known tracking click IDs (`fbclid`, `mc_eid`, `ttclid`, `hsCtaTracking`, and — as of the iOS 26 era — `gclid`, `gbraid`, `wbraid` in most contexts) from URLs in Private Browsing, Mail, Messages, and default Safari under Advanced Tracking and Fingerprinting Protection. `utm_*` parameters are preserved. See [ITP History & Impact](/privacy/itp-history-impact/) for the rollout timeline and mitigations (server-side enhanced conversions, first-party data capture).
 
 **Fingerprinting protection:** Safari returns simplified/generic values for many browser APIs that could be used for fingerprinting (canvas API, WebGL, audio, screen resolution).
 
@@ -73,7 +75,9 @@ Firefox's Enhanced Tracking Protection uses a combination of blocklists and beha
 **Custom:**
 - User-configured combination of the above
 
-**Total Cookie Protection (enabled since Firefox 86):** Firefox's Total Cookie Protection partitions cookies by site. A tracker's cookie set on Site A is separate from the same tracker's cookie on Site B. This prevents cookie-based cross-site tracking without blocking cookies entirely. It is more sophisticated than a simple block.
+**Total Cookie Protection (default for all users since Firefox 103, 2022):** Firefox's Total Cookie Protection partitions cookies by site. A tracker's cookie set on Site A is separate from the same tracker's cookie on Site B. This prevents cookie-based cross-site tracking without blocking cookies entirely. It is more sophisticated than a simple block and now applies in Standard mode for every Firefox user.
+
+**Privacy-Preserving Attribution (PPA, Firefox 128+, 2024):** Firefox ships an experimental attribution API (on by default, user-disableable) that lets advertisers measure conversions from ad impressions/clicks with differential-privacy-level aggregation, rather than cross-site cookies. Similar in spirit to Chrome's Attribution Reporting API and Apple's Private Click Measurement. Not widely adopted by ad platforms yet, but the plumbing is live in the browser.
 
 **Firefox-specific behavior:**
 
@@ -87,27 +91,30 @@ Firefox's Enhanced Tracking Protection uses a combination of blocklists and beha
 
 **Impact on GA4:** Firefox is less impactful than Safari for analytics accuracy. The main risk is that the GTM container script itself may be blocked in Strict mode. For Standard mode users, first-party GA4 cookies are unaffected.
 
-## Chrome: Privacy Sandbox and third-party cookie deprecation
+## Chrome: Privacy Sandbox (3PC deprecation abandoned)
 
-Chrome is in the process of the most consequential change in tracking history: deprecating third-party cookies. The timeline has slipped multiple times, but the direction is clear.
+Chrome spent years planning to deprecate third-party cookies entirely. That plan was **abandoned in July 2024**. Google announced it would not force third-party cookie removal; instead, it would offer a new user-choice surface and continue investing in Privacy Sandbox APIs as opt-in alternatives.
 
-**Current state (as of 2024-2025):**
-- Third-party cookies still enabled by default, but with Privacy Sandbox APIs being tested
-- 1% of users had third-party cookies blocked as a test in 2024
-- Full deprecation timeline remains in flux
+**Current state (2026):**
 
-**Privacy Sandbox APIs replacing third-party cookie use cases:**
+- **Third-party cookies are still enabled by default in Chrome.** There is no mandated deprecation deadline.
+- Users can opt out of third-party cookies via a prompt/setting, but the default remains "allow."
+- Privacy Sandbox APIs (Topics, Protected Audience, Attribution Reporting) continue to ship as optional replacements for advertisers who want to move off third-party cookies voluntarily.
+- Enterprise policy and parental controls can still disable third-party cookies at the deployment level.
+
+**Privacy Sandbox APIs (opt-in alternatives):**
+
 - **Topics API:** Replaces interest-based advertising. The browser learns broad topic categories from browsing history and shares them with advertisers without sharing the URL or browsing history itself.
 - **Protected Audience API (formerly FLEDGE):** Remarketing without cross-site tracking. Ad auctions happen in the browser, not on servers.
 - **Attribution Reporting API:** Conversion attribution from ad clicks to conversions, reported with noise/aggregation to prevent individual user identification.
 
-**Impact on GA4 with Privacy Sandbox:**
-- GA4 itself does not rely on third-party cookies for core analytics — it uses first-party cookies, so Privacy Sandbox does not break basic analytics functionality.
-- Google Ads attribution and remarketing are more impacted — these rely on cross-site tracking that third-party cookies enabled.
-- The Attribution Reporting API provides some replacement functionality but with more aggregation and less granularity than third-party cookies offered.
+**Impact on GA4 in Chrome:**
 
-**Chrome's current first-party tracking behavior:**
-Chrome does not impose caps on JavaScript-set first-party cookies like Safari does. `_ga` retains its full 2-year lifetime in Chrome. This makes Chrome the "least restricted" major browser for analytics accuracy.
+- GA4 does not rely on third-party cookies for core analytics — it uses first-party cookies — so Chrome is the least restrictive major browser for GA4 measurement accuracy.
+- Google Ads remarketing and cross-site attribution that did depend on third-party cookies now have a longer runway than expected. You can keep using third-party cookies in Chrome for the foreseeable future, but **adopting server-side conversion APIs and first-party identity strategies is still the right move** — it makes you resilient to Safari/Firefox restrictions that are not going away, and to any future Chrome policy shift.
+
+**Chrome's first-party cookie behavior:**
+Chrome does not impose caps on JavaScript-set first-party cookies like Safari does. `_ga` retains its full 2-year lifetime in Chrome.
 
 ## Brave: aggressive by default
 

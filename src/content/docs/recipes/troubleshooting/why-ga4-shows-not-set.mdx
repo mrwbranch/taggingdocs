@@ -1,0 +1,73 @@
+---
+title: "Why GA4 Shows '(not set)'"
+description: "The five situations that produce '(not set)' in GA4 reports — missing custom dimensions, cardinality limits, processing lag, and unavailable parameters."
+sidebar:
+  order: 5
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+If you're seeing `(not set)` as a value in GA4 reports or Explorations, here are the most common causes and how to fix them. `(not set)` is not a single bug — it's GA4's umbrella placeholder for "this dimension had no value for this row." Each of the causes below requires a different fix.
+
+<Aside type="tip">
+Before digging in, check DebugView for a single event. If the parameter is present and non-empty there, the collection is fine and the problem is downstream (dimension registration, cardinality, or lag). If the parameter is absent in DebugView, the collection itself is broken.
+</Aside>
+
+## 1. Custom dimension not registered (or registered after the fact)
+
+**Verify.** GA4 → Admin → **Custom definitions**. Find the dimension. Check:
+- The **event parameter** name exactly matches what you're sending (case sensitive).
+- The **scope** is correct (Event vs. User vs. Item).
+- The **creation date** — dimensions apply only to events collected *after* registration. Historical events show `(not set)` forever.
+
+**Fix.** Register missing dimensions. Correct scope if wrong. Understand that backfilling is impossible — the parameter was sent, GA4 stored it in the raw event, but the dimension wasn't mapped at ingest time. Re-registering today fixes future events, never past ones.
+
+## 2. Event genuinely missing the parameter on some hits
+
+**Verify.** In BigQuery: `SELECT event_name, COUNT(*) FROM ... WHERE (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'your_param') IS NULL GROUP BY event_name`. If some events have it and others don't, your tag isn't consistently setting the parameter.
+
+**Fix.** Audit the GTM tag. A common pattern: the parameter is mapped from a Data Layer Variable that only exists on certain pages. On pages where the push didn't run, the variable is `undefined` and GA4 stores the event without the parameter, so reports show `(not set)` for those rows.
+
+## 3. Processing lag — registered after the event was collected
+
+**Verify.** You registered a custom dimension yesterday. Today's events show the value. Yesterday's and earlier events show `(not set)` even though the parameter was in the payload. This is working as designed: GA4 maps dimensions at ingest.
+
+**Fix.** No retroactive fix in the UI. If you need the historical data, it's in BigQuery as `event_params` raw data — query it directly. If you don't have BigQuery export, enable it now for the next occurrence (it can't backfill either, so enable it before you need it).
+
+## 4. Cardinality limit — too many unique values
+
+**Verify.** GA4 enforces a per-day cardinality limit (typically 500-1000 unique values per dimension per day, varies). When exceeded, low-frequency values are bucketed into `(other)` in standard reports and `(not set)` appears when the bucket overflows. Most common on dimensions like `page_location` (with query strings), `search_term`, or any high-cardinality user-scoped ID.
+
+**Fix.** Reduce cardinality at source. Strip query strings from page paths. Bucket search terms by category. For user IDs, don't send the raw ID as an event parameter — use GA4's User-ID feature instead. If you truly need full cardinality, use BigQuery export — the raw table has no cardinality cap.
+
+## 5. Parameter unavailable on the event type
+
+**Verify.** Some dimensions only populate for certain event types. `page_location` on a `file_download` event may be `(not set)` if Enhanced Measurement captures the download before a `page_view` established the context. Session-scoped dimensions are `(not set)` for events before `session_start`.
+
+**Fix.** Either accept the limitation, or route around it. For `page_location` on events that fire pre-pageview, either fire the Google Tag earlier (Initialization trigger, not Page View trigger) or add an explicit `page_location = {{Page URL}}` parameter to the event tag so it's set directly.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GA4 Event Not Appearing"
+    description="When the whole event is missing, not just one dimension."
+    href="/recipes/troubleshooting/ga4-event-not-appearing/"
+  />
+  <LinkCard
+    title="Why GA4 Shows 'Unassigned' Traffic"
+    description="The related problem for channel/source/medium specifically."
+    href="/recipes/troubleshooting/why-ga4-shows-unassigned-traffic/"
+  />
+  <LinkCard
+    title="BigQuery Schema Reference"
+    description="Where to find the raw parameter values when the GA4 UI won't show them."
+    href="/ga4/bigquery/schema-reference/"
+  />
+  <LinkCard
+    title="Data Discrepancies"
+    description="Why BigQuery numbers don't match the GA4 UI — includes the cardinality rebucketing effect."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+</CardGrid>

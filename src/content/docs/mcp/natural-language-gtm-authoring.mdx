@@ -1,0 +1,194 @@
+---
+title: "Natural-language GTM authoring"
+description: "Describe a tag, get the config. Realistic capabilities (GA4 event tags, dataLayer variables, standard triggers), current limitations, and a worked example from prompt to deployment."
+sidebar:
+  order: 9
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
+
+"Natural-language authoring" is the most-hyped capability of the whole MCP pitch: describe what you want, the model builds it. In practice, today, that works beautifully for maybe 60% of GTM tasks and produces flawed output for the other 40%. Knowing which is which is the skill.
+
+This page maps the two categories, then walks through a full worked example with the review and deploy steps. *Valid as of April 2026 against Claude 4 and GPT-5-class models connected to the TaggingDocs MCP server.*
+
+## What works well today
+
+These are the tasks where you can describe in English and the model produces deployable config with minimal correction.
+
+### GA4 event tags
+
+Simple events (`signup`, `login`, `search`, `add_to_wishlist`, etc.) map cleanly. The model knows the GA4 event reference well, pulls the right parameter names, and maps dataLayer variables correctly.
+
+**Prompt shape:** *"Create a GA4 event tag for `add_to_wishlist`. Event parameters: `item_id`, `item_name`, `item_category`, `value`, `currency`. Read all five from the dataLayer."*
+
+**Success rate:** ~95% correct on first try.
+
+### DataLayer variables
+
+One-for-one mapping between a JSON path and a variable name. Trivial work that's boring at volume — the perfect LLM task.
+
+**Prompt shape:** *"Create dataLayer variables for `user.id`, `user.plan`, `user.signup_date`, `user.country`, `order.total`, `order.currency`, `order.items.length`. Follow the naming convention `DLV - path.to.key`."*
+
+**Success rate:** ~98% correct on first try. Failures are almost always a naming-convention mismatch.
+
+### Standard triggers
+
+Click triggers, form-submit triggers, pageview triggers, scroll triggers, basic custom-event triggers.
+
+**Prompt shape:** *"Create a Click trigger that fires when the user clicks any element with `data-track="cta"`. Support clicks on children of those elements (use matches CSS selector with the `*=` operator)."*
+
+**Success rate:** ~90%. The model occasionally gets CSS-selector matching syntax slightly wrong; verify in Preview.
+
+### GA4 ecommerce events
+
+Standard ecommerce events are in the model's training set heavily. `purchase`, `add_to_cart`, `view_item`, `begin_checkout`, and `refund` all map well.
+
+**Prompt shape:** *"Set up the full GA4 ecommerce suite — view_item_list, view_item, add_to_cart, begin_checkout, purchase. Use existing dataLayer variables; create any missing ones. Trigger each on its matching `event` key in the dataLayer."*
+
+**Success rate:** ~85% correct. Usually needs one correction on the `items` array handling.
+
+### Consent Mode v2 configuration
+
+For major CMPs (Cookiebot, CookieYes, OneTrust, Iubenda), the model knows the signal shape and can wire up the default/update flow.
+
+**Prompt shape:** *"Set up Consent Mode v2 in my container using Cookiebot. Default state: deny all except `security_storage`. Update on user decision. Fire on all pages before any other tag."*
+
+**Success rate:** ~80% correct. Check the firing priority on the Consent Mode template tag (should be higher than anything it gates).
+
+## What doesn't work well yet
+
+These tasks either fail or produce output you'll spend more time fixing than writing from scratch.
+
+### Complex triggers with compound conditions
+
+Triggers with five-plus conditions connected by mixed AND/OR logic, referencing custom variables, with consent-status gating, and fallback branches. The model produces plausible structure but often gets the boolean logic backwards or forgets an edge case.
+
+**Example that fails:** *"Fire this tag when (the user is on a product page AND the page is in French AND the user has scrolled past 50%) OR (the user is on the /contact page AND has filled out the phone field), but only when the user has granted ad_storage consent."*
+
+**What happens:** the model produces a trigger with four conditions and one note saying "add the OR logic in the UI." Then the part it can't express in the API JSON is the part that matters.
+
+**Better approach:** break it into two triggers, build the config in natural language for each, use the GTM UI to wire the OR manually.
+
+### Custom Templates
+
+Covered in depth in [AI for custom templates](/mcp/ai-for-custom-templates/). Short version: the sandbox restricts what works, and models hallucinate APIs that don't exist. Usable with heavy verification; not "describe and ship."
+
+### Anything testing-related
+
+"Write me a tag AND the tests that verify it works" produces a tag and tests that usually agree with each other but sometimes both agree on the wrong thing. Testing logic needs to come from a different head than authoring logic — if you want the LLM to help with both, use two conversations.
+
+### Complex variable transformations
+
+Variables that need to run a computation across several data sources, handle null/undefined gracefully, and return a canonical format ("return the currency-symbol-stripped, decimal-normalised value as a float") are a weak spot. The model produces Custom JavaScript variables, which run in a sandboxed context, and often use syntax that works in regular JS but not in the GTM sandbox.
+
+### Migrations
+
+"Migrate this Universal Analytics config to GA4" looks like it should work. It doesn't, because the mapping between UA custom dimensions (session-scoped) and GA4 custom parameters (event-scoped) is not a one-to-one translation. The model will produce a config that looks right and silently drops session context. Use the `migrate_ua_to_ga4` prompt in the [MCP prompts reference](/mcp/tools-and-prompts/) for the guided version; do not freelance this.
+
+## A worked example — natural language to deployment
+
+Scenario: the marketing team wants to track when a logged-in user adds a specific premium plan to their cart. Currently no tracking exists for plan selection.
+
+### Step 1 — Describe
+
+> *"In container GTM-ABC123, workspace 14:*
+>
+> *Create a GA4 event tag called `GA4 - plan_selected` that fires an event with the parameters `plan_name` (string), `plan_tier` (string, one of 'free' | 'pro' | 'enterprise'), `billing_period` (string, 'monthly' or 'annual'), and `plan_price` (number, in cents).*
+>
+> *Read all four from the dataLayer at paths `plan.name`, `plan.tier`, `plan.billing_period`, and `plan.price_cents`.*
+>
+> *Trigger on the custom event `plan_selected`, but only when the user is authenticated — there's a dataLayer key `user.authenticated` (boolean) you should use.*
+>
+> *Match the naming convention of the existing GA4 event tags in that workspace."*
+
+### Step 2 — Model reads the workspace
+
+It calls `list_tags` to see existing GA4 event naming, calls `list_variables` to see which dataLayer variables already exist, and calls `list_triggers` to see existing patterns.
+
+### Step 3 — Model proposes
+
+> *"I'll create these resources. Let me know to proceed or adjust:*
+>
+> *New variables (only if they don't already exist):*
+>
+> - *`DLV - plan.name`*
+> - *`DLV - plan.tier`*
+> - *`DLV - plan.billing_period`*
+> - *`DLV - plan.price_cents`*
+> - *`DLV - user.authenticated`*
+>
+> *New trigger: `CE - plan_selected (authenticated)`, custom event type, event name `plan_selected`, with condition `{{DLV - user.authenticated}}` equals `true`.*
+>
+> *New tag: `GA4 - plan_selected`, event name `plan_selected`, four event parameters mapped to the four new variables, firing trigger = the new custom event trigger, using the existing `GA4 Config - Primary` for measurement ID.*
+>
+> *Confirm to create?"*
+
+### Step 4 — Review
+
+Read the proposal. Look for:
+
+- Naming matches the workspace convention.
+- The trigger condition uses the right comparison (boolean `true`, not string `"true"`).
+- The tag does not accidentally send PII.
+- The `plan_price` parameter's type matches what GA4 expects (GA4 treats prices as numbers; the model should not be wrapping in `makeString`).
+
+### Step 5 — Confirm
+
+> *"Proceed."*
+
+Model calls `create_variable` (5 times), `create_trigger` (1), `create_tag` (1). Reports success.
+
+### Step 6 — Verify in Preview
+
+Open Preview, navigate to the plan page, click "Select plan." Tag Assistant should show `GA4 - plan_selected` firing with the four parameters populated. In GA4 DebugView, confirm the event arrives.
+
+### Step 7 — Publish
+
+You — not the model — freeze a version (`create_version`) and publish (`publish_version`). The [MCP security considerations](/mcp/mcp-security-considerations/) page covers why human-in-the-loop on publish is non-negotiable.
+
+Total elapsed time: 6-8 minutes. Doing it by hand through the GTM UI: 20-25 minutes. And this was a clean, well-specified request — messier requests save proportionally more time because the search-and-click work is what the model eliminates.
+
+## Current limitations summary
+
+| Task | Status | Notes |
+|------|--------|-------|
+| GA4 event tags (standard) | Works well | 95% first-try success |
+| DataLayer variables | Works well | Trivial, high accuracy |
+| Simple triggers | Works well | Click, form, pageview, custom event |
+| Ecommerce suite | Works well with review | Check items-array handling |
+| Consent Mode v2 | Usable with review | Verify firing priority |
+| Complex compound triggers | Partial | Split into multiple; wire OR in UI |
+| Custom templates | Needs heavy verification | See [AI for custom templates](/mcp/ai-for-custom-templates/) |
+| UA → GA4 migration | Use guided prompt | Don't freelance |
+| Tests alongside tags | Separate conversations | One task at a time |
+| Complex variable transformations | Error-prone | Write these by hand |
+
+<Aside type="tip">
+The bias that helps most: treat the model like a junior engineer with perfect documentation recall but no judgement. You still review, you still test, you still publish. What's eliminated is the typing, the context-switching, and the "what's that variable called in this container" lookup.
+</Aside>
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="MCP use cases"
+    description="The broader set of tasks the MCP server unlocks."
+    href="/mcp/mcp-use-cases/"
+  />
+  <LinkCard
+    title="Writing prompts for GTM"
+    description="Prompt patterns that shift tasks from the 'doesn't work' column to the 'works well' column."
+    href="/mcp/writing-prompts-for-gtm/"
+  />
+  <LinkCard
+    title="Tools and prompts reference"
+    description="The underlying MCP tools natural-language authoring composes."
+    href="/mcp/tools-and-prompts/"
+  />
+  <LinkCard
+    title="MCP security considerations"
+    description="Why publish is always a human step, and how to configure the server accordingly."
+    href="/mcp/mcp-security-considerations/"
+  />
+</CardGrid>

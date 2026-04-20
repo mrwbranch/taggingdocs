@@ -1,0 +1,230 @@
+---
+title: "Event Deduplication Across Client & Server"
+description: "Cross-platform cheat sheet for deduplicating conversions when running client-side pixels alongside server-side CAPIs — field names, windows, stable ID patterns, and propagation."
+sidebar:
+  order: 20
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Once you've deployed Conversions APIs on more than one ad platform, you have a new problem: every platform dedupes differently. Meta calls its key `event_id`, Snap calls it `client_dedup_id`, X calls it `conversion_id` (while using `event_id` for something completely different), LinkedIn calls it `eventId`, Microsoft keys on `MSCLKID` + goal name, and Amazon uses `clientDedupeId`.
+
+This page is the cheat sheet — a single table you can bookmark — plus the propagation patterns that make it all work consistently across platforms.
+
+*Valid as of April 2026; verify specific fields against each platform's current CAPI docs when implementing.*
+
+<Aside type="tip">
+For the mechanics of how event_id propagates through the dataLayer, client-side GTM, GA4, and sGTM, see the deeper reference: [Server-side event deduplication](/server-side/advanced/event-deduplication/). This page is the cross-platform lookup; that page is the architecture.
+</Aside>
+
+## Why dedup matters for bid algorithms
+
+Most engineers think of dedup as a reporting problem — "my purchase count is wrong." The real damage is worse: ad platform bid algorithms consume conversion data to decide what to bid on, and duplicate conversions systematically corrupt those decisions.
+
+Three concrete failure modes:
+
+1. **Inflated CPA signal, overbidding.** When the platform sees 2× conversions for the same clicks, CPA looks artificially low. The bid algorithm concludes the cohort is profitable and bids more aggressively — into a market where the real CPA is actually fine but not as good as the duplicated data suggests. You end up overpaying for traffic.
+
+2. **Skewed audience lookalikes.** Platforms build value-based lookalike audiences from your converter list. If your converters are double-counted, heavy converters (e.g., repeat purchasers with fast repeat cycles) get triple-weighted in the training set, producing lookalikes skewed toward that narrow segment.
+
+3. **Wrong winner in bid experiments.** If one creative gets proper CAPI + pixel dedup and another doesn't (because you rolled out CAPI piecemeal), the un-deduped creative shows 2× conversions and wins the budget fight — despite identical true performance.
+
+None of this is theoretical. It is the main reason "we turned on CAPI and ROAS went up 40%" stories exist: the ROAS didn't actually improve, the measurement did.
+
+## The universal pattern
+
+Every major ad platform uses the same conceptual dedup model: a shared identifier across client-side and server-side events, compared within a time window, optionally supported by matching user identifiers. The field name and window size differ; the pattern is constant.
+
+**Shared identifier:** a string that is identical on the client-side event and the server-side event for the same conversion. Generated once in your system (usually in the dataLayer), propagated to both tags.
+
+**Matching signal:** most platforms also require the event name (or conversion rule) to match — a `Purchase` from pixel and an `AddToCart` from CAPI with the same ID are not deduped.
+
+**Time window:** typically 24–48 hours, during which two events with the same identifier are treated as one. Outside the window, the second event is counted as new.
+
+## Per-platform dedup cheat sheet
+
+| Platform | Dedup field name | Window | Secondary signal | Full guide |
+|---|---|---|---|---|
+| Meta | `event_id` | 48h | `event_name` must match | [Meta CAPI](/integrations/meta-capi-server-side/) |
+| TikTok | `event_id` | 48h | `event_source_url` helps match | [TikTok Events API](/integrations/tiktok-pixel-and-api/) |
+| Pinterest | `event_id` | ~7 days | `event_name` + match keys | [Pinterest CAPI](/integrations/pinterest-capi-server-side/) |
+| Snap | `client_dedup_id` | ~24h | match keys | [Snap CAPI](/integrations/snapchat-capi-server-side/) |
+| Reddit | `conversion_id` + `click_id` | ~7 days | `click_id` is primary | [Reddit CAPI](/integrations/reddit-capi-server-side/) |
+| X (Twitter) | `conversion_id` | ~24h | `twclid` | [X CAPI](/integrations/twitter-x-ads-capi-server-side/) |
+| LinkedIn | `eventId` (+ user identifiers) | ~24h | `conversionHappenedAt` proximity | [LinkedIn CAPI](/integrations/linkedin-capi-server-side/) |
+| Google Ads | `gclid` / `gbraid` / `wbraid` | Match-based, per conversion action | Enhanced Conversions user data | [Google Ads](/integrations/google-ads/) |
+| Microsoft Ads | `MSCLKID` + `ConversionName` | 30 days (click window) | timestamp rounded | [Microsoft UET](/integrations/microsoft-uet-server-side/) |
+| Amazon Ads | `clientDedupeId` | 48h | match keys | [Amazon CAPI](/integrations/amazon-ads-capi-server-side/) |
+
+**Two details that trip people up:**
+
+- **X's `event_id` is NOT the dedup key.** On X, `event_id` identifies the configured conversion rule in Ads Manager. Your per-event dedup key is `conversion_id`. Every other major platform inverts this — which is why X deduplication bugs are depressingly common.
+
+- **Google and Microsoft aren't keyed on an event_id.** They dedup at the click-identifier level (`gclid` / `MSCLKID`) plus conversion action/goal name. If the same click generates two conversion events against the same action within the click window, the platform treats them as the same conversion. This is simpler than event_id-based dedup but has different edge cases — e.g., it does not help you if the user clears cookies between click and conversion.
+
+## Stable event ID generation patterns
+
+The event_id must be stable enough that client-side and server-side generate the same value for the same conversion, but unique enough that two separate conversions don't collide. Three patterns, in order of preference for e-commerce:
+
+### Pattern A: `transaction_id`-derived (recommended for e-commerce)
+
+```javascript
+const event_id = 'evt-' + order.id + '-' + Math.floor(Date.now() / 60000);
+// e.g. "evt-ORDER-12345-28558500"
+```
+
+**Pros:** Survives page reload on the thank-you page (same order + same minute = same ID). Deterministic, debuggable, human-readable.
+
+**Cons:** If you want sub-minute uniqueness (e.g., true UUID-per-firing to debug race conditions), drop the minute bucket and use `Date.now()` — but then reloads generate new IDs, which means duplicate counts unless you also carry `order_id` as a secondary key.
+
+### Pattern B: Pure UUID v4
+
+```javascript
+const event_id = crypto.randomUUID();
+// e.g. "9b5a7c4d-8e2f-4a1b-9c3d-1e5f8a7b6c9d"
+```
+
+**Pros:** Guaranteed unique. Safe for high-volume non-ecommerce events where there's no natural key.
+
+**Cons:** Requires the dataLayer to persist across the boundary between client-side tag and server-side tag — which it does when GA4 forwards event_id via Measurement Protocol, but you must confirm the forwarding is wired up.
+
+### Pattern C: `session_id` + event_name + timestamp bucket
+
+```javascript
+const event_id = session_id + '-' + event_name + '-' + Math.floor(Date.now() / 60000);
+// e.g. "abc123-lead-28558500"
+```
+
+**Pros:** Cheapest to implement for lead-gen and other non-transactional events (where there's no order ID).
+
+**Cons:** Assumes one firing per minute per session per event name — fine for lead submits, wrong for rapid-fire events like `add_to_cart`.
+
+<Aside type="note">
+Never hash the event_id. It's already opaque; hashing adds no privacy benefit (it's not PII) and makes debugging harder. Only user identifiers (`em`, `ph`, `external_id`) should be hashed.
+</Aside>
+
+## Propagation patterns
+
+There are three architectures for getting the same event_id to both the browser pixel and the server-side CAPI. Two are good; one is a footgun.
+
+### Pattern 1: dataLayer-originated (recommended)
+
+```
+Frontend (thank-you page)
+  └─ dataLayer.push({ event: 'purchase', event_id: 'evt-ORDER-123-...' })
+      ├─ Client-side GTM → Browser Pixel (carries event_id)
+      └─ Client-side GTM → GA4 → sGTM → CAPI (carries event_id as event parameter)
+```
+
+The event_id is born in the frontend, and both branches (browser pixel and server-side CAPI) read from the same source. Every platform's pixel tag and CAPI tag can reference the same `{{DL - event_id}}` variable.
+
+This is the right default for nearly everyone.
+
+### Pattern 2: Backend-originated (for headless / server-rendered)
+
+```
+Backend order creation
+  └─ generates event_id at order commit time
+      ├─ returned to frontend in response, injected into dataLayer
+      │     └─ Browser Pixel picks it up
+      └─ also dispatched directly server-to-server to each CAPI (no sGTM needed)
+```
+
+Useful when your frontend is minimal (e.g., a checkout page rendered server-side with little JavaScript) or when you want CAPI calls to originate from the same service that creates the order — guaranteeing the server-side event always fires even if the frontend never loads.
+
+### Pattern 3: sGTM-originated (anti-pattern)
+
+```
+sGTM generates event_id on receipt of each incoming event
+```
+
+This sounds clean but breaks dedup — the client-side pixel tag generates its own event_id (or has none), and the sGTM-generated event_id never matches. You end up with duplicated conversions on every platform. Avoid.
+
+## Verifying dedup is working
+
+Each platform exposes a dedup signal, at varying levels of quality:
+
+- **Meta Events Manager** → Event Quality → "Duplicate %" column. Should be under 1% when dedup is working. Gold standard of dedup UI.
+- **TikTok Events Manager** → same concept, "Matched Event" counter.
+- **Pinterest Tag Health** → shows events by source ("Tag" / "CAPI" / "Both"). The "Both" column is the deduped count.
+- **Snap Events Manager** → Test Events shows source-per-event; Match Quality report shows match rates over time.
+- **X Ads Manager** → Events panel, with source breakdown. No explicit dedup percentage.
+- **LinkedIn Campaign Manager** → Conversion Tracking → Recent Activity. Source column only; no dedup metric.
+- **Microsoft Ads UI** → UET goals show source (Tag vs. API); no explicit dedup metric.
+- **Amazon Ads** → Conversions Builder → API Events tab; no explicit dedup metric.
+- **Google Ads** → conversion diagnostics show duplicate-click warnings if `gclid` collisions occur.
+
+**Fallback check if the UI doesn't expose a dedup metric:** compare the conversion counts before and after enabling the server-side tag. If you turn on CAPI and total conversions roughly double overnight, dedup is not working. If they lift 15–40%, it is.
+
+## Common mistakes
+
+### Reusing the same event_id across unrelated events
+
+One hardcoded `event_id = 'event-1'` in a template for-every-conversion kills dedup and, worse, means the platform drops every conversion after the first match within the window. Always generate a fresh event_id per event firing.
+
+### Generating event_id per tag instead of per event
+
+If your browser pixel tag generates its own event_id inside the tag template (e.g., a `Math.random()` inside Custom HTML), and the CAPI tag generates a different one, you have two IDs for one event. Generate once, upstream, in the dataLayer.
+
+### Hashing the event_id
+
+The event_id is not PII — it's a dedup token. Hashing it gains no privacy benefit and guarantees it won't match if the two sides hash differently (different normalization, different encoding). Leave event_id as-is and only hash user identifiers.
+
+### Truncating event_id to fit platform limits
+
+Some platforms have length limits on the dedup field (usually 64 or 100 characters — Meta is 50). If your `transaction_id + timestamp` scheme produces longer IDs for some rows, platform-side truncation may collide previously-unique values. Keep event_ids short (under 40 chars), or validate length in your generator.
+
+### Relying on click_id alone for dedup
+
+On platforms where the click identifier is the primary dedup signal (Google, Microsoft, Reddit to some extent), click_id-only dedup fails when the user blocks or clears cookies between the ad click and the conversion. Always carry an explicit event_id / conversion_id as a secondary signal where the platform supports it.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Server-Side Event Deduplication (Deep Dive)"
+    description="The architectural reference for how event_id flows from dataLayer through GTM, GA4, and sGTM to each CAPI."
+    href="/server-side/advanced/event-deduplication/"
+  />
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="The reference CAPI implementation and the cleanest dedup model in the industry."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Pinterest CAPI (Server-Side)"
+    description="Pinterest's event_id-based dedup with a generous 7-day window."
+    href="/integrations/pinterest-capi-server-side/"
+  />
+  <LinkCard
+    title="Snap CAPI (Server-Side)"
+    description="Snap uses client_dedup_id, a 24h window, and is strict about uppercase event names."
+    href="/integrations/snapchat-capi-server-side/"
+  />
+  <LinkCard
+    title="Reddit CAPI (Server-Side)"
+    description="Reddit dedups primarily on click_id, with conversion_id as secondary."
+    href="/integrations/reddit-capi-server-side/"
+  />
+  <LinkCard
+    title="X (Twitter) Ads CAPI (Server-Side)"
+    description="X's event_id vs. conversion_id naming trap — the most confusing dedup model of any platform."
+    href="/integrations/twitter-x-ads-capi-server-side/"
+  />
+  <LinkCard
+    title="LinkedIn CAPI (Server-Side)"
+    description="LinkedIn's eventId plus user identifier dedup for B2B conversion cycles."
+    href="/integrations/linkedin-capi-server-side/"
+  />
+  <LinkCard
+    title="Microsoft UET (Server-Side)"
+    description="Microsoft keys dedup on MSCLKID plus goal name, not event_id."
+    href="/integrations/microsoft-uet-server-side/"
+  />
+  <LinkCard
+    title="Amazon Ads CAPI (Server-Side)"
+    description="Amazon's clientDedupeId — and the caveat that it doesn't dedup against the DSP pixel."
+    href="/integrations/amazon-ads-capi-server-side/"
+  />
+</CardGrid>

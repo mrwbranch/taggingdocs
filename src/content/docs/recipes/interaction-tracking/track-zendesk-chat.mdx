@@ -1,0 +1,214 @@
+---
+title: "Track Zendesk Messaging & Web Widget"
+description: "Track Zendesk Messaging and Web Widget (Classic) events — opens, chat starts, and ticket submissions — in GA4 via GTM using the zE API."
+sidebar:
+  order: 29
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Zendesk ships two different chat products on the same brand: **Messaging** (the modern async successor) and the **Web Widget (Classic)**. They expose different event APIs. This recipe covers both so you can drop in whichever matches your install.
+
+*Valid as of April 2026, Zendesk Web Widget (Classic) and Zendesk Messaging (`zE` API).*
+
+## Problem
+
+Zendesk's reporting tells you about ticket volume but not about on-site behaviour leading up to a chat. Which product pages drive support tickets? Which campaigns produce high-cost conversations? A dataLayer bridge surfaces those questions in GA4 alongside everything else.
+
+## Solution
+
+Both products expose a global `zE` (or `window.zE`) function. Attach listeners once Zendesk signals ready, and push a dedicated dataLayer event for each lifecycle change.
+
+<Aside type="note">
+Check which widget you have before wiring anything up. Open your browser console and type `zE('messenger', 'close')`. If that errors with "invalid command", you're on Classic. If it closes the widget, you're on Messaging.
+</Aside>
+
+## Implementation
+
+<Tabs>
+<TabItem label="Messaging (modern)">
+
+<DataLayerExample event="zendesk_widget_open" description="Messaging uses the zE('messenger:on', event, handler) signature. Attach in a Custom HTML tag.">
+```javascript
+(function() {
+  if (typeof window.zE !== 'function') return;
+
+  function push(payload) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(payload);
+  }
+
+  // Widget opened
+  window.zE('messenger:on', 'open', function() {
+    push({
+      event: 'zendesk_widget_open',
+      zendesk_product: 'messaging',
+      zendesk_action: 'open',
+      page_path: window.location.pathname
+    });
+  });
+
+  // Widget closed
+  window.zE('messenger:on', 'close', function() {
+    push({
+      event: 'zendesk_widget_close',
+      zendesk_product: 'messaging',
+      zendesk_action: 'close'
+    });
+  });
+
+  // Unread messages count changed
+  window.zE('messenger:on', 'unreadMessages', function(count) {
+    push({
+      event: 'zendesk_unread_message',
+      zendesk_product: 'messaging',
+      zendesk_action: 'unread_change',
+      zendesk_unread_count: count
+    });
+  });
+
+  // Conversation started
+  window.zE('messenger:on', 'conversationStarted', function() {
+    push({
+      event: 'zendesk_chat_started',
+      zendesk_product: 'messaging',
+      zendesk_action: 'conversation_started',
+      page_path: window.location.pathname
+    });
+  });
+})();
+```
+</DataLayerExample>
+
+</TabItem>
+<TabItem label="Web Widget (Classic)">
+
+<DataLayerExample event="zendesk_widget_open" description="Classic uses the zE('webWidget:on', event, handler) signature. Chat and ticket submit fire through different events.">
+```javascript
+(function() {
+  if (typeof window.zE !== 'function') return;
+
+  function push(payload) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(payload);
+  }
+
+  window.zE('webWidget:on', 'open', function() {
+    push({
+      event: 'zendesk_widget_open',
+      zendesk_product: 'classic',
+      zendesk_action: 'open',
+      page_path: window.location.pathname
+    });
+  });
+
+  window.zE('webWidget:on', 'close', function() {
+    push({
+      event: 'zendesk_widget_close',
+      zendesk_product: 'classic',
+      zendesk_action: 'close'
+    });
+  });
+
+  // Live chat started
+  window.zE('webWidget:on', 'chat:start', function() {
+    push({
+      event: 'zendesk_chat_started',
+      zendesk_product: 'classic',
+      zendesk_action: 'chat_started'
+    });
+  });
+
+  // Live chat ended
+  window.zE('webWidget:on', 'chat:end', function() {
+    push({
+      event: 'zendesk_chat_ended',
+      zendesk_product: 'classic',
+      zendesk_action: 'chat_ended'
+    });
+  });
+
+  // Contact form / ticket submitted
+  window.zE('webWidget:on', 'userEvent', function(data) {
+    if (data && data.action === 'Contact Form Submitted') {
+      push({
+        event: 'zendesk_ticket_submitted',
+        zendesk_product: 'classic',
+        zendesk_action: 'ticket_submitted',
+        zendesk_category: data.category || 'unknown'
+      });
+    }
+  });
+})();
+```
+</DataLayerExample>
+
+</TabItem>
+</Tabs>
+
+## GTM setup
+
+<Steps>
+1. **Add the listener script as a Custom HTML tag**
+   - Trigger: **Window Loaded** (or your consent-granted trigger)
+   - If you run both widgets on different properties, use separate tags gated by a Lookup Table variable on hostname
+
+2. **Create a regex Custom Event trigger**
+   - Trigger type: **Custom Event**
+   - Event name: `^zendesk_(widget_open|widget_close|chat_started|chat_ended|ticket_submitted|unread_message)$`
+   - Use regex matching: **true**
+
+3. **Create Data Layer Variables**
+   - `DLV - zendesk_action` → `zendesk_action`
+   - `DLV - zendesk_product` → `zendesk_product`
+   - `DLV - zendesk_unread_count` → `zendesk_unread_count`
+   - `DLV - zendesk_category` → `zendesk_category`
+
+4. **Create a GA4 Event Tag**
+   - Event name: `{{Event}}`
+   - Parameters:
+     - `zendesk_action` → `{{DLV - zendesk_action}}`
+     - `zendesk_product` → `{{DLV - zendesk_product}}`
+     - `page_path` → `{{Page Path}}`
+   - Trigger: the regex Custom Event trigger
+
+5. **Mark `zendesk_ticket_submitted` and `zendesk_chat_started` as key events** in GA4.
+</Steps>
+
+<TagConfig
+  name="GA4 - zendesk_events"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - zendesk_* (regex)"
+  variables={["DLV - zendesk_action", "DLV - zendesk_product", "DLV - zendesk_unread_count"]}
+/>
+
+## Test it
+
+1. Open GTM Preview on a page with the widget installed
+2. Click the launcher — confirm `zendesk_widget_open` with the correct `zendesk_product`
+3. Start a chat or conversation — confirm `zendesk_chat_started`
+4. (Classic only) Submit a ticket via the contact form — confirm `zendesk_ticket_submitted`
+5. Close the widget — confirm `zendesk_widget_close`
+6. In GA4 DebugView, verify each event arrives with parameters
+
+## Common gotchas
+
+**Wrong API signature for your product.** Messaging and Classic don't share event names. `zE('webWidget:on', 'chat:start', ...)` silently does nothing on Messaging installs. Use the tab that matches your widget — the note at the top shows how to detect it.
+
+**SDK not ready at Window Loaded.** Zendesk loads asynchronously. `zE` is usually available by Window Loaded, but async-heavy pages can beat it. Wrap the listener attach in a small retry: `if (!window.zE) return setTimeout(attach, 500);`
+
+**Multiple events for a single user action.** Opening the widget often fires both `open` and (milliseconds later) a `conversationStarted` if the visitor had an active conversation. That's expected — treat them as distinct signals or dedupe with a conversation-scoped flag.
+
+**`userEvent` is chatty.** In Classic, `userEvent` fires for many internal UI transitions, not just form submits. Filter by `data.action === 'Contact Form Submitted'` to catch real ticket submissions, or log all `data.action` values once to see what your install emits.
+
+**Consent gating differs by region.** If Zendesk loads only after consent in some regions, the widget and your listener must both wait for the consent-granted event. A global Window Loaded trigger will run too early for those visitors.
+
+<CardGrid>
+  <LinkCard title="Track Intercom Messenger" href="/recipes/interaction-tracking/track-intercom/" description="Same pattern for Intercom's JavaScript API." />
+  <LinkCard title="Track Drift Chat" href="/recipes/interaction-tracking/track-drift/" description="Same pattern for Drift's SDK events." />
+  <LinkCard title="Custom HTML Tags" href="/client-side/tags/custom-html-tags/" description="The tag type used to attach these listeners." />
+  <LinkCard title="JavaScript for Tag Managers" href="/resources/javascript-for-tag-managers/" description="Refresher on async SDK detection and retry." />
+</CardGrid>

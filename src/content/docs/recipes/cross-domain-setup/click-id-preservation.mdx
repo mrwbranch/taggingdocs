@@ -1,0 +1,155 @@
+---
+title: "Click ID Preservation"
+description: "Capture and preserve gclid, fbclid, msclkid, and ttclid across redirects, ITP cookie truncation, and payment-processor round-trips so conversions attribute to the right ad click."
+sidebar:
+  order: 6
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Click IDs (`gclid`, `fbclid`, `msclkid`, `ttclid`) are how each ad platform reconciles a paid click with a downstream conversion. They are only present on the first landing URL. If the user clicks through to a payment processor, authenticates on a second domain, or simply navigates around the site for ten minutes, the original query string is long gone — and so is the ad-platform match.
+
+This recipe captures each click ID at the first opportunity, stores it in a first-party cookie with a long expiry, and re-attaches it to the conversion event (client-side, server-side, or both).
+
+## The problem
+
+A user clicks a Google Ads search result carrying `?gclid=Cj0KCQ...` and lands on `/pricing`. They browse for a minute, click through to `/checkout`, get redirected to the payment processor, come back on `/thank-you`, and the purchase event fires.
+
+At the point the purchase fires, `location.search` contains `?session=xyz` (or nothing). `gclid` is long gone. Without it, enhanced conversions cannot match the purchase back to the ad click, and your Google Ads ROAS dashboard under-reports the campaign.
+
+The same pattern breaks Meta (`fbclid`), Microsoft (`msclkid`), and TikTok (`ttclid`) attribution.
+
+## The canonical pattern
+
+<Steps>
+1. Capture all known click IDs on every page load.
+2. Store each one in a first-party cookie with a long expiry (90 days is the common window).
+3. At conversion time, read the cookie(s) and attach the values as event parameters or user properties.
+4. Forward to ad platforms via the GA4 tag, Google Ads tag, Meta CAPI, or sGTM.
+</Steps>
+
+<Aside type="note">
+Body-line: this recipe assumes you control the GTM container and can deploy a small Custom HTML tag. If you are on a fully locked-down CMS, the same pattern works from sGTM using request-header reads — see the server-side section below.
+</Aside>
+
+## Step 1 — Capture click IDs on landing
+
+Create a **Custom HTML** tag that fires on **All Pages** with a low numeric priority (so it runs before any conversion tag).
+
+```html
+<script>
+(function () {
+  var CLICK_IDS = ['gclid', 'fbclid', 'msclkid', 'ttclid', 'dclid', 'wbraid', 'gbraid'];
+  var params = new URLSearchParams(window.location.search);
+  var maxAge = 60 * 60 * 24 * 90; // 90 days
+
+  CLICK_IDS.forEach(function (key) {
+    var value = params.get(key);
+    if (!value) return;
+    document.cookie =
+      '_cid_' + key + '=' + encodeURIComponent(value) +
+      '; Max-Age=' + maxAge +
+      '; Path=/; SameSite=Lax; Secure';
+  });
+})();
+</script>
+```
+
+Only overwrite when a new value is present on the URL — the `if (!value) return` guard keeps older click IDs intact when the user navigates internally.
+
+## Step 2 — Expose the cookies to GTM
+
+Create a **First-Party Cookie** variable in GTM for each click ID you capture:
+
+- `Cookie - gclid` → cookie name `_cid_gclid`
+- `Cookie - fbclid` → cookie name `_cid_fbclid`
+- `Cookie - msclkid` → cookie name `_cid_msclkid`
+- `Cookie - ttclid` → cookie name `_cid_ttclid`
+
+Tick **URI-decode cookie** so values match the original.
+
+## Step 3 — Attach to the conversion
+
+<Tabs>
+<TabItem label="GA4 event">
+Add each click ID as an event parameter on your purchase / lead tag:
+
+- `gclid` → `{{Cookie - gclid}}`
+- `fbclid` → `{{Cookie - fbclid}}`
+- `msclkid` → `{{Cookie - msclkid}}`
+- `ttclid` → `{{Cookie - ttclid}}`
+
+Register them as custom dimensions in GA4 if you want them to appear in Explorations and Data Studio.
+</TabItem>
+<TabItem label="Google Ads conversion">
+The Google Ads Conversion Tracking tag reads `gclid` automatically from the URL. If the purchase page no longer has `gclid` in the URL, set the **gclid** field explicitly to `{{Cookie - gclid}}` in the tag configuration.
+
+For enhanced conversions, also pass the hashed email and phone you collected at checkout.
+</TabItem>
+<TabItem label="Meta CAPI">
+Send `fbclid` as part of the `user_data` block (`fbc` parameter). Meta's `fbc` format is `fb.1.{timestamp}.{fbclid}` — build it in a Custom JavaScript variable:
+
+```javascript
+function () {
+  var fbclid = {{Cookie - fbclid}};
+  if (!fbclid) return undefined;
+  return 'fb.1.' + Math.floor(Date.now() / 1000) + '.' + fbclid;
+}
+```
+</TabItem>
+</Tabs>
+
+## Step 4 — Server-side continuation with sGTM
+
+Browser cookies written from JavaScript get truncated to 7 days under Safari ITP. For click IDs to survive a 90-day window, rewrite them as first-party HTTP cookies from sGTM.
+
+<Steps>
+1. Route the GA4 stream through sGTM on a first-party subdomain (e.g. `sgtm.example.com`) — see [Cloudflare Proxy Setup](/server-side/operations/cloudflare-proxy-setup/).
+2. In sGTM, create a **Cookie** variable reading the click ID from the incoming request.
+3. Create a **Set-Cookie** response modifier that re-writes the cookie with `HttpOnly=false; Max-Age=7776000; SameSite=Lax`. Since sGTM responses come from your own domain, the cookie gets the full browser retention rather than the 7-day JS ceiling.
+4. Read the cookie on the server side when building outbound Google Ads / Meta CAPI / Microsoft Ads UET events.
+</Steps>
+
+<Aside type="caution">
+Set-Cookie from sGTM only lands as a first-party cookie if the sGTM endpoint is served from your own domain. A `*.run.app` Cloud Run URL will write a third-party cookie that Safari and Firefox reject.
+</Aside>
+
+## Step 5 — Payment processor round-trips
+
+Users who leave for PayPal, Klarna, Stripe Checkout, or a bank 3-D Secure flow come back with the payment provider as referrer and no query string from the original ad click.
+
+Because we captured the click IDs on first landing and stored them in a 90-day first-party cookie, the conversion tag on `/thank-you` still sees them. The only remaining risk is the browser clearing the cookie during the round-trip — mitigated by the sGTM rewrite in Step 4.
+
+Pair this with the stored-client-id technique from [Payment Redirect Attribution Fix](/recipes/ecommerce-conversions/payment-redirect-attribution-fix/) for full coverage.
+
+## Testing
+
+<Steps>
+1. Open an incognito window and visit `https://example.com/?gclid=TEST_CLICK_123`.
+2. In DevTools → Application → Cookies, confirm `_cid_gclid=TEST_CLICK_123` is set with a 90-day expiry.
+3. Navigate away and back. Confirm the cookie is unchanged.
+4. Complete a conversion. In GA4 DebugView, verify the purchase event carries `gclid=TEST_CLICK_123`.
+5. Repeat with `?fbclid=...`, `?msclkid=...`, `?ttclid=...`.
+6. Repeat in Safari to confirm the sGTM-written cookie survives ITP's 7-day JS cookie cap.
+</Steps>
+
+## Common gotchas
+
+**Overwriting good click IDs with empty values.** If you drop the `if (!value) return` guard, every internal page view blanks the cookie. Always short-circuit when the URL has no click ID.
+
+**Click ID leakage across users on shared devices.** A 90-day cookie will attach the first user's `gclid` to the second user's conversion. Clear the click ID cookie inside your logout handler, and always overwrite when a fresh click ID arrives.
+
+**Safari ITP truncates JS-written cookies to 7 days.** If you have long consideration cycles, the server-side rewrite in Step 4 is not optional. Without it, roughly one in three Safari users will drop out of the 90-day window.
+
+**`wbraid` and `gbraid` require different handling.** These are iOS app-to-web / app-to-app click IDs. Capture them in the same cookie pattern, but never forward them as `gclid` — Google Ads rejects mixed IDs.
+
+**Consent Mode denies storage.** If `ad_storage=denied`, you cannot write the cookie. Google's Consent Mode v2 will still transmit a hashed click signal, but it is not a substitute for the cookie path.
+
+<CardGrid>
+  <LinkCard title="Transfer UTM Parameters" href="/recipes/cross-domain-setup/transfer-utm-parameters/" description="Same pattern for UTM parameters through multi-page journeys." />
+  <LinkCard title="Cross-Domain Tracking Setup" href="/recipes/cross-domain-setup/cross-domain-setup/" description="Configure the `_gl` linker so GA4 sessions survive cross-domain hops." />
+  <LinkCard title="Cross-Domain Tracking" href="/client-side/tracking/cross-domain-tracking/" description="Deep dive on how the linker works under the hood." />
+  <LinkCard title="Cloudflare Proxy Setup" href="/server-side/operations/cloudflare-proxy-setup/" description="Serve sGTM on a first-party subdomain so Set-Cookie survives ITP." />
+  <LinkCard title="Offline Conversion Import" href="/recipes/ecommerce-conversions/offline-conversion-import/" description="Upload stored click IDs back to Google Ads for offline conversions." />
+</CardGrid>

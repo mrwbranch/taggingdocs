@@ -1,0 +1,127 @@
+---
+title: "Cross-Cloud Migration"
+description: "Moving sGTM between providers — GCP to AWS, self-hosted to Stape, and back — without breaking cookies, losing events, or triggering a visible outage."
+sidebar:
+  order: 10
+---
+
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Teams migrate sGTM between hosting providers for unremarkable reasons: a finance team consolidating cloud vendors, an ops team standardising on AWS, a cost decision to move off Stape once volume justifies self-hosting, or the reverse — moving *to* Stape after realising the maintenance burden isn't worth the savings. None of the reasons are exciting, but the migration is high-stakes: tagging infrastructure is rarely visible when it works, and extremely visible when it doesn't.
+
+The pattern that works consistently is **parallel deployment followed by DNS cutover** — run both old and new in parallel, shift traffic gradually, and keep the old stack warm until you're sure. The exact sequence depends on the source and destination, but the shape is the same.
+
+## The six-stage playbook
+
+<Steps>
+1. **Lower DNS TTL in advance.** A week before cutover, drop the TTL on your sGTM hostname (`metrics.example.com`) to 60 seconds. DNS TTL changes are themselves cached — if you try to lower the TTL and cut over same-day, clients keep resolving to the old record for the old TTL's duration (often 24+ hours).
+
+2. **Stand up the new deployment in parallel.** Deploy sGTM on the new provider with a temporary hostname (`new-metrics.example.com` or `metrics-aws.example.com`). Import the same GTM container version. The GTM container ID (`GTM-XXXXXX`) stays identical — you're moving the compute, not the container definition. The client-side GTM continues hitting the old sGTM hostname.
+
+3. **Validate the new deployment with synthetic traffic.** Fire test events directly at the new hostname via curl, the GA4 debugger, or sGTM's preview mode. Confirm:
+   - `/healthz` returns 200.
+   - Client claiming works for GA4, GA4-events, and any custom clients.
+   - Downstream tags fire and show in GA4 DebugView, Meta Events Manager, etc.
+   - Custom domain mapping and SSL certificate both resolve.
+   - First-party cookies can be set and read.
+
+4. **Cut over DNS, one record at a time.** Point `metrics.example.com` at the new provider. Because TTL is 60s, 95% of clients pick up the new target within 2 minutes. The old deployment keeps running — any stragglers still resolving the old IP hit the old server and are served normally.
+
+5. **Monitor both stacks for 24–48 hours.** Request rate on the new stack should rise rapidly, on the old stack should drop to near zero. Error rates should stay flat on both. GA4 event counts, Meta conversion counts, and downstream vendor dashboards should all look unchanged. Any anomaly in this window — latency spike, geo shift, downstream rejection rate — rolls back with a single DNS change.
+
+6. **Decommission the old stack.** Once 48 hours pass with clean metrics, tear down the old sGTM deployment. Restore the DNS TTL to its original value (usually 3600s). Archive the old provider's container export as a rollback artifact.
+</Steps>
+
+## Provider-specific notes
+
+<Tabs>
+<TabItem label="GCP → AWS">
+**What transfers cleanly:**
+- GTM container JSON (export from GCP's tagging infrastructure, import on AWS — the container itself is provider-agnostic).
+- Client-side snippet (unchanged — the only thing the browser cares about is the custom domain).
+- First-party cookies (survive the DNS change as long as `Domain=example.com` is set).
+
+**What needs work:**
+- **Autoscaling.** Cloud Run's request-based scaling is replaced by AWS Lambda concurrency limits or ECS Fargate task counts. Cold-start behaviour differs — Lambda has noticeable cold starts under low traffic, Fargate has warmer workers but slower scale-up. Benchmark before cutover.
+- **Static egress IP.** See [Static Egress IP](/server-side/operations/static-egress-ip/). Cloud NAT IPs don't transfer to AWS; you need a new Elastic IP, and any vendor allowlists need updating before cutover.
+- **Logging destinations.** Cloud Logging exports to BigQuery or Pub/Sub need AWS equivalents (CloudWatch → Kinesis → S3). Downstream alerting policies rebuild from scratch.
+</TabItem>
+<TabItem label="Stape → Self-hosted">
+**What transfers cleanly:**
+- GTM container JSON.
+- Custom domain (you re-register it on the new provider).
+
+**What needs work:**
+- **Power-Ups.** Stape's GEO Headers, Logs Storage, Static Egress IP, and DNS are all Power-Up features. Each has a self-hosted equivalent but they don't port automatically. Audit every enabled Power-Up and plan its replacement before cutover.
+- **Transforms and custom clients** sometimes use Stape-specific request headers. Audit transform code for `x-stape-*` header references.
+- **Stape's log UI is gone** — you need to rebuild event debugging workflows against Cloud Logging or CloudWatch.
+</TabItem>
+<TabItem label="Self-hosted → Stape">
+**What transfers cleanly:**
+- Everything on the container side. Stape accepts a standard GTM container import.
+
+**What needs work:**
+- **Cost model shift.** Usage-based Stape pricing vs. fixed Cloud Run pricing — the break-even point is usually 3–8M events per month. Model both before committing.
+- **Custom templates using runtime features Stape doesn't expose.** Rare, but audit any custom clients that call external APIs — Stape's sandbox is stricter on some outbound patterns.
+- **Giving up direct log access.** You query logs through Stape's UI instead of Cloud Logging's BigQuery sink. Some operations workflows (error dashboards, cost-per-event reports) need rebuilding in Stape's tooling.
+</TabItem>
+</Tabs>
+
+## Gradual traffic split (optional)
+
+For high-volume deployments where a DNS cutover feels too abrupt, use weighted routing at the DNS or proxy layer:
+
+- **Cloudflare Load Balancer** (paid feature): weighted pools between old and new origins. Start at 5% new / 95% old for 24 hours, then 50/50 for 24 hours, then 100% new.
+- **Route 53 weighted routing** (AWS): same idea, DNS-level.
+- **Cloudflare Worker**: manual implementation — route requests to old/new based on `Math.random() < 0.05`, controlled by a KV value you adjust without redeploying.
+
+Gradual split is slower but lets you catch subtle issues (a specific event type failing on the new stack, a geo-specific latency problem) before committing fully.
+
+## Container continuity
+
+The GTM container itself — the tags, triggers, variables, and templates — is provider-agnostic. You export once, import once, and the definition is identical. What *changes* across providers is the runtime environment: the compute platform, the networking stack, the log destination, the observability tools. The migration risk is not in the container; it's in the environment.
+
+That means your pre-cutover testing should focus on environment-dependent things:
+
+- Does the custom HTTP template that calls your internal API still work? (DNS resolution, TLS trust, egress IP allowlisting.)
+- Do custom templates that read request headers get the headers they expect? (Different providers normalise headers differently.)
+- Does the new stack's cold-start latency affect user-facing response time? (If your client-side GA4 config has a `server_container_url`, slow sGTM slows down page tracking.)
+
+## Common mistakes
+
+**Not lowering TTL far enough in advance.** Setting TTL to 60s five minutes before cutover doesn't help — DNS resolvers honour the previous (longer) TTL. Drop it at least a week ahead.
+
+**Forgetting vendor IP allowlists.** If you use a [static egress IP](/server-side/operations/static-egress-ip/) and a vendor has allowlisted it, the new stack's new IP is rejected. The rejection is silent at the vendor's end and invisible from sGTM. Notify every IP-restricted vendor at least a week ahead of cutover with the new IP.
+
+**Migrating on a high-traffic day.** Black Friday, a major campaign launch, an earnings release — these are not cutover days. Schedule the DNS change during a low-traffic window (middle of the night in your largest market is usually a safe bet) so issues are smaller in absolute terms if they occur.
+
+**Tearing down the old stack too fast.** 48 hours of dual-running is the minimum. For high-stakes deployments, run in parallel for a full week so you can observe day-of-week traffic patterns on the new stack before committing.
+
+**Assuming cookies survive silently.** They *do* survive (they're on your registrable domain, unchanged by the IP change), but test this explicitly — load the site in a browser that has existing sGTM cookies, fire an event, confirm the cookies are preserved and the client ID is unchanged.
+
+**Not capturing the rollback path.** Write down, before cutover, the exact DNS change that reverses the move. Store it in your runbook. When something goes wrong at 2am you do not want to be reconstructing the old configuration from memory.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Hosting Comparison"
+    description="The upstream decision — which provider to target."
+    href="/server-side/operations/hosting-comparison/"
+  />
+  <LinkCard
+    title="Static Egress IP"
+    description="One of the biggest migration pain points — the egress IP changes and vendor allowlists break."
+    href="/server-side/operations/static-egress-ip/"
+  />
+  <LinkCard
+    title="Custom Domain Setup"
+    description="The domain-mapping step every migration repeats on the new provider."
+    href="/server-side/setup/custom-domain-setup/"
+  />
+  <LinkCard
+    title="Uptime Monitoring"
+    description="The dual-monitoring setup you want during the parallel-run window."
+    href="/server-side/operations/uptime-monitoring/"
+  />
+</CardGrid>

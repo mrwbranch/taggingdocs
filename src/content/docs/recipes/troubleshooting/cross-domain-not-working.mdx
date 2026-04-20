@@ -1,0 +1,88 @@
+---
+title: "Cross-Domain Tracking Not Working"
+description: "Seven reasons cross-domain tracking between two sites breaks — missing domain lists, stripped _gl parameter, same-site cookie rules, and more."
+sidebar:
+  order: 3
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+If you're seeing users show up as new visitors after crossing between two of your domains, here are the most common causes and how to fix them. Cross-domain tracking in GA4 relies on the `_gl` URL parameter carrying the client ID and session state between domains. Every fault here is a failure to either generate, propagate, or read that parameter.
+
+<Aside type="note">
+Before debugging, confirm you actually have two separate registrable domains. `shop.example.com` and `account.example.com` are subdomains of the same registrable domain and share cookies automatically — cross-domain setup is not required, and configuring it can cause harm.
+</Aside>
+
+## 1. Google Tag not configured with the domain list
+
+**Verify.** Open the Google Tag in GTM (the one with your `G-XXXXXXX`). Click **Configuration settings** → **Configure your domains**. If the domain list is empty or missing the partner domain, `_gl` will never be appended to outgoing links.
+
+**Fix.** Add every domain involved in the cross-domain flow — both your primary domain and every partner. Use bare hostnames (`example.com`, `partner.com`), not URLs. Save and republish.
+
+## 2. Measurement ID mismatch between the two sites
+
+**Verify.** Both sites must send to the same GA4 property (same `G-XXXXXXX`). If Site A fires `G-ABC123` and Site B fires `G-XYZ789`, cross-domain stitching can never work — they are two separate properties.
+
+**Fix.** Consolidate. Either both sites point at the same Measurement ID, or you accept that they are two different audiences. Web stream IDs within a property are fine to differ — what must match is the property.
+
+## 3. `_gl` parameter stripped by a server-side redirect
+
+**Verify.** Open the cross-domain link in a clean browser with DevTools → Network → **Preserve log**. Click the link. You should see `?_gl=...` on the outbound URL. Follow each redirect in the chain (301/302 rows) and check whether `_gl` survives. If you see `https://partner.com/?_gl=1*abcd...` followed by `https://partner.com/` (no query string), a redirect stripped it.
+
+**Fix.** Update the redirect logic to preserve query parameters. Nginx: `rewrite ^/old$ /new$is_args$args permanent;`. Apache: add `[QSA]` to the RewriteRule. CDN/edge redirects (Cloudflare, Fastly) usually have a "preserve query string" setting — enable it.
+
+## 4. Legacy `linker` config on gtag (not the Google Tag UI)
+
+**Verify.** If the site still uses raw `gtag('config', 'G-XXXXXXX', {...})` outside of GTM, the `linker` object must be configured explicitly: `linker: { domains: ['partner.com'], accept_incoming: true }`. Missing `accept_incoming` means the destination site generates its own cookies instead of reading `_gl`.
+
+**Fix.** Add `accept_incoming: true`. Or better, move the configuration into the Google Tag UI in GTM and delete the raw gtag config to avoid the two disagreeing.
+
+## 5. Missing `accept_incoming` on the destination
+
+**Verify.** Outgoing link from Site A correctly has `_gl=1*...`. Destination Site B ignores it and generates a fresh client ID. In DevTools on Site B, check `_ga` cookie value after arrival — if it doesn't match the decoded client ID in `_gl`, `accept_incoming` is off.
+
+**Fix.** In the Google Tag on Site B, enable accepting cross-domain linker parameters. In the Google Tag UI it's on by default when you add the domain — in raw gtag it requires `accept_incoming: true`.
+
+## 6. SameSite cookie policy breaks on cross-domain redirect chains
+
+**Verify.** A cross-domain redirect chain (A → B → A) with `Set-Cookie: SameSite=Strict` on the `_ga` cookie fails on the return leg. Modern browsers (Chrome 80+, Safari 16+) drop Strict cookies on cross-site navigations. This manifests as the client ID reverting to a new value after the round trip.
+
+**Fix.** Ensure GA4's own cookies use `SameSite=Lax` (the default since gtag.js 2020+). If your own server sets a session cookie that participates in tracking, it must be `SameSite=Lax` for top-level navigations, or the flow breaks.
+
+## 7. URL parameter blocked by a campaign-tagging rule
+
+**Verify.** GA4 → Admin → **Data streams** → pick stream → **Configure tag settings** → **List unwanted referrals / exclude URL query parameters**. If `_gl` was added to the excluded parameter list (someone thought it was PII), the incoming URL has the data stripped before GA4 reads it.
+
+**Fix.** Remove `_gl` from any exclusion list. `_gl` is not PII — it's a hashed client-ID transport.
+
+## Other things that look like cross-domain failures but aren't
+
+- **Iframes** — an iframe embed is not cross-domain navigation. Cross-domain config doesn't apply. See [Iframe Tracking](/recipes/cross-domain-setup/iframe-tracking/).
+- **Hash-based redirects** — `#_gl=...` fragments are not sent to the server, and some JavaScript navigators strip them. Use query-string `_gl`, not fragment.
+- **Referral exclusion missing** — even with `_gl` working end-to-end, if the partner domain isn't in your Configure your domains list, returning from the partner creates a new session (referral). Configure both directions.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Cross-Domain Tracking Setup"
+    description="The full happy-path setup, which is the starting point before troubleshooting."
+    href="/client-side/tracking/cross-domain-tracking/"
+  />
+  <LinkCard
+    title="Cross-Domain Setup Recipe"
+    description="Step-by-step recipe including subdomains and multi-country setups."
+    href="/recipes/cross-domain-setup/cross-domain-setup/"
+  />
+  <LinkCard
+    title="Subdomain Tracking"
+    description="When the 'two sites' are actually subdomains — different rules apply."
+    href="/recipes/cross-domain-setup/subdomain-tracking/"
+  />
+  <LinkCard
+    title="Why GA4 Shows 'Unassigned' Traffic"
+    description="The session arrives but channel grouping falls over — a related symptom."
+    href="/recipes/troubleshooting/why-ga4-shows-unassigned-traffic/"
+  />
+</CardGrid>

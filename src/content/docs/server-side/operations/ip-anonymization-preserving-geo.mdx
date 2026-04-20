@@ -1,0 +1,126 @@
+---
+title: "IP Anonymization Preserving Geo"
+description: "Strip the client IP from outbound hits without losing country/region/city in GA4 — the transforms-order trick that keeps compliance and analytics both happy."
+sidebar:
+  order: 7
+---
+
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Privacy teams routinely ask for client IPs to be removed from analytics. GA4 already truncates IPs before storing them, but that is not enough for many regulators and DPOs — the concern is what happens during processing, and who else the IP might be forwarded to (ad-platform CAPIs, enrichment APIs, log sinks). The obvious fix is to strip the IP in sGTM before it goes anywhere. The problem: if you strip the IP too early, GA4 and downstream tools lose the country/region/city data derived from it, and geo reports go blank.
+
+The answer is ordering. Enrich the event with derived geo fields *before* stripping the IP, then forward the enriched, de-identified hit. Every major sGTM host supports this, but the mechanics differ.
+
+## The pattern
+
+<Steps>
+1. **Client browser sends a hit** to sGTM. The request carries the user's IP in the TCP connection and in headers like `X-Forwarded-For`.
+
+2. **sGTM parses the hit** into its event model. The GA4 web client extracts the IP and places it into `event_data.ip_override`.
+
+3. **A geo-lookup transform** reads the IP, resolves it against a MaxMind or equivalent database, and writes `event_data.geo.country`, `event_data.geo.region`, `event_data.geo.city` onto the event.
+
+4. **A second transform strips `ip_override`** and any other IP-carrying fields from the event model.
+
+5. **Tags fire against the de-identified event**. GA4, Meta CAPI, and any other downstream now receive country/region/city but no IP.
+</Steps>
+
+The ordering is the whole game. Transforms run in sequence — geo-enrichment must come before IP-stripping, or the enrichment has nothing to work from.
+
+## Stape — automatic via GEO Headers
+
+Stape's **GEO Headers** Power-Up is a one-switch implementation of exactly this pattern. Enable it in the container settings. Stape resolves the incoming IP to country/region/city server-side, writes them as custom headers (`x-geo-country`, `x-geo-region`, `x-geo-city`) onto the request, and then you use a Transform to copy those into `event_data.geo.*` and drop the IP. Stape's documentation calls this the "GEO Headers plus IP anonymization" combo and it takes under five minutes to wire up.
+
+## GCP / self-hosted — with Cloudflare in front
+
+If your sGTM is fronted by Cloudflare (see [Cloudflare Proxy Setup](/server-side/operations/cloudflare-proxy-setup/)), Cloudflare injects `CF-IPCountry`, `CF-IPCity`, `CF-Region`, and related headers into every request. You read those in a custom client or a transform and write them onto the event before any tag runs.
+
+<Steps>
+1. **Enable IP Geolocation in Cloudflare**: Dashboard → Network → IP Geolocation → On.
+
+2. **In sGTM, add a Transform** that runs before every tag:
+
+   ```javascript
+   // Custom Variable template — request header reader
+   const getRequestHeader = require('getRequestHeader');
+   const setEventData = require('setEventData');
+
+   const country = getRequestHeader('CF-IPCountry');
+   const region = getRequestHeader('CF-Region');
+   const city = getRequestHeader('CF-IPCity');
+
+   if (country) setEventData('geo_country', country);
+   if (region) setEventData('geo_region', region);
+   if (city) setEventData('geo_city', city);
+   ```
+
+3. **Add a second Transform** that strips the IP:
+
+   ```javascript
+   const setEventData = require('setEventData');
+   setEventData('ip_override', undefined);
+   ```
+
+4. **Map the custom geo fields** in your GA4 tag as event parameters. Register them as [Custom Dimensions](/ga4/configuration/custom-dimensions/) in GA4 Admin so they appear in reports.
+</Steps>
+
+<Aside type="caution">
+GA4 will still attempt to derive geo from the connection IP if `ip_override` is absent. Since the connection IP seen by GA4 is now sGTM's own IP, not the user's, GA4's native geo becomes wrong for everyone — clustered around your sGTM region. That is why you send the derived country/region/city as explicit event parameters and report from those, not from GA4's built-in country/region fields.
+</Aside>
+
+## GCP / self-hosted — without Cloudflare (MaxMind on GCS)
+
+If you don't have Cloudflare in front, you need a geo-IP database inside sGTM. The practical option is to host MaxMind GeoLite2 on Cloud Storage and load it into sGTM via a custom template that reads from GCS on each request (with in-memory caching).
+
+This is significantly more operational work — license tracking, monthly database updates, custom template maintenance — and most teams find that putting Cloudflare in front is cheaper and simpler. If you're already on Stape or Cloudflare, use the built-in option.
+
+## Verifying it works
+
+<Steps>
+1. **Open GA4 DebugView** and fire a test event.
+
+2. **Inspect the event parameters**. Your custom `geo_country`/`geo_region`/`geo_city` should be populated; no IP should be visible in the event (GA4 never shows raw IPs in DebugView, but you can confirm by inspecting the outbound request in your sGTM logs).
+
+3. **Check sGTM logs** for the transform execution. Cloud Logging entries should show the geo headers being read and the ip_override being cleared.
+
+4. **Inspect a GA4 report** that uses the custom geo dimensions. Countries should match expected traffic distribution.
+
+5. **Inspect GA4's built-in Country report**. It will now be dominated by the country where your sGTM is hosted — that is expected and confirms the IP is not reaching GA4's geo lookup.
+</Steps>
+
+## Common mistakes
+
+**Running the strip-IP transform before the enrich-geo transform.** Transform order matters. If `ip_override` is cleared first, the geo lookup has nothing to work from. In the sGTM UI, transforms run top to bottom — verify the order.
+
+**Relying on GA4's built-in Country/Region for reporting.** Once the IP is stripped, GA4's built-in geo fields resolve to the sGTM hosting region for everyone. You must use the custom `geo_country`/`geo_region`/`geo_city` event parameters as the source of truth in reports and audiences.
+
+**Forgetting other destinations.** If you only strip the IP on the GA4 tag, the Meta CAPI tag, TikTok Events API tag, and any Custom HTTP tag still send the IP downstream. Strip the IP at the event level (a single transform) so every downstream tag inherits the de-identification. See [Data Redaction / PII](/server-side/advanced/data-redaction-pii/) for the full transform-as-redaction pattern.
+
+**Assuming "IP anonymization" in GA4's property settings is enough.** Google's IP anonymization truncates the last octet before storing, but the full IP is still processed through Google's systems during routing and geo lookup. For strict compliance postures, server-side stripping before the event leaves your infrastructure is what's usually required.
+
+**Not testing with a VPN.** After setup, connect through a VPN endpoint in another country and fire a test event. The custom geo parameters should reflect the VPN endpoint's country, and GA4's built-in country should not. This confirms the whole pipeline works.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Data Redaction & PII"
+    description="The broader pattern of scrubbing personal data from events before tags fire."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+  <LinkCard
+    title="Cloudflare Proxy Setup"
+    description="Fronting sGTM with Cloudflare — which also gives you the CF-IPCountry headers used above."
+    href="/server-side/operations/cloudflare-proxy-setup/"
+  />
+  <LinkCard
+    title="Consent Mode"
+    description="The related compliance angle — adjusting tag behavior based on user consent state."
+    href="/client-side/setup/google-consent-mode/"
+  />
+  <LinkCard
+    title="Server-Side Consent"
+    description="Enforcing consent rules inside sGTM transforms."
+    href="/consent/advanced/server-side-consent/"
+  />
+</CardGrid>

@@ -1,0 +1,237 @@
+---
+title: "LinkedIn CAPI (Server-Side)"
+description: "LinkedIn Conversions API via sGTM — OAuth setup, conversion rule URNs, hashed match keys, Lead Gen Form responses, and deduplication with the Insight Tag."
+sidebar:
+  order: 17
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+LinkedIn's Conversions API sends conversions from your server or CRM to LinkedIn Ads, closing the loop on B2B attribution where the conversion happens long after the click. For B2B campaigns — where a whitepaper download becomes a pipeline opportunity weeks later, and that opportunity becomes closed revenue months after that — CAPI is the only way to report the signals that actually matter for optimization.
+
+*Valid as of April 2026, LinkedIn REST API (LinkedIn-Version 202604).*
+
+## Why server-side for LinkedIn
+
+B2B conversion cycles don't fit the client-side pixel model. A lead fills out a form, sales qualifies them two weeks later, the opportunity closes in a quarter, and the revenue lands six months after the ad click. The Insight Tag only ever saw the form submit.
+
+LinkedIn CAPI lets you push each of those downstream events back to LinkedIn with the original user's identifier, so LinkedIn's bid algorithm can optimize toward pipeline quality and closed revenue — not just lead volume.
+
+A few specifics that matter for LinkedIn:
+
+1. **Long attribution windows.** LinkedIn supports 30-, 60-, and 90-day click attribution — longer than most social platforms. CAPI is how you take advantage of it.
+2. **Hashed identifiers have strong match rates.** LinkedIn users sign in with professional email addresses consistently, so `SHA256_EMAIL` matches at much higher rates than on consumer platforms.
+3. **Lead Gen Form responses** have a separate CAPI flow that pushes form-submit data from LinkedIn-hosted lead forms directly to your CRM — conceptually similar but structurally distinct from standard conversion push.
+
+## The event model
+
+LinkedIn CAPI v202604 accepts one or more conversion events at a single endpoint. Events are always tied to a **conversion rule** configured in Campaign Manager — each rule has a URN that identifies it.
+
+**Required per event:**
+
+| Field | Notes |
+|---|---|
+| `conversion` | Rule URN: `urn:lla:llaPartnerConversion:<id>` |
+| `conversionHappenedAt` | Unix milliseconds |
+| `user.userIds[]` | At least one hashed identifier |
+| `conversionValue` | Object with `currencyCode` and `amount` (string) |
+
+**Match keys (`idType` values in `user.userIds`):**
+
+| idType | Hashed? | Source |
+|---|---|---|
+| `SHA256_EMAIL` | Yes | Email (lowercase, trimmed, then SHA-256) |
+| `LINKEDIN_FIRST_PARTY_ADS_TRACKING_UUID` | No | `li_fat_id` cookie set by Insight Tag |
+| `ACXIOM_ID` | No | Third-party matching ID |
+| `ORACLE_MOAT_ID` | No | Third-party matching ID |
+
+**Supplementary plaintext matching** (not hashed, optional, lifts match quality): `user.userInfo.firstName`, `lastName`, `companyName`, `title`, `countryCode`. LinkedIn uses these to corroborate the hashed identifier — they don't match on their own, but they reduce false matches.
+
+## Setup in sGTM
+
+<Steps>
+1. Generate an OAuth 2.0 access token:
+   - Create a LinkedIn developer app at developer.linkedin.com.
+   - Request the `r_ads` and `rw_conversions` scopes.
+   - OAuth tokens expire after 60 days — build a refresh path or set a calendar reminder. This is the single biggest operational pitfall.
+   - Store the token as an sGTM Constant variable.
+
+2. In Campaign Manager → Account Assets → Conversion Tracking, create the conversion rule(s) you want to push events to. Each rule gives you a URN — copy it into an sGTM variable.
+
+3. In sGTM, create a Custom Template (LinkedIn does not maintain a first-party sGTM template). Skeleton:
+
+   ```javascript
+   const sendHttpRequest = require('sendHttpRequest');
+   const getAllEventData = require('getAllEventData');
+   const JSON = require('JSON');
+
+   const event = getAllEventData();
+   const payload = {
+     conversion: data.conversionUrn,
+     conversionHappenedAt: event.timestamp_ms,
+     conversionValue: {
+       currencyCode: event.ecommerce.currency,
+       amount: String(event.ecommerce.value)
+     },
+     eventId: event.event_id,
+     user: {
+       userIds: [
+         event.user_data && event.user_data.email_hash && {
+           idType: 'SHA256_EMAIL',
+           idValue: event.user_data.email_hash
+         },
+         event.li_fat_id && {
+           idType: 'LINKEDIN_FIRST_PARTY_ADS_TRACKING_UUID',
+           idValue: event.li_fat_id
+         }
+       ].filter(Boolean),
+       userInfo: {
+         firstName: event.user_data && event.user_data.first_name,
+         lastName: event.user_data && event.user_data.last_name,
+         companyName: event.user_data && event.user_data.company,
+         title: event.user_data && event.user_data.job_title,
+         countryCode: event.user_data && event.user_data.country
+       }
+     }
+   };
+
+   sendHttpRequest('https://api.linkedin.com/rest/conversionEvents', {
+     method: 'POST',
+     headers: {
+       'Authorization': 'Bearer ' + data.accessToken,
+       'LinkedIn-Version': '202604',
+       'X-Restli-Protocol-Version': '2.0.0',
+       'Content-Type': 'application/json'
+     }
+   }, JSON.stringify(payload));
+   ```
+
+4. Read `li_fat_id` from a Cookie Variable in sGTM (the Insight Tag sets this cookie on first-party domains).
+
+5. Firing trigger: the GA4 events that correspond to your conversion rules.
+</Steps>
+
+**Raw HTTP shape:**
+
+```http
+POST https://api.linkedin.com/rest/conversionEvents
+Authorization: Bearer <access_token>
+LinkedIn-Version: 202604
+X-Restli-Protocol-Version: 2.0.0
+Content-Type: application/json
+```
+
+```json
+{
+  "conversion": "urn:lla:llaPartnerConversion:12345678",
+  "conversionHappenedAt": 1713571200000,
+  "conversionValue": {
+    "currencyCode": "USD",
+    "amount": "1299.99"
+  },
+  "eventId": "evt-OPP-456-1713571200",
+  "user": {
+    "userIds": [
+      {"idType": "SHA256_EMAIL", "idValue": "<sha256>"},
+      {"idType": "LINKEDIN_FIRST_PARTY_ADS_TRACKING_UUID", "idValue": "<li_fat_id>"}
+    ],
+    "userInfo": {
+      "firstName": "Jane",
+      "lastName": "Doe",
+      "companyName": "Acme Corp",
+      "title": "VP Engineering",
+      "countryCode": "US"
+    }
+  }
+}
+```
+
+## Event mapping from the Insight Tag
+
+Unlike pixel-oriented platforms, LinkedIn doesn't have a standard event taxonomy — every conversion maps to a **conversion rule URN** you configured in Campaign Manager. Typical B2B rule setups:
+
+| GA4 event | Conversion rule | Notes |
+|---|---|---|
+| `generate_lead` | `Lead` | Fires at form-submit |
+| `sign_up` | `Sign Up` | For free-trial or newsletter |
+| `purchase` | `Purchase` | For e-commerce or self-serve SaaS |
+| CRM: opportunity created | `Pipeline` (custom rule) | Pushed from your CRM, not the site |
+| CRM: opportunity won | `Closed Revenue` (custom rule) | With the real closed-won amount |
+
+The downstream CRM events (`Pipeline`, `Closed Revenue`) are where LinkedIn CAPI earns its keep — they are not possible from a browser-side Insight Tag.
+
+## Deduplication with the Insight Tag
+
+LinkedIn dedups by `conversion` URN + `user.userIds` + `conversionHappenedAt` proximity. Since version 202401, the `eventId` field provides explicit per-event dedup — use it whenever you can.
+
+**Two paths:**
+
+1. **`eventId`-based dedup (recommended).** The Insight Tag's Enhanced Conversions supports a matching event ID. If you pass the same `eventId` from both the Insight Tag and the server-side CAPI event for the same conversion, LinkedIn dedups cleanly.
+
+2. **Identifier-based dedup (fallback).** If `eventId` isn't threaded through both sides, LinkedIn falls back to matching on hashed email plus conversion URN plus a rough timestamp window. This works but is fuzzier — same-minute events for the same email against the same conversion rule are usually deduped.
+
+**For CRM-pushed events,** there is nothing to dedup against — the Insight Tag never saw the event. Just pick a stable `eventId` derived from the CRM record ID, so re-imports don't create duplicates.
+
+<Aside type="note">
+LinkedIn's CAPI dedup window is not publicly documented in specific hours but behaves as a rough 24-hour window when using identifier-based dedup, tighter when using `eventId`. Use `eventId` wherever possible for predictable behavior.
+</Aside>
+
+## Lead Gen Form responses
+
+LinkedIn Lead Gen Forms (LGF) are LinkedIn-hosted forms shown inside the ad. Their responses flow through a separate CAPI-adjacent mechanism: LinkedIn pushes form responses to your configured webhook or your CRM's LinkedIn integration, and you push structured follow-up events (qualified / closed / not-qualified) back through the standard CAPI as custom conversions.
+
+This isn't a different API per se — it's the same `/rest/conversionEvents` endpoint — but the *source* of the initial match identifier is the LinkedIn-hosted form submission, not a cookie on your site. Use the email the user submitted in the LGF as your `SHA256_EMAIL` match key.
+
+## Testing and validation
+
+Campaign Manager → Conversion Tracking → your rule → Recent Activity shows inbound events with source labeled "Insight Tag" or "Conversions API." Latency is slow — 1–2 hours is normal, and sometimes up to 24 hours for match quality rollups.
+
+sGTM Preview mode is your fastest signal: HTTP 201 means LinkedIn accepted the event, HTTP 401 means your token expired, HTTP 400 usually means the `LinkedIn-Version` header is stale or the URN format is wrong.
+
+## Common mistakes
+
+### Forgetting the LinkedIn-Version header
+
+Every LinkedIn REST API request requires `LinkedIn-Version: YYYYMM`. Omit it and you get a 400. The version rotates monthly, and LinkedIn deprecates versions older than ~12 months — a CAPI tag that worked last year may start 400-ing today. Review your pinned version quarterly.
+
+### Using the v2 base URL
+
+`/v2/` is the old Marketing API. `/rest/` is the new REST API. Calls to `https://api.linkedin.com/v2/conversionEvents` may silently route to older, incompatible handling. Always use `/rest/`.
+
+### Sending plaintext email in `SHA256_EMAIL`
+
+Obvious in retrospect but common: the field expects the SHA-256 hash of the lowercased, trimmed email — not the email itself. A plaintext email is accepted as a string, but the match will never succeed.
+
+### Token expiry with no alerting
+
+OAuth tokens expire after 60 days. If your CAPI tag silently starts 401-ing, you'll notice when your LinkedIn pipeline reporting flatlines for a month. Monitor sGTM for non-2xx responses on the LinkedIn tag and alert on sustained failure.
+
+### Pushing CRM events without stable eventId
+
+If you push "Opportunity Created" every nightly sync, and the `eventId` isn't derived from the opportunity record, you create a duplicate conversion every night. Derive `eventId` from the CRM record ID plus a state qualifier (e.g., `sfdc-opp-123-stage-qualified`).
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="LinkedIn Insight Tag (Client-Side)"
+    description="The Insight Tag that CAPI supplements — base installation, conversion tracking, and demographic insights."
+    href="/integrations/linkedin-insight-tag/"
+  />
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="The reference CAPI implementation — similar architecture, simpler auth and no version header rotation."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Event Deduplication Across Client & Server"
+    description="Cross-platform cheat sheet for dedup fields and windows, including LinkedIn's eventId."
+    href="/integrations/event-deduplication-across-client-server/"
+  />
+  <LinkCard
+    title="Data Redaction & PII Hashing"
+    description="Hashing match keys correctly in sGTM — especially important for LinkedIn's high-value B2B data."
+    href="/server-side/advanced/data-redaction-pii/"
+  />
+</CardGrid>

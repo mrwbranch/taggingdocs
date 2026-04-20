@@ -1,0 +1,233 @@
+---
+title: "Reddit CAPI (Server-Side)"
+description: "Reddit Conversions API via sGTM — OAuth setup, click_id (rdt_cid) handling, standard tracking types, hashed match keys, and deduplication with the Reddit Pixel."
+sidebar:
+  order: 13
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Reddit's Conversions API (CAPI) exists, works, and is significantly less polished than Meta's or TikTok's. If you are running Reddit ad spend where attribution actually matters — B2B tech, gaming, crypto, niche communities — CAPI pays for itself by recovering conversions the client-side pixel misses. If Reddit is a rounding error in your media mix, skip it.
+
+*Valid as of April 2026, Reddit Conversions API v2.*
+
+## Why server-side for Reddit
+
+Reddit's client-side pixel has the same ad-blocker and ITP exposure as every other ad platform, with an added wrinkle: Reddit's audience skews toward technically literate users running uBlock Origin, Brave, and Firefox with strict tracking protection. A meaningful share of Reddit converters are actively blocking the client-side pixel.
+
+CAPI recovers those conversions by sending events from your server — where no ad blocker can reach — keyed on Reddit's click identifier (`rdt_cid`) which arrives in the landing URL.
+
+**When it is not worth it:** Reddit's measurement is materially less accurate than Meta's or Google's regardless of CAPI. If your campaigns can't tolerate ±20% attribution noise, Reddit probably isn't the right channel in the first place. And Reddit's conversion APIs have no public test-events UI, so debugging is slower than on other platforms.
+
+## The event model
+
+Reddit CAPI v2 accepts one or more events per request at a per-pixel endpoint.
+
+**Required per event:**
+
+| Field | Notes |
+|---|---|
+| `event_at` | ISO 8601 timestamp (NOT Unix epoch) |
+| `event_type.tracking_type` | One of Reddit's standard types |
+| `click_id` | The `rdt_cid` value — strongly recommended |
+| `conversion_id` | Your dedup key for event-level matching |
+
+**Standard `tracking_type` values:** `PageVisit`, `ViewContent`, `Search`, `AddToCart`, `AddToWishlist`, `Purchase`, `Lead`, `SignUp`, `Custom`.
+
+**Match keys:**
+
+| Field | Hashed? |
+|---|---|
+| `user.email` | SHA-256 |
+| `user.external_id` | SHA-256 |
+| `user.aaid` | No (mobile ad ID) |
+| `user.idfa` | No (iOS IDFA) |
+| `user.ip_address` | No |
+| `user.user_agent` | No |
+| `user.screen_dimensions` | No |
+
+<Aside type="caution">
+Reddit's documentation hints at internal processing concepts ("advertiser event processing") that are not exposed as public API parameters. If you see references to `aepp` or similar in community templates, those are client-template conveniences, not fields on the Reddit API. Stick to the v2 request shape below.
+</Aside>
+
+## Setup in sGTM
+
+Reddit has no official sGTM community template. You will build a Custom Template or a Custom Image Tag with `sendHttpRequest`.
+
+<Steps>
+1. Create a Reddit developer app at Reddit Ads Manager → Business Info → API Access. Request the `conversions.write` scope. You will receive a client ID and client secret.
+
+2. Generate a long-lived OAuth access token. Reddit's tokens are refreshable; in practice, store the refresh token as an sGTM constant and have your sGTM template call the token endpoint when the access token expires. For low-volume use, generate an access token manually and set a calendar reminder.
+
+3. Get your Reddit Pixel ID from Ads Manager → Conversions. It's a UUID.
+
+4. In sGTM, create a new Custom Template. The skeleton:
+
+   ```javascript
+   const sendHttpRequest = require('sendHttpRequest');
+   const getAllEventData = require('getAllEventData');
+   const JSON = require('JSON');
+   const sha256Sync = require('sha256Sync');
+
+   const event = getAllEventData();
+   const url = 'https://ads-api.reddit.com/api/v2.0/conversions/events/' + data.pixelId;
+
+   const body = {
+     events: [{
+       event_at: new Date(event.timestamp_ms).toISOString(),
+       event_type: { tracking_type: data.trackingType },
+       click_id: event.rdt_cid,
+       conversion_id: event.event_id,
+       user: {
+         email: event.user_data && event.user_data.email_hash,
+         external_id: event.user_data && event.user_data.external_id_hash,
+         ip_address: event.ip_override,
+         user_agent: event.user_agent
+       },
+       event_metadata: {
+         currency: event.ecommerce && event.ecommerce.currency,
+         value: event.ecommerce && event.ecommerce.value,
+         item_count: event.ecommerce && event.ecommerce.items && event.ecommerce.items.length,
+         conversion_id: event.ecommerce && event.ecommerce.transaction_id
+       }
+     }]
+   };
+
+   sendHttpRequest(url, {
+     method: 'POST',
+     headers: {
+       'Authorization': 'Bearer ' + data.accessToken,
+       'Content-Type': 'application/json'
+     }
+   }, JSON.stringify(body));
+   ```
+
+5. Configure the tag's input fields for Pixel ID, Access Token (stored as a Constant variable), and Tracking Type (mapped per event).
+
+6. Read `rdt_cid` from the landing cookie via a Cookie Variable in sGTM, propagated through GA4 as an event parameter.
+</Steps>
+
+**Raw HTTP shape:**
+
+```http
+POST https://ads-api.reddit.com/api/v2.0/conversions/events/<pixel_id>
+Authorization: Bearer <oauth_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "events": [{
+    "event_at": "2026-04-20T12:34:56Z",
+    "event_type": {"tracking_type": "Purchase"},
+    "click_id": "<rdt_cid>",
+    "conversion_id": "evt-ORDER-123-1713571200",
+    "user": {
+      "email": "<sha256>",
+      "external_id": "<sha256>",
+      "ip_address": "203.0.113.45",
+      "user_agent": "Mozilla/5.0 ..."
+    },
+    "event_metadata": {
+      "currency": "USD",
+      "value": 79.99,
+      "item_count": 2,
+      "conversion_id": "ORDER-123"
+    }
+  }]
+}
+```
+
+## Event mapping from the Reddit Pixel
+
+| GA4 event | Reddit `tracking_type` | Notes |
+|---|---|---|
+| `page_view` | `PageVisit` | Optional; client-side already covers it |
+| `view_item` | `ViewContent` | Pass product in `event_metadata.products` |
+| `add_to_cart` | `AddToCart` | Pass `value`, `item_count` |
+| `purchase` | `Purchase` | The critical one — carry `order_id` as `conversion_id` metadata |
+| `generate_lead` | `Lead` | |
+| `sign_up` | `SignUp` | |
+| `search` | `Search` | Pass query in `event_metadata.search_query` |
+| (custom) | `Custom` | With `custom_event_name` metadata |
+
+## Deduplication with the Reddit Pixel
+
+Reddit's deduplication is unusual: the primary matching signal is `click_id` (the `rdt_cid`), and `conversion_id` is the secondary per-event dedup key. Window: 7 days.
+
+**What this means in practice:**
+
+- If both pixel and CAPI fire for the same user's purchase and both carry the same `rdt_cid`, Reddit will usually dedup even without `conversion_id`.
+- But relying on `rdt_cid` alone is fragile — if the click was from an old session, the cookie expired, or the user cleared cookies between click and purchase, `rdt_cid` on the CAPI side may not match what the pixel sent.
+- Always send `conversion_id` (sourced from your dataLayer `event_id`) on both sides. On the client-side pixel, that maps to the `externalId` parameter.
+
+**Propagation:**
+
+```javascript
+// dataLayer on the thank-you page
+dataLayer.push({
+  event: 'purchase',
+  event_id: 'rdt-' + order.id + '-' + Date.now(),
+  rdt_cid: readCookie('rdt_cid'),
+  ecommerce: { ... }
+});
+```
+
+Client-side Reddit Pixel: pass `externalId: '{{DL - event_id}}'`.
+sGTM CAPI: set `conversion_id = event.event_id` and `click_id = event.rdt_cid`.
+
+## Testing and validation
+
+Reddit Ads Manager → Events Manager → your pixel shows inbound events with a source column ("Pixel" / "CAPI" / "Both"). Latency is 2–10 minutes — longer than Meta or Snap.
+
+Reddit has no test-events mode. Your options:
+
+1. Use a staging pixel (create a separate pixel ID in a test ad account) during development.
+2. Filter Events Manager by timestamp during test windows.
+3. Check your sGTM Preview mode for the tag's request/response to confirm the API accepted the event (HTTP 200).
+
+A 400 with no body usually means `event_at` is Unix epoch (it must be ISO 8601). A 401 means the access token expired.
+
+## Common mistakes
+
+### Using Unix epoch for `event_at`
+
+Reddit requires ISO 8601 (`2026-04-20T12:34:56Z`). A number like `1713571200` is rejected with a 400. Most other CAPIs accept epoch; Reddit does not.
+
+### Omitting `click_id` entirely
+
+Without `rdt_cid`, Reddit falls back to IP + user agent matching, which has a much lower match rate. Always capture `rdt_cid` from the URL on landing, store it in a first-party cookie for the ad's click window, and include it on every CAPI event.
+
+### Sending plaintext email in `user.email`
+
+`user.email` must be SHA-256 hashed, lowercase, trimmed. Sending plaintext `user@example.com` silently fails to match (the event is still recorded, but attribution is degraded).
+
+### Token expiry with no refresh path
+
+If you generated a manual OAuth token and never wired up refresh, it will expire — typically within a few months — and every CAPI request starts returning 401. Build the refresh into your sGTM template or at minimum set a calendar reminder and monitoring.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Reddit Conversion Pixel (Client-Side)"
+    description="The client-side pixel that CAPI supplements — base tag, standard events, and rdt_cid capture."
+    href="/integrations/reddit-pixel/"
+  />
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="The reference CAPI implementation — cleaner tooling and more mature debugging."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Event Deduplication Across Client & Server"
+    description="Cross-platform cheat sheet for dedup field names, windows, and stable ID generation."
+    href="/integrations/event-deduplication-across-client-server/"
+  />
+  <LinkCard
+    title="Server-Side GTM Overview"
+    description="The sGTM foundation required for CAPI implementations on any platform."
+    href="/server-side/"
+  />
+</CardGrid>

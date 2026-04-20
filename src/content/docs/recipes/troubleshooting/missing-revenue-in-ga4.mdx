@@ -1,0 +1,103 @@
+---
+title: "Missing Revenue in GA4"
+description: "Seven reasons GA4 purchase revenue doesn't match your payment processor — missing value, wrong currency, string types, dedup, and refund handling."
+sidebar:
+  order: 9
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+If you're seeing GA4 report `$0` or missing revenue for purchase events, here are the most common causes and how to fix them. The `purchase` event is one of GA4's strictest events — it has specific required fields, strict type expectations, and a deduplication layer that silently drops hits. A single malformed field is all it takes for revenue to vanish.
+
+<Aside type="caution">
+Always fix revenue tracking before building any reporting on top of it. A missing-revenue bug discovered six weeks into a quarter means six weeks of reports need footnotes.
+</Aside>
+
+## 1. `value` parameter missing or not mapped
+
+**Verify.** GA4 → DebugView → inspect a recent `purchase` event. Look for the `value` parameter. If it's absent, GA4 has no total-revenue number to attribute. The event counts (as a conversion), but revenue stays at 0.
+
+**Fix.** Open the GA4 Event tag in GTM for purchases. Under Event Parameters, add `value` mapped to your Data Layer Variable (typically `{{DLV - ecommerce.value}}` or similar). Ensure the push sets `ecommerce.value` at the correct level — GA4 reads it from the top-level `value`, not from inside `items`.
+
+## 2. `value` is a string instead of a number
+
+**Verify.** BigQuery query: `SELECT event_name, ecommerce.purchase_revenue FROM ... WHERE event_name = 'purchase' LIMIT 100`. If `purchase_revenue` is `NULL` but raw `event_params` show `value = "89.99"` (string), GA4 rejected the value at ingest.
+
+**Fix.** Cast to number in the dataLayer push. `value: parseFloat(order.total)` not `value: order.total.toString()`. In GTM, Data Layer Variables return whatever type the push sent — if the source is a string, either fix the source or use a JavaScript Variable to parse: `return parseFloat({{DLV - ecommerce.value}});`. Verify type with `typeof` in DevTools Console.
+
+## 3. Missing or wrong `currency` code
+
+**Verify.** `currency` must be a valid ISO 4217 three-letter code (USD, EUR, GBP, JPY, SEK, etc). `"$"`, `"dollar"`, `"us"`, blank, or lowercase `"usd"` (valid but inconsistent) can cause rejection or misattribution. GA4 uses the property's default currency when `currency` is missing, which may convert your values unexpectedly.
+
+**Fix.** Always send `currency` in uppercase ISO 4217. For multi-currency stores, send the transaction's currency (not the property's base currency) and let GA4 do the conversion. Pin the value in your dataLayer spec — e.g. `currency: 'EUR'`, not `currency: 'eur'` or `currency: '€'`.
+
+## 4. `items` array missing prices
+
+**Verify.** Even with `value` correct at the event level, missing `items[n].price` breaks item-level revenue reports. Look at GA4 → Monetisation → Item-level reports — if product-level revenue is 0 but top-line revenue is fine, this is the symptom.
+
+**Fix.** Every item in `items` needs `item_id`, `item_name`, `price` (as a number), and `quantity`. `price` is per-unit, not the line total. If you're sending `price: "0"` because the backend sends prices in cents as strings, fix it: `price: product.price_cents / 100`.
+
+## 5. Tax and shipping inclusion mismatch
+
+**Verify.** Is your `value` supposed to include tax and shipping or not? GA4's convention is that `value` represents what GA4 should treat as revenue — which for most e-commerce is *ex-tax, ex-shipping* (the product revenue). If your backend sends `value = order.grand_total` (inc. tax + shipping) but your reporting assumes product revenue, GA4 "revenue" will be inflated vs. finance's revenue.
+
+**Fix.** Pick a convention with finance and stick to it. The cleanest pattern: `value = order.subtotal` (products only), plus separate `tax` and `shipping` parameters. GA4 receives all three and analysts choose which to report on. Document the decision.
+
+## 6. Duplicate purchase deduplicated — wrong one won
+
+**Verify.** If duplicate purchases (see [Duplicate Events in GA4](/recipes/troubleshooting/duplicate-events-in-ga4/)) land with the same `transaction_id`, GA4 dedups — keeping one, dropping others. If the surviving copy has `value: 0` while the dropped one had the real amount, revenue disappears.
+
+**Fix.** Pin down the duplicate source and kill one side. Also check which side sends complete data — a common pattern is client-side sends a rough estimate (cart total) and server-side sends the real settled amount. If GA4 keeps the client-side copy, you lose the good data. Ensure both copies have identical `value`, or remove the duplicate entirely.
+
+## 7. Refund events subtracting from revenue
+
+**Verify.** GA4 → **Monetisation** → compare Purchase revenue to Gross revenue. If Purchase revenue is noticeably lower and you have a flow that sends `refund` events, refunds are being subtracted. Check DebugView for `refund` events — especially ones that didn't correspond to real refunds.
+
+**Fix.** The `refund` event is designed to subtract. That's correct. But ensure:
+- You only fire `refund` on actual refunds, not cancellations (unless the payment was captured and needs to be undone).
+- `refund` events include a `transaction_id` referring to the original purchase — otherwise GA4 can subtract a phantom amount.
+- Partial refunds specify the refunded amount, not the full transaction value.
+
+## Verification SQL (BigQuery)
+
+```sql
+SELECT
+  event_date,
+  SUM(ecommerce.purchase_revenue) AS ga4_revenue,
+  COUNT(*) AS purchase_events,
+  COUNT(DISTINCT ecommerce.transaction_id) AS unique_transactions,
+  COUNT(CASE WHEN ecommerce.purchase_revenue IS NULL THEN 1 END) AS null_revenue_rows
+FROM `your-project.analytics_XXXXXXX.events_*`
+WHERE event_name = 'purchase'
+  AND _TABLE_SUFFIX BETWEEN '20260401' AND '20260420'
+GROUP BY event_date
+ORDER BY event_date;
+```
+
+If `null_revenue_rows > 0`, you have causes 1, 2, or 3 active. If `purchase_events > unique_transactions`, you have duplication (cause 6). Reconcile `SUM(ga4_revenue)` against your payment processor for the same period — a 2-5% gap is expected (timing + refunds); 10%+ warrants digging.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Duplicate Events in GA4"
+    description="The dedup behaviour described in cause 6 explained in full."
+    href="/recipes/troubleshooting/duplicate-events-in-ga4/"
+  />
+  <LinkCard
+    title="Duplicate Transaction Prevention"
+    description="Prevent the duplication in the first place with a transaction-ID cache."
+    href="/recipes/ecommerce-conversions/duplicate-transaction-prevention/"
+  />
+  <LinkCard
+    title="Data Discrepancies"
+    description="Expected vs. unexpected differences between GA4 and payment processor revenue."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+  <LinkCard
+    title="BigQuery Schema Reference"
+    description="Where to find ecommerce fields in the BigQuery export for audit queries."
+    href="/ga4/bigquery/schema-reference/"
+  />
+</CardGrid>

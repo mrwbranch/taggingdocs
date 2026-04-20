@@ -1,0 +1,168 @@
+---
+title: "Track Wistia Videos"
+description: "Track Wistia play, pause, end, and percent-watched events in GA4 via GTM using the _wq queue pattern and the Wistia Player API."
+sidebar:
+  order: 32
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Wistia's embed API is built around a queue — `window._wq` — that you can push to before the Wistia script even loads. That makes wiring up tracking particularly clean: one push, any number of videos, lifecycle events delivered to a single callback.
+
+*Valid as of April 2026, Wistia Player API.*
+
+## Problem
+
+Wistia's built-in analytics is excellent inside Wistia, but the events don't appear in GA4 by default. A dataLayer bridge unifies Wistia plays with YouTube, Vimeo, and HTML5 under the same `video_engagement` event family, so reports and audiences work across providers.
+
+## Solution
+
+Push a single matcher object into `window._wq` with an `onReady` callback. Wistia calls the callback once per video embed, passing you the video instance. Bind `play`, `pause`, `end`, and `percentwatchedchanged` — dedupe to 25/50/75/90/100 milestones — and push dataLayer events.
+
+## The `_wq` queue
+
+<DataLayerExample event="video_engagement" description="One Custom HTML tag handles every Wistia video on the page. The _wq queue accepts the push before or after Wistia's script loads.">
+```javascript
+(function() {
+  window._wq = window._wq || [];
+
+  window._wq.push({
+    id: '_all',  // Match every Wistia video on the page
+    onReady: function(video) {
+      var meta = {
+        hashedId: video.hashedId(),
+        title: null,
+        duration: 0
+      };
+      var milestones = [25, 50, 75, 90, 100];
+      var fired = {};
+
+      // Name and duration are only reliable once metadata is ready
+      try {
+        meta.title = video.name();
+        meta.duration = Math.round(video.duration());
+      } catch (e) {
+        // Some assets expose name/duration lazily — retry in the first event
+      }
+
+      function push(action, percent) {
+        if (!meta.title) {
+          try { meta.title = video.name(); } catch (e) {}
+          try { meta.duration = Math.round(video.duration()); } catch (e) {}
+        }
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({
+          event: 'video_engagement',
+          video_provider: 'wistia',
+          video_action: action,
+          video_title: meta.title,
+          video_url: 'https://fast.wistia.net/embed/iframe/' + meta.hashedId,
+          video_hashed_id: meta.hashedId,
+          video_duration: meta.duration,
+          video_percent: percent != null ? percent : 0
+        });
+      }
+
+      video.bind('play', function() {
+        if (!fired.start) {
+          fired.start = true;
+          push('start', 0);
+        } else {
+          push('resume', Math.round(video.percentWatched() * 100));
+        }
+      });
+
+      video.bind('pause', function() {
+        push('pause', Math.round(video.percentWatched() * 100));
+      });
+
+      video.bind('end', function() {
+        push('complete', 100);
+      });
+
+      // Wistia fires this very often — dedupe to our milestone set
+      video.bind('percentwatchedchanged', function(percent) {
+        var pct = Math.round(percent * 100);
+        milestones.forEach(function(m) {
+          if (pct >= m && !fired[m]) {
+            fired[m] = true;
+            push('progress_' + m, m);
+          }
+        });
+      });
+    }
+  });
+})();
+```
+</DataLayerExample>
+
+<Aside type="tip">
+The `id: '_all'` matcher catches every Wistia embed on the page. If you only want to track specific videos, replace it with the hashed ID — for example `id: 'abc123xyz'`.
+</Aside>
+
+## GTM setup
+
+<Steps>
+1. **Add the script as a Custom HTML tag**
+   - Trigger: **All Pages** or **DOM Ready**
+   - The `_wq` queue pattern works even if Wistia hasn't loaded yet, so timing is forgiving
+
+2. **Create a Custom Event trigger**
+   - Trigger type: **Custom Event**
+   - Event name: `video_engagement`
+
+3. **Create Data Layer Variables**
+   - `DLV - video_provider` → `video_provider`
+   - `DLV - video_action` → `video_action`
+   - `DLV - video_title` → `video_title`
+   - `DLV - video_url` → `video_url`
+   - `DLV - video_hashed_id` → `video_hashed_id`
+   - `DLV - video_percent` → `video_percent`
+   - `DLV - video_duration` → `video_duration`
+
+4. **Create a GA4 Event Tag**
+   - Event name: `video_engagement`
+   - Parameters: all DLVs above, plus `page_path` → `{{Page Path}}`
+   - Trigger: the Custom Event trigger
+</Steps>
+
+<TagConfig
+  name="GA4 - video_engagement (Wistia)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - video_engagement"
+  variables={["DLV - video_provider", "DLV - video_action", "DLV - video_title", "DLV - video_hashed_id", "DLV - video_percent"]}
+/>
+
+## Test it
+
+1. Open GTM Preview on a page with a Wistia embed
+2. Press Play — confirm `video_engagement` with `video_action: start`, populated `video_title`, and a valid `video_hashed_id`
+3. Pause at around 35% — confirm `video_action: pause` with `video_percent` near 35
+4. Let playback cross each milestone — confirm `progress_25`, `progress_50`, `progress_75`, `progress_90`, `progress_100` fire once each
+5. In GA4 DebugView, verify `video_provider: wistia` on every event and that `video_hashed_id` matches the Wistia media ID
+
+## Common gotchas
+
+**`_all` matcher catches Channel embeds too.** Wistia Channels, series players, and popover embeds all bind through `_all`. That's usually what you want, but if you're counting "unique videos played" you'll double-count a video that also appears in a channel tile.
+
+**`percentwatchedchanged` fires very frequently.** It emits on every sub-second change. The milestone dedupe in the code above is what keeps event volume sane. Never push a raw event from this binding without deduping — you'll burn through GA4 event quota.
+
+**Seeking triggers milestones out of order.** If a viewer scrubs forward to 80%, `progress_25`, `progress_50`, `progress_75` all fire near-simultaneously because `percentWatched()` crossed each threshold at once. That's correct behaviour for "watched at least X%" metrics, but will inflate time-to-milestone calculations. If that matters, track `video.secondsWatched()` separately.
+
+**Metadata lazy availability.** On some Wistia plans and asset types, `video.name()` and `video.duration()` return empty on the first `onReady` tick. The retry inside `push()` handles that — keep it.
+
+**Multiple `_wq` pushes are additive.** If another script already pushed an `id: '_all'` handler, yours runs alongside it, not instead of it. That's intentional. If you see duplicate events, search your codebase for other `_wq.push` calls.
+
+**Autoplay muted counts as start.** Same caveat as YouTube and Vimeo — set a user-gesture flag if you need to distinguish intentional plays.
+
+**Popover embeds fire `onReady` only when opened.** For popover / lightbox-triggered Wistia videos, `onReady` doesn't fire until the viewer actually opens the popover. That's fine for tracking — just don't expect pre-play metadata in that flow.
+
+<CardGrid>
+  <LinkCard title="Track Video Engagement" href="/recipes/interaction-tracking/track-video-engagement/" description="The generic recipe — YouTube built-in, Vimeo basics, HTML5." />
+  <LinkCard title="Track YouTube Player" href="/recipes/interaction-tracking/track-youtube-player/" description="Deeper YouTube IFrame Player API integration." />
+  <LinkCard title="Track Vimeo Player" href="/recipes/interaction-tracking/track-vimeo-player/" description="Vimeo Player SDK with metadata extraction." />
+  <LinkCard title="Custom HTML Tags" href="/client-side/tags/custom-html-tags/" description="The tag type used to push onto the _wq queue." />
+</CardGrid>

@@ -21,6 +21,7 @@ TaggingDocs covers the gaps, edge cases, and real-world implementations that Goo
 - **Consent & Privacy** — Consent Mode v2, CMP integration, browser privacy restrictions
 - **Recipes** — Copy-paste solutions for common tracking scenarios
 - **Interactive Tools** — DataLayer Builder, BigQuery Query Generator, Regex Tester
+- **MCP Server** — `mcp.taggingdocs.com` exposes the whole library plus 31 GTM management tools to Claude, ChatGPT, and Cursor ([docs](https://taggingdocs.com/mcp/) · [repo](https://github.com/mrwbranch/taggingdocs-mcp))
 
 ## Tech stack
 
@@ -48,4 +49,9 @@ Every page has an "Edit page" link. If you spot an error, have a better approach
 
 ## License
 
-MIT
+Dual-licensed:
+
+- **Site code** (Astro configuration, components, styles, scripts) — [MIT](./LICENSE)
+- **Documentation content** (every `.md` / `.mdx` file under `src/content/docs/`) — [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)
+
+You're free to remix, translate, or redistribute the content — including commercially — as long as you credit TaggingDocs and release derivatives under the same license. Full text in [LICENSE](./LICENSE).

@@ -1,0 +1,220 @@
+---
+title: "Consent Mode v2 with iubenda"
+description: "Step-by-step Google Consent Mode v2 integration with iubenda Cookie Solution via GTM — purpose mapping, callback configuration, built-in Google integration, and verification."
+sidebar:
+  order: 5
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+iubenda is an Italian-origin privacy compliance suite whose Cookie Solution is widely deployed across southern European small-and-medium business, hospitality, and publishing sites. It supports per-purpose consent, GPC, and an IAB TCF v2.2 stub, and it can emit Consent Mode signals either through a built-in Google integration toggle or via its JavaScript API. This playbook covers both routes.
+
+Valid as of April 2026, iubenda Cookie Solution v4 / Consent Mode v2.
+
+<Aside type="caution">
+The Cookie Solution script can be slow on first load, especially on shared hosting. The `denied` default consent state must be set **before** GTM and before the iubenda script. Do not rely on iubenda's `perPurposeConsent` defaults to reach Google tags in time.
+</Aside>
+
+## Overview
+
+iubenda offers two integration paths:
+
+1. **Built-in Google integration** — a dashboard toggle that auto-emits `gtag('consent', 'update', …)` based on the user's stored preferences. Minimum configuration, least control.
+2. **Custom callback** — use `_iub.cs.api` or the `onPreferenceExpressed` config callback to emit the update yourself. Full control, required if you need custom category mapping.
+
+Most sites start with the built-in path and move to custom when they need to gate non-Google tags as well.
+
+## Prerequisites
+
+- iubenda account with Cookie Solution activated and a configured site.
+- Site ID and (for per-purpose mode) the list of purposes your project is using.
+- `perPurposeConsent: true` enabled in the Cookie Solution configuration if you want per-purpose granularity. Simplified (binary) mode works but loses the analytics/ads split.
+- GTM container installed.
+
+## Step 1 — Set default consent state
+
+Add this to `<head>` **before** the GTM snippet and before the iubenda loader:
+
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+
+  gtag('consent', 'default', {
+    ad_storage: 'denied',
+    analytics_storage: 'denied',
+    ad_user_data: 'denied',
+    ad_personalization: 'denied',
+    functionality_storage: 'denied',
+    personalization_storage: 'denied',
+    security_storage: 'granted',
+    wait_for_update: 500
+  });
+</script>
+```
+
+## Step 2 — Install the iubenda Cookie Solution
+
+The iubenda configuration object defines the banner, purposes, and callbacks. Paste it in `<head>` after the consent defaults:
+
+```html
+<script type="text/javascript">
+  var _iub = _iub || [];
+  _iub.csConfiguration = {
+    siteId: YOUR_SITE_ID,
+    cookiePolicyId: YOUR_COOKIE_POLICY_ID,
+    lang: "en",
+    perPurposeConsent: true,
+    consentOnContinuedBrowsing: false,
+    banner: { acceptButtonDisplay: true, customizeButtonDisplay: true, rejectButtonDisplay: true }
+  };
+</script>
+<script type="text/javascript" src="//cdn.iubenda.com/cs/iubenda_cs.js" charset="UTF-8" async></script>
+```
+
+Replace `YOUR_SITE_ID` and `YOUR_COOKIE_POLICY_ID` with values from your iubenda dashboard.
+
+## Step 3 — iubenda purpose mapping
+
+In `perPurposeConsent` mode, iubenda numbers purposes 1–5:
+
+| Purpose ID | Purpose | Google Consent Signal |
+|---|---|---|
+| 1 | Strictly Necessary | Always granted |
+| 2 | Basic Interactions & Functionalities | `functionality_storage` |
+| 3 | Experience Enhancement | `personalization_storage` |
+| 4 | Measurement | `analytics_storage` |
+| 5 | Targeting & Advertising | `ad_storage`, `ad_user_data`, `ad_personalization` |
+
+<Aside type="note">
+If your project uses simplified (binary) mode, the numeric keys are unavailable and you only receive a single `consent` boolean. Enable `perPurposeConsent: true` before wiring Consent Mode — without it, you cannot separate analytics from advertising.
+</Aside>
+
+## Step 4 — Integration path A: built-in Google integration
+
+<Steps>
+1. In the iubenda dashboard, open your site → Cookie Solution → **Integrations**.
+2. Enable **Google Consent Mode** and select **v2**.
+3. Map each purpose in the dashboard UI to the Consent Mode signal listed in the table above.
+4. Save and republish the configuration.
+5. Clear the browser cache and reload your site — iubenda will now emit the `gtag('consent', 'update', …)` call automatically.
+</Steps>
+
+The built-in integration covers the common mapping. Use path B if you need to emit additional signals or forward consent to other tools.
+
+## Step 5 — Integration path B: custom callback
+
+Add the callbacks to your `_iub.csConfiguration` object. These fire at the right moment in the iubenda lifecycle without any custom event listener:
+
+```html
+<script type="text/javascript">
+  var _iub = _iub || [];
+  _iub.csConfiguration = {
+    siteId: YOUR_SITE_ID,
+    cookiePolicyId: YOUR_COOKIE_POLICY_ID,
+    lang: "en",
+    perPurposeConsent: true,
+
+    callback: {
+      // Fires for returning visitors when stored consent is loaded
+      onReady: function(consent) {
+        pushConsentToGtag(consent);
+      },
+      // Fires when the user saves preferences
+      onPreferenceExpressed: function(preference) {
+        pushConsentToGtag(preference);
+      },
+      // Fires when the user revokes all consent
+      onConsentRejected: function() {
+        gtag('consent', 'update', {
+          analytics_storage: 'denied',
+          ad_storage: 'denied',
+          ad_user_data: 'denied',
+          ad_personalization: 'denied',
+          functionality_storage: 'denied',
+          personalization_storage: 'denied'
+        });
+      }
+    }
+  };
+
+  function pushConsentToGtag(data) {
+    var purposes = (data && data.purposes) || {};
+
+    gtag('consent', 'update', {
+      analytics_storage: purposes[4] ? 'granted' : 'denied',
+      ad_storage: purposes[5] ? 'granted' : 'denied',
+      ad_user_data: purposes[5] ? 'granted' : 'denied',
+      ad_personalization: purposes[5] ? 'granted' : 'denied',
+      functionality_storage: purposes[2] ? 'granted' : 'denied',
+      personalization_storage: purposes[3] ? 'granted' : 'denied'
+    });
+
+    // Optional — expose state to the dataLayer for non-Google tags
+    window.dataLayer.push({
+      event: 'iubenda_consent_ready',
+      iubenda_purposes: purposes
+    });
+  }
+</script>
+```
+
+## Step 6 — GTM configuration
+
+<Steps>
+1. Open your **Google Tag** in GTM → Advanced Settings → Consent Settings. Require `analytics_storage`.
+2. For **Google Ads** conversion tags, require `ad_storage` and `ad_user_data`.
+3. For non-Google tags (Facebook Pixel, LinkedIn Insight), use the `iubenda_consent_ready` dataLayer event as an additional trigger condition.
+4. Publish the container.
+</Steps>
+
+## Cookie wall and GPC
+
+iubenda offers a cookie wall (`enableCookieWall: true`) that blocks page content until the user chooses. If you use it, Consent Mode still applies — the defaults stay `denied` while the wall is up, and the update fires once the user clicks through. Global Privacy Control is also honoured: if the visitor's browser sends the GPC signal, iubenda pre-sets rejection for Targeting and Measurement purposes.
+
+## Testing
+
+### iubenda preview
+
+Append `?iubshow=1` to any page URL to force the banner to reappear regardless of stored consent. Useful during QA.
+
+### GTM Preview Mode
+
+<Steps>
+1. Open GTM Preview, visit the site in a clean browser profile.
+2. The iubenda banner appears. Consent tab: all denied.
+3. Click **Accept** (or customise and accept analytics only). The consent update appears in the Summary pane.
+4. Reload the page. The `onReady` callback fires from the stored cookie before any other tag.
+</Steps>
+
+### GA4 DebugView
+
+Before consent: cookieless pings with `gcs=G100`. After accepting measurement: full events with `gcs=G111`.
+
+### Console check
+
+```javascript
+// After iubenda has loaded
+_iub.cs.api.getPreferences();
+// Returns: { id, timestamp, version, purposes: { 1: true, 2: false, 3: false, 4: true, 5: false } }
+```
+
+## Common gotchas
+
+**Purpose numbers mean different things between modes.** In `perPurposeConsent: true` mode, purposes are keyed 1–5 as above. In simplified mode, you only get `consent: true|false`. Do not mix the two — always check `perPurposeConsent` is enabled in the dashboard before trusting the purpose IDs in your callback.
+
+**Built-in integration disables the custom callback.** If you enable the dashboard's Google Consent Mode toggle and also wire your own `onPreferenceExpressed` callback pushing `gtag('consent','update', …)`, both run and the order is non-deterministic. Pick one path and stick to it.
+
+**Cached pages serve stale consent.** On Varnish, Cloudflare, or WordPress full-page caches, iubenda's consent cookie is read client-side after the HTML is served. That is fine, but if the cache also strips the iubenda script tag (some aggressive HTML minifiers do), no update ever fires. Whitelist `iubenda_cs.js` in your cache config.
+
+**Cross-domain consent.** iubenda stores consent in a first-party cookie. Multi-domain properties (`example.com` + `example.it`) need iubenda's cross-site consent feature enabled and a shared `cookiePolicyId`. Without it, each domain prompts independently.
+
+**TC string latency for ad partners.** Downstream ad vendors read the TCF string via `__tcfapi`. iubenda publishes the string only after the user interacts with the banner. Partners that poll on page load will see an empty string for a few hundred milliseconds — this is expected behaviour, not a bug.
+
+<CardGrid>
+  <LinkCard title="Consent Mode v2 Explained" href="/consent/consent-mode/consent-mode-v2/" description="The seven consent types and why defaults must come before GTM." />
+  <LinkCard title="CMP Integration Overview" href="/consent/cmp-integration/cmp-integration/" description="Integration patterns across all major CMPs." />
+  <LinkCard title="Google Consent Mode" href="/consent/consent-mode/google-consent-mode/" description="How Google tags consume consent signals." />
+  <LinkCard title="Consent Mode v2 with Axeptio" href="/consent/cmp-integration/axeptio/" description="The same process for Axeptio users." />
+</CardGrid>

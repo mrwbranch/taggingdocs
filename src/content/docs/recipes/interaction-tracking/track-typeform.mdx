@@ -1,0 +1,188 @@
+---
+title: "Track Typeform Submissions"
+description: "Track Typeform embed submissions in GTM via the Embed SDK onSubmit callback — with response IDs you can link back to the Typeform dashboard."
+sidebar:
+  order: 24
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Typeform embeds run in an iframe — GTM cannot see anything inside it. The Embed SDK exposes a small set of callbacks, plus a postMessage API for raw iframe embeds. This recipe wires both paths and captures the `responseId` so you can link each GA4 event back to the Typeform response in the admin dashboard.
+
+*Valid as of April 2026, Typeform Embed SDK v3.*
+
+## The success signal
+
+Typeform emits two relevant signals:
+
+- **Embed SDK `onSubmit` callback** — fires the moment the user reaches the end screen after answering the last question. Passes `{ formId, responseId }`.
+- **postMessage `form-submit`** — equivalent to `onSubmit`, fires on the parent window from the iframe. Use this for raw iframe embeds where you do not use the SDK.
+
+A related event `form-ready` fires when the embed loads, not on submission — do not use it for conversions.
+
+<Aside type="note">
+`onSubmit` fires when the user advances past the final question, not when they explicitly close the form. For ratings or NPS-style single-question forms, that is effectively the moment of submission.
+</Aside>
+
+## dataLayer push pattern
+
+<Tabs>
+<TabItem label="Embed SDK">
+
+<DataLayerExample event="form_submission" description="Typeform Embed SDK — createWidget, createPopup, or createSlider all accept onSubmit.">
+```html
+<div id="typeform-inline" data-tf-live="01ABCDEFGHIJKLMNOPQRSTUVWX"></div>
+<script src="https://embed.typeform.com/next/embed.js"></script>
+<script>
+  // The inline data-tf-live attribute auto-initialises. For programmatic control:
+  (function () {
+    if (!window.tf || !window.tf.createWidget) return;
+
+    window.tf.createWidget('01ABCDEFGHIJKLMNOPQRSTUVWX', {
+      container: document.getElementById('typeform-inline'),
+      onSubmit: function (event) {
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({
+          event: 'form_submission',
+          form_vendor: 'typeform',
+          typeform_id: event.formId,
+          typeform_response_id: event.responseId
+        });
+      }
+    });
+  })();
+</script>
+```
+</DataLayerExample>
+
+For popup or slider embeds the SDK signature is the same — `tf.createPopup(formId, { onSubmit })` and `tf.createSlider(formId, { onSubmit })`.
+
+</TabItem>
+<TabItem label="postMessage fallback">
+
+For raw iframe embeds (no SDK):
+
+```javascript
+window.addEventListener('message', function (event) {
+  if (!event.origin.endsWith('.typeform.com')) return;
+  if (!event.data || event.data.type !== 'form-submit') return;
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_vendor: 'typeform',
+    typeform_id: event.data.formId,
+    typeform_response_id: event.data.responseId
+  });
+});
+```
+
+</TabItem>
+</Tabs>
+
+## GTM setup
+
+<Steps>
+1. **Create a Custom Event trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `form_submission`
+   - This fires: **Some Custom Events** → `DLV - form_vendor` **equals** `typeform`
+
+2. **Create Data Layer Variables**
+
+   - `DLV - form_vendor` → `form_vendor`
+   - `DLV - typeform_id` → `typeform_id`
+   - `DLV - typeform_response_id` → `typeform_response_id`
+
+3. **Create a GA4 Event Tag**
+
+   - Event name: `generate_lead`
+   - Parameters:
+     - `form_vendor` → `{{DLV - form_vendor}}`
+     - `typeform_id` → `{{DLV - typeform_id}}`
+     - `typeform_response_id` → `{{DLV - typeform_response_id}}`
+   - Trigger: the Custom Event trigger above
+
+4. **Test in Preview mode**
+
+   Complete a Typeform submission end-to-end. Confirm `form_submission` appears with both IDs.
+</Steps>
+
+<TagConfig
+  name="GA4 - generate_lead (Typeform)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - form_submission (typeform)"
+  variables={["DLV - form_vendor", "DLV - typeform_id", "DLV - typeform_response_id"]}
+/>
+
+## Linking back to Typeform responses
+
+Every Typeform response has a unique `responseId`. You can open it directly in the Typeform admin:
+
+```
+https://admin.typeform.com/form/<typeform_id>/results#responses/<response_id>
+```
+
+In GA4, register `typeform_response_id` as a custom dimension so you can surface it in reports. Combine with BigQuery export to join GA4 session data against Typeform's own Responses API (which accepts `response_id` as a filter) — useful for attribution without shipping PII to GA4.
+
+<Aside type="tip">
+If you want the `responseId` as a hidden field inside the Typeform (for internal reporting), use a Typeform Logic hidden field and pass a session identifier from the embed URL — then join both directions in your warehouse.
+</Aside>
+
+## Tracking progress through questions (optional)
+
+The SDK also exposes `onQuestionChanged` (fires when the user advances between questions) and `onEndingButtonClick` (fires on custom end-screen CTA clicks):
+
+```javascript
+window.tf.createWidget('01ABCDEFGHIJKLMNOPQRSTUVWX', {
+  container: document.getElementById('typeform-inline'),
+  onQuestionChanged: function (event) {
+    window.dataLayer.push({
+      event: 'typeform_question_changed',
+      typeform_id: event.formId,
+      typeform_question_ref: event.ref
+    });
+  },
+  onSubmit: function (event) { /* as above */ }
+});
+```
+
+Create a separate Custom Event trigger for `typeform_question_changed` if you want funnel-style reporting.
+
+## Test it
+
+<Steps>
+1. Open GTM **Preview mode** on a page with a Typeform embed.
+2. Complete the Typeform end-to-end — answer all questions and reach the end screen.
+3. Confirm `form_submission` appears in the Summary pane with `form_vendor: typeform`, a valid `typeform_id`, and a populated `typeform_response_id`.
+4. Verify **Tags Fired** lists the GA4 tag.
+5. In GA4 **DebugView**, confirm `generate_lead` arrives with both IDs.
+6. Open the Typeform admin and confirm the `typeform_response_id` you captured matches a real response in the dashboard.
+7. **Test abandon path**: start the Typeform but close it before reaching the end screen. Confirm no `form_submission` fires.
+</Steps>
+
+## Common gotchas
+
+**`onSubmit` fires on end-screen reach, not on explicit close.** If your Typeform has no end screen (legacy setups), `onSubmit` may not fire. Add an end screen — even a minimal one.
+
+**Popup embeds require user action to close.** The submission is counted on end-screen reach regardless of whether the user clicks the close button.
+
+**Autoclose settings.** If you use Typeform's autoclose-on-submit feature, `onSubmit` fires immediately before the close animation — your dataLayer push is already queued, so this is fine.
+
+**Cross-origin postMessage noise.** Many iframes on the page post messages to the parent. Always filter by `event.origin.endsWith('.typeform.com')` before trusting the payload.
+
+**Typeform CDN cache for `embed.js`.** If the CDN serves a stale SDK (browser cache), `tf.createWidget` may be undefined. Add a `?v=3` query string or a defensive `if (!window.tf || !window.tf.createWidget)` check.
+
+**Multiple Typeforms on one page.** The SDK fires `onSubmit` per widget instance with its own `formId`. No disambiguation logic needed — each listener is bound to its own widget.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard title="Track Form Submissions" href="/recipes/interaction-tracking/track-form-submissions/" description="Generic form-submission patterns across native, AJAX, and third-party forms." />
+  <LinkCard title="form_submission custom event" href="/datalayer/custom-events/form-submission/" description="The canonical dataLayer schema for form submission events." />
+  <LinkCard title="Form triggers reference" href="/client-side/triggers/form-triggers/" description="When GTM's built-in form triggers work — and when they don't." />
+</CardGrid>

@@ -295,13 +295,13 @@ FROM ML.PREDICT(
 
 This predicts conversion probability by channel combination, which you can use to weight attribution.
 
-## Building a comparison dashboard in Looker Studio
+## Building a comparison dashboard in Data Studio
 
 Create a dashboard comparing all attribution models side-by-side:
 
 1. **Create a derived table in BigQuery** that materializes all three models (position-based, time-decay, linear)
 2. **Schedule a daily refresh** using a scheduled query
-3. **Connect Looker Studio** to the derived table
+3. **Connect Data Studio** to the derived table
 4. **Add cards for each metric**:
    - Table: Source/Medium with columns for each model's credit
    - Chart: Total credit by model (stacked bar)
@@ -333,7 +333,7 @@ FROM attribution_data
 WHERE source IS NULL OR medium IS NULL
 ```
 
-Use these in your Looker Studio filters to keep direct traffic visible but aggregated separately from paid channels.
+Use these in your Data Studio filters to keep direct traffic visible but aggregated separately from paid channels.
 
 ## Credit allocation formulas with clear SQL examples
 
@@ -378,7 +378,7 @@ GROUP BY source, medium
 - [aliasoblomov/Bigquery-GA4-Queries GitHub](https://github.com/aliasoblomov/Bigquery-GA4-Queries) — Community SQL examples
 - [GA4BigQuery.com](https://ga4bigquery.com) — GA4 + BigQuery documentation and templates
 - [Google Analytics Reporting API v4 Attribution](https://developers.google.com/analytics/devguides/reporting/core/v4/basics#multi-touch) — Concepts and definitions
-- [Looker Studio BigQuery Connector](https://support.google.com/looker-studio/answer/6370356) — Dashboard setup guide
+- [Data Studio BigQuery Connector](https://support.google.com/looker-studio/answer/6370356) — Dashboard setup guide
 
 ## Common questions
 

@@ -1,0 +1,166 @@
+---
+title: "Track Vimeo Player SDK"
+description: "Track Vimeo player events — play, pause, ended, progress milestones — plus title and URL metadata in GA4 via GTM using the Vimeo Player SDK."
+sidebar:
+  order: 31
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Vimeo has no GTM built-in trigger, so every install needs a short bridge: load the Player SDK, wrap each iframe, and push dataLayer events for the lifecycle you care about. This recipe is the drop-in version, with metadata extraction and per-player state.
+
+*Valid as of April 2026, Vimeo Player SDK (`player.js`).*
+
+## Problem
+
+Vimeo's own analytics is solid for content teams but doesn't flow into GA4. Without a bridge, Vimeo plays show up in GA4 as generic iframe engagement — no title, no percent, no completion signal. The bridge gives you parity with YouTube in the same `video_engagement` event family.
+
+## Solution
+
+Inject Vimeo's `player.js` if it isn't already present, then for each `iframe[src*="vimeo.com"]` instantiate `new Vimeo.Player(iframe)` and bind listeners. Fetch title, URL, and duration once via `Promise.all` so every subsequent event has metadata ready.
+
+## Load the Player SDK
+
+<DataLayerExample event="video_engagement" description="One Custom HTML tag handles SDK loading, per-iframe wrapping, and all event pushes. Metadata is fetched once and cached per player.">
+```javascript
+(function() {
+  // Load SDK if not already present
+  function ensureSDK(cb) {
+    if (window.Vimeo && window.Vimeo.Player) return cb();
+    var s = document.createElement('script');
+    s.src = 'https://player.vimeo.com/api/player.js';
+    s.onload = cb;
+    document.head.appendChild(s);
+  }
+
+  ensureSDK(function() {
+    var iframes = document.querySelectorAll('iframe[src*="vimeo.com"]');
+
+    iframes.forEach(function(iframe) {
+      var player = new Vimeo.Player(iframe);
+      var meta = { title: null, url: iframe.src, duration: 0 };
+      var milestones = [25, 50, 75, 90, 100];
+      var fired = {};
+
+      // Fetch metadata once. Safe to call before 'loaded' fires — the SDK queues.
+      Promise.all([
+        player.getVideoTitle(),
+        player.getVideoUrl().catch(function() { return iframe.src; }),
+        player.getDuration()
+      ]).then(function(values) {
+        meta.title = values[0];
+        meta.url = values[1];
+        meta.duration = Math.round(values[2]);
+      });
+
+      function push(action, percent, currentTime) {
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({
+          event: 'video_engagement',
+          video_provider: 'vimeo',
+          video_action: action,
+          video_title: meta.title,
+          video_url: meta.url,
+          video_duration: meta.duration,
+          video_current_time: currentTime != null ? Math.round(currentTime) : undefined,
+          video_percent: percent != null ? percent : 0
+        });
+      }
+
+      player.on('play', function(data) {
+        if (!fired.start) {
+          fired.start = true;
+          push('start', 0, data && data.seconds);
+        } else {
+          push('resume', Math.round((data && data.percent || 0) * 100), data && data.seconds);
+        }
+      });
+
+      player.on('pause', function(data) {
+        push('pause', Math.round((data && data.percent || 0) * 100), data && data.seconds);
+      });
+
+      player.on('ended', function(data) {
+        push('complete', 100, data && data.seconds);
+      });
+
+      player.on('timeupdate', function(data) {
+        var percent = Math.round((data && data.percent || 0) * 100);
+        milestones.forEach(function(m) {
+          if (percent >= m && !fired[m]) {
+            fired[m] = true;
+            push('progress_' + m, m, data && data.seconds);
+          }
+        });
+      });
+    });
+  });
+})();
+```
+</DataLayerExample>
+
+## GTM setup
+
+<Steps>
+1. **Add the script as a Custom HTML tag**
+   - Trigger: **Window Loaded** — iframes must exist before the querySelectorAll
+   - If Vimeo iframes are lazy-loaded, trigger on your custom "video_mounted" event instead
+
+2. **Create a Custom Event trigger**
+   - Trigger type: **Custom Event**
+   - Event name: `video_engagement`
+
+3. **Create Data Layer Variables**
+   - `DLV - video_provider` → `video_provider`
+   - `DLV - video_action` → `video_action`
+   - `DLV - video_title` → `video_title`
+   - `DLV - video_url` → `video_url`
+   - `DLV - video_percent` → `video_percent`
+   - `DLV - video_duration` → `video_duration`
+
+4. **Create a GA4 Event Tag**
+   - Event name: `video_engagement`
+   - Parameters: all DLVs above, plus `page_path` → `{{Page Path}}`
+   - Trigger: the Custom Event trigger
+
+5. **Filter by `video_provider` in GA4 reports** to separate Vimeo, YouTube, Wistia, and HTML5 plays.
+</Steps>
+
+<TagConfig
+  name="GA4 - video_engagement (Vimeo)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - video_engagement"
+  variables={["DLV - video_provider", "DLV - video_action", "DLV - video_title", "DLV - video_percent"]}
+/>
+
+## Test it
+
+1. Open GTM Preview on a page with a Vimeo embed
+2. Press Play — confirm `video_engagement` with `video_action: start`, non-empty `video_title`, and a numeric `video_duration`
+3. Pause at around 40% — confirm `video_action: pause` with `video_percent` near 40
+4. Resume and let playback cross 25, 50, 75, 90, 100 — confirm each `progress_*` fires once
+5. In GA4 DebugView, verify `video_provider: vimeo` on every event
+
+## Common gotchas
+
+**SDK load race condition.** If another tag on the page already loads `player.js`, the `ensureSDK` check prevents a double load. If a third-party script injects a partial `window.Vimeo` without `.Player`, the check still passes incorrectly — harden the guard to `window.Vimeo && typeof window.Vimeo.Player === 'function'` on sites with known conflicts.
+
+**Private / domain-restricted videos.** `player.getVideoTitle()` and `player.getVideoUrl()` reject on private videos when the embedding domain isn't whitelisted. The `.catch` on `getVideoUrl` falls back to the iframe's own `src`, which is usually enough. If `getVideoTitle()` rejects, `meta.title` stays `null` — GA4 will record the event with an empty title rather than failing.
+
+**Metadata Promise resolves after first event.** The `play` listener can fire before the `Promise.all` resolves, so the very first `video_engagement` may have `video_title: null`. That's acceptable on most sites; if you need it always populated, push a buffered event from inside `.then()` or use the `'loaded'` event as your start signal.
+
+**Multiple players per page.** Each player gets its own closure, `meta`, `milestones`, and `fired` map — no shared state. Don't hoist `fired` out of the loop or you'll suppress milestones on the second player.
+
+**Autoplay muted counts as start.** Same as YouTube — set a user-gesture flag if you need to distinguish intentional plays from autoplay.
+
+**`timeupdate` is chatty.** It fires many times per second. The `fired` map ensures each milestone pushes once. Don't replace the milestone pattern with a raw `timeupdate → push` loop or you'll flood GA4.
+
+<CardGrid>
+  <LinkCard title="Track Video Engagement" href="/recipes/interaction-tracking/track-video-engagement/" description="The generic recipe — YouTube built-in, Vimeo basics, HTML5." />
+  <LinkCard title="Track YouTube Player" href="/recipes/interaction-tracking/track-youtube-player/" description="Deeper YouTube IFrame Player API integration." />
+  <LinkCard title="Track Wistia" href="/recipes/interaction-tracking/track-wistia/" description="The _wq queue pattern for Wistia embeds." />
+  <LinkCard title="Custom HTML Tags" href="/client-side/tags/custom-html-tags/" description="The tag type used to attach the SDK." />
+</CardGrid>

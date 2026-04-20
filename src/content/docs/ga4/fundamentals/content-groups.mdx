@@ -1,0 +1,255 @@
+---
+title: "Content Groups"
+description: "Content Groups in GA4 — what they are, how to set them via the content_group parameter or GTM, reporting via the contentGroup dimension, limits, and when to use them over custom dimensions."
+sidebar:
+  order: 7
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+*Valid as of April 2026, GA4 property interface.*
+
+Content Groups are GA4's built-in way to categorize content above the page-URL level without consuming a custom-dimension slot. If you have ever wanted to see "Blog", "Product Detail", "Pricing", and "Support" as top-level rows in a report instead of hundreds of individual page paths, Content Groups are the intended solution.
+
+They existed in Universal Analytics, disappeared from the initial GA4 release, and returned as a first-class feature. They are underused, partly because the GA4 documentation treats them as an afterthought.
+
+## How Content Groups differ from custom dimensions
+
+Content Groups look like a custom dimension at first glance — a string value you set per event, surfaced as a dimension in reports. The differences matter:
+
+| Attribute | Content Group | Event-scoped custom dimension |
+|-----------|---------------|-------------------------------|
+| Per-property limit | 5 content groups | 50 custom dimensions |
+| Registration required | No — just send the parameter | Yes — register in Admin before collection |
+| Dimension name in reports | `Content group` | Whatever you name it |
+| Parameter name | `content_group` (exactly) | Any valid parameter name |
+| Counts toward 25-parameter event limit | Yes | Yes |
+| Available in standard reports | Yes, in Engagement → Pages and screens | Only if built into an Exploration or custom report |
+| Retroactive for historical data | No — only populated for events after you start sending it | No |
+
+The practical takeaway: if you are already close to the 50-dimension cap, Content Groups let you categorize pages without using a slot. And because they are a known GA4 field, they integrate naturally into the standard Pages and screens report without explicit custom-report work.
+
+<Aside type="tip">
+Only 5 content groups per property. Plan them. The right granularity is "section of the site" (Blog, Docs, Pricing, Support, Marketing), not "topic within a section" (React Basics, React Advanced, React Hooks…). For topic-level categorization inside a section, use a custom dimension.
+</Aside>
+
+## Setting the content_group parameter
+
+The mechanism is a single event parameter named **exactly** `content_group`. Send it with `page_view` events (and any other events where page context matters — `view_item`, `scroll`, custom events, etc.).
+
+<Tabs>
+  <TabItem label="gtag.js">
+```html
+<script>
+  gtag('event', 'page_view', {
+    page_location: window.location.href,
+    page_title: document.title,
+    content_group: 'Blog'
+  });
+</script>
+```
+  </TabItem>
+  <TabItem label="GTM — GA4 Config">
+Set a global parameter on the Google tag (or GA4 configuration tag, depending on your template version):
+
+- **Parameter name**: `content_group`
+- **Value**: `{{DLV - contentGroup}}` (a Data Layer Variable reading `contentGroup` from the dataLayer)
+
+Push the value from the page before GTM fires:
+
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    contentGroup: 'Blog'
+  });
+</script>
+```
+  </TabItem>
+  <TabItem label="GTM — Lookup Table">
+For a handful of sections, a Lookup Table variable scales better than per-page pushes:
+
+- **Variable type**: Lookup Table
+- **Input**: `{{Page Path}}`
+- **Table**:
+  - `/blog/` → `Blog`
+  - `/docs/` → `Docs`
+  - `/pricing` → `Pricing`
+  - `/support/` → `Support`
+- **Default**: `Marketing`
+
+Assign the lookup variable to the `content_group` parameter on your GA4 configuration.
+  </TabItem>
+  <TabItem label="Measurement Protocol">
+```json
+{
+  "client_id": "1234567890.1234567890",
+  "events": [{
+    "name": "page_view",
+    "params": {
+      "page_location": "https://example.com/blog/post",
+      "content_group": "Blog"
+    }
+  }]
+}
+```
+  </TabItem>
+</Tabs>
+
+### Casing and whitespace
+
+The parameter name is `content_group` — lowercase, snake_case, no trailing `s`. GA4 silently ignores `contentGroup`, `content-group`, `Content_Group`, and `content_groups`. If the dimension is consistently empty in reports, the first thing to check is the parameter name in DebugView.
+
+Values are case-sensitive in reports. `Blog` and `blog` will appear as two separate rows. Normalize casing at the tagging layer.
+
+## Reporting on Content Groups
+
+### Standard reports
+
+The **Reports → Engagement → Pages and screens** report has `Content group` as a selectable primary dimension. Click the dropdown over the first column and pick it. The report then aggregates views, users, and engagement by content group instead of page path or title.
+
+Content group also appears in:
+- **Explore** — in the dimension picker under the "Page / screen" group.
+- Secondary dimension on any Engagement or Monetization report.
+- Filter on most reports and Explorations.
+
+### Data API and Data Studio
+
+Use the dimension name `contentGroup` (camelCase, unlike the parameter name) in Data API calls and in Data Studio via the GA4 connector. The Data Studio connector exposes it automatically once it starts receiving data.
+
+```
+GET https://analyticsdata.googleapis.com/v1beta/properties/123456789:runReport
+
+{
+  "dateRanges": [{ "startDate": "28daysAgo", "endDate": "yesterday" }],
+  "dimensions": [{ "name": "contentGroup" }],
+  "metrics": [
+    { "name": "screenPageViews" },
+    { "name": "activeUsers" },
+    { "name": "userEngagementDuration" }
+  ]
+}
+```
+
+### BigQuery
+
+In the BigQuery export, `content_group` is a regular event parameter inside `event_params`. Unnest it the same way as any other parameter:
+
+```sql
+SELECT
+  (SELECT value.string_value
+   FROM UNNEST(event_params)
+   WHERE key = 'content_group') AS content_group,
+  COUNT(*) AS views,
+  COUNT(DISTINCT user_pseudo_id) AS users
+FROM `project.dataset.events_*`
+WHERE event_name = 'page_view'
+  AND _TABLE_SUFFIX BETWEEN '20260401' AND '20260430'
+GROUP BY content_group
+ORDER BY views DESC;
+```
+
+## When to use Content Groups vs. custom dimensions
+
+<CardGrid>
+  <LinkCard
+    title="Use Content Groups for…"
+    description="Top-level site-section categorization. Stable, low-cardinality (2-5 values). The taxonomy your whole organization agrees on. Values like Blog, Docs, Product, Support, Pricing."
+    href="#when-to-use-content-groups"
+  />
+  <LinkCard
+    title="Use custom dimensions for…"
+    description="Sub-categorization within sections, author names, publish year, product category, content type, video length bucket — anything that exceeds 5 buckets or varies per-event."
+    href="#when-to-use-custom-dimensions"
+  />
+</CardGrid>
+
+### Pair them
+
+The recommended pattern is one Content Group per site section, plus event-scoped custom dimensions for finer attributes inside each section. A blog post event might have:
+
+```
+event_name: page_view
+content_group: Blog
+page_title: "Understanding GA4 Content Groups"
+article_author: "Jane Doe"        ← custom dimension
+article_category: "Analytics"     ← custom dimension
+article_published_year: "2026"    ← custom dimension
+```
+
+This gives you a five-row top-level breakdown in standard reports plus rich filtering in Explorations.
+
+## Limits
+
+<Steps>
+1. **5 Content Groups per property**. Unlike custom dimensions, there is no way to "archive" a content group to free a slot. Once you start sending a value, plan to keep it.
+
+2. **One Content Group dimension**. There is a single `content_group` field, not `content_group_1` through `content_group_5` as in Universal Analytics. The "5" is the count of distinct values the property will track per session for backwards analysis — but in day-to-day use you send a single string per event.
+
+3. **Standard 25-parameter-per-event limit applies**. `content_group` counts against it.
+
+4. **500-character limit per value**. Keep values short — they are labels, not descriptions.
+
+5. **No retroactive application**. Values only populate for events collected after you implement the parameter. Historical events show `(not set)`.
+</Steps>
+
+<Aside type="caution">
+If you previously had multiple content groups in Universal Analytics (`Content Group 1`, `Content Group 2`, etc.), you cannot migrate them 1:1 to GA4. Pick the single most valuable one as your `content_group`, and move the others to custom dimensions or merge them into a compound string.
+</Aside>
+
+## Changing content group values
+
+Renaming or restructuring content groups creates a discontinuity in reports. If you change "Blog" to "Articles", your historical data still reads "Blog" and new data reads "Articles" — they appear as two rows, not as one renamed row.
+
+Best practices:
+- Decide your taxonomy before implementation.
+- Document it — the GA4 interface does not store descriptions for content groups.
+- If you must rename, do it at a clean period boundary (start of quarter/year) and annotate the change so dashboard viewers know what happened. See [Annotations](/ga4/reporting/annotations/).
+
+## Common mistakes
+
+### Sending `contentGroup` instead of `content_group`
+
+The most common implementation bug. GA4 does not warn you — it simply drops the parameter silently. Verify in DebugView: the `Content group` field on any event should show your value. If it is always `(not set)`, the parameter name is wrong.
+
+### Sending it only on `page_view`
+
+If you want Content Group to appear on engagement events, key events, and scroll events too, send `content_group` on those events as well. The easiest approach in GTM is setting it as a global "Event parameter" on the Google tag, which injects it into every outgoing event.
+
+### Overflowing the 5-value plan
+
+A blog that launches with `Tutorials`, `News`, `Case Studies`, `Opinion`, `Reviews` has used all five. If you later add `Podcasts`, you either retire one of the five or merge it into the nearest existing category. Choose broader categories than you think you need.
+
+### Using Content Group as a URL stand-in
+
+`content_group: '/blog/2026/04/understanding-content-groups'` is not a Content Group — it is a page path. Content Groups are for **categorization**, not identification. High-cardinality values fragment reports and defeat the purpose.
+
+### Expecting values to update retroactively
+
+An event that was collected without `content_group` is permanently `(not set)` for that dimension. There is no tool to back-fill. Plan for this when you change taxonomy.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Custom Dimensions"
+    description="For categorization that exceeds the 5-value Content Group limit."
+    href="/ga4/configuration/custom-dimensions/"
+  />
+  <LinkCard
+    title="Data Model"
+    description="Events, parameters, and how Content Groups fit the collection model."
+    href="/ga4/fundamentals/data-model/"
+  />
+  <LinkCard
+    title="Audiences"
+    description="Segment users by Content Group for remarketing and analysis."
+    href="/ga4/configuration/audiences/"
+  />
+  <LinkCard
+    title="Common BigQuery Queries"
+    description="Query content_group alongside other event parameters."
+    href="/ga4/bigquery/common-queries/"
+  />
+</CardGrid>

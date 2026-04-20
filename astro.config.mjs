@@ -9,6 +9,10 @@ export default defineConfig({
   site: 'https://taggingdocs.com',
   trailingSlash: 'always',
   build: { inlineStylesheets: 'auto' },
+  redirects: {
+    '/ga4/configuration/conversions/': '/ga4/configuration/key-events/',
+    '/ga4/bigquery/looker-studio-patterns/': '/ga4/bigquery/data-studio-patterns/',
+  },
   vite: {
     plugins: [tailwindcss()],
   },
@@ -132,6 +136,7 @@ export default defineConfig({
             { label: 'Ecommerce & Conversions', collapsed: true, autogenerate: { directory: 'recipes/ecommerce-conversions' } },
             { label: 'Cross-Domain & Setup', collapsed: true, autogenerate: { directory: 'recipes/cross-domain-setup' } },
             { label: 'Testing & Experimentation', collapsed: true, autogenerate: { directory: 'recipes/testing' } },
+            { label: 'Troubleshooting', collapsed: true, autogenerate: { directory: 'recipes/troubleshooting' } },
             { label: 'Privacy & Consent', collapsed: true, autogenerate: { directory: 'recipes/privacy-consent' } },
             { label: 'Reference', collapsed: true, autogenerate: { directory: 'recipes/reference' } },
           ],
@@ -178,6 +183,11 @@ export default defineConfig({
             { label: 'BigQuery Generator', link: '/tools/bigquery-generator/' },
             { label: 'Regex Tester', link: '/tools/regex-tester/' },
           ],
+        },
+        {
+          label: 'MCP Server',
+          collapsed: true,
+          autogenerate: { directory: 'mcp' },
         },
         {
           label: 'Resources',

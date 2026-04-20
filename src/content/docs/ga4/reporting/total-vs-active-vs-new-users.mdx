@@ -1,0 +1,205 @@
+---
+title: "Total Users vs. Active Users vs. New Users"
+description: "Three user metrics, three different definitions. How Total Users, Active Users, and New Users differ in GA4 — with guidance on when each is appropriate."
+sidebar:
+  order: 7
+lastUpdated: 2026-04-20
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+*Valid as of April 2026, GA4 property interface.*
+
+GA4 exposes three user metrics that look interchangeable at a glance and are not: **Total Users**, **Active Users**, and **New Users**. Many standard reports default to Active Users (often labelled just "Users"), while the Data API and some Explorations default to Total Users. The gap between them is usually small but occasionally large, and knowing which you are looking at is the difference between a credible weekly report and a wrong one.
+
+## The one-sentence definitions
+
+| Metric | Counts |
+|--------|--------|
+| Total Users | Distinct user identifiers (`user_pseudo_id` or User ID) that triggered **any event** in the range |
+| Active Users | Distinct users who triggered an event accompanied by an **engagement signal** in the range |
+| New Users | Distinct users whose **first `first_visit` or `first_open`** event falls in the range |
+
+The "engagement signal" behind Active Users is specific: the event carried `engagement_time_msec > 0`, or the event itself is one of the engagement-bearing automatic events (`user_engagement`, a first page of a session that meets the engaged-session criteria, and similar). In practice almost every real session triggers at least one such event within 10 seconds, which is why Total and Active numbers are usually close.
+
+## Why the numbers differ
+
+Total Users ≥ Active Users ≥ New Users, in that order, for any given date range.
+
+<CardGrid>
+  <LinkCard
+    title="Total − Active"
+    description="The gap is driven by users who fired events without any engagement signal — bot-like traffic that slipped past filtering, Measurement Protocol hits with no engagement_time_msec, and sessions abandoned before the 10-second mark."
+    href="#total-minus-active"
+  />
+  <LinkCard
+    title="Active − New"
+    description="The gap is returning users. If Active ≈ New, you have an acquisition site with no retention. If Active ≫ New, you have a loyal user base and the new-user trend is what to watch."
+    href="#active-minus-new"
+  />
+</CardGrid>
+
+### Total minus Active
+
+Most properties see Total Users within 1-3% of Active Users. A larger gap is a signal, not noise:
+
+- **Measurement Protocol traffic** — server-to-server events that do not set `engagement_time_msec` count as Total but not Active. If you send offline conversions or CRM events into GA4 via Measurement Protocol, expect Total to inflate.
+- **Bot-like sessions** — traffic that fires a single event and disappears before the engagement timer. GA4's automatic bot filter catches known lists; anything past it shows up here.
+- **Aggressive single-page abandonment** — users who load a page and close the tab in under 10 seconds without scrolling or clicking. These never hit engagement thresholds.
+
+### Active minus New
+
+This gap is the returning-user count. A healthy content site typically has Active:New around 2:1 to 5:1. An ecommerce site in peak season may see 1.2:1. A breaking-news landing page may see 1:1 (everyone is new).
+
+Track the ratio over time rather than the absolute delta. A declining Active:New ratio often precedes a retention problem.
+
+## What most GA4 reports actually show
+
+The metric label "Users" in standard reports is almost always **Active Users**, not Total Users. This has caught out experienced analysts who read the Data API documentation first.
+
+| Surface | "Users" means | Override |
+|---------|---------------|----------|
+| Reports → Acquisition (both) | Active Users | Not customizable in standard reports |
+| Reports → Engagement | Active Users | Same |
+| Reports Snapshot cards | Active Users | Same |
+| Explorations | Defaults to Active Users | Switch to Total Users in the metric picker |
+| Data API (`activeUsers`) | Active Users | Request `totalUsers` explicitly |
+| BigQuery export | Neither — you compute | Count `DISTINCT user_pseudo_id`, filter as needed |
+
+<Aside type="caution">
+If you compare a GA4 standard-report "Users" number to a BigQuery `COUNT(DISTINCT user_pseudo_id)` query, you are comparing Active Users to Total Users. The BigQuery number will almost always be higher. Either filter BigQuery to engagement-bearing events, or query the Data API for the standard-report equivalent.
+</Aside>
+
+## The 28-day, 7-day, and 1-day active users
+
+GA4 also exposes rolling active-user windows: `active1DayUsers`, `active7DayUsers`, and `active28DayUsers`. These are not simple filters over a 1/7/28-day date range — they are rolling counts anchored on the last day of your report range.
+
+| Metric | Counts Active Users over the |
+|--------|------------------------------|
+| `active1DayUsers` | Trailing 1-day window ending on the report date |
+| `active7DayUsers` | Trailing 7-day window ending on the report date |
+| `active28DayUsers` | Trailing 28-day window ending on the report date |
+
+The **28-day active users** metric is the closest GA4 equivalent to "monthly active users" (MAU) as the rest of the product-analytics industry defines it. It is the headline user number for most B2C apps and web products. Stickiness = `active1DayUsers / active28DayUsers` — a ratio of daily-to-monthly engagement that most SaaS dashboards track.
+
+These rolling metrics are available in:
+- The **User stickiness** report in Reports → Engagement.
+- Explorations (metric picker, "Active users" group).
+- The Data API as `active1DayUsers`, `active7DayUsers`, `active28DayUsers`.
+
+They are **not** in the BigQuery export as computed columns — you build the rolling windows yourself with `COUNT(DISTINCT user_pseudo_id)` over a `BETWEEN date - INTERVAL 27 DAY AND date` range.
+
+## When to use each metric
+
+### Use Total Users when
+
+- You are reconciling with BigQuery counts, which naturally produce Total-like results.
+- You are auditing Measurement Protocol or server-side traffic volume.
+- You need the broadest possible user denominator for a ratio (e.g., percentage of all known users who did X).
+
+### Use Active Users when
+
+- You are reporting to stakeholders, because it matches the default "Users" label in the GA4 UI they also see.
+- You need the most comparable number across date ranges — Active filters out the noisy bot-ish long tail that Total includes.
+- You are computing engagement rates or conversion rates at the user level.
+
+### Use New Users when
+
+- You are evaluating acquisition channels — the natural denominator for "cost per new user."
+- You are building cohort analyses — the cohort definition is anchored on first visit.
+- You are reporting growth — new-user velocity is the leading indicator for total audience growth.
+
+### Use 28-day Active Users when
+
+- You are reporting MAU to a product or executive stakeholder used to SaaS metrics.
+- You are computing stickiness.
+- You are smoothing over weekly seasonality — DAU is noisy, MAU is stable.
+
+## Comparison with Universal Analytics
+
+UA had a simpler model: **Users** and **New Users**, plus session-based metrics. The UA "Users" metric was closer to GA4's Total Users — a distinct-client-ID count with no engagement filter. UA had no equivalent of Active Users.
+
+| Concept | Universal Analytics | GA4 |
+|---------|-------------------|-----|
+| Distinct client IDs | Users | Total Users |
+| Engaged distinct users | — | Active Users |
+| First-visit users | New Users | New Users |
+| Rolling MAU | Not exposed | `active28DayUsers` |
+| Sessions | Sessions (first-class) | Sessions (derived from events) |
+
+Expect UA's "Users" to read higher than GA4's "Users" (Active) for the same site and date range, even with identical traffic. Both the engagement filter and GA4's improved bot filtering tilt the comparison downward on the GA4 side.
+
+## BigQuery equivalents
+
+```sql
+-- Total Users (distinct pseudonymous IDs with any event)
+SELECT COUNT(DISTINCT user_pseudo_id) AS total_users
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20260401' AND '20260430';
+
+-- Active Users (distinct users with an engagement-bearing event)
+SELECT COUNT(DISTINCT user_pseudo_id) AS active_users
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20260401' AND '20260430'
+  AND (
+    event_name = 'user_engagement'
+    OR (SELECT value.int_value
+        FROM UNNEST(event_params)
+        WHERE key = 'engagement_time_msec') > 0
+  );
+
+-- New Users (distinct users whose first_visit falls in range)
+SELECT COUNT(DISTINCT user_pseudo_id) AS new_users
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20260401' AND '20260430'
+  AND event_name = 'first_visit';
+```
+
+Rolling 28-day active users requires a windowed query over each day in the range. See [Common BigQuery Queries](/ga4/bigquery/common-queries/).
+
+## Common mistakes
+
+### Reading "Users" in the UI as Total Users
+
+The UI label is unqualified. It is Active Users almost everywhere. Check the metric definition in the Explorations metric picker when in doubt — each metric has a hover tooltip describing which scope it uses.
+
+### Averaging daily active users to get MAU
+
+Summing or averaging `active1DayUsers` across 28 days does not produce `active28DayUsers`. The rolling-window metric deduplicates users across the window; a summed daily count inflates by the number of days a single user was active. Always use the rolling metric directly.
+
+### Comparing BigQuery distinct-user counts to UI user counts
+
+Covered above — you are comparing Total to Active. Either add the engagement filter in SQL or switch the UI to Total Users.
+
+### Treating New Users as acquisition-channel-attributable
+
+New Users counts first-visit events, not first-visit users per channel. The same user can generate multiple `first_visit` events over time if they clear cookies, switch browsers, or use incognito. For genuine acquisition analysis, use User ID for identity continuity, and pair New Users with first-touch source dimensions.
+
+### Expecting Active Users to equal Sessions / Sessions per User
+
+`Sessions per user` in GA4 is `sessions ÷ total users`, not `sessions ÷ active users`. If you hand-divide sessions by the "Users" column you see in a report, you will not reproduce the `Sessions per user` metric. The denominator is Total Users.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Data Model"
+    description="How users are identified and how events produce user counts."
+    href="/ga4/fundamentals/data-model/"
+  />
+  <LinkCard
+    title="Sessions and Attribution"
+    description="Session-level metrics and how they pair with user-level metrics."
+    href="/ga4/fundamentals/sessions-and-attribution/"
+  />
+  <LinkCard
+    title="Audiences"
+    description="Segment users using any of these definitions."
+    href="/ga4/configuration/audiences/"
+  />
+  <LinkCard
+    title="Data Discrepancies"
+    description="Why GA4 user counts do not match other tools."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+</CardGrid>

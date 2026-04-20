@@ -1,0 +1,160 @@
+---
+title: "Static Egress IP"
+description: "Routing outbound sGTM traffic through a fixed IP so vendors can allowlist your server — GCP Cloud NAT, AWS NAT Gateway, and Stape setups compared."
+sidebar:
+  order: 6
+---
+
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+By default, sGTM makes outbound requests from ephemeral IPs that rotate constantly — Cloud Run and Lambda don't guarantee stable source addresses. For most destinations this is fine, because the vendor accepts traffic from any IP. But some destinations — enterprise CRMs, ad platforms with IP-restricted API keys, Cloud SQL instances behind private networking, and internal APIs with firewall rules — require the caller's IP to be known and allowlisted in advance. Rotating IPs break those integrations silently: the request leaves, the vendor rejects it, and you see zero-tag-fires-received on the other side with no obvious cause.
+
+The fix is to route outbound sGTM traffic through a fixed IP you control. The mechanism differs by hosting provider, but the pattern is the same: put a NAT in front of your compute, attach a static IP to the NAT, and force all egress through it.
+
+## When you need a static egress IP
+
+- A vendor's API documentation says "provide the source IPs you'll be calling us from."
+- You're calling a Cloud SQL instance, self-hosted database, or internal REST API that has firewall rules.
+- Your Meta CAPI access token is scoped to specific IPs (rare, but some enterprise setups use this).
+- Your data warehouse (Snowflake, BigQuery with CMEK) requires network-level allowlisting.
+
+You do **not** need a static egress IP for normal GA4 Measurement Protocol calls, public ad-platform CAPIs (Meta, TikTok, Reddit with default scoping), or any other endpoint on the open internet. Static IPs cost money and add failure modes — don't add one preemptively.
+
+## GCP Cloud Run — VPC connector + Cloud NAT
+
+Cloud Run services run in a Google-managed environment with no direct VPC attachment by default. To route egress through a static IP, you attach the service to a Serverless VPC Access connector, which bridges Cloud Run into your VPC, and then configure Cloud NAT with a reserved static IP on that VPC.
+
+<Steps>
+1. **Reserve a static external IP address**
+
+   ```bash
+   gcloud compute addresses create sgtm-egress-ip \
+     --region=europe-west1
+   ```
+
+   Note the assigned IP:
+
+   ```bash
+   gcloud compute addresses describe sgtm-egress-ip \
+     --region=europe-west1 \
+     --format='value(address)'
+   ```
+
+2. **Create a VPC network and subnet** (skip if you already have one)
+
+   ```bash
+   gcloud compute networks create sgtm-vpc --subnet-mode=custom
+
+   gcloud compute networks subnets create sgtm-subnet \
+     --network=sgtm-vpc \
+     --region=europe-west1 \
+     --range=10.8.0.0/28
+   ```
+
+3. **Create a Cloud Router** (required by Cloud NAT)
+
+   ```bash
+   gcloud compute routers create sgtm-router \
+     --network=sgtm-vpc \
+     --region=europe-west1
+   ```
+
+4. **Configure Cloud NAT with the reserved IP**
+
+   ```bash
+   gcloud compute routers nats create sgtm-nat \
+     --router=sgtm-router \
+     --region=europe-west1 \
+     --nat-custom-subnet-ip-ranges=sgtm-subnet \
+     --nat-external-ip-pool=sgtm-egress-ip
+   ```
+
+5. **Create a Serverless VPC Access connector**
+
+   ```bash
+   gcloud compute networks vpc-access connectors create sgtm-connector \
+     --region=europe-west1 \
+     --subnet=sgtm-subnet \
+     --min-instances=2 \
+     --max-instances=10
+   ```
+
+6. **Update Cloud Run to route egress through the connector**
+
+   ```bash
+   gcloud run services update gtm \
+     --region=europe-west1 \
+     --vpc-connector=sgtm-connector \
+     --vpc-egress=all-traffic
+   ```
+
+   `--vpc-egress=all-traffic` forces every outbound request through the connector. Use `private-ranges-only` if you only want internal/RFC-1918 traffic routed — but for static-IP use cases you want all egress pinned.
+</Steps>
+
+Verify the egress IP:
+
+```bash
+# From inside sGTM, make a request to an echo service
+# (via a Custom HTML tag or a one-off curl from the container)
+curl https://api.ipify.org
+# Expected: the static IP you reserved
+```
+
+## AWS — NAT Gateway + Elastic IP
+
+AWS Lambda and ECS Fargate running sGTM need a NAT Gateway in their VPC with an attached Elastic IP.
+
+<Steps>
+1. **Allocate an Elastic IP**
+
+   ```bash
+   aws ec2 allocate-address --domain vpc
+   ```
+
+2. **Create a NAT Gateway in a public subnet** attached to the allocated EIP.
+
+3. **Route the sGTM private subnet's default route** (`0.0.0.0/0`) through the NAT Gateway.
+
+4. **Deploy sGTM into the private subnet**. All outbound traffic will now emit from the Elastic IP.
+</Steps>
+
+Cost is the major differentiator: an AWS NAT Gateway runs roughly $32/month plus $0.045/GB processed. GCP Cloud NAT is cheaper (~$0.0014/hour per VM using NAT, plus $0.045/GB). At typical sGTM volumes both come in under $50/month, but they are not free.
+
+## Stape — Power-Up
+
+Stape exposes static egress IPs as a one-click Power-Up on paid plans. Enable "Outgoing Requests IP" in the container settings; Stape assigns a dedicated IP and provides it on the Power-Up screen for you to hand to vendors. No networking work required. The trade-off is the usual Stape one: less control, faster time-to-value.
+
+## Common mistakes
+
+**Routing all egress when you only need one destination allowlisted.** `--vpc-egress=all-traffic` adds a hop to every outbound call, including the high-volume GA4 MP and Meta CAPI traffic that doesn't care about your IP. If only one vendor requires the allowlist, consider keeping the VPC egress limited and using a [custom HTTP template](/server-side/tags/custom-http-requests/) that routes just that destination via a proxy instance with the static IP. Most deployments accept the extra hop for simplicity — but know the trade-off.
+
+**Assuming the static IP survives region failover.** A reserved IP is regional. If your sGTM deployment fails over to a different region, egress is no longer from the allowlisted IP. Multi-region deployments need one reserved IP per region and all of them allowlisted at the vendor.
+
+**Forgetting the cost.** Cloud NAT + Serverless VPC Access on GCP adds roughly $20–40/month for moderate sGTM volume. AWS NAT Gateway is higher (~$32/month base plus data processing). Not huge numbers, but budget for them — the line item is easy to miss in cost forecasts.
+
+**Not validating the IP.** After setup, make an outbound request from sGTM to an IP-echo service and confirm the returned address matches the reserved one. Setups can look correct on paper but route around the NAT if a routing rule is misconfigured.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Hosting Comparison"
+    description="GCP vs. AWS vs. Stape — the networking capability differences across providers."
+    href="/server-side/operations/hosting-comparison/"
+  />
+  <LinkCard
+    title="Cross-Cloud Migration"
+    description="Moving sGTM between providers — including moving or re-allocating static egress IPs."
+    href="/server-side/operations/cross-cloud-migration/"
+  />
+  <LinkCard
+    title="Custom HTTP Requests"
+    description="Making outbound HTTP calls from sGTM tags to arbitrary endpoints."
+    href="/server-side/tags/custom-http-requests/"
+  />
+  <LinkCard
+    title="Monitoring & Logging"
+    description="Detecting when outbound requests fail — including vendor-side IP rejections."
+    href="/server-side/advanced/monitoring-logging/"
+  />
+</CardGrid>

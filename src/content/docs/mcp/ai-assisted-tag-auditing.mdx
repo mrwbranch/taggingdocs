@@ -1,0 +1,184 @@
+---
+title: "AI-assisted tag auditing"
+description: "Using LLMs to review a GTM container. What models catch well (duplicates, missing consent gates, orphaned triggers, deprecated APIs), what they miss (semantic correctness), and how to structure the audit prompt."
+sidebar:
+  order: 7
+lastUpdated: 2026-04-20
+---
+
+import { Aside, CardGrid, LinkCard, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Container audits are the perfect LLM task. The work is pattern-matching over config, which is what transformer models do natively. The output is a list, which is a format models produce well. And the audit pays for itself the first time the model surfaces a tag that's been firing wrong for six months.
+
+This page is about the specific patterns that make AI-assisted audits reliable — what to audit, what to *not* trust to the model, and how to structure the prompt. *Valid as of April 2026.*
+
+## What LLMs catch well
+
+Four categories of issue where the model consistently outperforms a manual review.
+
+### 1. Duplicates and near-duplicates
+
+Containers accumulate `GA4 Config`, `GA4 Config - v2`, `GA4 Config - legacy`, `GA4 Config - backup`. Each fires, each sends the same events, and you're double-counting. A human reviewer misses this because they look at names; the model reads configuration and notices that three tags have the same Measurement ID and overlapping triggers.
+
+Same pattern for: Meta Pixel tags, conversion linker tags, and GA4 event tags that differ only in capitalisation (`purchase` vs `Purchase`).
+
+### 2. Missing consent gates
+
+The model reliably catches tags that write cookies or send data to advertising vendors but have no `Additional Consent` configuration. It cross-references the tag type against the Google-published consent-type matrix and flags the mismatches.
+
+Caveat: it does not know your legal interpretation. A tag "missing consent" might be intentional under your jurisdiction's legitimate-interest basis. The audit reports the gap; a human decides whether to close it.
+
+### 3. Orphaned triggers and variables
+
+Triggers that no tag references. Variables that no tag or trigger references. Folders containing nothing. These accumulate over years and confuse future editors. One `list_tags` + `list_triggers` + `list_variables` call is enough for the model to build the reference graph and report the orphans.
+
+### 4. Deprecated API references
+
+Custom HTML tags still using `_gaq.push`, `ga('send', ...)`, or old gtag.js event syntax from 2019. References to sandbox template APIs that have been removed. Preview-mode helpers left in production (`console.log` inside a Custom HTML tag, no `try`/`catch` around the hot path). The model recognises the shape of deprecated syntax because it has seen thousands of before-and-after examples.
+
+### 5. Naming-convention drift
+
+If your container follows a convention (e.g. every GA4 event tag starts with `GA4 - event_name`), the model can enumerate tags that break the pattern. The [naming conventions checklist](/resources/naming-conventions-checklist/) page covers what a good convention looks like; the model enforces whichever one your container actually uses.
+
+## What LLMs miss
+
+Equally important — these are the categories where you should not trust the model without a human pass.
+
+### 1. Semantic correctness of event payloads
+
+The model can confirm that a `purchase` event has a `transaction_id` parameter mapped. It cannot confirm that the dataLayer variable actually reads the correct field path, or that your backend sends `ecommerce.purchase.transaction_id` vs `ecommerce.transaction_id`. It reads container config, not runtime.
+
+### 2. Data-contract compliance
+
+If your tracking plan says the `estimated_arr` parameter must be an integer representing cents (not dollars), the model cannot catch that your variable sends `45000.50` as a string. Container config has types only loosely. This is why you still need a tracking plan and ideally a schema-validation step at ingest.
+
+### 3. Business-logic correctness
+
+"Fire this tag only for users in the premium tier with a completed profile" is a condition a human designs. The model will happily implement whatever conditions you write, correctly or not, and it will not second-guess the logic. Audits of "is the business logic right" are human work.
+
+### 4. Implementation quality of Custom HTML
+
+The model will flag obvious issues (missing `try`/`catch`, inline `<script>` without `type`). It will miss subtler ones: race conditions against a framework's hydration, event listeners attached before the DOM exists, polling loops that never clean up. Static analysis of sandboxed Custom HTML is a human task.
+
+### 5. Performance impact
+
+Whether your container adds 800ms to TTI is a question answered by profiling, not by reading config. The audit can list "14 tags fire on Page View" but can't tell you if that's causing the slowness.
+
+## Structuring the audit prompt
+
+The pattern that works is a single-turn prompt with explicit categories. Below is a template you can adapt.
+
+```text
+You are auditing a GTM container. The account ID is [X], container ID [Y],
+workspace ID [Z]. Use the MCP server to read the container config.
+
+Produce a report organised by these sections, in this order:
+
+1. Duplicates & near-duplicates
+   - Any two tags sharing the same destination (Measurement ID, Pixel ID,
+     Conversion ID) that fire on overlapping triggers.
+
+2. Consent gates
+   - Any tag that writes cookies, sends data to ad vendors, or fires
+     analytics pixels without an Additional Consent configuration.
+   - Tags that claim a consent type (e.g. `analytics_storage`) that
+     doesn't match the vendor's documented consent requirement.
+
+3. Orphans
+   - Triggers referenced by zero tags.
+   - User-defined variables referenced by zero tags, triggers, or
+     other variables.
+   - Folders containing zero resources.
+
+4. Deprecated APIs
+   - UA tags still present (`ga('send', ...)`, `_gaq.push`, `__utm*`).
+   - `gtag('event', ...)` direct calls inside Custom HTML (should be
+     GA4 event tags, not raw gtag).
+   - References to removed sandbox template APIs.
+
+5. Naming-convention drift
+   - First: infer the convention from the majority pattern across tags,
+     triggers, and variables.
+   - Then: list every resource that breaks the inferred convention.
+
+6. Quick wins
+   - Specific changes that cost <10 minutes each and would each improve
+     the container's hygiene score.
+
+For each finding, include:
+- Resource name and ID
+- One-sentence description of the issue
+- Severity (High / Medium / Low)
+- Suggested fix
+
+Do not make any changes. Return only the report.
+```
+
+The "do not make any changes" line is critical. MCP clients will sometimes volunteer to fix things. You want the report first, then separate conversations per fix.
+
+## How long the audit takes
+
+Approximate timings against real containers (Claude 4 + TaggingDocs MCP, single audit run):
+
+| Container size | Audit time | Total tool calls |
+|----------------|------------|------------------|
+| Small (< 30 tags) | 20-40 seconds | 15-30 |
+| Medium (30-150 tags) | 60-120 seconds | 50-100 |
+| Large (150-500 tags) | 2-5 minutes | 200-400 |
+| Enterprise (> 500 tags) | 5-10 minutes, may need chunking | 500+ |
+
+For containers above ~500 tags, the model sometimes runs out of context mid-audit. The fix is to chunk: "first do sections 1-3, then in a new conversation do 4-6." You lose cross-section insight but stay within context limits.
+
+## The triage workflow
+
+Running the audit produces a report. The report is not the deliverable — the *fixed container* is. The process that works:
+
+<Steps>
+1. **Run the audit.** Save the output.
+
+2. **Human triage.** Go through every High-severity finding. Mark each as "real issue, fix," "intentional, document," or "false positive." The model's High-severity calls are roughly 85% real, 10% intentional, 5% false positive. Medium and Low are lower precision.
+
+3. **Batch the fixes.** For each "real issue," decide whether it's a quick fix or needs design work. Quick fixes (orphan removal, folder cleanup, naming fixes) go into one workspace; design-work fixes (consent restructuring, tag deduplication) each get their own.
+
+4. **Document the intentional ones.** Add a note in the tag description explaining why it looks wrong but isn't. Future audits will re-flag it; future-you will thank past-you for the note.
+
+5. **Re-run the audit after fixes.** Confirm the High findings drop to zero. Expect the Medium/Low list to stay similar — those are usually stylistic and not worth chasing.
+</Steps>
+
+<Aside type="caution">
+Don't publish audit fixes in bulk without Preview-mode verification. Removing an "orphan trigger" that was actually a scheduled-campaign trigger waiting for a specific date to roll around is a real failure mode. The [Audit checklist](/resources/audit-checklist/) covers the manual version of this review and is worth running on top of the AI audit.
+</Aside>
+
+## When to audit
+
+- **Quarterly** for containers with active development.
+- **Before every major release** — especially if you're migrating tag platforms, changing consent vendors, or swapping analytics stacks.
+- **After any team handover** — the incoming team should audit before trusting what's there.
+- **Immediately after any incident** — the audit often surfaces the reason the incident happened.
+
+Audits that happen on a cadence catch drift. Audits that only happen when something breaks catch fires, not drift.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Audit checklist"
+    description="The manual audit process the AI audit complements."
+    href="/resources/audit-checklist/"
+  />
+  <LinkCard
+    title="Naming conventions checklist"
+    description="What good naming looks like — the convention the model enforces."
+    href="/resources/naming-conventions-checklist/"
+  />
+  <LinkCard
+    title="MCP tools and prompts"
+    description="The `audit_container` prompt workflow and the underlying tools."
+    href="/mcp/tools-and-prompts/"
+  />
+  <LinkCard
+    title="GTM as code"
+    description="Treating your container as a versioned artifact, which makes audits deterministic."
+    href="/resources/gtm-as-code/"
+  />
+</CardGrid>

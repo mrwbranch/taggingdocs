@@ -1,0 +1,175 @@
+---
+title: "Writing prompts for GTM work"
+description: "Prompt patterns specific to Google Tag Manager — providing container context, specifying output format, avoiding hallucinated APIs, asking for verification steps, and few-shot examples."
+sidebar:
+  order: 5
+lastUpdated: 2026-04-20
+---
+
+import { Aside, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Generic "write a GTM tag for X" prompts produce generic, often-wrong answers. Prompts that constrain the model with container context, explicit output format, and verification steps produce config you can actually paste into production.
+
+This page is the set of patterns that consistently work. *Valid as of April 2026 against Claude 3.5/4, GPT-4/5, and Gemini 2.x.*
+
+## The five prompt components that matter
+
+Every good tagging prompt has these five elements, in roughly this order. Skip any of them and output quality drops measurably.
+
+| Component | Why it matters |
+|-----------|----------------|
+| **Context** | Which container, which workspace, which existing conventions |
+| **Task** | One clear thing to produce — not a paragraph of related asks |
+| **Output format** | JSON resource, SQL query, GTM export JSON, or prose — pick one |
+| **Constraints** | Naming conventions, consent rules, sandbox restrictions |
+| **Verification** | How the model should double-check its own output |
+
+A prompt missing any of these usually still gets a response. The response is just not as useful.
+
+## Pattern 1 — Provide container context explicitly
+
+The MCP server lets the model *read* the container. You still want to tell it which container and which workspace, because models default to generic GTM advice if you don't.
+
+**Don't:**
+
+> *"Add a GA4 event tag for newsletter signup."*
+
+**Do:**
+
+> *"In account 123456, container GTM-ABC123, workspace 14, add a GA4 event tag for newsletter signup. Use the existing `GA4 Config - Primary` tag's Measurement ID variable. Match the naming conventions you see in the other GA4 event tags in that workspace."*
+
+The second prompt makes the model call `list_tags` first and pattern-match against what's already there. That's how it picks up your naming convention (e.g. `GA4 - newsletter_signup` vs `ga4_event_newsletter_signup`) without you having to describe it.
+
+## Pattern 2 — Specify output format precisely
+
+"Write me a tag" is ambiguous. Output format should always be one of:
+
+- **GTM JSON resource** (for something to paste into the GTM API or create via MCP)
+- **GTM export JSON** (for containers exported from the UI — different schema)
+- **JSON schema** (for a tracking plan document)
+- **SQL query** (for BigQuery / downstream analytics)
+- **Prose explanation** (for a human reading the chat transcript)
+
+Say which one you want.
+
+**Example — JSON schema for a template:**
+
+> *"Return a JSON Schema (draft 2020-12) describing the expected input to our `purchase` event. Include field types, whether each is required, and a brief description. Do not return any other format."*
+
+**Example — GTM API JSON for a variable:**
+
+> *"Return the JSON body that would be sent to the GTM API's `accounts.containers.workspaces.variables.create` endpoint for a dataLayer variable reading `ecommerce.transaction_id`. Do not return UI-style pseudocode."*
+
+Specifying the format kills 80% of the back-and-forth where the model gives you pseudo-code and you ask it to convert.
+
+## Pattern 3 — Pre-empt hallucinated APIs
+
+LLMs will cheerfully invent `setCookie()` or `fetch()` inside a sandboxed Custom Template because those functions exist in browser JavaScript. The GTM sandbox doesn't have them. You have to say so.
+
+The sandboxed-JS environment is restrictive enough that you should paste the list of available APIs into the prompt. The [Sandboxed JavaScript](/templates/sandboxed-javascript/) page has the full list; here's a condensed version that fits in a prompt:
+
+> *"You are writing GTM Custom Template sandboxed JavaScript. Available APIs: `require('sendPixel')`, `require('injectScript')`, `require('setCookie')`, `require('getCookieValues')`, `require('logToConsole')`, `require('makeTableMap')`, `require('queryPermission')`, `require('getUrl')`, `require('getTimestamp')`. You cannot use `fetch`, `XMLHttpRequest`, `document.*`, `window.*`, or any DOM APIs. All APIs that have permission implications must be declared in the Permissions section. Return the template's Code tab contents and the required permissions list."*
+
+That single paragraph in the system/context portion of a prompt eliminates the most common hallucination in template work.
+
+<Aside type="caution">
+Even with the API list provided, the model will occasionally invent a `require()` name that sounds plausible (`require('httpRequest')` is a frequent fabrication). The [AI for custom templates](/mcp/ai-for-custom-templates/) page covers verification patterns that catch this.
+</Aside>
+
+## Pattern 4 — Ask for verification steps
+
+One of the cheapest quality improvements: end every prompt with "then list three ways to verify this works." This forces the model to think about how the output would be tested, which often surfaces issues in the output itself.
+
+**Example:**
+
+> *"Create a Meta CAPI tag firing on the `purchase` event. Use the Meta pixel ID from the existing `Meta - Pixel ID` constant variable. After you return the config, list three specific checks I should run in Preview mode to verify it works."*
+
+The model will typically return:
+
+1. "Open Preview, trigger a purchase, and confirm the Meta CAPI tag status is `Succeeded` (not `Fired` — `Fired` does not guarantee the HTTP request succeeded)."
+2. "In the Network tab, find the request to `graph.facebook.com/.../events` and check the `event_name`, `event_id`, and `fbc`/`fbp` fields in the payload."
+3. "In Meta Events Manager → Test Events, confirm the event arrives with the expected `action_source`."
+
+All three steps are correct, and running them catches real problems. The [how GTM works](/foundations/how-gtm-works/) page explains why "Fired" is not the same as "worked" — and why this verification step matters.
+
+## Pattern 5 — Use few-shot examples for naming conventions
+
+If your container has a specific naming style you want maintained, show two or three existing examples rather than trying to describe the rule.
+
+**Example:**
+
+> *"Create three dataLayer variables for `user.id`, `user.plan`, and `user.signup_date`. Name them following this convention:*
+>
+> - *DLV - user.email → pulls `user.email`*
+> - *DLV - order.total → pulls `order.total`*
+> - *DLV - page.category → pulls `page.category`*
+>
+> *Output the three new variables as GTM API JSON."*
+
+Three examples is the sweet spot. One can be ambiguous. Five is overkill and eats context window. The [GTM as code](/resources/gtm-as-code/) page has a worked example of running this at container scale.
+
+## A full template
+
+Paste this at the top of a chat for any tag-authoring task. Fill in the bracketed parts.
+
+```text
+Context:
+- Account: [account ID]
+- Container: [container ID]
+- Workspace: [workspace ID]
+- Conventions: match existing tags/triggers/variables in this workspace
+
+Task:
+[one concrete thing to produce]
+
+Output format:
+[GTM API JSON | GTM export JSON | JSON schema | SQL | prose]
+
+Constraints:
+- [naming convention notes]
+- [consent requirements if any]
+- [sandboxed JS API list if applicable]
+
+Verification:
+After producing the output, list three specific ways I should verify it works
+in Preview mode (or in the destination product, if relevant).
+```
+
+Teams that use this template report roughly 2-3x fewer correction cycles than ad-hoc prompting. The cost is 30 seconds of typing per task.
+
+## Anti-patterns
+
+**Asking for multiple unrelated things in one prompt.** "Create the purchase tag, then write me the BigQuery query for revenue, then audit the container." Each of these is a different task with different output formats. The model does all three badly. Ask them one at a time.
+
+**Letting the model "figure out" the container structure.** If you don't tell it which workspace, it will sometimes call `list_workspaces` and pick one, usually not the one you meant. Specify.
+
+**Prompting for "best practices" without naming them.** "Set up tracking using best practices" is meaningless. The model's internal best-practices-for-tracking corpus is a mixture of 2018-vintage gtag advice, ad-vendor blog posts, and half-remembered forum threads. If you want TaggingDocs-style best practices, invoke the `lookup_best_practice` prompt or reference a specific article.
+
+**Skipping the verification step.** The hour you save by not asking for verification steps is the hour you spend debugging production three days later. It's a false economy.
+
+**Assuming the model remembers across chats.** Context is per-conversation for most clients (Claude Projects and ChatGPT Custom GPTs excepted). Paste container IDs and conventions into every new chat, or save them as a system prompt / Project instruction.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="MCP use cases"
+    description="Concrete tasks these prompt patterns unlock."
+    href="/mcp/mcp-use-cases/"
+  />
+  <LinkCard
+    title="AI for custom templates"
+    description="Sandboxed-JS specific prompt patterns and hallucination risks."
+    href="/mcp/ai-for-custom-templates/"
+  />
+  <LinkCard
+    title="Tools & prompts reference"
+    description="The 35 MCP tools and 6 prompts the server exposes."
+    href="/mcp/tools-and-prompts/"
+  />
+  <LinkCard
+    title="Glossary"
+    description="Prompt, Hallucination, Token — quick definitions."
+    href="/foundations/glossary/"
+  />
+</CardGrid>

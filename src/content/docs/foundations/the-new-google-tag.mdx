@@ -1,0 +1,220 @@
+---
+title: "The New Google Tag"
+description: "What the unified Google Tag actually is — a single loader that auto-provisions Ads, Floodlight, and Campaign Manager tags from one Measurement ID, and how that changes your tagging architecture."
+sidebar:
+  order: 7.6
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../components/Comparison.astro';
+
+People hear "Google Tag" and assume it is just a rename of `gtag.js`. It is, and it is not. The file on the wire is still called `gtag.js` and still exports the same `gtag()` function. What changed in 2022 is that Google introduced a server-side configuration object — *the* Google Tag — that lives in the Google Tag admin UI, and a single Tag ID can now fan out to multiple Google destinations without you ever touching the HTML snippet.
+
+That distinction sounds academic. It is not. It means tags can start firing on your site without anyone editing your codebase, because the fan-out is configured in Google's admin, not in your page.
+
+*Valid as of April 2026, Google Tag (gtag.js).*
+
+## What the Google Tag actually is
+
+The Google Tag is a configuration entity. It has:
+
+- A **Tag ID** (either `G-XXXXXXXXXX` for GA4 or `GT-XXXXXXXXXX` for the unified format)
+- One or more **linked destinations** — GA4 properties, Google Ads accounts, Floodlight activity groups, Campaign Manager 360 advertisers
+- A set of **shared configuration** — consent settings, user properties, default parameters
+
+The loader script, `gtag.js`, fetches that configuration at runtime and fires whatever tags the admin says to fire. You install one snippet; Google decides what it does.
+
+<Aside type="note">
+The `GT-` prefix is the unified Google Tag ID introduced for accounts that are not tied to a single GA4 property. You can link a `GT-` tag to GA4, Ads, and Floodlight simultaneously. The older `G-` IDs still work and can host the same linked destinations — the prefix is cosmetic, not functional.
+</Aside>
+
+## `gtag.js` vs. the Google Tag
+
+Two names, two things. The mental model matters for debugging.
+
+<Comparison leftTitle="gtag.js (the loader)" rightTitle="The Google Tag (the config)" leftType="neutral" rightType="neutral">
+  <Fragment slot="left">
+    A JavaScript file served from `googletagmanager.com/gtag/js?id=...`. It exposes the global `gtag()` function, sets up the `dataLayer` queue, and handles network requests to Google's collection endpoints.
+
+    One file, versioned by Google. You do not configure it beyond the `id` query parameter.
+  </Fragment>
+  <Fragment slot="right">
+    A record in the Google Tag admin UI (Google Ads, GA4, or the standalone Tag Manager admin). It holds the Tag ID, the linked destinations, and shared settings like consent configuration.
+
+    You configure this. The loader reads it at runtime.
+  </Fragment>
+</Comparison>
+
+Same file on the wire. Different mental model. When a tag "fires" you are seeing `gtag.js` execute a decision made by the admin-side Google Tag.
+
+## The auto-loading behaviour
+
+This is the part that catches people out. When `gtag.js` initializes with a Tag ID, it does not just set up that one destination. It chains.
+
+Simo Ahava has reverse-engineered this flow in detail, and the short version is:
+
+<Steps>
+1. The page loads `https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX`.
+
+2. The returned script includes — or fetches — the list of linked destinations for that Tag ID.
+
+3. For each linked destination that is not already present, `gtag.js` injects an additional `<script>` tag or fetches an additional configuration bundle.
+
+4. A `config` command fires for each destination. GA4 sends its initialization `page_view`. Google Ads fires its remarketing `page_view`. Floodlight fires its global site tag.
+
+5. From that point on, any `gtag('event', ...)` call is evaluated against every linked destination. One event call, many collection endpoints.
+</Steps>
+
+The practical consequence: if you install a single GA4 snippet and someone later links a Google Ads account to that Tag ID in the admin UI, Ads remarketing pixels will start firing on your site. No code change on your side. No deploy.
+
+### A rough network timeline
+
+```
+Time (ms)  Request
+─────────  ──────────────────────────────────────────────
+0          Browser parses HTML, encounters gtag.js snippet
+~50        GET googletagmanager.com/gtag/js?id=G-XXXX
+~200       Script executes, reads linked destinations
+~210       Additional bundle(s) fetched for linked Ads/Floodlight
+~250       config('G-XXXX') → GA4 page_view
+           config('AW-YYYY') → Ads page_view
+           config('DC-ZZZZ') → Floodlight global site tag
+~300+      Subsequent gtag('event', ...) calls fan out
+```
+
+<Aside type="caution">
+The linked-destinations list is cached by the browser like any other script response, but it is refreshed frequently. A destination added in the Google Tag admin at 10:00 can be firing on your site by 10:05. Audit the admin UI, not just your HTML, when you are trying to answer the question "what is firing on this site?"
+</Aside>
+
+## `config` vs. `event`
+
+Two commands, two roles.
+
+| Command | Purpose | Fires how often |
+|---|---|---|
+| `gtag('config', 'G-XXXX', {...})` | Initialize a destination — cookies, session, first `page_view` | Once per destination per page load |
+| `gtag('event', 'name', {...})` | Send a named event to all matching destinations | Every time you call it |
+
+```javascript
+// Initialization — once per destination
+gtag('config', 'G-XXXXXXXXXX', {
+  send_page_view: true,
+  user_id: 'user_123'
+});
+
+// Event — sent to every linked destination that matches
+gtag('event', 'purchase', {
+  currency: 'USD',
+  value: 49.99,
+  transaction_id: 'T_12345'
+});
+```
+
+You rarely write `config` calls by hand any more. The snippet Google gives you already includes one, and the auto-loading behaviour issues the rest. `event` is the call you actually make from your site's code.
+
+## Standalone vs. via GTM
+
+The Google Tag works in two architectures. They share the same runtime — they differ only in who owns the snippet.
+
+<Tabs>
+<TabItem label="Standalone Google Tag">
+
+You install `gtag.js` directly. This is the right choice for small sites that need GA4 plus maybe Google Ads and nothing else.
+
+```html
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-XXXXXXXXXX');
+</script>
+```
+
+The linked destinations are configured in the Google Tag admin. No GTM container. No trigger system. Pros: simple, fast, no GTM overhead. Cons: no custom triggers, no dataLayer transformation, no non-Google vendors.
+
+</TabItem>
+<TabItem label="Via GTM">
+
+The GA4 Configuration tag in GTM *is* a Google Tag under the hood. It ships with a Tag ID, it emits `config` for GA4, and — critically — it respects the same linked-destinations fan-out when the admin has one configured.
+
+```
+GTM fires GA4 Configuration tag
+  → internally calls gtag('config', 'G-XXXX')
+  → gtag.js fetches linked destinations
+  → Ads / Floodlight auto-provision
+```
+
+Pros: GTM triggers, variables, and Consent Mode wiring. Cons: heavier, and the fan-out behaviour can surprise GTM users who expect everything in their container to be visible in the GTM UI.
+
+</TabItem>
+</Tabs>
+
+<Aside type="tip">
+In GTM, the Google Tag admin-side linked destinations are invisible. Your container has no record of them. If your site fires Ads pixels you did not configure in GTM, check the Google Tag admin UI in Google Ads or GA4 for linked destinations on the Tag ID.
+</Aside>
+
+## What this means in practice
+
+A few consequences worth internalizing.
+
+**Auditing is a two-place job.** Inspecting the HTML and the GTM container used to be enough. Now you also need to check the Google Tag admin for linked destinations. A site with one `G-` snippet can be firing four separate Google vendors.
+
+**"Removing the snippet" is not always enough.** If you delete the GA4 inline snippet but leave a Google Ads conversion tag in GTM with the same linked Tag ID, the fan-out can still bring back the GA4 destination via the Ads side. Linked destinations are bidirectional.
+
+**Consent Mode applies globally.** A single `gtag('consent', 'default', {...})` call governs every linked destination. You do not need to call it per destination — but you do need to call it before `gtag.js` fires, or the auto-loaded destinations will read an undefined consent state.
+
+## Debugging the Google Tag
+
+Three tools, in order of usefulness:
+
+1. **Tag Assistant** (`tagassistant.google.com`). Shows every `config` call, every `event`, and — crucially — every linked destination that auto-provisioned.
+
+2. **`?gtm_debug=x`** in the URL. Surfaces the GTM debug panel if GTM is on the page.
+
+3. **Network tab**, filtered to `google-analytics.com/g/collect` (GA4), `googleads.g.doubleclick.net` (Ads), and `ad.doubleclick.net` (Floodlight). Each destination has its own endpoint; counting the distinct endpoints tells you how many destinations the Tag fanned out to.
+
+## Common mistakes
+
+### Assuming `gtag.js` means GA4 only
+
+The same loader serves Ads and Floodlight. A `gtag.js` snippet with a `G-` ID can be firing three vendors. Check the admin.
+
+### Installing two copies of `gtag.js`
+
+Old setups often have one snippet from the GA4 admin and another from the Ads admin, both inline in the `<head>`. Modern `gtag.js` deduplicates the loader file itself, but the two inline `gtag('config', ...)` calls will both fire. Usually harmless, occasionally causes double `page_view` hits if both IDs are configured to send them.
+
+### Thinking removing GA4 disables Ads
+
+If you delete your GA4 property but leave the Google Ads linked destination on the Tag ID, Ads remarketing keeps firing. The Tag ID is the primary key, not GA4.
+
+### Not accounting for auto-loaded tags in Consent Mode
+
+A common bug: consent defaults are set correctly, but only for `analytics_storage`. The auto-loaded Ads destination reads `ad_storage`, which was never defaulted. Ads then defaults to granted and the implementation is non-compliant. Default all six Consent Mode v2 parameters before `gtag.js` runs.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="How GTM Works"
+    description="The execution model underneath all of this — events, triggers, dataLayer, and the container lifecycle."
+    href="/foundations/how-gtm-works/"
+  />
+  <LinkCard
+    title="Tags, Triggers & Variables"
+    description="The three core abstractions in GTM and how they relate to the Google Tag's fan-out behaviour."
+    href="/foundations/tags-triggers-variables/"
+  />
+  <LinkCard
+    title="Google Ads Conversion Tracking"
+    description="How the Google Tag feeds Google Ads — Conversion Linker, conversion tags, Enhanced Conversions."
+    href="/integrations/google-ads/"
+  />
+  <LinkCard
+    title="Google Tag Gateway"
+    description="Serve gtag.js and its auto-loaded destinations from your own domain via a Google-managed proxy."
+    href="/foundations/google-tag-gateway/"
+  />
+</CardGrid>

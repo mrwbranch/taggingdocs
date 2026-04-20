@@ -1,0 +1,233 @@
+---
+title: "Microsoft UET (Server-Side)"
+description: "Microsoft Ads server-side conversions — UET offline conversion imports, the Microsoft Conversions API, MSCLKID handling, goal mapping, and Microsoft Consent Mode interaction."
+sidebar:
+  order: 16
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Microsoft Ads offers two distinct server-side paths: the mature **UET offline conversion import** (CSV / Bulk API) and the newer **Microsoft Conversions API** for real-time event push. For most advertisers the offline path is the production-safe choice today — it is stable, widely supported, and handles CRM-to-Bing attribution well. The real-time CAPI is newer and still rolling out to all markets.
+
+*Valid as of April 2026, Microsoft Ads API v13 (Bulk + Conversions API).*
+
+## Why server-side for Microsoft
+
+Bing has a surprisingly resilient audience — older demographics, enterprise users, and certain regional markets where Bing holds double-digit share. The client-side UET tag covers most of that traffic, but server-side fills specific gaps:
+
+1. **CRM-attributed conversions.** A Bing-driven lead closes into revenue weeks later in Salesforce. The UET tag never saw the close. Offline conversion import lets you push the closed-revenue event back to Microsoft for bid optimization.
+2. **Safari and ad blocker blind spots.** Real-time CAPI covers what the client-side UET misses.
+3. **Enhanced Conversions parity.** Hashed email and phone sent server-side give Microsoft the same matching signal Google gets via Enhanced Conversions.
+
+**When it is not worth it:** Bing spend under ~10% of total search budget usually does not justify the setup effort. If you're only running Bing as a Google shadow, the client-side UET tag alone is fine.
+
+## The two server-side paths
+
+| Path | Use case | Stability | Latency |
+|---|---|---|---|
+| **Offline conversion import** (Bulk API / CSV upload) | CRM-to-Bing attribution, closed-loop revenue | GA, widely supported | Hours to days |
+| **Microsoft Conversions API** (real-time) | Mirror client-side UET events server-side | Preview/LA in some markets | Real-time |
+
+If your conversions are all on-site and fast (e-commerce purchases), the real-time CAPI is the right target when it is available in your market. If your conversions close offline (B2B lead → sales cycle → closed deal), offline import is the only option.
+
+## The event model
+
+Both paths share the same core field set; what differs is the transport.
+
+**Required per event:**
+
+| Field | Notes |
+|---|---|
+| `MicrosoftClickId` | The `MSCLKID` URL parameter captured on landing |
+| `ConversionName` | Must match an existing UET goal name exactly |
+| `ConversionTime` | ISO 8601 (with timezone) or Microsoft's MM/DD/YYYY HH:MM:SS format |
+| `ConversionValue` | Decimal |
+| `ConversionCurrencyCode` | ISO 4217 |
+
+**Hashed match keys (real-time CAPI, enhanced conversions):**
+
+| Field | Hashed? |
+|---|---|
+| `HashedEmailAddress` | SHA-256 (lowercase, trimmed) |
+| `HashedPhoneNumber` | SHA-256 (E.164 first) |
+
+## Setup: offline conversion import
+
+<Steps>
+1. In Microsoft Ads → Tools → UET tags → Conversion Goals, create (or identify) the goal you want to import conversions against. Note its exact name — this is what you will put in the `ConversionName` column.
+
+2. Ensure `MSCLKID` is captured on landing. The UET tag does this automatically if you have auto-tagging enabled in Microsoft Ads and the base UET tag on all pages. Store `MSCLKID` in your CRM or database against the lead record.
+
+3. Prepare a CSV with one conversion per row. Microsoft's required columns:
+
+   ```csv
+   MicrosoftClickId,ConversionName,ConversionTime,ConversionValue,ConversionCurrencyCode,AdjustmentType
+   abc123def456,Purchase,4/20/2026 12:34:56 PM,79.99,USD,
+   xyz789ghi012,Lead - Closed,4/19/2026 3:15:00 PM,1200.00,USD,
+   ```
+
+4. Upload via Microsoft Ads UI → Tools → Import → Offline Conversions, or programmatically via the Bulk API (`https://bulk.api.bingads.microsoft.com/`).
+
+5. Microsoft processes the file within ~3 hours. Successful conversions appear in the corresponding UET goal's reporting.
+</Steps>
+
+**AdjustmentType** values: leave blank for net-new conversions, `Retract` to remove a previously imported conversion, `Restate` to update its value.
+
+## Setup: real-time Conversions API
+
+<Steps>
+1. Request access. The real-time Conversions API is not self-serve in all markets — contact your Microsoft Ads rep or apply through the Microsoft Ads API portal.
+
+2. Obtain OAuth 2.0 credentials: Developer Token, Customer ID, Customer Account ID, and an OAuth access token for a user with access to the ad account.
+
+3. Configure a UET goal in Microsoft Ads (same as offline) — the real-time events still route to a named goal.
+
+4. In sGTM, create a Custom Template using `sendHttpRequest`. The skeleton mirrors other CAPIs:
+
+   ```javascript
+   const sendHttpRequest = require('sendHttpRequest');
+   const getAllEventData = require('getAllEventData');
+   const JSON = require('JSON');
+
+   const event = getAllEventData();
+   const payload = {
+     ConversionEvents: [{
+       MicrosoftClickId: event.msclkid,
+       ConversionName: data.goalName,
+       ConversionTime: new Date(event.timestamp_ms).toISOString(),
+       ConversionValue: event.ecommerce && event.ecommerce.value,
+       ConversionCurrencyCode: event.ecommerce && event.ecommerce.currency,
+       HashedEmailAddress: event.user_data && event.user_data.email_hash,
+       HashedPhoneNumber: event.user_data && event.user_data.phone_hash
+     }]
+   };
+
+   sendHttpRequest(data.endpoint, {
+     method: 'POST',
+     headers: {
+       'Authorization': 'Bearer ' + data.accessToken,
+       'DeveloperToken': data.developerToken,
+       'CustomerId': data.customerId,
+       'CustomerAccountId': data.customerAccountId,
+       'Content-Type': 'application/json'
+     }
+   }, JSON.stringify(payload));
+   ```
+
+5. Firing trigger: GA4 purchase/lead events that map to the goal.
+</Steps>
+
+**Raw HTTP shape:**
+
+```http
+POST https://<region>.api.ads.microsoft.com/conversions
+Authorization: Bearer <access_token>
+DeveloperToken: <dev_token>
+CustomerId: <cid>
+CustomerAccountId: <aid>
+Content-Type: application/json
+```
+
+```json
+{
+  "ConversionEvents": [{
+    "MicrosoftClickId": "abc123def456",
+    "ConversionName": "Purchase",
+    "ConversionTime": "2026-04-20T12:34:56Z",
+    "ConversionValue": 79.99,
+    "ConversionCurrencyCode": "USD",
+    "HashedEmailAddress": "<sha256>",
+    "HashedPhoneNumber": "<sha256>"
+  }]
+}
+```
+
+## Goal mapping
+
+Microsoft doesn't have a standard event taxonomy like Meta or TikTok. Every conversion maps to a named UET goal you define in Ads Manager. Your server-side event's `ConversionName` must match one of those names exactly — case-sensitive.
+
+| GA4 event | Recommended UET goal name | Notes |
+|---|---|---|
+| `purchase` | `Purchase` | Enable variable revenue on the goal |
+| `generate_lead` | `Lead` | Count = One per user for lead gen |
+| `sign_up` | `Sign Up` | |
+| `add_to_cart` | `Add to Cart` | Lower-funnel, useful for audience building |
+| Custom | Whatever you named it | Must match exactly |
+
+<Aside type="caution">
+`ConversionName` is a literal string match. "Purchase" and "purchase" and "Purchases" are three different goals to Microsoft. Create the goal first, copy the name verbatim into your sGTM template, and do not rename the goal without updating the template.
+</Aside>
+
+## Microsoft Consent Mode interaction
+
+Microsoft UET supports a Consent Mode signal via `window.uetq.push('consent', 'update', { 'ad_storage': 'granted' })`. When `ad_storage` is denied, the client-side UET tag throttles its tracking — it still fires, but with reduced fidelity (no user data, no cookies).
+
+Server-side events should respect the same consent state. Your backend or sGTM should:
+
+1. Only send server-side events when the user's consent state includes advertising.
+2. Omit hashed identifiers (`HashedEmailAddress`, `HashedPhoneNumber`) if `ad_user_data` consent was denied, even if `ad_storage` was granted.
+
+Because consent state is browser-side, you need to propagate it to your backend (e.g., as a flag in the order creation request) so the server-side event can respect it.
+
+## Deduplication
+
+Microsoft dedups by `MicrosoftClickId` + `ConversionName` + `ConversionTime` (rounded to the minute). The window is the conversion window configured on the goal (default 30 days click-through).
+
+This is looser than other platforms' dedup: if your client-side UET fires a Purchase with `MSCLKID=abc123` at 12:34 and your server-side event arrives with the same `MSCLKID` and `ConversionName` at 12:34, Microsoft treats them as the same conversion. If the server-side event has a slightly different `ConversionTime` (12:35) and the same `MSCLKID`, it is counted as a second conversion unless the goal's count setting is "One per user."
+
+**The safe practice:** for real-time CAPI mirroring, send the server-side event with the same `ConversionTime` as the client-side firing. For offline import of closed-revenue, use the goal's "One per user" setting and a distinct `ConversionName` (e.g., `Lead - Closed`) so closed-revenue imports don't conflict with the original Lead goal.
+
+## Testing and validation
+
+**Offline import:**
+1. Upload a small test CSV (5–10 rows).
+2. Microsoft Ads → Tools → Import → Import History shows the result within ~3 hours.
+3. Check the target UET goal's reporting for the imported conversions.
+
+**Real-time CAPI:**
+1. sGTM Preview mode shows the HTTP response.
+2. Microsoft Ads UI → Tools → UET Tags → your goal shows a source breakdown of "Tag" vs. "API" within ~15 minutes.
+
+## Common mistakes
+
+### ConversionName mismatch
+
+If you type `Purchases` in your template but the goal is named `Purchase`, every event is silently dropped. Microsoft returns HTTP 200 and then the event has nowhere to go. Always copy-paste the name directly from Ads Manager.
+
+### Timezone-naive ConversionTime
+
+Microsoft's API prefers UTC timestamps with a `Z` suffix or an explicit offset. A bare `2026-04-20 12:34:56` is ambiguous and can be interpreted in the ad account's display timezone, shifting the conversion by several hours and pushing it outside the click window.
+
+### Trying to send to a goal not marked API-eligible
+
+Not every UET goal accepts API events. In the goal settings there is a checkbox for "Include in Conversions." If it is off, server-side events against that goal are silently dropped. Check this after creating a new goal.
+
+### Running offline import against a goal that the UET tag also fires
+
+If the UET tag fires `Purchase` and you also import `Purchase` rows from your CRM for the same orders, you double-count. Either use distinct goal names for offline (`Purchase - CRM`) or rely on `MSCLKID` dedup within the same goal.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Microsoft Ads UET (Client-Side)"
+    description="The UET client-side tag — base installation, conversion goals, and variable revenue."
+    href="/integrations/microsoft-ads-uet/"
+  />
+  <LinkCard
+    title="Meta CAPI (Server-Side)"
+    description="The reference CAPI implementation — Microsoft's real-time CAPI follows a similar architecture."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="Event Deduplication Across Client & Server"
+    description="Cross-platform cheat sheet — Microsoft's MSCLKID-based dedup is quite different from event_id-based platforms."
+    href="/integrations/event-deduplication-across-client-server/"
+  />
+  <LinkCard
+    title="Consent Mode"
+    description="Gating UET and CAPI events on user consent, including Microsoft Consent Mode specifics."
+    href="/consent/"
+  />
+</CardGrid>

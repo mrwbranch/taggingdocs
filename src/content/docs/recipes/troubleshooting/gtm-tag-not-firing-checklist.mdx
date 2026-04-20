@@ -1,0 +1,126 @@
+---
+title: "GTM Tag Not Firing Checklist"
+description: "Thirteen reasons a GTM tag fails to fire, ordered by frequency. Each item: the symptom, how to verify in Preview mode, and the fix."
+sidebar:
+  order: 1
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+If you're seeing a GTM tag that refuses to fire, here are the most common causes and how to fix them. The list is ordered by frequency in real support threads — start at the top and work down. Most cases resolve by item 6.
+
+Before you start, open GTM Preview mode (Tag Assistant) for the page in question and reproduce the event. Nearly every item below is diagnosed from the Preview timeline.
+
+<Aside type="tip">
+If Preview mode won't connect at all, skip to [GTM Preview Mode Not Working](/recipes/troubleshooting/gtm-preview-mode-not-working/) before continuing.
+</Aside>
+
+## 1. Container workspace not published
+
+**Verify.** In GTM, look at the top-right version selector. If the workspace shows an orange dot or "Unpublished changes", your edits only exist in Preview. Real users are still hitting the last published version.
+
+**Fix.** Click **Submit** → give the version a name → **Publish**. Publishing propagates in under 60 seconds. Hard-reload the page with cache disabled to pick up the new container.
+
+## 2. Tag is paused
+
+**Verify.** Open the tag in GTM. A paused tag shows a grey pause icon next to its name and sits at the top of the tag list with a "Paused" badge.
+
+**Fix.** Click the tag → three-dot menu → **Unpause**. Republish. Paused tags are ignored regardless of triggers, Preview mode included.
+
+## 3. Trigger conditions don't match actual variable values
+
+**Verify.** In Preview mode, click the event in the left timeline, then the **Tags** tab, then your tag under "Tags Not Fired". Open the Triggers section — one condition row shows red. Compare the expected value with the actual value (shown inline).
+
+**Fix.** Either change the trigger condition to match the real value, or fix the dataLayer push that sets the variable. Common traps: trailing slashes on URLs, case differences (`Submit` vs `submit`), query strings, and URL-encoded characters (`%20` vs space).
+
+## 4. Blocking trigger (exception) is catching the tag
+
+**Verify.** Same Tags panel in Preview — if the tag shows "Blocked by exception trigger", you have an active exception. Scroll to the Exceptions section at the bottom of the tag to see which one.
+
+**Fix.** Either remove the exception, or tighten its conditions so it stops matching this event. Also check Trigger Groups — a group-level exception can block a tag that itself looks clean.
+
+## 5. Consent gate blocking the tag
+
+**Verify.** Preview timeline → click your event → **Consent** tab. If the required consent type (e.g. `analytics_storage`) shows `denied`, the tag is held back. If you never see a `consent` event in the timeline, the CMP isn't wiring into Consent Mode at all.
+
+**Fix.** If this is expected behaviour (tag should wait for consent), no action. If consent should be granted: check your CMP is calling `gtag('consent', 'update', { analytics_storage: 'granted' })` after acceptance. See [Consent Mode v2](/consent/consent-mode/consent-mode-v2/).
+
+## 6. Tag sequencing — setup tag failed
+
+**Verify.** Open the tag → **Advanced Settings** → **Tag Sequencing**. If "Don't fire this tag if the setup tag fails" is checked and the setup tag errored, your tag is skipped silently. Find the setup tag in Preview — if it's in "Tags Fired" but threw an error in the Errors tab, the dependent tag won't fire.
+
+**Fix.** Debug the setup tag (usually a Custom HTML or Consent Initialization). Once it fires cleanly, the dependent tag runs.
+
+## 7. Browser extension blocking the script
+
+**Verify.** Open an incognito window with all extensions disabled and retry. If the tag fires there, an extension is the culprit. Most common: uBlock Origin, Privacy Badger, Ghostery, 1Blocker.
+
+**Fix.** Nothing to fix in your container — users who block trackers won't be tracked. For internal QA, use a clean browser profile.
+
+## 8. Content Security Policy blocking inline script
+
+**Verify.** Open DevTools Console. Look for `Refused to execute inline script because it violates the following Content Security Policy directive: "script-src ..."`. A Custom HTML tag's inline `<script>` block triggers this when `'unsafe-inline'` is not allowed.
+
+**Fix.** Either add a nonce to the tag (GTM supports nonce via the container), move the logic into an external file allowlisted by your CSP, or add `'unsafe-inline'` (not recommended). See [CSP and GTM](/client-side/setup/csp-configuration/) if you have that page indexed.
+
+## 9. Container not installed on the page
+
+**Verify.** DevTools Console: `typeof window.google_tag_manager`. If it returns `"undefined"`, the container never loaded on this page.
+
+**Fix.** Add the GTM snippet to the page template. For SPAs, make sure it's in the root layout and not in a route that re-mounts. `<head>` before any other tracking scripts.
+
+## 10. Wrong container ID installed
+
+**Verify.** Console: `Object.keys(window.google_tag_manager).filter(k => k.startsWith('GTM-'))`. If the ID returned is not the one you're editing in GTM, you're looking at the wrong container.
+
+**Fix.** Either update the snippet on the page to the correct `GTM-XXXXXXX`, or switch to editing the container that's actually live. Common on sites with staging/prod containers where the env swap didn't happen.
+
+## 11. Built-in variable not enabled
+
+**Verify.** Your trigger references `{{Click Element}}`, `{{Form ID}}`, `{{Page Path}}`, etc., but the variable isn't enabled. In Preview, the Variables tab will show the variable as `undefined`.
+
+**Fix.** GTM → **Variables** → **Configure** (top of Built-In Variables) → enable the ones referenced. Republish.
+
+## 12. Incorrect variable value from the dataLayer
+
+**Verify.** Variables tab in Preview → find your Data Layer Variable. If it shows `undefined`, either the push never happened or the key name doesn't match. If the value is a nested object when you expected a string, your path is wrong.
+
+**Fix.** Check the variable's **Data Layer Version** is set to **Version 2** (Version 1 can't resolve dotted paths). Fix the `Data Layer Variable Name` so it exactly matches the key — including underscores, camelCase, and nesting (e.g. `ecommerce.items.0.item_id`).
+
+## 13. Tag permissions — user lacks edit rights
+
+**Verify.** The tag exists in production but recent changes never made it in. Check Admin → User Management. If you have Read-only or Edit-without-Publish, your changes stay in draft.
+
+**Fix.** Request Publish permission from the container admin, or have an admin publish your workspace for you.
+
+## Still stuck
+
+<Aside type="note">
+If none of the above apply, you almost certainly have an event-name mismatch. Open [Why Isn't My Tag Firing?](/client-side/debugging/why-tag-not-firing/) — it has a decision tree specifically for this.
+</Aside>
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Why Isn't My Tag Firing?"
+    description="Interactive decision tree covering the same causes with branching questions."
+    href="/client-side/debugging/why-tag-not-firing/"
+  />
+  <LinkCard
+    title="GTM Preview Mode Not Working"
+    description="When you can't even get to the debugger, start here."
+    href="/recipes/troubleshooting/gtm-preview-mode-not-working/"
+  />
+  <LinkCard
+    title="Common Errors"
+    description="Reference list of the most frequent GTM problems with targeted fixes."
+    href="/client-side/debugging/common-errors/"
+  />
+  <LinkCard
+    title="Preview Mode"
+    description="Complete guide to using Tag Assistant effectively."
+    href="/client-side/debugging/preview-mode/"
+  />
+</CardGrid>

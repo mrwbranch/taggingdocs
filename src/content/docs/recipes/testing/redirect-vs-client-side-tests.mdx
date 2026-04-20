@@ -1,0 +1,149 @@
+---
+title: "Redirect vs. Client-Side Tests"
+description: "When to redirect users to a different URL for the variant vs. mutating the same URL in the browser — SEO implications, attribution pitfalls, and the decision matrix."
+sidebar:
+  order: 4
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+A/B tests come in two structural flavours:
+
+1. **Client-side mutation tests** — variant and control share the same URL. JavaScript modifies the DOM in the variant group.
+2. **Redirect tests** — variant and control have different URLs (`/pricing` vs. `/pricing-v2`). Users in the variant group are redirected to the variant URL before the page renders.
+
+Testing tools support both. Most teams default to client-side because it's easier to set up. But for a specific class of changes — heavy layout revisions, full-page redesigns, tests of different content strategies — redirect tests produce better data and a better user experience. Knowing when to use which is a skill.
+
+## Client-side tests
+
+**Best for:**
+- Small visual changes (copy, button colour, CTA text).
+- Changes that don't alter page structure significantly.
+- Fast iteration — you can ship and modify a variant without touching the site's codebase.
+
+**Trade-offs:**
+- **Flicker risk.** See [Flicker and FOUC Prevention](/recipes/testing/flicker-and-fouc-prevention/). Every client-side test has some flicker, mitigated but not eliminated by the anti-flicker snippet.
+- **Core Web Vitals impact.** Late-running variant code delays LCP and can cause CLS if the variant reflows content.
+- **Mobile performance penalty.** Low-end devices with slow JavaScript execution experience more flicker than desktop. Your mobile conversion rate in the variant may be artificially depressed.
+- **Search-bot handling is messy.** Bots see the control (because they don't execute testing JavaScript reliably). If the variant changes visible content, you're testing on humans and SEO ranks from the control — which is fine but needs to be understood.
+
+## Redirect tests
+
+**Best for:**
+- Full-page redesigns or layout overhauls.
+- Tests of different content strategies (entirely different copy, sections, flow).
+- Tests of different page templates.
+- Pricing-page experiments where the variant is a materially different page.
+
+**Trade-offs:**
+- **Added network latency.** Every variant-group user eats an extra redirect (~50–200ms). This itself may bias the test against the variant.
+- **SEO handling is critical.** Without proper canonical tags, search engines can index both URLs, split ranking signal, and penalise the site for duplicate content. See [SEO handling](#seo-handling-for-redirect-tests) below.
+- **Attribution breaks in specific ways.** UTM parameters, referrer information, and campaign tags can be lost or doubled during the redirect.
+- **Analytics gets noisier.** The redirect itself is often logged as a page view in GA4, inflating pageview counts.
+
+## SEO handling for redirect tests
+
+If the test URLs are publicly linkable (which they almost always are, because search engines find them), the variant URL needs to be marked so search engines don't treat it as a duplicate competing for ranking.
+
+Three acceptable patterns:
+
+**Option A — Canonical tag pointing back to the control.**
+
+On the variant page `/pricing-v2`:
+
+```html
+<link rel="canonical" href="https://example.com/pricing" />
+```
+
+This tells search engines: "this URL exists, but the authoritative version is the canonical one." Google generally respects this and rolls ranking signals into the canonical. Use for short-running tests where the variant may become permanent.
+
+**Option B — `noindex` on the variant.**
+
+On the variant page `/pricing-v2`:
+
+```html
+<meta name="robots" content="noindex" />
+```
+
+Stronger — tells search engines to exclude the URL from the index entirely. Use for long-running tests or when the variant is clearly experimental. Downside: if you ship the variant, you have to remember to remove the noindex, and search engines can take days to re-index.
+
+**Option C — Serve variant via subdirectory, disallow in robots.txt.**
+
+Put all test variants under `/experiments/*` and disallow that prefix in `robots.txt`:
+
+```
+User-agent: *
+Disallow: /experiments/
+```
+
+Strongest signal to search engines. Cleanest for long-running tests. Requires the variant to live on a URL pattern you can commit to at infrastructure level.
+
+<Aside type="caution">
+Do not use 301 redirects for redirect tests. 301 is permanent — search engines treat it as a URL move, roll ranking into the destination, and update their indexes. When the test ends and you stop redirecting, you've given search engines mixed signal about where the content lives. Use 302 (temporary) if you must use HTTP redirects, but most testing tools handle this via client-side redirects that don't affect SEO the same way.
+</Aside>
+
+## Attribution pitfalls in redirect tests
+
+The redirect from `/pricing` to `/pricing-v2` can strip URL parameters the user arrived with. If they clicked an ad with `?utm_source=google&utm_campaign=spring_sale&gclid=XYZ`, the redirect must preserve those parameters. Otherwise:
+
+- GA4 sees the variant pageview with no UTM, attributing it to (direct) / (none).
+- Google Ads auto-tagging breaks because `gclid` is lost.
+- Facebook's `fbclid` is stripped and attribution to Meta ads breaks.
+
+Good testing tools handle this automatically by appending query parameters to the redirect target. Bad ones silently drop them. Always test attribution after setting up a redirect test by clicking through a campaign URL end to end and verifying the UTMs appear in GA4 Real-Time.
+
+Similarly, the `document.referrer` on the variant page becomes the control page (`/pricing`), not the original referrer. Any analytics code that reads `document.referrer` sees a same-domain navigation, not the actual source. Most modern analytics (GA4 included) handles this by using URL parameters or session-level attribution, but custom attribution code may be affected.
+
+## Decision matrix
+
+| Question | Client-side | Redirect |
+|---|---|---|
+| Change is limited to a few DOM elements? | ✅ | — |
+| Change requires a different page template? | — | ✅ |
+| Change involves significant layout restructuring? | ⚠️ (flicker risk) | ✅ |
+| Traffic includes price-sensitive or fast-scrolling users? | ⚠️ (flicker visible) | ✅ |
+| SEO on the test page matters? | ✅ | ⚠️ (handle carefully) |
+| Test needs to complete fast with low engineering cost? | ✅ | ⚠️ (more setup) |
+| Variant will ship as a permanent new page anyway? | — | ✅ |
+| You're running GA4 + Google Ads and need clean attribution? | ✅ | ⚠️ (UTM preservation must work) |
+
+If both rows light up for a given change, the decision usually comes down to engineering cost vs. data quality. Client-side is faster to ship; redirect is cleaner data. For changes significant enough to care about the test outcome, the extra setup cost of a redirect test is almost always justified.
+
+## Common mistakes
+
+**Running a redirect test without canonical or noindex.** Search engines find both URLs, index both, and split ranking signal. Weeks later you notice organic traffic dropped and it takes the team ages to realise the experiment caused it.
+
+**Using client-side for a heavy layout test.** Users see the control fully render, then watch the page rearrange itself into the variant. The variant test "loses" because users bounced during the 800ms reflow.
+
+**Not preserving UTMs through the redirect.** The variant page gets no attribution, Meta ads show depressed conversion rates, the team disables a campaign that was actually working.
+
+**Using 301 redirects for redirect tests.** Search engines permanently reassign ranking signal to the variant URL. When the test ends, you've confused search engines about where the content actually lives.
+
+**Measuring the primary metric from the variant URL only.** If your primary is `purchase` events and the purchase confirmation page is shared between variants, you need to carry the variant assignment through to the confirmation — see [Forwarding Variant to Conversions](/recipes/testing/forwarding-variant-to-conversions/).
+
+**Assuming the redirect has no performance cost.** The 100–200ms redirect latency biases the test. If variant performs equally well on pure conversion rate despite the redirect penalty, the variant is actually better — you're seeing the signal net of the latency tax. Account for this when interpreting marginal results.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Experimentation Fundamentals"
+    description="The upstream discipline — knowing what you're testing before picking a structure."
+    href="/recipes/testing/experimentation-fundamentals/"
+  />
+  <LinkCard
+    title="Flicker and FOUC Prevention"
+    description="The main reason client-side tests underperform — and how to mitigate it."
+    href="/recipes/testing/flicker-and-fouc-prevention/"
+  />
+  <LinkCard
+    title="Server-Side Experiments"
+    description="The third option — assign variants server-side before the HTML ever reaches the browser."
+    href="/recipes/testing/server-side-experiments/"
+  />
+  <LinkCard
+    title="Cross-Domain Tracking"
+    description="Redirect-test attribution and UTM preservation overlap with cross-domain patterns."
+    href="/client-side/tracking/cross-domain-tracking/"
+  />
+</CardGrid>

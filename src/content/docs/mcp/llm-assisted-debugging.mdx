@@ -1,0 +1,146 @@
+---
+title: "LLM-assisted debugging"
+description: "Using Claude or ChatGPT to chase down why a tag isn't firing — a worked debug flow with MCP as the data source, showing prompt, tool call, reasoning, and fix."
+sidebar:
+  order: 6
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Tag debugging is one of those tasks where the time-to-answer scales with how much of your container you hold in working memory. If you built the container yesterday, you find the broken tag in 2 minutes. If you inherited it last week, the same bug takes an hour.
+
+An LLM with MCP access does not have your intuition, but it does have infinite patience for walking through configs, variables, and triggers. Used correctly, it compresses the "load container structure into my head" phase from 30 minutes to zero.
+
+This page walks through a real debug flow end-to-end. *Valid as of April 2026, MCP spec version 2025-06-18.*
+
+## The debugging loop
+
+The pattern that works:
+
+<Steps>
+1. **Describe the symptom precisely.** Not "the tag is broken" — what specifically is wrong and where you noticed it.
+2. **Point the model at the suspect.** Name the tag, the trigger, or the event.
+3. **Let the model pull config.** It calls `get_tag`, `get_trigger`, `get_variable` as needed.
+4. **Ask for hypotheses, ranked by likelihood.** Force it to commit to probabilities.
+5. **Verify each hypothesis yourself.** The model suggests; you confirm. This is the critical step.
+6. **Fix, re-run Preview, confirm.**
+</Steps>
+
+Steps 1-4 are the model's job. Steps 5-6 are yours. The value is that you skip the "find and load the context" work that dominates real debugging sessions.
+
+## A worked example
+
+Scenario: GA4 purchase events are missing about 15% of the time in production. The tag fires every time in Preview mode. Support was sent a screenshot of an order confirmation where the tag fired but no event appeared in GA4.
+
+### Turn 1 — describe the symptom
+
+> *"In container GTM-ABC123, workspace 14, the `GA4 - purchase` tag is firing in Preview mode every time but missing about 15% of real purchases in GA4. I have one specific order where the tag fired (per the Tag Assistant logs in the user's session) but no purchase event landed in GA4. The order value was €1,247.50. The customer was in Germany. Help me form hypotheses."*
+
+### Turn 2 — the model pulls config
+
+The model calls (via the MCP server):
+
+- `get_tag` on the purchase tag → returns its parameters and trigger refs.
+- `get_trigger` on the purchase trigger → confirms it's a Custom Event trigger on `purchase`.
+- `get_variable` on each referenced variable — especially `transaction_id`, `value`, `currency`, `items`.
+- `search_taggingdocs` with query "GA4 purchase event silently dropped" → pulls up the [purchase event reference](/datalayer/ecommerce/purchase/) and a note about consent.
+
+Six tool calls, about 8 seconds of wall-clock time.
+
+### Turn 3 — the ranked hypothesis list
+
+> *"Based on the config and the specifics of your failing order, here are the most likely causes, ranked:*
+>
+> 1. ***Consent Mode blocking the tag (~50% likely).*** *The tag has no `Additional Consent` configuration, but your Cookiebot CMP is enabled on the domain. Users in Germany who decline `statistics` cookies will see the tag fire in GTM logs but the GA4 request is blocked by Consent Mode. A €1,247.50 order is not a typical bot pattern; this is almost certainly a consent-decline user.*
+>
+> 2. ***Transaction_id collision with a previously seen transaction (~25% likely).*** *GA4 deduplicates purchases with the same `transaction_id` within 24 hours. If your backend re-sends order confirmation emails that re-render the thank-you page, the tag re-fires with the same ID and GA4 silently drops the second one.*
+>
+> 3. ***Value field format (~15% likely).*** *Your `value` variable pulls `ecommerce.value` as a string. GA4 tolerates string values up to a point but values with commas as decimal separators (European format: `1.247,50`) are parsed as NaN and the event is dropped server-side. Check how your thank-you page renders the value.*
+>
+> 4. ***Comma-in-currency or malformed items array (~10% likely).*** *Less likely but worth checking. Your items variable has no explicit JSON parse step; if one item's name contains characters GA4's validator rejects, the full event can be dropped."*
+
+### Turn 4 — verification
+
+You check in this order. The model is decent at ranking but you do not trust the ranking blindly.
+
+Hypothesis 1 (consent): pull the user's session replay. Confirm they clicked "Decline all" on the Cookiebot banner. Cross-reference with the GA4 DebugView — no event. **Confirmed.**
+
+Hypothesis 2: not relevant here (only one order confirmation was sent).
+
+Hypothesis 3 and 4: not relevant given hypothesis 1 explained it.
+
+### Turn 5 — the fix
+
+> *"Confirmed it's consent. About 18% of German traffic declines statistics cookies and we're losing those purchases. What's the TaggingDocs-recommended way to handle this — I don't want to re-fire the tag; I want the purchase event to still land in GA4 in a consent-safe way."*
+
+The model searches the docs, pulls the relevant Consent Mode v2 article, and explains that the answer is to ensure the tag has `Require additional consent for tag firing: ad_storage, analytics_storage` properly configured *and* that the GA4 property is set up to receive `consent_mode_pings` so modeled conversions can fill the gap. It does not push a fix — it shows the change it would make and asks for confirmation.
+
+You confirm. It calls `update_tag` to add the consent configuration and `create_version` to freeze the change. You publish after Preview-mode verification.
+
+Total elapsed time: about 12 minutes. A week without MCP for a similar bug previously: 3 hours.
+
+## What the model is good at
+
+- **Cross-referencing.** "This variable feeds this tag which is gated by this trigger which reads this other variable." Tedious for humans, trivial with MCP.
+- **Pattern recognition on common failure modes.** Consent gates, transaction-id deduplication, DOM ready vs. window loaded timing. These show up in its training data repeatedly.
+- **Restating the symptom in structured form.** Useful for your own thinking — having the bug written up as "what works, what breaks, what varies" often surfaces the cause.
+- **Searching the docs for relevant articles.** Better than grepping.
+
+## What the model is bad at
+
+- **Reasoning about runtime behaviour.** Container config doesn't tell it whether the dataLayer push actually happened. You still need browser DevTools for that.
+- **Nondeterministic bugs.** "Sometimes the tag doesn't fire" is a race condition nine times in ten. The model will suggest plausible causes but verification requires reproducing the race.
+- **Browser-specific quirks.** "iOS Safari private mode drops third-party cookies differently" is not reliably in the model's head. Check yourself.
+- **Anything touching real customer data.** The MCP server exposes container config, not production events. The model cannot see "did event X actually arrive." You have to pull that from GA4, BigQuery, or server logs.
+
+<Aside type="tip">
+For the common cases — tag not firing, event missing, trigger conditions not matching — work through the [GTM tag not firing checklist](/recipes/troubleshooting/gtm-tag-not-firing-checklist/) in parallel with the model. The checklist catches the things the model misses; the model catches the things the checklist misses.
+</Aside>
+
+## Prompt patterns that help
+
+**Always include the workspace number.** Models that don't know which workspace will sometimes read from the default and give advice that doesn't match what you see in your editor.
+
+**Paste Preview-mode screenshots or the Tag Assistant log as text.** Models with image input handle screenshots; if yours is text-only, copy-paste the event log. The model can pattern-match on it.
+
+**Paste the raw dataLayer push.** The single most valuable piece of context. "Here's what my site pushes, here's the tag that should consume it, tell me why they don't match" is a prompt the model handles well.
+
+**Ask for probabilities, not just ranked lists.** "Rank by likelihood" sometimes produces a list that's really alphabetical. "Give each a percentage" forces commitment and exposes when the model is uncertain.
+
+**Demand a falsification step.** After each hypothesis, ask "what single observation would rule this out?" This keeps you from chasing the wrong cause for half an hour.
+
+## Anti-patterns
+
+**Trusting the model's ranking.** The hypothesis ordering is usually reasonable but not reliably correct. Verify in order of cheapest-to-check, not in order of highest-ranked.
+
+**Letting the model make changes before you've confirmed the root cause.** The MCP server exposes `update_tag`, `update_trigger`, and `update_variable`. It's tempting to let the model iterate. Don't — each change shifts the state of the container and muddies what you're actually debugging.
+
+**Debugging with MCP alone when the bug is runtime.** If the symptom is "the dataLayer push fires sometimes," no amount of reading container config will help. Open DevTools.
+
+**Asking the model to verify its own fix without a human in the loop.** Even if it says "I've applied the fix and verified it works," the verification is reading config, not watching real events. Publish only after you've seen the fix behave correctly in Preview.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="GTM tag not firing checklist"
+    description="The systematic checklist that complements the LLM approach."
+    href="/recipes/troubleshooting/gtm-tag-not-firing-checklist/"
+  />
+  <LinkCard
+    title="MCP use cases"
+    description="Other tasks the MCP server unlocks beyond debugging."
+    href="/mcp/mcp-use-cases/"
+  />
+  <LinkCard
+    title="How GTM works"
+    description="The execution model. The mental model you'll be debugging against."
+    href="/foundations/how-gtm-works/"
+  />
+  <LinkCard
+    title="Writing prompts for GTM"
+    description="Prompt patterns that improve output quality measurably."
+    href="/mcp/writing-prompts-for-gtm/"
+  />
+</CardGrid>

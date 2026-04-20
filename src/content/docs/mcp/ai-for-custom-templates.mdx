@@ -1,0 +1,194 @@
+---
+title: "AI for custom templates"
+description: "Using LLMs to scaffold sandboxed-JS custom templates — the sandbox's API restrictions, verification patterns, and hallucination risks unique to the template environment."
+sidebar:
+  order: 8
+lastUpdated: 2026-04-20
+---
+
+import { Aside, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Custom templates are the GTM task most transformed by LLMs. They are also the task most likely to silently break in production if you don't verify carefully.
+
+The reason is that LLMs have been trained on the wide open web of JavaScript — `fetch`, `XMLHttpRequest`, the DOM, Node.js, npm packages. None of that is available in the GTM sandbox. The model's default mode is to generate JavaScript that looks plausible and runs nowhere. Used correctly, you get a working template in 5 minutes. Used carelessly, you get a hallucination that compiles but does nothing.
+
+*Valid as of April 2026, against the GTM sandboxed-JS environment as documented.*
+
+## What the sandbox actually is
+
+Before any prompting, you need to internalise one fact: the GTM Custom Template sandbox is not regular JavaScript. It is a restricted interpreter with a deliberately small API surface. The full reference is on the [Sandboxed JavaScript](/templates/sandboxed-javascript/) page. A condensed list of what's actually available:
+
+| Category | API |
+|----------|-----|
+| Network | `sendPixel`, `injectScript`, `injectHiddenIframe` |
+| Cookies | `getCookieValues`, `setCookie` |
+| Storage | `localStorage` via `require('localStorage')` |
+| DOM (read-only) | `copyFromWindow`, `callInWindow` (with permissions) |
+| Data | `getUrl`, `getReferrerUrl`, `getTimestamp`, `getTimestampMillis` |
+| Utilities | `makeTableMap`, `makeString`, `makeNumber`, `makeInteger`, `JSON` (parse/stringify) |
+| Control | `queryPermission`, `logToConsole`, `Math`, `encodeUriComponent` |
+
+What's not available: `fetch`, `XMLHttpRequest`, `document.*`, `window.*` (directly), `new Promise(...)`, arrow functions in some older versions, async/await, most ES2015+ syntax, and any npm module.
+
+The model does not know this by default. You have to tell it.
+
+## The prompt that works
+
+Paste this into the system-prompt portion of your chat or into a Project / Custom GPT instruction set. It adds about 300 tokens of context and dramatically reduces hallucination.
+
+```text
+You are writing a GTM Custom Template. Sandboxed JavaScript rules apply:
+
+AVAILABLE APIs (use require() for each):
+  sendPixel, injectScript, injectHiddenIframe, getCookieValues,
+  setCookie, localStorage, copyFromWindow, callInWindow, getUrl,
+  getReferrerUrl, getTimestamp, getTimestampMillis, makeTableMap,
+  makeString, makeNumber, makeInteger, queryPermission, logToConsole,
+  Math, encodeUriComponent, JSON
+
+UNAVAILABLE (do NOT use, these will fail):
+  fetch, XMLHttpRequest, document, window (direct access),
+  async/await, Promise (for new construction), arrow functions in
+  some versions, any npm modules, any DOM manipulation, setTimeout
+  or setInterval (use the Timer trigger in GTM instead)
+
+PERMISSIONS:
+  Every network call, cookie read/write, and window access must be
+  declared in the template's Permissions section. List every domain
+  your injectScript/sendPixel calls target. List every cookie key.
+  List every window variable you read or call.
+
+OUTPUT FORMAT:
+  Return three blocks:
+  1. The Code tab contents (sandboxed JS).
+  2. The Permissions you need (as a bulleted list with scopes).
+  3. Three test cases I should add in the Tests tab, each with a
+     mock setup and an assertion.
+```
+
+This one block prevents roughly 80% of the template-specific hallucinations I've seen. The remaining 20% need verification (covered below).
+
+## The four hallucinations that still get through
+
+### 1. Invented `require()` names
+
+Plausible-sounding module names like `require('httpRequest')`, `require('ajax')`, `require('xhr')`. None of these exist. The model invents them because "a module for HTTP requests" is what a well-designed API would have, and the model fills in the gap.
+
+**Catch it:** read every `require()` call in the output. If it's not in the API list above, it's fabricated.
+
+### 2. Plain-JS fallback inside permissions-dependent calls
+
+The model knows `callInWindow` exists but forgets that the function name it calls has to be listed in `access_globals` permissions. It returns code that compiles but throws at runtime with a permission error.
+
+**Catch it:** for every `callInWindow`, `copyFromWindow`, `sendPixel`, `injectScript`, `setCookie`, and `getCookieValues` call, verify the permission is declared with the specific target.
+
+### 3. Modern JS syntax that the sandbox rejects
+
+Arrow functions inside `Array.prototype.filter` callbacks. Template literals inside logging. `const`/`let` in older sandbox versions. All parse-fail cases.
+
+**Catch it:** save and open the template. The GTM UI shows syntax errors immediately. Run the Tests before you publish.
+
+### 4. Conceptually-impossible network patterns
+
+The model writes code that looks like it makes an HTTP request, waits for the response, and conditionally fires a pixel based on the response body. The sandbox has no mechanism for reading response bodies from `sendPixel` or `injectScript`. The response-body access simply does not exist.
+
+**Catch it:** if the template "does X, then based on the result does Y" across a network boundary, it's wrong. The sandbox is fire-and-forget for outbound requests. Response-reading pattern calls belong in a [server-side tag template](/templates/) or an sGTM tag, not client-side.
+
+## Verification patterns
+
+One of the nicest things about templates is they have a built-in test runner. Use it.
+
+### Write tests before you publish
+
+Every template should have at least three tests before it leaves your editor:
+
+1. **Happy path.** Provide the expected config, trigger the tag, assert `sendPixel` (or whichever output) was called with the expected URL.
+2. **Missing config.** Omit a required field, trigger, assert `logToConsole` got the error, assert no network call.
+3. **Permission failure.** Mock a `queryPermission` to return `false`, trigger, assert graceful degradation.
+
+The LLM can write all three tests when you ask. It writes the happy-path test correctly almost every time; the error-path tests sometimes miss edge cases, so review those.
+
+The [Testing custom templates](/templates/testing-custom-templates/) page has the full testing reference.
+
+### Run in Preview with the Permissions sidebar open
+
+When you save a template, GTM's Preview mode shows permission violations in real time. Trigger the tag once with the dev tools open. If permissions were under-declared, the console tells you exactly which call violated which permission. Add the permission, re-run.
+
+### Compare against an existing working template
+
+If your template is a variation of something you already have working (e.g. "same as the Meta Pixel template but for TikTok"), ask the model to diff. "Here's a working Meta template. Here's the TikTok vendor's documented pixel URL and parameters. Produce a template that's structurally identical to the Meta one but targets TikTok." Higher success rate than from-scratch generation.
+
+## A worked example
+
+User prompt:
+
+> *"Create a sandboxed-JS Custom Tag template that sends a server-side hit to https://track.example.com/collect with these fields: event_name (string), user_id (string, optional), event_value (number, optional), timestamp (auto-populated as milliseconds since epoch). Return code, permissions, and three tests."*
+
+Good output (abbreviated):
+
+```javascript
+const sendPixel = require('sendPixel');
+const getTimestampMillis = require('getTimestampMillis');
+const encode = require('encodeUriComponent');
+const log = require('logToConsole');
+
+const base = 'https://track.example.com/collect';
+
+const params = [];
+params.push('event=' + encode(data.event_name));
+if (data.user_id) params.push('uid=' + encode(data.user_id));
+if (typeof data.event_value === 'number') {
+  params.push('val=' + encode(String(data.event_value)));
+}
+params.push('ts=' + getTimestampMillis());
+
+const url = base + '?' + params.join('&');
+
+log('Firing tracking pixel', url);
+sendPixel(url, data.gtmOnSuccess, data.gtmOnFailure);
+```
+
+Permissions:
+
+- `send_pixel` with allowed URLs: `https://track.example.com/*`
+- `logging` for console.
+
+Tests (three tests, each with mock inputs and an assertion on `sendPixel`'s call URL).
+
+**What to check before shipping:**
+
+1. The `sendPixel` URL pattern in permissions. The model sometimes writes `https://track.example.com/` (no trailing wildcard) which fails when the code appends `?event=...`.
+2. The order of `gtmOnSuccess`/`gtmOnFailure` callbacks. The sandbox expects these passed as positional args.
+3. That the tests actually run. Paste the Tests tab code and run them in the template editor.
+
+## When not to use an LLM for templates
+
+- **Templates that need cryptographic work.** The sandbox has some crypto utilities but the model regularly invents ones that don't exist. Do these by hand against the documented API.
+- **Templates that need to read response bodies.** Move the work to server-side.
+- **Templates for internal tools where correctness matters more than speed.** Write it yourself, get it reviewed.
+- **Your first template ever.** Write one by hand first so you understand the sandbox's edges. Then reach for the LLM.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Sandboxed JavaScript"
+    description="The complete API reference for the GTM Custom Template sandbox."
+    href="/templates/sandboxed-javascript/"
+  />
+  <LinkCard
+    title="Testing custom templates"
+    description="How to use GTM's built-in test runner to verify templates before publishing."
+    href="/templates/testing-custom-templates/"
+  />
+  <LinkCard
+    title="Writing prompts for GTM"
+    description="Broader prompt patterns that apply beyond templates."
+    href="/mcp/writing-prompts-for-gtm/"
+  />
+  <LinkCard
+    title="JavaScript for tag managers"
+    description="The regular-JS reference — what the model knows by default and where the sandbox diverges."
+    href="/resources/javascript-for-tag-managers/"
+  />
+</CardGrid>

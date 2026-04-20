@@ -9,6 +9,10 @@ import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 The single biggest challenge in querying GA4 BigQuery data is the nested structure. Event parameters, user properties, and items are all stored as arrays of structs rather than flat columns. Every parameter lookup requires an UNNEST operation. This guide covers every pattern you will encounter.
 
+<Aside type="tip">
+New to SQL or to the GA4 export schema specifically? Read the [SQL Primer for GA4 BigQuery](/ga4/bigquery/sql-primer/) first — it covers basic `SELECT`/`WHERE`/`GROUP BY`, the minimal `UNNEST` pattern, CTEs, and partition pruning. Everything on this page builds on that foundation.
+</Aside>
+
 ## The value struct
 
 GA4 parameters store their value in one of four sub-fields depending on the data type:

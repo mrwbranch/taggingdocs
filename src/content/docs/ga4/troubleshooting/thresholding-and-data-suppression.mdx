@@ -1,0 +1,200 @@
+---
+title: "Thresholding and Data Suppression"
+description: "Why GA4 reports show '(data not available)' — the data-thresholding privacy mechanic, when it activates, how it interacts with Consent Mode, and using BigQuery as the workaround."
+sidebar:
+  order: 7
+lastUpdated: 2026-04-20
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+*Valid as of April 2026, GA4 property interface.*
+
+You open a GA4 report, apply a filter, and several rows go missing. The totals do not tally. A card reads `(data not available)`. The explanation is almost always **thresholding** — a privacy-protection mechanic that suppresses small user counts to prevent individual users from being identified by cross-referencing demographics, devices, and behavior.
+
+Thresholding is not a bug, not a limit you can buy your way out of, and not something an implementation change will remove. Understanding when it activates is the only way to work around it.
+
+## What thresholding does
+
+When a report row, cell, or card would reveal information about a very small group of users, GA4 suppresses that data. The suppressed value is replaced with `(data not available)`, and the row is either hidden entirely or shown with `—` in the affected metric columns.
+
+Thresholding is applied at query time, not at collection time. Your raw data is intact — the BigQuery export contains every event. Only the GA4 reporting interface applies the suppression.
+
+## When thresholding activates
+
+Thresholding activates on a report when **both** of the following are true:
+
+| Condition | Description |
+|-----------|-------------|
+| The property has identity-enriching signals enabled | Google signals is on, demographics and interests are on, or User ID is in use |
+| The queried segment has a user count below Google's threshold | Default threshold is around 50 users, but varies by report context and Google's privacy model |
+
+Either condition alone does not trigger thresholding. A property with Google signals disabled and demographics disabled never sees thresholding — it also never sees demographic dimensions.
+
+### The signals that enrich identity
+
+Thresholding exists because certain signals could let someone cross-reference a small cohort to identify an individual. Any of these enables thresholding property-wide:
+
+- **Google signals** — cross-device linking and demographic inference for Google-signed-in users who have opted into Ads Personalization.
+- **Demographics and interests reporting** — age, gender, and affinity dimensions.
+- **User ID** — only if combined with demographic dimensions in the same query.
+
+Disabling Google signals and demographics stops thresholding but costs you those dimensions. Most properties prefer the trade.
+
+### When the user count is "too small"
+
+Google does not publish exact thresholds, and they are not constant. Observed behavior:
+
+- Reports aggregating fewer than ~50 active users in the date range regularly trigger thresholding on at least some rows.
+- Reports on short date ranges (yesterday, last 7 days) for low-traffic properties trigger it frequently.
+- Long tail dimensions (city, device model, specific page URLs) trigger it row-by-row.
+- Segments combining multiple filters (audience × landing page × device) trigger it even on large properties because the intersection is small.
+
+## Worked example
+
+An e-commerce site has 180,000 monthly active users and Google signals enabled. A marketer opens Reports → Acquisition → User Acquisition and filters by:
+
+- Country: Ireland
+- Device: Tablet
+- Session default channel group: Paid search
+
+The filtered segment contains 31 users over the month. GA4 shows:
+
+```
+Total users            (data not available)
+New users              (data not available)
+Engaged sessions       (data not available)
+Key events             (data not available)
+Session conversion rate (data not available)
+```
+
+Nothing is broken. Nothing needs a re-tag. The segment is below threshold and the report cannot display user-level metrics without risking re-identification.
+
+The workaround is to broaden the segment (drop the device filter), shorten the dimension set, or go to BigQuery.
+
+## Where you will see it most
+
+| Surface | Thresholding frequency |
+|---------|------------------------|
+| Demographics reports (age, gender) | Very high — these dimensions exist because of identity signals |
+| City, region dimensions | High, especially outside large metros |
+| Explorations with 4+ filters | High |
+| Standard reports with no filters | Low (totals are usually large enough) |
+| Audiences (building) | Low — Audience sizing is approximate but visible |
+| Advertising → Attribution | High when filtered to specific campaigns |
+| Data API | Same as UI — the API returns `(not set)` or suppresses the row |
+| BigQuery export | **Never** — BigQuery bypasses thresholding entirely |
+
+## Thresholding is not bot filtering and not cardinality capping
+
+Three different mechanics produce missing rows in GA4, and they are often conflated:
+
+| Mechanic | What it is | How to tell |
+|----------|-----------|-------------|
+| Thresholding | Privacy suppression for small cohorts | Row shows `(data not available)`; resolves if you remove filters or broaden date range |
+| Bot filtering | Automatic exclusion of known-bot traffic | Invisible — you never had the row to begin with |
+| Cardinality capping | High-cardinality dimensions bucketed into `(other)` | Row literally labeled `(other)` with aggregate numbers |
+
+Only thresholding is what this page is about. Cardinality and bot filtering need separate treatment.
+
+## The Consent Mode interaction
+
+Consent Mode v2 (the current standard) affects thresholding in both directions:
+
+**Consent denied users** → GA4 receives modeled data for these users. Modeled users do not carry the same identity enrichment as consented users, so their presence in a report does not on its own escalate thresholding. However, they also do not contribute to dimensions like age, gender, or city, because those values depend on signals that require consent.
+
+**Consent granted users** → These are the users who trigger thresholding if their segment slice is small. Reducing consented-signals traffic (through CMP-design changes, market mix shift, or regulatory change in the EU) increases the thresholding surface because your "queryable" user pool shrinks.
+
+<Aside type="caution">
+If you recently tightened your consent banner design and your reports suddenly show more `(data not available)`, the cause is likely not a GA4 change. A smaller consented population means more segments fall below threshold, even at the same total traffic. Check consent-mode telemetry before assuming a GA4 regression.
+</Aside>
+
+## The BigQuery workaround
+
+The GA4 BigQuery export is not subject to thresholding. Every event, every user, every dimension is present in the raw tables.
+
+```sql
+-- The Ireland / tablet / paid-search example from above,
+-- which is suppressed in the UI but fully queryable here.
+SELECT
+  COUNT(DISTINCT user_pseudo_id) AS users,
+  COUNT(DISTINCT CONCAT(user_pseudo_id, '.',
+    CAST((SELECT value.int_value FROM UNNEST(event_params)
+          WHERE key = 'ga_session_id') AS STRING))) AS sessions,
+  COUNTIF(event_name = 'purchase') AS purchases
+FROM `project.dataset.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20260401' AND '20260430'
+  AND geo.country = 'Ireland'
+  AND device.category = 'tablet'
+  AND (SELECT value.string_value FROM UNNEST(event_params)
+       WHERE key = 'medium') = 'cpc';
+```
+
+For a no-BigQuery fallback, Explorations built on segments that avoid demographic dimensions are less likely to trigger thresholding than the same filters on standard reports, because without age/gender in the cell there is less re-identification risk. This is a partial workaround, not a reliable one — Google's threshold logic still applies based on the signals enabled at the property level.
+
+### Why BigQuery is privacy-safe
+
+The BigQuery export lives in your own Google Cloud project. Anyone querying it must have IAM access to that project — a much narrower and auditable population than "anyone with GA4 Viewer access to the property." Google considers this sufficient privacy assurance to ship raw user-level data there without the reporting-layer suppression.
+
+In practice: yes, you see individual `user_pseudo_id`s, but you do not see names, emails, or browsing history beyond what your own tagging captured.
+
+## Reducing thresholding impact
+
+If turning off Google signals is not an option but thresholding is hurting reports:
+
+- **Broaden date ranges** for segmented reports. Instead of day-level, look at 7-day or 28-day rolling windows.
+- **Drop the least-load-bearing dimension** from a segment. Often a single filter (e.g., "Device: Tablet") is the one that pushes the segment below threshold.
+- **Move demographic analysis to BigQuery**. Pipe aggregated results into Data Studio after you have aggregated away from individual users.
+- **Use audiences rather than filters** for recurring analysis. Audience memberships are less suppressed than on-the-fly filtered reports.
+- **Consider User ID hygiene**. If User ID is only set for a subset of users, demographic combinations tend to be smaller; ensuring User ID is set consistently helps the user count in each cohort.
+
+<Aside type="tip">
+You cannot "turn off thresholding" as a property setting. The only lever is turning off the signals (Google signals, demographics) that cause it — at the cost of losing those dimensions entirely. There is no middle setting in the property UI.
+</Aside>
+
+## Common mistakes
+
+### Assuming thresholding means data loss
+
+The data is in BigQuery. It is also in the Data API at the row level where it is not suppressed. The UI is the most conservative surface; it is not the only surface.
+
+### Changing tagging to fix thresholding
+
+Thresholding is not related to your implementation. Changing events, adding dimensions, or fixing consent-mode coverage does not raise segments above the threshold — only broadening the segment does. Do not spend engineering time on this.
+
+### Reading `(data not available)` as zero
+
+A row with `(data not available)` is a row with some suppressed count greater than zero but below threshold. Summing visible rows and declaring a total will understate reality. Either aggregate in BigQuery or widen the segment.
+
+### Conflating thresholding with sampling
+
+GA4 reports in standard views are generally not sampled. Explorations on very large queries can be sampled. Thresholding and sampling are different: sampled results show an approximate value, thresholded cells show no value. The banner at the top of a report indicates sampling; thresholding has no dedicated banner.
+
+### Ignoring the Consent Mode angle
+
+If thresholding suddenly increases without a property-config change, look at consent metrics. Less consent → smaller queryable cohort → more suppression. This is often the answer when a GDPR enforcement action or a CMP redesign preceded the change.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Data Discrepancies"
+    description="Other reasons GA4 numbers do not line up, beyond thresholding."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+  <LinkCard
+    title="Common BigQuery Queries"
+    description="The workaround of choice for thresholded segments."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Audiences"
+    description="Less affected by thresholding than ad-hoc filters."
+    href="/ga4/configuration/audiences/"
+  />
+  <LinkCard
+    title="Data Model"
+    description="How the raw events underneath thresholded reports are shaped."
+    href="/ga4/fundamentals/data-model/"
+  />
+</CardGrid>

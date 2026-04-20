@@ -155,7 +155,7 @@ Define what "good data" means for your implementation. These KPIs help you monit
 
 | KPI | Target | How to Monitor | Alert Threshold |
 |-----|--------|---|---|
-| **Daily event volume stability** | ±10% vs. 7-day average | Looker Studio dashboard checking yesterday vs. weekly baseline | > 15% drop |
+| **Daily event volume stability** | ±10% vs. 7-day average | Data Studio dashboard checking yesterday vs. weekly baseline | > 15% drop |
 | **PII in event parameters** | 0 instances | Daily audit query scanning for email/phone patterns in strings | Any match |
 | **Parameter coverage** | P0 events with >95% of sessions | Query: sessions with event / total sessions | < 90% |
 | **Event naming consistency** | 100% match specification | Audit all unique `event_name` values monthly | Any deviation |

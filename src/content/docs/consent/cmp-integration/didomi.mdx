@@ -1,0 +1,208 @@
+---
+title: "Consent Mode v2 with Didomi"
+description: "Step-by-step Google Consent Mode v2 integration with Didomi CMP via GTM — purpose-based consent, TCF v2.2, server-side forwarding, and verification."
+sidebar:
+  order: 6
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Didomi is an enterprise-grade CMP widely used by European publishers, media groups, and large e-commerce portfolios. It has first-class IAB TCF v2.2 support, multi-brand notice management, and a server-side consent API that makes it a natural fit for architectures combining client-side GTM with server-side GTM. This playbook covers purpose-based mapping, the JavaScript API, and server forwarding.
+
+Valid as of April 2026, Didomi SDK v2 / Consent Mode v2.
+
+<Aside type="caution">
+Didomi purposes are referenced by either a purpose **ID** (stable technical key) or a purpose **slug** (human-readable name). Always map against IDs. Slugs can be renamed in the console and will silently break a consent integration.
+</Aside>
+
+## Overview
+
+Didomi communicates consent through:
+
+1. The `didomiOnReady` queue — fires once the SDK has resolved the user's consent state (either freshly collected or loaded from storage).
+2. The `Didomi.on('consent.changed', …)` event — fires whenever the user updates a preference.
+3. The IAB TCF v2.2 API (`__tcfapi`) — for downstream ad-vendor chains.
+4. The Didomi Web Consent API — for server-side retrieval of a user's consent record via their Didomi user token.
+
+## Prerequisites
+
+- Didomi account with a **published notice** and the notice's public ID.
+- API key and SDK loader configured (either embed mode or notice-only mode).
+- Purposes enabled in the notice that map to Consent Mode signals: `cookies`, `analytics`, `advertising_personalisation`, `measure_ad_performance` at minimum.
+- GTM container installed on the site.
+- (Optional) Server-side GTM container if you plan to forward consent server-side.
+
+## Step 1 — Set default consent state
+
+```html
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+
+  gtag('consent', 'default', {
+    ad_storage: 'denied',
+    analytics_storage: 'denied',
+    ad_user_data: 'denied',
+    ad_personalization: 'denied',
+    functionality_storage: 'denied',
+    personalization_storage: 'denied',
+    security_storage: 'granted',
+    wait_for_update: 500
+  });
+</script>
+```
+
+## Step 2 — Install the Didomi SDK loader
+
+Paste the Didomi loader in `<head>` **after** the consent defaults but before GTM. Replace `NOTICE_ID` with your published notice ID:
+
+```html
+<script type="text/javascript">
+  window.gdprAppliesGlobally=true;
+  (function(){
+    function n(){if(!window.frames.__tcfapiLocator){if(document.body){var e=document.body;var t=e.ownerDocument.createElement("iframe");t.style.cssText="display:none",t.name="__tcfapiLocator",e.appendChild(t)}else{setTimeout(n,5)}}}n();
+    var e=[];var t=window;t.__tcfapi=function(){var n=arguments;e.push(n);if(n.length<2)return;if(typeof n[2]==="function"){n[2](n[0]==="ping"?{gdprApplies:t.gdprAppliesGlobally,cmpLoaded:false,cmpStatus:"stub"}:void 0,true)}};
+  })();
+  (function(e,r,t,a,l){var o=document.createElement("script");o.id="spcloader",o.type="text/javascript",o.async=true,o.src="https://sdk.privacy-center.org/"+"NOTICE_ID"+"/loader.js?target="+document.location.hostname;o.charset="utf-8";var i=document.getElementsByTagName("script")[0];i.parentNode.insertBefore(o,i)})();
+</script>
+```
+
+## Step 3 — Didomi purpose mapping
+
+Didomi purposes are identified by IDs (exact keys vary per notice). The defaults for a fresh IAB TCF-based notice are:
+
+| Didomi purpose ID | Purpose | Google Consent Signal |
+|---|---|---|
+| `cookies` | Storage of or access to information on a device | `functionality_storage` |
+| `analytics` | Audience measurement (non-TCF custom) | `analytics_storage` |
+| `measure_ad_performance` | Measure ad performance (TCF 7) | `analytics_storage` |
+| `select_basic_ads` | Basic ads (TCF 2) | `ad_storage` |
+| `create_ads_profile` | Create personalised ads profile (TCF 3) | `ad_user_data` |
+| `select_personalized_ads` | Personalised ads (TCF 4) | `ad_personalization` |
+| `device_characteristics` | Scan device characteristics (TCF 9) | `ad_storage` |
+
+<Aside type="note">
+Retrieve the exact purpose IDs for your notice from **Didomi Console → Notice → Purposes → API name**. The values above are defaults for the standard IAB template — custom notices will differ.
+</Aside>
+
+## Step 4 — Wire the consent update callback
+
+Add a Custom HTML tag in GTM on **Consent Initialization — All Pages** with priority 10:
+
+```html
+<script>
+  window.didomiOnReady = window.didomiOnReady || [];
+
+  window.didomiOnReady.push(function(Didomi) {
+    pushConsentToGtag(Didomi);
+
+    // Fires on every user interaction that changes consent
+    Didomi.on('consent.changed', function() {
+      pushConsentToGtag(Didomi);
+    });
+
+    // Fires when user revokes everything
+    Didomi.on('preferences.clickagreetoall', function() { pushConsentToGtag(Didomi); });
+    Didomi.on('preferences.clickdisagreetoall', function() { pushConsentToGtag(Didomi); });
+  });
+
+  function pushConsentToGtag(Didomi) {
+    var status = Didomi.getUserConsentStatusForAll().purposes.enabled || [];
+    var has = function(id) { return status.indexOf(id) !== -1; };
+
+    gtag('consent', 'update', {
+      analytics_storage: (has('analytics') || has('measure_ad_performance')) ? 'granted' : 'denied',
+      ad_storage: (has('select_basic_ads') || has('device_characteristics')) ? 'granted' : 'denied',
+      ad_user_data: has('create_ads_profile') ? 'granted' : 'denied',
+      ad_personalization: has('select_personalized_ads') ? 'granted' : 'denied',
+      functionality_storage: has('cookies') ? 'granted' : 'denied'
+    });
+
+    window.dataLayer.push({
+      event: 'didomi_consent_ready',
+      didomi_purposes_enabled: status
+    });
+  }
+</script>
+```
+
+## Step 5 — GTM configuration
+
+<Steps>
+1. Name the Custom HTML tag `CMP - Didomi - Consent Update`.
+2. Trigger: **Consent Initialization — All Pages**, priority **10**.
+3. Open your **Google Tag** in GTM → Advanced Settings → Consent Settings. Require `analytics_storage`.
+4. For **Google Ads** conversion tags, require `ad_storage` and `ad_user_data`.
+5. For non-Google tags, trigger on the `didomi_consent_ready` dataLayer event with purpose-specific conditions.
+6. Publish the container.
+</Steps>
+
+## TCF v2.2 integration
+
+Didomi is TCF-certified. The TC string is available via the standard `__tcfapi` interface and is automatically consumed by Google, Facebook, and any TCF-compliant ad vendor.
+
+```javascript
+__tcfapi('addEventListener', 2, function(tcData, success) {
+  if (success && tcData.eventStatus === 'useractioncomplete') {
+    console.log('TC string:', tcData.tcString);
+  }
+});
+```
+
+You do not need to forward the TC string manually — Google reads it when `ad_storage` is granted.
+
+## Server-side consent forwarding
+
+Architectures that use server-side GTM benefit from forwarding consent server-side so that downstream tools (Facebook CAPI, Segment, data warehouses) don't rely on a second client-side consent read.
+
+Two approaches:
+
+1. **Pass the Didomi user token as a cookie.** Didomi sets `didomi_token` — forward it on the server request and call the Didomi Web Consent API (`https://api.privacy-center.org/v1/consents/token/<token>`) to resolve purposes server-side.
+2. **Mirror consent in the event payload.** Push the `purposes_enabled` array into your GA4 Measurement Protocol event or sGTM container via a user-defined variable. The server container then gates tag fires on that variable.
+
+See [Server-Side Consent](/consent/advanced/server-side-consent/) for the full pattern.
+
+## Testing
+
+### GTM Preview Mode
+
+<Steps>
+1. Clear cookies, open GTM Preview, visit the site.
+2. The Didomi notice appears. All Consent Mode signals show `denied` in the Consent tab.
+3. Click **Agree**. The `CMP - Didomi - Consent Update` tag fires; the Consent tab flips to `granted` for the purposes you agreed to.
+4. Reload the page. The `didomiOnReady` callback fires from storage within 50–200ms — well inside `wait_for_update: 500`.
+</Steps>
+
+### Console check
+
+```javascript
+Didomi.getUserConsentStatusForAll();
+// Returns { purposes: { enabled: [...], disabled: [...] }, vendors: {...} }
+
+Didomi.getUser();
+// Returns the Didomi user token, useful for server-side lookups
+```
+
+### GA4 DebugView
+
+Before consent: cookieless pings with `gcs=G100`. After consent: full events with `gcs=G111` and the TC string appended to ad-targeted hits.
+
+## Common gotchas
+
+**Purpose slug vs. purpose ID.** Didomi's API accepts both but the slug can be renamed in the console without a warning. Always hard-code against the API name (visible in console → Purposes). If you built your integration against `audience_measurement` and someone renames it to `measurement`, your mapping silently breaks.
+
+**SPA navigation without a new consent event.** Single-page apps trigger only one `didomiOnReady`. Subsequent route changes do not re-fire consent events — because consent has not changed. This is correct behaviour, but if you have custom logic that expects a consent event per route, wire it to `consent.changed` only and trust the resolved state between routes.
+
+**Regional purpose variation.** Didomi supports geo-targeted notices (one notice in the EU, another in the US). The same purpose ID may be enabled in one region and absent in another. Test every region where your notice is served, not just your home region.
+
+**Notice version drift.** Publishing a new notice version invalidates stored consent for visitors whose stored TCF version is older. Expect a temporary spike in banner impressions after every notice publish. Align notice releases with deploy windows.
+
+**Stub TC API before SDK loads.** Didomi's stub responds to `__tcfapi` calls before the full SDK is ready, but the `cmpStatus` is `"stub"`. Ad partners that gate behaviour on `cmpStatus === "loaded"` will wait. This is normal — wait for the `eventStatus: 'tcloaded'` callback before assuming full TCF readiness.
+
+<CardGrid>
+  <LinkCard title="Consent Mode v2 Explained" href="/consent/consent-mode/consent-mode-v2/" description="The seven consent types and why defaults must come before GTM." />
+  <LinkCard title="Server-Side Consent" href="/consent/advanced/server-side-consent/" description="Forwarding consent to server-side GTM and downstream tools." />
+  <LinkCard title="CMP Integration Overview" href="/consent/cmp-integration/cmp-integration/" description="Integration patterns across all major CMPs." />
+  <LinkCard title="Consent Mode v2 with Usercentrics" href="/consent/cmp-integration/usercentrics/" description="The same process for Usercentrics users." />
+</CardGrid>

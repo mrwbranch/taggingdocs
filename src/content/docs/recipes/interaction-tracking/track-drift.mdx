@@ -1,0 +1,164 @@
+---
+title: "Track Drift Chat"
+description: "Track Drift conversations, message sends, email and phone captures, and meeting bookings in GA4 via GTM using the Drift JavaScript SDK."
+sidebar:
+  order: 28
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Drift's JavaScript SDK surfaces every meaningful event in its conversation funnel — from the first message to the booked meeting. Forwarding those events to GA4 lets you measure which pages produce qualified chats, not just total chat volume.
+
+*Valid as of April 2026, Drift JavaScript SDK.*
+
+## Problem
+
+Drift's native reporting is conversation-centric. It rarely maps cleanly to page-level attribution in GA4, and the out-of-the-box GA4 integration only sends a subset of events. A dataLayer bridge gives you full parity and lets you reuse GA4 audiences (for example, "visitors who captured an email via Drift") across the rest of your marketing stack.
+
+## Solution
+
+Wait for Drift to be ready via the `drift.on('ready', ...)` hook, then subscribe to the events you care about. Each subscription pushes a distinct dataLayer event, and a single GTM Custom Event trigger with a regex picks them all up.
+
+## Detecting the Drift instance
+
+Drift exposes `window.drift` as an event emitter. Like Intercom, it queues calls before the full script arrives, so calling `drift.on(...)` early is safe — but the `'ready'` event is the clean integration point.
+
+<DataLayerExample event="drift_conversation_started" description="Attach all Drift listeners inside the ready handler. One Custom HTML tag covers every event.">
+```javascript
+(function() {
+  if (typeof window.drift === 'undefined') return;
+
+  function push(payload) {
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push(payload);
+  }
+
+  window.drift.on('ready', function(api) {
+    // User (or a playbook) started a conversation
+    window.drift.on('startConversation', function(data) {
+      push({
+        event: 'drift_conversation_started',
+        drift_action: 'conversation_started',
+        drift_conversation_id: data && data.conversationId,
+        drift_inbox_id: data && data.inboxId,
+        drift_is_user_initiated: !(data && data.playbookId)
+      });
+    });
+
+    // Any subsequent message in a conversation
+    window.drift.on('conversation:playbookFired', function(data) {
+      push({
+        event: 'drift_playbook_fired',
+        drift_action: 'playbook_fired',
+        drift_playbook_id: data && data.playbookId
+      });
+    });
+
+    // Outbound message from the visitor
+    window.drift.on('message:sent', function(data) {
+      push({
+        event: 'drift_message_sent',
+        drift_action: 'message_sent',
+        drift_conversation_id: data && data.conversationId
+      });
+    });
+
+    // Email capture
+    window.drift.on('emailCapture', function(data) {
+      push({
+        event: 'drift_email_captured',
+        drift_action: 'email_captured',
+        drift_has_email: !!(data && data.data && data.data.email)
+      });
+    });
+
+    // Phone capture
+    window.drift.on('phoneCapture', function(data) {
+      push({
+        event: 'drift_phone_captured',
+        drift_action: 'phone_captured'
+      });
+    });
+
+    // Meeting booked via Drift scheduling
+    window.drift.on('scheduling:meetingBooked', function(data) {
+      push({
+        event: 'drift_meeting_booked',
+        drift_action: 'meeting_booked',
+        drift_meeting_slot: data && data.meeting && data.meeting.slot
+      });
+    });
+  });
+})();
+```
+</DataLayerExample>
+
+<Aside type="caution">
+Do not push the captured email or phone value into the dataLayer. Send a boolean like `drift_has_email` instead. Raw contact data in GA4 is a policy violation.
+</Aside>
+
+## GTM setup
+
+<Steps>
+1. **Add the listener script as a Custom HTML tag**
+   - Trigger: **Window Loaded** (or your consent-granted trigger if Drift loads post-consent)
+
+2. **Create a regex Custom Event trigger**
+   - Trigger type: **Custom Event**
+   - Event name: `^drift_(conversation_started|message_sent|email_captured|phone_captured|meeting_booked|playbook_fired)$`
+   - Use regex matching: **true**
+
+3. **Create Data Layer Variables**
+   - `DLV - drift_action` → `drift_action`
+   - `DLV - drift_conversation_id` → `drift_conversation_id`
+   - `DLV - drift_is_user_initiated` → `drift_is_user_initiated`
+   - `DLV - drift_has_email` → `drift_has_email`
+
+4. **Create a GA4 Event Tag**
+   - Event name: `{{Event}}`
+   - Parameters:
+     - `drift_action` → `{{DLV - drift_action}}`
+     - `drift_conversation_id` → `{{DLV - drift_conversation_id}}`
+     - `page_path` → `{{Page Path}}`
+   - Trigger: the regex Custom Event trigger
+
+5. **Mark `drift_meeting_booked` as a conversion** in GA4 Admin → Events → Mark as key event.
+</Steps>
+
+<TagConfig
+  name="GA4 - drift_events"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - drift_* (regex)"
+  variables={["DLV - drift_action", "DLV - drift_conversation_id", "DLV - drift_has_email"]}
+/>
+
+## Test it
+
+1. Open GTM Preview on a page that has Drift installed
+2. Trigger a playbook manually from the Drift console — confirm `drift_playbook_fired`
+3. Send a message as the visitor — confirm `drift_conversation_started` and `drift_message_sent`
+4. Enter a test email in the capture prompt — confirm `drift_email_captured` with `drift_has_email: true`
+5. Book a test meeting — confirm `drift_meeting_booked`
+6. In GA4 DebugView, verify each event appears with its parameters
+
+## Common gotchas
+
+**Playbook-fired is not the same as conversation-started.** A playbook can appear without the visitor replying. Use `drift_is_user_initiated` (derived from `!data.playbookId`) to distinguish proactive vs reactive conversations in GA4 reports.
+
+**Email capture can fire twice.** Drift sometimes re-emits `emailCapture` if the visitor edits their email or if a follow-up playbook re-asks. Deduplicate in GA4 using `drift_conversation_id` as the session-scoped key, or suppress repeated events in the handler with a simple `fired` set.
+
+**Widget iframes and cross-origin postMessage.** Drift renders inside an iframe, but its SDK proxies events to the parent window via postMessage. If your CSP blocks `frame-src` or `connect-src` for Drift's domain, events never arrive. Check the browser console for CSP violations before blaming the tag.
+
+**Lazy widget load.** Some installations only load Drift after a scroll or CTA click. If your Custom HTML tag runs before Drift is present, `window.drift` is undefined and the listeners never attach. Either load Drift earlier, or re-run the listener attach on your Drift-load custom event.
+
+**Identified users.** If you call `drift.identify(...)` from your app, do not mirror the identifier into the dataLayer. Push a boolean `drift_user_identified: true` if you need that signal in GA4.
+
+<CardGrid>
+  <LinkCard title="Track Intercom Messenger" href="/recipes/interaction-tracking/track-intercom/" description="Same pattern for Intercom's JavaScript API." />
+  <LinkCard title="Track Zendesk Messaging" href="/recipes/interaction-tracking/track-zendesk-chat/" description="Zendesk Web Widget and Messaging events." />
+  <LinkCard title="Custom HTML Tags" href="/client-side/tags/custom-html-tags/" description="The tag type used to attach these listeners." />
+  <LinkCard title="JavaScript for Tag Managers" href="/resources/javascript-for-tag-managers/" description="Patterns for event emitters and dataLayer bridges." />
+</CardGrid>

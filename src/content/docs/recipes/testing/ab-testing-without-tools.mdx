@@ -2,7 +2,7 @@
 title: "A/B Testing Without Tools"
 description: "Implement simple A/B tests purely through GTM — cookie-based variant assignment, DOM manipulation, anti-flicker snippet, and GA4 custom dimensions."
 sidebar:
-  order: 2
+  order: 6
 ---
 
 import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
@@ -12,7 +12,11 @@ import DataLayerExample from '../../../../components/DataLayerExample.astro';
 You do not need Optimizely or VWO for every A/B test. For simple copy or layout tests — changing a headline, swapping a CTA colour, reordering sections — GTM can handle assignment, variant application, and result tracking entirely on its own. This recipe shows you how.
 
 <Aside type="note">
-GTM-based A/B tests have a flash of original content (FOOC) problem: the page loads first in its default state, then GTM applies the variant after loading. Use the anti-flicker snippet to prevent this. For tests involving significant layout changes, a purpose-built testing tool is more appropriate.
+GTM-based A/B tests have a flash of original content (FOOC) problem: the page loads first in its default state, then GTM applies the variant after loading. Use the anti-flicker snippet to prevent this. For tests involving significant layout changes, a purpose-built testing tool is more appropriate, or consider [server-side variant assignment](/recipes/testing/server-side-experiments/) which eliminates flicker entirely.
+</Aside>
+
+<Aside type="tip">
+Before running any test, work through [Experimentation Fundamentals](/recipes/testing/experimentation-fundamentals/) (hypothesis, primary metric, guardrails) and [Sample Size and MDE](/recipes/testing/sample-size-and-mde/) (how much traffic you actually need). The tactical mechanics below don't produce useful results without the methodology behind them. See also [Flicker and FOUC Prevention](/recipes/testing/flicker-and-fouc-prevention/) for the anti-flicker snippet in depth.
 </Aside>
 
 ## Anti-flicker snippet

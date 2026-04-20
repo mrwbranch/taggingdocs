@@ -1,0 +1,138 @@
+---
+title: "How Programmatic Advertising Works"
+description: "A primer on the ad-tech stack — advertisers, publishers, DSPs, SSPs, ad exchanges, DMPs, RTB, and walled gardens — so the platform-specific integration pages that follow actually make sense."
+sidebar:
+  order: 0.5
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+The rest of this section documents how to integrate with specific ad platforms — Google Ads, Meta, TikTok, LinkedIn, and so on. Each page assumes you know what role that platform plays in the broader ad-tech stack. This page is the grounding for that assumption: a single read that explains how programmatic advertising actually works end to end, what all the acronyms mean, and why there are so many of them.
+
+It's aimed at tagging practitioners who are comfortable with GTM but fuzzy on the ad-tech landscape. If you've ever set up a Meta CAPI integration without knowing whether Meta is a "walled garden" in the technical sense — this page is for you.
+
+## The two-sided market
+
+Digital advertising is a marketplace between two parties:
+
+- **Advertisers** want to buy impressions in front of specific audiences.
+- **Publishers** want to sell inventory (ad slots on their site, app, or channel) to whoever will pay the most.
+
+Every piece of infrastructure in programmatic advertising exists to solve one or both sides of that marketplace: help advertisers target more precisely, help publishers get higher prices, or let the two meet without either having to negotiate directly.
+
+## The core flow
+
+```
+User requests a page
+     │
+     ▼
+Publisher's site renders
+     │
+     ├── Ad slot appears in the DOM
+     │    │
+     │    ▼
+     │   Publisher's SSP is notified
+     │    │
+     │    ▼
+     │   SSP broadcasts bid request to ad exchanges
+     │    │
+     │    ▼
+     │   Multiple DSPs evaluate the request
+     │    │
+     │    ▼
+     │   Each DSP decides whether to bid, and how much
+     │    │
+     │    ▼
+     │   Highest bid wins the auction (100ms or less)
+     │    │
+     │    ▼
+     │   Winning DSP's creative renders in the slot
+     │    │
+     │    ▼
+     │   Creative's tracking pixels fire
+     │    │
+     │    ▼
+     │   Advertiser's tag manager captures the impression
+     │
+     ▼
+User sees the page with the ad
+```
+
+This happens in the time it takes the page to render — typically under 100ms. Every ad you see on a publisher site that isn't a direct-sold deal went through this auction or one very similar to it.
+
+## The glossary with context
+
+**Advertiser** — the party paying to place ads. Brands, e-commerce sites, app developers. In tagging work, the advertiser is almost always who owns the GTM container and the conversion tracking.
+
+**Publisher** — the party selling ad inventory. News sites, apps, blogs, streaming services. If you're running GA4 for your own analytics, you're a publisher from an ad-tech perspective.
+
+**DSP (Demand-Side Platform)** — software advertisers use to buy impressions programmatically across many publishers. Takes targeting rules ("women 25–45 in urban US interested in fitness") and a budget, then bids into exchanges on the advertiser's behalf. Google's DV360, The Trade Desk, and Amazon DSP are the biggest. DSPs are where advertisers aggregate their bidding strategy; they don't directly own inventory.
+
+**SSP (Supply-Side Platform)** — software publishers use to sell inventory. Takes an impression and runs an auction to get the highest price for it. Google Ad Manager, Magnite, PubMatic are the biggest. SSPs are the publisher-side counterpart to DSPs.
+
+**Ad exchange** — the marketplace where DSPs bid and SSPs sell. Think of it as a stock exchange for ad impressions. Google's Authorized Buyers and Xandr are examples. The distinction between SSP and ad exchange has blurred over time — Google Ad Manager functions as both.
+
+**RTB (Real-Time Bidding)** — the mechanism by which impressions are auctioned in real time as the page loads. Each impression triggers a bid request, DSPs respond with bids in the low tens of milliseconds, highest bid wins, winner's creative renders. This is the "programmatic" in programmatic advertising.
+
+**DMP (Data Management Platform)** — a system that aggregates audience data (first-party, third-party, CRM) and makes it available for targeting in DSPs. Cookie-based DMPs (the original model) lost most of their power with Safari ITP and Chrome's third-party cookie deprecation. First-party-focused successors are often called CDPs (Customer Data Platforms) now, though the technical distinction is fuzzy.
+
+**Walled garden** — an ad platform that keeps data inside its own ecosystem. Google, Meta, and Amazon are the canonical walled gardens: you get conversion reporting inside their interfaces but can't export user-level data to your own warehouse for cross-channel analysis. The "walls" are informational, not technical — you could in principle pipe GA4 data to anywhere, but the walled garden's internal data (who saw the ad, what their profile is) doesn't leave.
+
+**ROAS (Return on Ad Spend)** — revenue attributed to a campaign divided by the campaign's spend. 4× ROAS means every $1 spent returned $4 in revenue. Ad platforms' bidding algorithms optimize for ROAS when you feed them accurate conversion values, which is why reliable server-side conversion tracking matters so much commercially.
+
+**CTR (Click-Through Rate)** — clicks divided by impressions. The classic ad-platform engagement metric. Useful but increasingly deprioritized in favor of downstream conversion metrics.
+
+## Where the tagging work actually fits
+
+In the flow above, the tagging work happens at two points:
+
+1. **Creative impression/click tracking** — when the ad renders, the creative usually contains pixels that notify the ad platform and sometimes third-party verification services. This is not normally your concern as an advertiser — the ad platform owns the creative.
+
+2. **Landing-page and conversion tracking** — when the user clicks the ad and arrives on your site, your GTM container captures the landing and any downstream conversion. The URL carries click identifiers (`gclid` for Google Ads, `fbclid` for Meta, `msclkid` for Microsoft Ads, platform-specific equivalents for others) that your tags pick up and forward back to the ad platform via a conversion pixel or server-side CAPI call. This is *the* piece you own and the thing every platform page in this section documents.
+
+Understanding the flow explains why the integration pages are structured the way they are: each platform has its own click identifier, its own conversion endpoint, its own match-key requirements for server-side events. The shape is the same; the details differ.
+
+## Walled gardens vs. the open web
+
+Most of the tagging work you'll do is with the big walled gardens — Google Ads, Meta, TikTok, LinkedIn, Amazon, Microsoft. These platforms:
+
+- Own both the inventory and the demand side (no separate DSP needed — you buy directly).
+- Have their own conversion APIs (Google Enhanced Conversions, Meta CAPI, TikTok Events API, LinkedIn CAPI) that server-side events can post directly to.
+- Do not expose user-level data to external analysis.
+
+The "open web" — non-walled-garden inventory sold through programmatic exchanges — is a smaller and shrinking fraction of total digital ad spend. Most practitioners won't touch DV360 or The Trade Desk directly; they work with the walled gardens. That's why this section's per-platform pages are all walled-garden integrations. The open-web ad-tech stack is worth understanding conceptually (it's where much innovation happens) but rarely worth building a separate tagging integration for.
+
+## Common misunderstandings
+
+**"A DSP and an ad network are the same thing."** Ad networks (Google Display Network pre-DSP era) aggregated inventory and sold it flat-rate. DSPs bid on inventory programmatically. Networks mostly gave way to DSPs, though the term "ad network" lingers.
+
+**"RTB means every impression is bid on."** Publishers also do direct deals (programmatic guaranteed, preferred deals) where inventory is reserved for a specific advertiser at a pre-negotiated price. RTB is the fall-back when no direct deal applies.
+
+**"Third-party cookies are necessary for programmatic advertising."** They used to be — DMPs relied on third-party cookies to match audiences across sites. With Safari ITP and Chrome's 3PC deprecation, the stack has shifted toward first-party data, authenticated user IDs, cohort-based targeting (Google's Privacy Sandbox), and contextual targeting. Programmatic isn't dead — it's changing shape.
+
+**"Walled gardens are anti-competitive by design."** They're sticky because data doesn't leave, which makes it hard to compare performance across platforms. That's the commercial dynamic — not necessarily the product design. Most walled garden products offer superior targeting *because* they have more user data, and users gave them that data in exchange for free services.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Google Ads"
+    description="Conversion tracking and gclid handling for the largest walled garden."
+    href="/integrations/google-ads/"
+  />
+  <LinkCard
+    title="Meta CAPI Server-Side"
+    description="Server-to-server conversion events for Meta — the modern conversion path."
+    href="/integrations/meta-capi-server-side/"
+  />
+  <LinkCard
+    title="TikTok Pixel & API"
+    description="Client and server-side tracking for TikTok Ads."
+    href="/integrations/tiktok-pixel-and-api/"
+  />
+  <LinkCard
+    title="Enhanced Conversions"
+    description="The hashed-user-data pattern that underlies modern server-side conversion tracking."
+    href="/recipes/ecommerce-conversions/enhanced-conversions/"
+  />
+</CardGrid>

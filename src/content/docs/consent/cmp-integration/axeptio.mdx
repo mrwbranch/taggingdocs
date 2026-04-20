@@ -1,0 +1,211 @@
+---
+title: "Consent Mode v2 with Axeptio"
+description: "Step-by-step Google Consent Mode v2 integration with Axeptio CMP via GTM — default state, cookies callback, vendor category mapping, TCF support, and verification."
+sidebar:
+  order: 4
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Axeptio is a French-origin Consent Management Platform built around CNIL guidance and popular with French, Belgian, and francophone-African publishers. It ships an IAB TCF v2.2 stub, vendor-level consent controls, and a scripted `cookies:complete` callback that makes Google Consent Mode v2 wiring straightforward. This playbook covers the full GTM integration.
+
+Valid as of April 2026, Axeptio SDK v2.x / Consent Mode v2.
+
+<Aside type="caution">
+Axeptio loads asynchronously from `static.axept.io`. The default consent state must be set **before** GTM loads — do not rely on the Axeptio snippet to establish defaults. Set `denied` defaults inline in `<head>` and let the Axeptio callback emit the update.
+</Aside>
+
+## Overview
+
+Axeptio communicates consent through three channels:
+
+1. The `_axcb` callback queue — fires when the SDK is ready and again on every preference change.
+2. The `axeptio.on('cookies:complete', …)` event — fires once per page with the final consent state.
+3. An IAB TCF v2.2 API (`__tcfapi`) — consumed by downstream ad partners that need a TC string.
+
+For Consent Mode v2 you only need the first two. The TCF layer handles ad-vendor chaining independently.
+
+## Prerequisites
+
+- Axeptio account with a configured **project** and **client ID** (visible in the Axeptio dashboard under Project → Settings).
+- Cookies configuration published (vendor list, categories, default language).
+- GTM container installed on the site.
+- The Google Tag (GA4 or Ads) configured in GTM.
+
+## Step 1 — Set default consent state
+
+Add this to your `<head>` **before** the GTM snippet and before the Axeptio loader:
+
+```html
+<!-- Google Consent Mode v2 defaults — BEFORE GTM and Axeptio -->
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+
+  gtag('consent', 'default', {
+    ad_storage: 'denied',
+    analytics_storage: 'denied',
+    ad_user_data: 'denied',
+    ad_personalization: 'denied',
+    functionality_storage: 'denied',
+    personalization_storage: 'denied',
+    security_storage: 'granted',
+    wait_for_update: 500
+  });
+</script>
+```
+
+## Step 2 — Install the Axeptio loader
+
+Axeptio does not publish an official GTM template at time of writing, so the SDK loads via a standard script tag. Place it in `<head>` after the consent defaults but before GTM:
+
+```html
+<script type="text/javascript">
+  window.axeptioSettings = {
+    clientId: "YOUR_CLIENT_ID",
+    cookiesVersion: "your-project-base",
+    // Optional — scope the consent cookie across subdomains
+    userCookiesDomain: ".example.com"
+  };
+
+  (function(d, s) {
+    var t = d.getElementsByTagName(s)[0],
+        e = d.createElement(s);
+    e.async = true;
+    e.src = "//static.axept.io/sdk.js";
+    t.parentNode.insertBefore(e, t);
+  })(document, "script");
+</script>
+```
+
+Replace `YOUR_CLIENT_ID` and `cookiesVersion` with the values from your Axeptio dashboard.
+
+## Step 3 — Axeptio category mapping
+
+Axeptio projects define their own vendor categories. The defaults from the French template are listed below. Adjust the right-hand column to match your Consent Mode signals:
+
+| Axeptio vendor category | Google Consent Signal |
+|---|---|
+| `google_analytics` | `analytics_storage` |
+| `google_ads` | `ad_storage`, `ad_user_data`, `ad_personalization` |
+| `Facebook_Pixel` / social trackers | `ad_storage`, `ad_user_data` |
+| `functional` / preferences | `functionality_storage`, `personalization_storage` |
+| Strictly necessary | Always granted — no mapping |
+
+<Aside type="note">
+Vendor keys are the technical identifiers configured in your Axeptio project. They are case-sensitive. Copy them from the dashboard rather than guessing.
+</Aside>
+
+## Step 4 — Wire the consent update callback
+
+Add a Custom HTML tag in GTM on the **Consent Initialization — All Pages** trigger with priority 10:
+
+```html
+<script>
+  window._axcb = window._axcb || [];
+  window._axcb.push(function(axeptio) {
+
+    // Fires once when Axeptio has resolved the user's consent state
+    axeptio.on('cookies:complete', function(choices) {
+      var analytics = !!choices.google_analytics;
+      var ads = !!choices.google_ads;
+
+      gtag('consent', 'update', {
+        analytics_storage: analytics ? 'granted' : 'denied',
+        ad_storage: ads ? 'granted' : 'denied',
+        ad_user_data: ads ? 'granted' : 'denied',
+        ad_personalization: ads ? 'granted' : 'denied',
+        functionality_storage: choices.functional ? 'granted' : 'denied'
+      });
+
+      // Optional — push a dataLayer event for downstream triggers
+      window.dataLayer.push({
+        event: 'axeptio_consent_ready',
+        axeptio_choices: choices
+      });
+    });
+
+    // Fires when the user changes any single vendor preference
+    axeptio.on('consent:saved', function(choices) {
+      gtag('consent', 'update', {
+        analytics_storage: choices.google_analytics ? 'granted' : 'denied',
+        ad_storage: choices.google_ads ? 'granted' : 'denied',
+        ad_user_data: choices.google_ads ? 'granted' : 'denied',
+        ad_personalization: choices.google_ads ? 'granted' : 'denied'
+      });
+    });
+  });
+</script>
+```
+
+`cookies:complete` fires both for returning visitors (where consent is already stored) and for first-time visitors after they click through the banner. `consent:saved` handles preference-centre edits.
+
+## Step 5 — GTM configuration
+
+<Steps>
+1. Create the Custom HTML tag above. Name it `CMP - Axeptio - Consent Update`.
+2. Trigger: **Consent Initialization — All Pages**. Priority **10** so it runs ahead of GA4 and Ads tags.
+3. Open your **Google Tag** in GTM → Advanced Settings → Consent Settings and confirm `analytics_storage` is required.
+4. For each **Google Ads** conversion tag, require `ad_storage` and `ad_user_data`.
+5. Publish the container.
+</Steps>
+
+## TCF v2.2 support
+
+Axeptio exposes the standard `__tcfapi` interface for downstream ad vendors (Google Ad Manager, Prebid partners, header-bidding wrappers). You do not need to call it directly for Consent Mode — Google reads the TC string automatically when `ad_storage` is granted.
+
+Verify the TCF stub is active:
+
+```javascript
+// In browser console after the banner is interacted with
+window.__tcfapi('getTCData', 2, function(tcData, success) {
+  console.log('TC string:', tcData.tcString);
+  console.log('Purposes:', tcData.purpose.consents);
+});
+```
+
+## Testing
+
+### GTM Preview Mode
+
+<Steps>
+1. Clear cookies, open GTM Preview, visit the site.
+2. The Axeptio banner should appear. Before interacting, the Consent tab shows all signals `denied`.
+3. Click **Accept all** — the `CMP - Axeptio - Consent Update` tag fires and the Consent tab flips to `granted`.
+4. Reload the page. The tag should fire again from the stored cookie and the state should restore instantly.
+</Steps>
+
+### GA4 DebugView
+
+1. Visit the site with a `?_dbg=1` or GA Debugger extension active.
+2. Before consent: cookieless pings appear with `gcs=G100`.
+3. After accepting analytics: full events appear with `gcs=G111` and a `_ga` cookie is set.
+
+### Console check
+
+```javascript
+// After Axeptio has loaded
+window._axcb.push(function(axeptio) {
+  console.log('Choices:', axeptio.userPreferencesManager.choices);
+});
+```
+
+## Common gotchas
+
+**Banner appears only on the root domain.** Axeptio scopes its consent cookie to the domain that served the SDK. If you serve content from both `www.example.com` and `example.com` or multiple subdomains, set `axeptioSettings.userCookiesDomain = ".example.com"` so the consent cookie applies across the whole property.
+
+**`cookies:complete` never fires for returning visitors.** This happens when the `cookiesVersion` value has been bumped in the dashboard without your snippet being updated. Axeptio treats the stored consent as stale and waits for a fresh interaction. Keep the snippet version in sync with the dashboard.
+
+**EU-vs-non-EU traffic.** Axeptio can be configured to skip the banner for non-EU visitors. If you enable that, your default consent state still applies — meaning non-EU visitors stay in `denied` unless you set a region-specific `gtag('consent', 'default', …)` block. Use geo-IP at the edge (Cloudflare Workers, CDN) to branch defaults.
+
+**Race with first pageview.** Axeptio's SDK is async. If a user lands on a page with prior consent, the restore event may arrive 200–400ms after `gtm.js`. The `wait_for_update: 500` default covers this, but if you see occasional `gcs=G100` on conversions for consented users, raise `wait_for_update` to 1000.
+
+**Vendor-key typos.** `google_analytics` vs `googleAnalytics` vs `GoogleAnalytics` — Axeptio is case-sensitive. Copy the exact technical key from the project dashboard, not from documentation.
+
+<CardGrid>
+  <LinkCard title="Consent Mode v2 Explained" href="/consent/consent-mode/consent-mode-v2/" description="The seven consent types and why defaults must come before GTM." />
+  <LinkCard title="CMP Integration Overview" href="/consent/cmp-integration/cmp-integration/" description="Integration patterns across all major CMPs." />
+  <LinkCard title="Consent Initialization Timing" href="/consent/advanced/consent-initialization-timing/" description="Diagnosing and fixing timing races between CMP and GTM." />
+  <LinkCard title="Consent Mode v2 with iubenda" href="/consent/cmp-integration/iubenda/" description="The same process for iubenda users." />
+</CardGrid>

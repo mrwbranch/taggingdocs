@@ -1,0 +1,252 @@
+---
+title: "Server-Side Experiments"
+description: "Assigning A/B test variants in sGTM before the HTML is returned — zero flicker, SEO-safe, consistent across devices, and the modern replacement for Google Optimize."
+sidebar:
+  order: 7
+---
+
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Google Optimize was deprecated in September 2023, and the ecosystem has not replaced it with a single obvious successor. What it has replaced it with is better: a pattern where variant assignment happens server-side, the browser receives HTML that is already the variant, and the test has no flicker, no SEO issues, and no mobile performance penalty.
+
+Server-side experiments are how large tech companies have always run their tests. They require more infrastructure than client-side testing, but the infrastructure you already have if you're running sGTM gets you most of the way there. This page covers the pattern end to end — how variant assignment works server-side, how to wire it into sGTM, how to emit the `experiment_impression` event, and how it trades off against client-side and redirect tests.
+
+## The architecture
+
+```
+Browser request
+     │
+     ▼
+┌───────────────────┐
+│ Edge / Origin     │ ──► reads sticky variant cookie (or assigns new)
+│ Server            │     picks variant, modifies HTML response
+└───────────────────┘
+     │ HTML (already the variant)
+     ▼
+Browser renders variant
+
+     │ On page load:
+     ▼
+┌───────────────────┐
+│ sGTM              │ ──► receives experiment_impression event
+│                   │     logs exposure to GA4 + analytics destination
+└───────────────────┘
+```
+
+Variant assignment can happen at three layers:
+
+1. **Edge worker** (Cloudflare Worker, Vercel Edge Function, AWS Lambda@Edge). Lowest latency; runs before the origin sees the request.
+2. **Application server** (your Next.js server, Rails app, Django app). Common for teams that want variant logic co-located with application code.
+3. **Reverse proxy** (Nginx, Cloudflare rules). Simple for basic traffic splitting but limited in variant-logic complexity.
+
+sGTM is *not* the variant-assignment layer — that's a common misconception. sGTM receives the `experiment_impression` event from the browser after the variant has already been applied, and forwards it to GA4, Meta CAPI, etc. The assignment happens upstream.
+
+## Variant assignment patterns
+
+<Tabs>
+<TabItem label="Cookie-based (most common)">
+```javascript
+// Cloudflare Worker — cookie-based variant assignment
+export default {
+  async fetch(request) {
+    const experimentId = 'checkout-copy-v2';
+    const variants = ['control', 'variant_a'];
+    const cookieName = `exp_${experimentId}`;
+
+    // Read existing assignment from cookie
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    let variant = cookies[cookieName];
+
+    // New user — assign randomly
+    if (!variant || !variants.includes(variant)) {
+      variant = variants[Math.floor(Math.random() * variants.length)];
+    }
+
+    // Fetch origin response
+    const response = await fetch(request);
+    const html = await response.text();
+
+    // Mutate HTML for the variant
+    const modified = variant === 'variant_a'
+      ? html.replace('Complete purchase', 'Pay securely')
+      : html;
+
+    // Return with the cookie set (1-year expiry for sticky assignment)
+    return new Response(modified, {
+      headers: {
+        ...Object.fromEntries(response.headers),
+        'Content-Type': 'text/html',
+        'Set-Cookie': `${cookieName}=${variant}; Path=/; Max-Age=31536000; SameSite=Lax`,
+      },
+    });
+  },
+};
+```
+
+Cookie-based assignment is sticky across visits to the same browser on the same device. It's the default choice for most teams.
+</TabItem>
+<TabItem label="User-ID-based (cross-device)">
+For logged-in users, assign variants based on the user ID so the variant is consistent across devices:
+
+```javascript
+// Deterministic variant from user ID using a hash
+function assignVariant(userId, experimentId, variants) {
+  const seed = hash(userId + ':' + experimentId);
+  const bucket = seed % variants.length;
+  return variants[bucket];
+}
+
+// In your origin server (simplified Next.js example)
+export async function getServerSideProps(ctx) {
+  const userId = ctx.req.session?.userId;
+  const variant = userId
+    ? assignVariant(userId, 'checkout-copy-v2', ['control', 'variant_a'])
+    : 'control'; // or fall back to cookie-based
+
+  return { props: { variant } };
+}
+```
+
+User-ID-based assignment is the right answer if you're testing a logged-in experience and want consistent variants across devices. It's the wrong answer for top-of-funnel tests where most traffic is anonymous.
+</TabItem>
+<TabItem label="Hybrid (ID when available, cookie otherwise)">
+```javascript
+function assignVariant(request, experimentId, variants) {
+  // Priority 1: user ID (logged-in, cross-device sticky)
+  const userId = getUserIdFromSession(request);
+  if (userId) {
+    return hashAssign(userId + ':' + experimentId, variants);
+  }
+
+  // Priority 2: existing cookie
+  const existing = getCookie(request, `exp_${experimentId}`);
+  if (existing && variants.includes(existing)) {
+    return existing;
+  }
+
+  // Priority 3: random new assignment
+  return variants[Math.floor(Math.random() * variants.length)];
+}
+```
+
+This is what most mature experimentation platforms do. Anonymous users get cookie-sticky assignment; logged-in users get ID-sticky assignment that survives cross-device.
+</TabItem>
+</Tabs>
+
+## Emitting `experiment_impression` server-side
+
+The client browser needs to know which variant it's in so it can fire `experiment_impression` to sGTM. The simplest approach: inject the assignment into the page's initial dataLayer push.
+
+```html
+<!-- Injected by the edge worker or origin server into the HTML -->
+<script>
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'experiment_impression',
+    experiment_id: 'checkout-copy-v2',
+    variant_id: 'variant_a'
+  });
+</script>
+```
+
+Everything from here is the same as a client-side test — GTM picks up the custom event, fires a GA4 event tag, registers custom dimensions, sets the user property. See [A/B Test Tracking](/recipes/testing/ab-test-tracking/) for the full GA4 wiring.
+
+**Alternative: emit directly from sGTM.** If your edge worker forwards the variant assignment via a header to sGTM (`x-experiment-id`, `x-variant-id`), sGTM can emit the event directly via the Measurement Protocol without involving the browser:
+
+```javascript
+// Inside an sGTM Custom HTTP Request tag triggered on every request
+const mpPayload = {
+  client_id: getCookie('_ga').split('.').slice(-2).join('.'),
+  events: [{
+    name: 'experiment_impression',
+    params: {
+      experiment_id: getRequestHeader('x-experiment-id'),
+      variant_id: getRequestHeader('x-variant-id'),
+    },
+  }],
+};
+
+sendHttpRequest(
+  `https://www.google-analytics.com/mp/collect?measurement_id=G-XXXXXX&api_secret=...`,
+  { method: 'POST', body: JSON.stringify(mpPayload) }
+);
+```
+
+This is more robust (survives ad-blockers, doesn't depend on GTM loading) but also more complex. Start with the client-side emission; only graduate to this if ad-blocker loss is material.
+
+## Measurement Protocol event shape
+
+For sGTM-emitted experiment events, the standard GA4 MP shape is:
+
+```json
+{
+  "client_id": "1234567890.1234567890",
+  "user_id": "optional-user-id",
+  "events": [
+    {
+      "name": "experiment_impression",
+      "params": {
+        "experiment_id": "checkout-copy-v2",
+        "variant_id": "variant_a",
+        "engagement_time_msec": 1
+      }
+    }
+  ]
+}
+```
+
+`engagement_time_msec: 1` is required by GA4 for the event to count as engaged; without it, the session may not be counted. This is a common gotcha with Measurement Protocol — documented in [Measurement Protocol Debugging](/ga4/fundamentals/measurement-protocol-debugging/).
+
+## Trade-offs vs. client-side and redirect tests
+
+| Dimension | Client-side | Redirect | Server-side |
+|---|---|---|---|
+| Flicker | Mitigated, not gone | None | None |
+| SEO safety | Good (bots see control) | Risky (canonical required) | Good (bots see assigned variant) |
+| Cross-device consistency | No (cookie per browser) | No | Yes (with user-ID) |
+| Mobile performance | Penalty from anti-flicker | Penalty from redirect | No penalty |
+| Engineering cost | Lowest | Low | Highest |
+| Data quality | Good with anti-flicker | Good with attribution care | Best |
+| Bot handling | Bots see control | Bots see redirected URL | Bots see assigned variant |
+| Works with ad-blockers that strip GTM | Variant applies, impression lost | Variant applies, impression lost | Variant applies; impression survives if emitted sGTM-side |
+
+Server-side wins on almost every dimension except engineering cost. For tests where data quality matters — pricing, checkout flow, anything revenue-critical — the engineering cost is worth it.
+
+## Common mistakes
+
+**Assigning the variant on every request.** The variant should be assigned once (on the first request the user makes to a test-eligible page), then persisted. Reassigning on every request means the user's variant flickers between visits, which is worse than client-side flicker.
+
+**Not setting a long enough cookie expiry.** A 1-year cookie is typical. A 7-day cookie (the Safari ITP limit if set via JavaScript) is useless for a test that needs to run 2–4 weeks. Server-set cookies with `Set-Cookie` headers aren't subject to the ITP JavaScript cap, so you can set 1 year without issue — but verify in Safari that the cookie actually persists.
+
+**Assigning based on `Math.random()` without a seed tied to user identity.** Refresh the page and the variant can change if you're not using a cookie or user ID. Server-side means the browser can't enforce stickiness — the server has to.
+
+**Forgetting to exclude bots from assignment.** Search engine bots crawl the site and get variant-assigned, consuming variant slots that should go to real users. Exclude known bot user-agents from assignment and always serve them the control.
+
+**Not firing `experiment_impression`.** A variant that renders but doesn't record an impression produces useless data — you'll see the outcomes but not know who was in each group. The impression has to fire on every exposed user, once per session.
+
+**Testing the variant on traffic types it shouldn't apply to.** Admin users, logged-in customer support accounts, internal traffic — exclude them from assignment so test data only includes real customers. Typically done with a cookie or header check in the assignment logic.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="A/B Test Tracking"
+    description="The GA4 wiring that receives experiment_impression events — same whether assignment is client or server-side."
+    href="/recipes/testing/ab-test-tracking/"
+  />
+  <LinkCard
+    title="Forwarding Variant to Conversions"
+    description="Making the variant ride on every downstream event so revenue attribution works."
+    href="/recipes/testing/forwarding-variant-to-conversions/"
+  />
+  <LinkCard
+    title="Measurement Protocol"
+    description="The MP shape for server-emitted events."
+    href="/ga4/fundamentals/measurement-protocol/"
+  />
+  <LinkCard
+    title="Consent Mode and Experiments"
+    description="How consent state interacts with server-side variant assignment."
+    href="/recipes/testing/consent-mode-and-experiments/"
+  />
+</CardGrid>

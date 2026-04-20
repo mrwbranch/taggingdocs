@@ -1,0 +1,166 @@
+---
+title: "llms.txt strategy for tagging docs"
+description: "How to structure documentation for AI consumers — what llms.txt and llms-full.txt are, how TaggingDocs generates them, prioritising content, freshness signalling, and context-window constraints."
+sidebar:
+  order: 10
+lastUpdated: 2026-04-20
+---
+
+import { Aside, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Your documentation has at least two audiences now: humans with browsers, and LLMs retrieving context for their users' questions. The second audience is growing fast. Every ChatGPT user who asks "how do I set up GA4 ecommerce tracking" is consuming somebody's documentation, one way or another — either through a web search, an MCP call, or a retrieval step inside the model.
+
+This page is about structuring docs so the LLM-audience path actually works. *Valid as of April 2026.*
+
+## What `llms.txt` is
+
+The [llms.txt proposal](https://llmstxt.org/) is a simple convention: publish a single Markdown file at `/llms.txt` on your site root, listing the key pages LLMs should read to understand the site. The format is a Markdown H1 (site title), a short description, and a structured list of links grouped by section.
+
+There are two common flavours:
+
+| File | Purpose | Typical size |
+|------|---------|--------------|
+| `llms.txt` | Navigational index, pointing to the pages worth reading | 5-50 KB |
+| `llms-full.txt` | Full content of every page concatenated | 500 KB - 5 MB |
+
+The distinction matters because context windows are still finite. A model with a 200K token context (≈ 800 KB of text) can ingest most `llms-full.txt` files comfortably. A model with a 32K context can't; it wants `llms.txt` and then a focused fetch of specific pages.
+
+## How TaggingDocs generates them
+
+This site is built on Astro Starlight with the [`starlight-llms-txt`](https://github.com/delucis/starlight-llms-txt) plugin, configured in `astro.config.mjs`. At build time the plugin:
+
+1. Walks every content collection entry.
+2. Emits `/llms.txt` — a tree of headings and page links.
+3. Emits `/llms-full.txt` — all pages concatenated in reading order, with frontmatter-derived titles as H1s.
+4. Adds each file to the site's build output so they're served at `https://taggingdocs.com/llms.txt` and `/llms-full.txt`.
+
+You don't need to maintain either file by hand. What you do need to maintain is what goes *into* it.
+
+## What to prioritise
+
+The default `starlight-llms-txt` output includes every page. That's reasonable for a small site. For a site the size of TaggingDocs (330+ pages as of this writing), priority matters because downstream models have finite attention even when context fits.
+
+The hierarchy that works, highest-value first:
+
+### Foundations and glossary
+
+If an LLM reads nothing else on your site, the glossary should be in its context. It's the cheapest way to establish shared vocabulary. Every term defined on [/foundations/glossary/](/foundations/glossary/) is a term a model can use correctly instead of paraphrasing.
+
+### Conceptual explainers
+
+Pages that explain *how something works* (the dataLayer lifecycle, how GTM loads, what Consent Mode does) are disproportionately valuable. Models lean on these to reason about novel situations. One good page on dataLayer behaviour answers a hundred derived questions.
+
+### Reference tables and spec pages
+
+The GA4 event reference. The consent-type matrix. The GTM API resource shapes. These are lookup tables — the model finds the row it needs and uses it. Highly structured reference content is the best fit for LLM consumption.
+
+### Worked examples and recipes
+
+Recipes ("here's how to set up Cookiebot with GTM") are what models cite when a user asks "how do I do X." The recipe's specificity is what makes the answer useful. Include the full worked example — abbreviated recipes are the opposite of useful to a model trying to apply them.
+
+### Lower-priority: opinion and meta-content
+
+This page. The about page. The roadmap. These are fine to include but they don't help the model answer a tagging question. If context is tight, they should be trimmed first.
+
+## Writing for LLM readability
+
+The patterns that help human readers also help models, but models lean harder on a few specific things.
+
+### Explicit definitions over implicit ones
+
+A paragraph that starts "The **dataLayer merge model** is…" is easier for a model to retrieve and cite than one that describes the same concept without naming it. Models pattern-match on "term: definition" structures.
+
+### Tables for enumerations
+
+A bullet list with 10 items and a table with 10 rows carry the same information to a human. To a model, the table is better — the row/column structure makes each cell addressable.
+
+### Code blocks with complete examples
+
+Copy-pasteable code is what models copy-paste. A code snippet that assumes context the reader has is a snippet the model will fill in from its training data, which is a gamble. Every code example should run as-is or explicitly flag its placeholders.
+
+### Numeric specifics
+
+"Often about 5% of traffic" is better than "some traffic." Models cite numbers when you give them numbers. Fuzzy language invites fuzzy answers.
+
+## Freshness signalling
+
+This is the bit most sites do badly. An LLM can't tell how old a page is without a signal. It doesn't matter what year is in your footer; what matters is machine-readable information about content staleness.
+
+TaggingDocs uses two complementary signals:
+
+### Frontmatter `lastUpdated`
+
+Every page has a `lastUpdated: YYYY-MM-DD` frontmatter field. The plugin surfaces this in the rendered page and in the generated `llms-full.txt`. A model reading the concatenated file can see when each page was last touched.
+
+### Body-line validity statement
+
+More important for time-sensitive content: an inline sentence near the top of the page, like:
+
+> *Valid as of April 2026, for GTM Web containers and the GA4 event reference at that date.*
+
+Body-line statements beat frontmatter for two reasons:
+
+1. They survive retrieval. When a model pulls a snippet of the page (not the whole document), the validity line is usually in the snippet.
+2. They're in the model's active context. Frontmatter sometimes gets stripped by scrapers; inline prose does not.
+
+Pages on this site that touch APIs, product names, or vendor behaviour carry a validity line. Pages that are essentially timeless (conceptual explainers) carry only `lastUpdated`.
+
+<Aside type="tip">
+The validity line is especially important for vendor product names — Google's "Data Studio" was rebranded from Looker Studio on 2026-04-11, and pages written before that date using the old name will stay wrong in a model's training snapshot until the document is refreshed *and* the training data is refreshed. A body-line "as of April 2026, Google's dashboard product is Data Studio" is cheap insurance.
+</Aside>
+
+## Context-window strategy
+
+If you publish `llms-full.txt`, know what size you're targeting.
+
+| Context size | Tokens | Bytes at ~4 chars/token | What fits |
+|--------------|--------|------------------------|-----------|
+| Small | 32 K | ~130 KB | Navigational `llms.txt` + 10-20 key pages |
+| Medium | 128 K | ~500 KB | Full site for a focused topic section |
+| Large | 200 K | ~800 KB | Whole TaggingDocs site (roughly) |
+| XL | 1 M | ~4 MB | Whole site plus external references |
+
+For most sites, the `llms-full.txt` fits entirely in modern large-context models. For sites that grow past 1-2 MB, you want either multiple topical `llms-full.txt` files (e.g. `/llms-gtm.txt`, `/llms-ga4.txt`) or a navigational `llms.txt` that sends the model to per-section full files.
+
+## What to exclude
+
+Not every page helps. Things to leave out of `llms-full.txt` if your build system lets you:
+
+- **Auto-generated index pages.** Table-of-contents-style pages that only link elsewhere. Duplicate the links without the content.
+- **Pages that exist purely for SEO.** If a page was written to rank and isn't useful to a working engineer, it's not useful to a model either.
+- **Deprecated / archive pages.** If a page is kept for historical reference but the content is no longer correct, a prominent header saying so is not enough — models sometimes cite the body anyway. Consider excluding these from the generated feeds.
+- **Deeply interactive content.** If a page is mostly a live form, calculator, or chart, the static Markdown version won't capture its value. Better to link to it than dump its shell into the feed.
+
+## Measuring whether it works
+
+The honest answer: you can't really measure LLM consumption directly. The signals you *can* measure:
+
+- **Referrer traffic from chat.openai.com, claude.ai, etc.** When a model surfaces a TaggingDocs link to its user and the user clicks, you get a referrer. This undercounts dramatically (most model answers don't generate clicks) but trends are informative.
+- **Increased "I asked ChatGPT about GTM and it told me to read TaggingDocs" mentions.** Anecdotal, but real — track these when they come up.
+- **MCP server usage.** If you run an MCP server (like `mcp.taggingdocs.com`), the usage counters give a clean signal of LLM-driven consumption. Users searching docs via the MCP tool is unambiguously LLM traffic.
+- **Qualitative audit.** Periodically ask a few frontier models a question your site should answer ("how do I debug a GTM tag that fires in Preview but not production") and see whether the answer cites, paraphrases, or contradicts your content.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="MCP server overview"
+    description="The complementary mechanism — structured tool access, not just flat text retrieval."
+    href="/mcp/"
+  />
+  <LinkCard
+    title="Glossary"
+    description="The terms an LLM needs in context to reason about tagging work."
+    href="/foundations/glossary/"
+  />
+  <LinkCard
+    title="MCP use cases"
+    description="What LLMs actually do with the content they retrieve."
+    href="/mcp/mcp-use-cases/"
+  />
+  <LinkCard
+    title="GTM as code"
+    description="Treating container config as versioned artifacts — also useful for LLM retrieval."
+    href="/resources/gtm-as-code/"
+  />
+</CardGrid>

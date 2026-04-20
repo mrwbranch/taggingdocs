@@ -1,0 +1,137 @@
+---
+title: "Cloudflare Proxy Setup"
+description: "Fronting both your website and sGTM with Cloudflare to extend first-party cookie lifetime past Safari ITP's 7-day cap, add DDoS protection, and get geo headers for free."
+sidebar:
+  order: 8
+---
+
+import { Aside, Steps, Tabs, TabItem, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Safari's Intelligent Tracking Prevention caps the lifetime of cookies set via JavaScript to 7 days, and cookies from domains classified as "cross-site trackers" get even shorter lifetimes — sometimes 24 hours. For sGTM that means your first-party identifier cookie (typically `_ga` or an sGTM-set client ID) rotates every 7 days, inflating new-user counts and breaking cross-visit attribution.
+
+The workaround is to set the cookie via an HTTP `Set-Cookie` header from a server on the same registrable domain as the page. Browsers treat server-set cookies as genuinely first-party and give them the full declared lifetime (typically 2 years). The simplest way to get a same-registrable-domain server in front of sGTM is Cloudflare: both the main website and the sGTM subdomain (or subfolder — see [Same-Origin Subfolder Deployment](/server-side/operations/same-origin-subfolder-deployment/)) go through Cloudflare, which proxies requests to their respective origins while presenting a single cookie-scoping boundary to the browser.
+
+Cloudflare also throws in DDoS protection, TLS termination, geo headers (used in [IP Anonymization Preserving Geo](/server-side/operations/ip-anonymization-preserving-geo/)), and edge caching — all for free on the lowest tier.
+
+## The target architecture
+
+```
+Browser
+  │
+  ├── example.com/* ──→ Cloudflare proxy ──→ your web origin (Vercel, Netlify, VPS)
+  │
+  └── metrics.example.com/* ──→ Cloudflare proxy ──→ sGTM origin (Cloud Run / AWS / Stape)
+```
+
+Both hostnames are served by Cloudflare from the same origin-level identity. Cookies set by `metrics.example.com` are same-site with cookies set by `example.com` as long as the registrable domain (`example.com`) is the same and `Domain=example.com` is specified on the cookie.
+
+## Step-by-step
+
+<Steps>
+1. **Move DNS to Cloudflare**
+
+   Sign up at cloudflare.com, add `example.com` as a site, and update the nameservers at your registrar to Cloudflare's. Wait for propagation (usually 5–30 minutes).
+
+2. **Add a DNS record for sGTM with the proxy enabled**
+
+   In Cloudflare Dashboard → DNS:
+   - Type: `CNAME`
+   - Name: `metrics` (or whatever subdomain you're using)
+   - Target: the origin hostname of your sGTM deployment. For Cloud Run this is `gtm-xxxxxx-xx.a.run.app`; for Stape it's the provided Stape-side hostname.
+   - Proxy status: **Proxied** (orange cloud) — this is what makes Cloudflare sit in front.
+
+3. **Configure SSL mode: Full (strict)**
+
+   Cloudflare Dashboard → SSL/TLS → Overview → **Full (strict)**. This encrypts the hop from Cloudflare to your sGTM origin and verifies the origin's certificate. Cloud Run and Stape both present valid certificates — this works out of the box.
+
+   Do **not** use "Flexible" mode — it serves HTTPS to the browser but HTTP to the origin, which creates a protocol mismatch that breaks sGTM authentication flows.
+
+4. **Set the custom domain on sGTM**
+
+   The sGTM container needs to know it should accept `metrics.example.com` as its hostname. For Cloud Run: GCP Console → Cloud Run → your service → **Domain Mappings** → add `metrics.example.com`. For Stape: container settings → Custom Domain → add. Follow the provider's domain-verification steps.
+
+5. **Bypass Cloudflare cache for tagging paths**
+
+   Cloudflare Dashboard → Rules → Page Rules (or the newer Cache Rules):
+   - URL pattern: `metrics.example.com/*`
+   - Cache Level: **Bypass**
+
+   Without this rule, Cloudflare can cache sGTM response bodies and serve stale events to the browser. Every sGTM path is request-unique — cache must be off.
+
+6. **Verify first-party cookies now have the full lifetime**
+
+   Open the site in Safari. Fire a test event. Inspect cookies in DevTools: the sGTM-set cookie should have an `Expires` value ~2 years in the future and should be present on both `example.com` and `metrics.example.com` requests. In Safari's Storage tab, it should be listed under `example.com` — not quarantined as a tracker.
+</Steps>
+
+## Subfolder variant with Cloudflare Workers
+
+If you want to go further and serve sGTM under `example.com/metrics/*` instead of `metrics.example.com`, a Cloudflare Worker handles the routing:
+
+```javascript
+// Simplified Worker — path-based routing to sGTM origin
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (url.pathname.startsWith('/metrics/')) {
+      // Rewrite to sGTM origin
+      const sgtmUrl = new URL(request.url);
+      sgtmUrl.hostname = 'gtm-xxxxxx-xx.a.run.app';
+      sgtmUrl.pathname = url.pathname.replace(/^\/metrics/, '');
+      return fetch(sgtmUrl.toString(), request);
+    }
+
+    // Everything else — pass through to main origin
+    return fetch(request);
+  }
+};
+```
+
+Subfolder deployment gives you the strongest cookie scoping available (same registrable domain, same path scope) but adds infrastructure complexity. See [Same-Origin Subfolder Deployment](/server-side/operations/same-origin-subfolder-deployment/) for the full pattern and trade-offs.
+
+## What you get for free
+
+**IP geolocation headers.** Enable Network → IP Geolocation. Every request to your origin carries `CF-IPCountry`, `CF-IPCity`, `CF-Region`. Use them to enrich events with geo before stripping the raw IP — see [IP Anonymization Preserving Geo](/server-side/operations/ip-anonymization-preserving-geo/).
+
+**DDoS protection.** Cloudflare's edge absorbs L3/L4 attacks. L7 protection (for floods of valid-looking requests) is available on paid tiers.
+
+**TLS certificate management.** Cloudflare issues and renews the certificate for `metrics.example.com` automatically. One less thing to track.
+
+**Edge caching for `/gtm.js`.** The client-side GTM script is served by Google's CDN, so this is rarely a win — but if you proxy `/gtm.js` through your own origin for first-party loading, Cloudflare's edge gives you a performance boost on top.
+
+## Common mistakes
+
+**Proxying but leaving SSL in Flexible mode.** Browsers see HTTPS; origin sees HTTP. Cloud Run rejects HTTP, sGTM serves 400s, and debugging is miserable because the browser-facing certificate looks correct. Always use Full (strict).
+
+**Forgetting the cache bypass rule.** Cloudflare's default is to cache based on URL. sGTM hits are dynamic but the URL paths repeat (`/g/collect`, `/j/collect`). Without an explicit bypass, some percentage of events get served from cache instead of forwarded to the origin, and those events never reach GA4. The symptom is weirdly low event counts that don't match traffic volume.
+
+**Using Cloudflare's WAF rules without tuning.** Default WAF rules flag some legitimate sGTM traffic as suspicious — Measurement Protocol requests with large payloads, rapid bursts during ecommerce events, bot-like request patterns. Add explicit allow rules for `metrics.example.com/*` or run in "Log" mode for the first week to observe what gets flagged before blocking anything.
+
+**Not setting `Domain=example.com` on cookies.** A cookie set by `metrics.example.com` without an explicit `Domain` attribute is scoped to `metrics.example.com` only and is invisible to the main site. For client-stitching to work, cookies need `Domain=example.com` (or `Domain=.example.com`). This is handled by sGTM's cookie-writing tags automatically, but verify in DevTools after setup.
+
+**Forgetting that Cloudflare adds latency.** Cloudflare's edge sits between the user and your origin. For users geographically close to the origin, this adds a few ms. For users far from both the edge and origin, it can subtract latency. Measure before and after — don't assume.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Same-Origin Subfolder Deployment"
+    description="The deeper ITP workaround — serving sGTM under /metrics/ instead of a subdomain."
+    href="/server-side/operations/same-origin-subfolder-deployment/"
+  />
+  <LinkCard
+    title="IP Anonymization Preserving Geo"
+    description="Using Cloudflare's CF-IPCountry headers to enrich events with geo, then stripping the raw IP."
+    href="/server-side/operations/ip-anonymization-preserving-geo/"
+  />
+  <LinkCard
+    title="FPID Cookie Management"
+    description="First-party identifier cookie patterns — what breaks under ITP and how to defend."
+    href="/privacy/fpid-cookie-management/"
+  />
+  <LinkCard
+    title="Extending Cookie Lifetimes"
+    description="The full set of techniques for keeping first-party cookies alive past ITP's cap."
+    href="/privacy/extending-cookie-lifetimes/"
+  />
+</CardGrid>

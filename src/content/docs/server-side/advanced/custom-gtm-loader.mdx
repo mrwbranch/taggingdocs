@@ -1,0 +1,274 @@
+---
+title: "Custom gtm.js Loader (Serving GTM From Your Own sGTM)"
+description: "Proxy gtm.js and gtag/js through your sGTM endpoint instead of googletagmanager.com — rationale, reverse-proxy client, cache headers, Google's updates, and trade-offs."
+sidebar:
+  order: 25
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+The standard GTM installation loads `gtm.js` from `www.googletagmanager.com`. Every browser that visits your site fetches a third-party script from a domain owned by Google. Ad-blockers target that domain specifically. Safari's Intelligent Tracking Prevention treats it as third-party. Some compliance frameworks count it as an uncontrolled dependency.
+
+Serving `gtm.js` from your own sGTM — so the browser loads it from `collect.yoursite.com/gtm.js` instead — mitigates all three. sGTM already hosts `/g/collect`; adding `/gtm.js` and `/gtag/js` as proxied routes keeps the same-origin story coherent. The pattern is not exotic; it is the logical conclusion of the same-origin-proxy architecture.
+
+*Valid as of April 2026, Server-side GTM container version 2.0+.*
+
+## Why do this at all?
+
+Three concrete reasons, each worth the complexity or not depending on your context:
+
+**Ad-blocker evasion.** EasyList and most ad-blocker rulesets target `www.googletagmanager.com` by domain. Self-hosting `gtm.js` routes around those rules. It does not route around content-based rules (a blocker that matches the script's body or known function signatures), and the most aggressive privacy blockers increasingly use both — but domain-based blocking is by far the common case, and domain-based evasion measurably increases GTM load rates.
+
+**ITP and tracking prevention.** Safari's ITP treats first-party storage more generously than third-party. A `gtm.js` loaded from your origin establishes a first-party loading context. Cookies set by the tags it loads, and storage written by those tags, get first-party lifetimes. For anything that depends on persistent client identity (experimentation cohorts, cross-session GA4 continuity), this is material.
+
+**Third-party domain reduction.** Performance budgets and compliance frameworks sometimes count distinct third-party domains as risk units. Self-hosting removes one.
+
+The honest counter-argument: Google ships `gtm.js` updates — both runtime updates and container-specific rebuilds on every publish. Your proxy must pass-through cleanly. Static-copy approaches (download once, host forever) break almost immediately, because the container JS changes every time a marketer publishes.
+
+<Aside type="caution">
+Self-hosting `gtm.js` does not hide tracking from a user's browser. Users who inspect network activity still see requests to `/gtm.js`, `/g/collect`, and so on — they are first-party rather than third-party, but they are not invisible. This is a deployment pattern, not a cloaking mechanism.
+</Aside>
+
+## Architecture: a reverse proxy
+
+The pattern is a reverse proxy, implemented as an sGTM custom client:
+
+```
+Browser                           sGTM                          Google
+ ─────                             ────                          ──────
+  │                                 │                              │
+  │  GET /gtm.js?id=GTM-XXXXX       │                              │
+  ├────────────────────────────────>│                              │
+  │                                 │  claim request               │
+  │                                 │                              │
+  │                                 │  sendHttpGet(                │
+  │                                 │   googletagmanager.com/      │
+  │                                 │   gtm.js?id=GTM-XXXXX)       │
+  │                                 ├─────────────────────────────>│
+  │                                 │                              │
+  │                                 │<─────────────────────────────│
+  │                                 │  response: JS body, headers  │
+  │                                 │                              │
+  │                                 │  setResponseHeader (filtered)│
+  │                                 │  setResponseBody (unchanged) │
+  │                                 │  returnResponse              │
+  │  200 OK (gtm.js body)           │                              │
+  │<────────────────────────────────│                              │
+```
+
+Body is pass-through — whatever Google returned goes back to the browser verbatim. Headers are mostly pass-through, with `Cache-Control` and `Content-Type` tightened, and Google-specific internal headers stripped.
+
+## The loader client
+
+A custom client that claims `/gtm.js` and `/gtag/js`, proxies the upstream, and returns the response.
+
+**Required permissions:**
+- `read_request` (path, method, query string)
+- `send_http` (URL pattern: `https://www.googletagmanager.com/*`)
+- `access_response` (status, headers, body)
+- `return_response`
+- `logging`
+
+```javascript
+const claimRequest = require('claimRequest');
+const getRequestPath = require('getRequestPath');
+const getRequestQueryString = require('getRequestQueryString');
+const sendHttpGet = require('sendHttpGet');
+const setResponseBody = require('setResponseBody');
+const setResponseHeader = require('setResponseHeader');
+const setResponseStatus = require('setResponseStatus');
+const returnResponse = require('returnResponse');
+const logToConsole = require('logToConsole');
+const JSON = require('JSON');
+
+const path = getRequestPath();
+
+// Paths this loader handles, mapped to upstream URLs.
+const LOADER_PATHS = {
+  '/gtm.js':  'https://www.googletagmanager.com/gtm.js',
+  '/gtag/js': 'https://www.googletagmanager.com/gtag/js'
+};
+
+if (!LOADER_PATHS[path]) return;
+
+claimRequest();
+
+const query = getRequestQueryString();
+const upstreamUrl = LOADER_PATHS[path] + (query ? '?' + query : '');
+
+sendHttpGet(upstreamUrl, (statusCode, headers, body) => {
+  if (statusCode !== 200 || !body) {
+    logToConsole(JSON.stringify({
+      level: 'error', client: 'gtm_loader',
+      upstream: upstreamUrl, upstream_status: statusCode
+    }));
+    setResponseStatus(statusCode || 502);
+    returnResponse();
+    return;
+  }
+
+  // Pass through Content-Type; override if missing.
+  setResponseHeader('Content-Type',
+    (headers && headers['content-type']) ||
+    'application/javascript; charset=utf-8');
+
+  // Short public cache, with stale-while-revalidate for smooth refresh.
+  setResponseHeader('Cache-Control',
+    'public, max-age=900, stale-while-revalidate=60');
+
+  // Required if any intermediate proxy transforms encoding.
+  setResponseHeader('Vary', 'Accept-Encoding');
+
+  // Identifier so you can tell proxied responses from direct in logs.
+  setResponseHeader('X-Sgtm-Loader', 'v1');
+
+  setResponseStatus(200);
+  setResponseBody(body);
+  returnResponse();
+}, {timeout: 5000});
+```
+
+**Priority.** This client needs a low priority number (evaluated early) — otherwise the GA4 client at priority 10 won't see `/gtm.js` but won't claim it either, and the request falls through. Priority 6 or 7 works. It only claims `/gtm.js` and `/gtag/js`, so it doesn't interfere with anything else.
+
+## Why not copy gtm.js statically?
+
+The obvious alternative — download `gtm.js` once, commit it to your CDN, serve forever — breaks for two reasons:
+
+**Container publishes change the file.** Every time someone publishes a change in GTM, `gtm.js?id=GTM-XXXXX` is regenerated by Google's CDN with the new configuration. A static copy becomes stale the moment anyone clicks Publish. Worse: it becomes *silently* stale, because the file still loads, the tags still fire, they just fire with the previous container's config.
+
+**Google ships runtime updates.** Independent of container publishes, Google updates the GTM runtime — bug fixes, new API surface, security patches. A static copy misses these. Breakages from a six-month-old runtime against modern browsers are a class of problem you don't want to be debugging.
+
+A proxy with a short cache (~15 minutes) splits the difference: browsers see a cacheable asset and don't re-fetch on every page load, but container publishes propagate within minutes.
+
+## Cache headers: getting it right
+
+| Asset | `Cache-Control` | Reasoning |
+|---|---|---|
+| `/gtm.js` | `public, max-age=900, stale-while-revalidate=60` | Container publishes must propagate fast; 15 minutes is an acceptable staleness window |
+| `/gtag/js` | `public, max-age=3600` | Runtime loader; changes less often than container payloads |
+| `/g/collect` and tracking endpoints | `no-store` | Every event is unique; caching is incoherent |
+
+Three things to avoid:
+
+- **Do not set `Expires`.** It's superseded by `Cache-Control` in every modern browser and creates needless inconsistency. Use `Cache-Control` exclusively.
+- **Do not invent your own `ETag` or `Last-Modified`.** If you want 304-aware caching, pass Google's values through verbatim; do not synthesise them from the proxy's timestamp. Synthesising them breaks conditional revalidation.
+- **Do not use `Cache-Control: immutable`.** The file is not immutable — it changes when the container is republished. `immutable` tells the browser it can skip revalidation for the entire `max-age` regardless of reload, which is the opposite of what you want for a dynamically-rebuilt asset.
+
+## Handling Google's updates
+
+Failure modes, in order of likelihood, and what to do about each:
+
+**Google changes a response header.** Your filter passes through specific headers and overrides others. If Google adds a header you aren't aware of (a new cache directive, a new security header), it silently drops. Mitigation: default to pass-through for headers outside a known-problematic list. Periodically diff `curl` responses from Google directly vs. your proxy and reconcile.
+
+**Google moves to a different upstream path or domain.** `sendHttpGet` returns a non-200 and your proxy returns 502. Mitigation: a client-side fallback. In the snippet that embeds the self-hosted `gtm.js`, wrap the load in a timeout:
+
+```javascript
+(function(w,d,s,l,i){
+  w[l] = w[l] || [];
+  w[l].push({'gtm.start': new Date().getTime(), event: 'gtm.js'});
+  var j = d.createElement(s);
+  j.async = true;
+  j.src = 'https://collect.yoursite.com/gtm.js?id=' + i;
+  j.onerror = function() {
+    // Fallback to direct load if the proxy fails.
+    var k = d.createElement(s);
+    k.async = true;
+    k.src = 'https://www.googletagmanager.com/gtm.js?id=' + i;
+    d.getElementsByTagName(s)[0].parentNode.insertBefore(k, d.getElementsByTagName(s)[0]);
+  };
+  d.getElementsByTagName(s)[0].parentNode.insertBefore(j, d.getElementsByTagName(s)[0]);
+})(window,document,'script','dataLayer','GTM-XXXXXX');
+```
+
+**Google ships a breaking runtime change affecting your container config.** Unrelated to proxying — same impact whether you proxy or not. Keep container changes narrow, test in Preview before publish, monitor tag success rate ([Proactive Monitoring](/server-side/operations/proactive-monitoring/)).
+
+## When not to do this
+
+<Comparison leftTitle="Self-hosted wins" rightTitle="Direct wins" leftType="good" rightType="good">
+  <Fragment slot="left">
+    ```
+    • Safari-heavy audience, need first-party
+      storage lifetimes
+    • Ad-blocker evasion is a material goal
+    • Already running sGTM; marginal cost of
+      adding /gtm.js proxy is low
+    • Compliance requires minimizing third-
+      party domains
+    • Large sites where a proxy bug is
+      manageable and monitored
+    ```
+  </Fragment>
+  <Fragment slot="right">
+    ```
+    • Small sites; complexity isn't worth
+      the upside
+    • No sGTM deployed; adding one just for
+      /gtm.js is overkill
+    • Google's CDN is materially faster than
+      your origin (measure via RUM)
+    • Compliance requires externally-
+      verifiable third-party tracking
+      disclosure
+    • Team lacks bandwidth to diagnose proxy
+      failures when they occur
+    ```
+  </Fragment>
+</Comparison>
+
+Run a real measurement before committing. Serve both variants to a sample of users (a simple A/B via a cookie), record P95 `gtm.js` load time in your RUM, compare. If the self-hosted variant is materially slower than Google's CDN for your audience geography, the privacy and evasion gains may not be worth the performance cost.
+
+## Consent Mode compatibility
+
+Consent Mode works identically whether `gtm.js` is self-hosted or loaded from Google. The runtime reads `gtag('consent', ...)` calls from `window.dataLayer` regardless of script origin. No container changes are required.
+
+The subtle gotcha: if your proxy fails and `gtm.js` never loads, Consent Mode never initialises. The `gtag('consent', ...)` calls queue in `window.dataLayer` forever, and tags that require consent never fire. A failing proxy is a silent, total tracking outage.
+
+Mitigations:
+
+- The client-side fallback snippet above.
+- Monitoring the proxy endpoint's success rate as a first-class SLO. A `gtm.js` request rate that drops 50% in a minute is an outage, regardless of what the `/healthz` endpoint says.
+- A synthetic uptime check hitting `/gtm.js?id=GTM-XXXXX` every minute from an external monitor, measuring both response time and body size (an empty body is a failure even if the status is 200).
+
+## Trade-offs summary
+
+- **Self-hosted gives you:** ad-blocker evasion for domain-based blockers, first-party storage under ITP, one fewer third-party domain, full request visibility in your own logs, correlation between `gtm.js` loads and downstream `/g/collect` hits in a single logging pipeline.
+- **Self-hosted costs you:** a proxy maintenance surface, a new class of failure (proxy bugs), coupling to Google's response format, compute time on your Cloud Run for every `gtm.js` load, and potentially slower delivery if your origin is farther from your users than Google's CDN.
+
+## Common mistakes
+
+**Caching `gtm.js` for hours or days.** Container publishes stop propagating. Marketers publish a change, production serves the old JS, and debugging the discrepancy takes a long time because Preview mode is unaffected. Keep `max-age` at 15 minutes or under.
+
+**Stripping gzip/brotli handling.** `gtm.js` is ~300 KB uncompressed, ~90 KB gzipped. If your proxy's response doesn't preserve encoding negotiation, you ship uncompressed JS to every visitor. `Vary: Accept-Encoding` plus not touching the `Content-Encoding` header is usually sufficient.
+
+**Conflating `/gtm.js` and `/gtag/js`.** They serve different things. `/gtm.js?id=GTM-XXXXX` is the container runtime. `/gtag/js?id=G-YYYYYYY` is the GA4 page-tag library. If you proxy only one, the other falls through to `googletagmanager.com` and you haven't fully self-hosted.
+
+**Forgetting the `?id=GTM-XXXXX` query parameter.** The upstream `sendHttpGet` must pass it through. Without it, Google returns a loader skeleton with no container config. Your proxy has to forward the full query string.
+
+**Using POST instead of GET.** `sendHttpGet` is the right call. `sendHttpRequest` with `method: 'POST'` to `googletagmanager.com/gtm.js` returns a 405.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Same-Origin Proxy"
+    description="The broader pattern of first-party tracking proxying."
+    href="/server-side/advanced/same-origin-proxy/"
+  />
+  <LinkCard
+    title="Preflight and CORS"
+    description="CORS implications of proxied script loading."
+    href="/server-side/advanced/preflight-and-cors/"
+  />
+  <LinkCard
+    title="Response Header Manipulation"
+    description="Detailed treatment of Cache-Control, Content-Type, and Vary."
+    href="/server-side/advanced/response-header-manipulation/"
+  />
+  <LinkCard
+    title="Proactive Monitoring"
+    description="SLOs and alerts appropriate for a proxied gtm.js endpoint."
+    href="/server-side/operations/proactive-monitoring/"
+  />
+</CardGrid>

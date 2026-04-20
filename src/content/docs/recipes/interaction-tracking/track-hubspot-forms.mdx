@@ -1,0 +1,190 @@
+---
+title: "Track HubSpot Forms Submissions"
+description: "Track HubSpot embedded forms in GTM using onFormSubmitted — with the portalId/formId metadata and guidance on avoiding HubSpot analytics double-counts."
+sidebar:
+  order: 23
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+HubSpot embedded forms fire three lifecycle callbacks — only one signals a confirmed submission. This recipe wires it via the native `hbspt.forms.create` callback and via postMessage (for embeds you do not control), extracts portal/form/guid metadata, and flags the double-count pitfall.
+
+*Valid as of April 2026, HubSpot Forms v2 embed.*
+
+## The success signal
+
+HubSpot's form embed exposes three callbacks:
+
+| Callback | When it fires | Use for conversions? |
+|---|---|---|
+| `onFormReady` | Form DOM rendered | No |
+| `onFormSubmit` | User clicked submit — before server validation | No |
+| `onFormSubmitted` | HubSpot confirmed the submission | **Yes** |
+
+If you cannot control the embed (for example, the form is inside an iframe from another subdomain), HubSpot also posts a `window.postMessage` with `eventName: 'onFormSubmitted'` that you can listen for from the parent page.
+
+<Aside type="caution">
+Do not listen to `onFormSubmit`. It fires on submit click, before validation. If the server rejects the submission, `onFormSubmit` has already counted it as a conversion.
+</Aside>
+
+## dataLayer push pattern
+
+<Tabs>
+<TabItem label="Direct embed">
+
+When you control the embed script:
+
+<DataLayerExample event="form_submission" description="Fires inside HubSpot's confirmed-submission callback.">
+```html
+<script src="https://js.hsforms.net/forms/embed/v2.js"></script>
+<script>
+  hbspt.forms.create({
+    portalId: '12345678',
+    formId: '87654321-dead-beef-cafe-abcdef012345',
+    region: 'eu1',
+    onFormSubmitted: function ($form, data) {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        event: 'form_submission',
+        form_vendor: 'hubspot',
+        hs_portal_id: '12345678',
+        hs_form_id: '87654321-dead-beef-cafe-abcdef012345',
+        hs_form_guid: (data && data.submissionValues && data.submissionValues.hs_context) || undefined
+      });
+    }
+  });
+</script>
+```
+</DataLayerExample>
+
+</TabItem>
+<TabItem label="postMessage (iframe embeds)">
+
+When the HubSpot form is inside an iframe you do not control, listen for postMessage on the parent window:
+
+```javascript
+window.addEventListener('message', function (event) {
+  if (!event.data || event.data.type !== 'hsFormCallback') return;
+  if (event.data.eventName !== 'onFormSubmitted') return;
+
+  window.dataLayer = window.dataLayer || [];
+  window.dataLayer.push({
+    event: 'form_submission',
+    form_vendor: 'hubspot',
+    hs_form_id: event.data.id,
+    hs_form_guid: event.data.data && event.data.data.submissionValues
+      && event.data.data.submissionValues.hs_context
+  });
+});
+```
+
+Note: the postMessage does not include `portalId`. If you need it, hardcode it in GTM as a constant variable per property.
+
+</TabItem>
+</Tabs>
+
+## GTM setup
+
+<Steps>
+1. **Create a Custom Event trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `form_submission`
+   - This fires: **Some Custom Events** → `DLV - form_vendor` **equals** `hubspot`
+
+2. **Create Data Layer Variables**
+
+   - `DLV - form_vendor` → `form_vendor`
+   - `DLV - hs_portal_id` → `hs_portal_id`
+   - `DLV - hs_form_id` → `hs_form_id`
+   - `DLV - hs_form_guid` → `hs_form_guid`
+
+3. **Create a GA4 Event Tag**
+
+   - Event name: `generate_lead`
+   - Parameters:
+     - `form_vendor` → `{{DLV - form_vendor}}`
+     - `hs_portal_id` → `{{DLV - hs_portal_id}}`
+     - `hs_form_id` → `{{DLV - hs_form_id}}`
+     - `hs_form_guid` → `{{DLV - hs_form_guid}}`
+   - Trigger: the Custom Event trigger above
+
+4. **Test in Preview mode**
+
+   Submit a HubSpot form. Confirm `form_submission` appears with correct portal and form IDs.
+</Steps>
+
+<TagConfig
+  name="GA4 - generate_lead (HubSpot)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - form_submission (hubspot)"
+  variables={["DLV - form_vendor", "DLV - hs_portal_id", "DLV - hs_form_id", "DLV - hs_form_guid"]}
+/>
+
+## The double-count caution
+
+HubSpot's own Tracking Code (`_hsq`) already records form submissions in HubSpot Analytics. If you also fire a HubSpot Custom Behavioural Event from GTM pointing at the same portal for the same submission, you will double-count inside HubSpot.
+
+<Aside type="caution">
+Pushing to the dataLayer and sending to GA4 is fine — that is a different analytics destination. But do **not** configure a GTM tag that calls `_hsq.push(['trackCustomBehavioralEvent', ...])` or the HubSpot Events Reporting API with the same submission — HubSpot will count both the native form submission and your custom event.
+</Aside>
+
+If you need a HubSpot custom event (for example, to surface the submission in a HubSpot workflow), use a different event name that represents a downstream action (`lead_qualified`, `meeting_booked`) rather than echoing `form_submission`.
+
+## Capturing submitted field values
+
+`onFormSubmitted` receives a `data` object containing `submissionValues`:
+
+```javascript
+onFormSubmitted: function ($form, data) {
+  var values = data.submissionValues || {};
+  // values.email, values.firstname, values.lastname, values.company
+}
+```
+
+<Aside type="caution">
+Do not send raw email addresses to GA4. Either hash client-side (SHA-256) or use HubSpot's own contact record for identity resolution and send only a hashed user ID to GA4.
+</Aside>
+
+## Test it
+
+<Steps>
+1. Open GTM **Preview mode** on a page with a HubSpot form.
+2. Submit the form with valid data. Confirm `form_submission` appears with `form_vendor: hubspot` and the correct `hs_form_id`.
+3. Verify **Tags Fired** shows the GA4 tag.
+4. In GA4 **DebugView**, confirm `generate_lead` arrives within 15 seconds.
+5. **Test failure path**: submit with an invalid email. HubSpot's inline validation blocks submit — confirm `onFormSubmit` does not leak into the dataLayer (if you mistakenly wired it, you will see an event here).
+6. **Cross-check in HubSpot**: confirm the submission appears in the HubSpot form's Submissions tab, and that your contact was created or updated.
+</Steps>
+
+## Common gotchas
+
+**Using `onFormSubmit` instead of `onFormSubmitted`.** The past-tense version is the one you want. `onFormSubmit` fires on click before server confirmation.
+
+**HubSpot script races with GTM.** `hbspt` may not be defined when GTM's Custom HTML tag runs. Wrap `hbspt.forms.create(...)` in a poller, or load the embed script from the same tag:
+
+```javascript
+(function waitForHbspt() {
+  if (!window.hbspt) return setTimeout(waitForHbspt, 100);
+  hbspt.forms.create({ /* ... */ });
+})();
+```
+
+**Region mismatch.** HubSpot has regional hosts (`na1`, `eu1`). If `region` is wrong, the embed silently fails. Check your portal's region in HubSpot settings.
+
+**Multiple forms with same formId.** If the same HubSpot form is embedded twice on a page, both fire `onFormSubmitted` independently. Your dataLayer push fires per submission — no dedupe needed.
+
+**Form in HubSpot CMS page.** If the parent page is itself a HubSpot CMS page, the form may not use the embed script at all — it renders inline. Use a different trigger: watch for the form's success DOM (`.hs-form-confirmation` becoming visible) via MutationObserver.
+
+**GDPR fields reset the form on load.** If your form has GDPR fields, HubSpot re-renders the form when consent is provided, which fires `onFormReady` twice. This does not affect `onFormSubmitted`.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard title="Track Form Submissions" href="/recipes/interaction-tracking/track-form-submissions/" description="Generic form-submission patterns across native, AJAX, and third-party forms." />
+  <LinkCard title="form_submission custom event" href="/datalayer/custom-events/form-submission/" description="The canonical dataLayer schema for form submission events." />
+  <LinkCard title="Form triggers reference" href="/client-side/triggers/form-triggers/" description="When GTM's built-in form triggers work — and when they don't." />
+</CardGrid>

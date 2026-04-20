@@ -1,0 +1,185 @@
+---
+title: "Forwarding Variant to Conversions"
+description: "The step most teams skip — making the variant ride on every downstream event (purchase, signup, Google Ads conversion, Meta CAPI) so revenue attribution actually works."
+sidebar:
+  order: 9
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Most teams set up A/B test tracking, fire `experiment_impression` when the user is assigned, and think they're done. They're not. The moment anyone tries to answer "did variant B produce more revenue than variant A?", the test falls apart — because the `purchase` event fires on a completely different page from the impression, often in a different session, and nothing on the purchase event says which variant the user was in.
+
+The fix is to carry the variant assignment on every subsequent event that matters for the test outcome: `add_to_cart`, `begin_checkout`, `purchase`, Google Ads conversion fires, Meta CAPI events, BigQuery-logged events. All of them. Otherwise you can count impressions and you can count conversions, but you can't compute *conversion-per-impression by variant*, which is the thing your test is supposed to measure.
+
+This is also the page that separates tagging teams that run tests from tagging teams whose test programme produces decisions the business actually acts on.
+
+## The attribution-misuse pattern
+
+The broken pattern, which a surprising number of implementations follow:
+
+1. User lands, gets assigned variant A. `experiment_impression` fires with `experiment_id=checkout-v2`, `variant_id=A`.
+2. User browses, adds to cart, checks out, pays.
+3. `purchase` event fires with `transaction_id`, `value`, `items`, etc. — but no `experiment_id` or `variant_id`.
+4. In GA4 Explorations, you filter to users who saw `experiment_impression` with variant A, cross-reference their purchases… and realise you can only do this in BigQuery, not in the GA4 UI, and the join is on client_id which doesn't work across consent states or user-id stitching.
+
+The data is recoverable with enough BigQuery SQL. But the correct pattern — propagating the variant onto every event — makes the analysis a 10-line GA4 Exploration instead of a 150-line BigQuery query.
+
+## The user property pattern
+
+The cleanest mechanism: set the variant as a **GA4 user property** at the moment of the impression. User properties are automatically attached to every subsequent event from that user, so the variant rides on `purchase`, `sign_up`, `add_to_cart`, every custom event — without any tag-level change.
+
+```javascript
+// On experiment_impression, set a user property that joins experiment and variant
+window.dataLayer.push({
+  event: 'experiment_impression',
+  experiment_id: 'checkout-v2',
+  variant_id: 'A'
+});
+
+// Set active_experiment as a user property on the GA4 Configuration tag
+// so it persists across events in the session
+```
+
+In GTM:
+
+1. Open the GA4 Configuration tag (the one that fires on all pages).
+2. Under **User Properties**, add: `active_experiment` → `{{DLV - experiment_id}}_{{DLV - variant_id}}`.
+3. In GA4 Admin → Custom Definitions → User Properties, register `active_experiment`.
+
+From this point on, every GA4 event from this user — including `purchase` — is tagged with `active_experiment=checkout-v2_A` in reports and BigQuery export. Variant-by-variant conversion analysis becomes a trivial filter.
+
+For users exposed to multiple experiments concurrently, use a delimited user property (`active_experiments=checkout-v2_A|header-v3_B`). Parsing the combined value in analysis is minor overhead in exchange for carrying unlimited experiments on a single user property slot.
+
+## Propagating to ad-platform conversions
+
+The user property pattern handles GA4. Ad platforms need the variant on the conversion event they receive, which means the `purchase` event going to Google Ads and Meta CAPI needs to carry the variant as a custom parameter.
+
+**Google Ads Conversion Tag**:
+
+Add the variant as a custom parameter on the conversion tag:
+
+```
+customParameters: {
+  experiment_id: '{{DLV - experiment_id}}',
+  variant_id: '{{DLV - variant_id}}'
+}
+```
+
+Google Ads surfaces these as custom columns in campaign reports, so you can compare cost-per-conversion by variant directly in the ads platform.
+
+**Meta CAPI**:
+
+The Meta Events API doesn't have a first-class experiment parameter, but it accepts arbitrary `custom_data` fields. Include the variant there:
+
+```json
+{
+  "event_name": "Purchase",
+  "event_time": 1234567890,
+  "custom_data": {
+    "value": 49.99,
+    "currency": "USD",
+    "experiment_id": "checkout-v2",
+    "variant_id": "A"
+  }
+}
+```
+
+Meta's attribution algorithms don't use these fields directly, but they're visible in the Events Manager and exportable for analysis.
+
+## sGTM as the forwarding layer
+
+If you're using server-side GTM, the cleanest implementation is a single transform that reads the variant from the event and copies it onto every downstream tag:
+
+```javascript
+// Transform: copy experiment parameters to every outbound tag
+const getEventData = require('getEventData');
+const setEventData = require('setEventData');
+
+const experimentId = getEventData('experiment_id');
+const variantId = getEventData('variant_id');
+
+if (experimentId && variantId) {
+  setEventData('experiment_id', experimentId);
+  setEventData('variant_id', variantId);
+}
+```
+
+With this transform running before every tag fires, downstream destinations (GA4, Meta CAPI, Google Ads, Custom HTTP) all receive the variant automatically. You don't have to remember to add it to each tag individually.
+
+## The BigQuery analysis pattern
+
+Once the user property is set and events carry the variant, the SQL analysis becomes straightforward. Example: compute conversion rate by variant for the `checkout-v2` experiment:
+
+```sql
+WITH experiment_users AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.string_value FROM UNNEST(user_properties) WHERE key = 'active_experiment') AS variant_raw,
+    MIN(event_timestamp) AS assigned_at
+  FROM `project.analytics_XXXXX.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20260401' AND '20260430'
+    AND (SELECT value.string_value FROM UNNEST(user_properties) WHERE key = 'active_experiment') LIKE 'checkout-v2_%'
+  GROUP BY user_pseudo_id, variant_raw
+),
+conversions AS (
+  SELECT
+    user_pseudo_id,
+    COUNTIF(event_name = 'purchase') AS purchase_count,
+    SUM(CASE WHEN event_name = 'purchase' THEN ecommerce.purchase_revenue ELSE 0 END) AS revenue
+  FROM `project.analytics_XXXXX.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20260401' AND '20260430'
+  GROUP BY user_pseudo_id
+)
+SELECT
+  e.variant_raw,
+  COUNT(DISTINCT e.user_pseudo_id) AS users,
+  SUM(c.purchase_count) AS purchases,
+  SUM(c.revenue) AS total_revenue,
+  SAFE_DIVIDE(SUM(c.purchase_count), COUNT(DISTINCT e.user_pseudo_id)) AS conversion_rate,
+  SAFE_DIVIDE(SUM(c.revenue), COUNT(DISTINCT e.user_pseudo_id)) AS revenue_per_user
+FROM experiment_users e
+LEFT JOIN conversions c USING (user_pseudo_id)
+GROUP BY e.variant_raw
+ORDER BY e.variant_raw;
+```
+
+Because the user property is set at assignment time, this join works even for users who converted days after their impression. Without the user property — relying on event-level joins — you'd need to reconstruct the session, chase `client_id`, and deal with consent-state complications.
+
+## Common mistakes
+
+**Setting the variant as an event parameter only, not a user property.** Event parameters are attached to individual events. The `purchase` event fires hours after `experiment_impression` — if the variant is only an event param, it's only on the impression event. Use a user property so it rides on everything.
+
+**Setting the user property once, then forgetting on subsequent page views.** If your assignment logic only pushes `experiment_impression` once per session and the GA4 Configuration tag's user property reads from the dataLayer, the property gets set on page 1 but not on page 2. Persist the assignment (cookie or localStorage) and re-push on every page view's GA4 Config fire.
+
+**Carrying the variant in client-side tags but not sGTM tags.** If your Google Ads and Meta tags fire from sGTM (which you should — server-side conversion tracking is strictly better), the variant has to ride on the server-side events too. Add it in the sGTM transform, not just in client-side tag configuration.
+
+**Using one user property per experiment.** GA4 caps at 25 user properties per property. A team running 10 concurrent experiments burns through nearly half the budget. Combine variants into a single `active_experiments` property with delimited values.
+
+**Not handling the case where the variant changes.** If a user's variant assignment changes (e.g., you fix a bug and rerun), the user property updates — but events they generated before the change are tagged with the *old* variant. When analysing, filter to the variant at the *time of impression*, not the current value. In BigQuery this is `active_experiment` from the events table at the time of `experiment_impression`, not the latest value.
+
+**Forgetting the Meta CAPI `custom_data` field.** Most teams add the variant to client-side tags and forget that server-side CAPI events bypass the client-side path entirely. Audit every tag that fires on conversion events and confirm the variant is being carried through.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="A/B Test Tracking"
+    description="The baseline — setting up experiment_impression and the user property."
+    href="/recipes/testing/ab-test-tracking/"
+  />
+  <LinkCard
+    title="Server-Side Experiments"
+    description="Pairs naturally — server-side assignment + server-side forwarding = clean attribution end to end."
+    href="/recipes/testing/server-side-experiments/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="More BigQuery patterns for analysing GA4 data."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Meta CAPI Server-Side"
+    description="Where to set the experiment_id on server-side Meta events."
+    href="/integrations/meta-capi-server-side/"
+  />
+</CardGrid>

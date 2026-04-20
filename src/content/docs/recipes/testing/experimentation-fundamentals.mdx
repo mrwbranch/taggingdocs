@@ -1,0 +1,110 @@
+---
+title: "Experimentation Fundamentals"
+description: "The hypothesis-before-test discipline — structuring A/B tests around a business goal, a named metric, an expected effect size, and explicit guardrails."
+sidebar:
+  order: 1
+---
+
+import { Aside, Steps, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Most teams that run A/B tests get the tag firing right and the statistics wrong. They ship a variant, watch the dashboard, declare a winner when the line looks higher, and move on. Sometimes that works. More often it produces results that don't replicate, decisions that don't pay off, and a test programme that slowly loses the team's trust.
+
+The fix is upstream of any tag: a written hypothesis that names the change, the metric, the expected direction and size of the effect, and the guardrails that would cause you to roll back. Testing without a hypothesis produces numbers. Testing with one produces learning.
+
+## The hypothesis template
+
+A well-formed hypothesis has four parts:
+
+> **We believe** [this change] **will cause** [this metric] **to move by** [this direction and size] **because** [this mechanism].
+>
+> **We will roll back if** [this guardrail metric] **moves by more than** [this threshold].
+
+A concrete example:
+
+> We believe **changing the checkout button copy from "Complete purchase" to "Pay securely"** will cause **the `begin_checkout → purchase` conversion rate** to move by **+3 to +7 percentage points** because **surveyed users reported hesitation around payment security**.
+>
+> We will roll back if **refund rate** moves by more than **+0.5 percentage points**.
+
+Everything in the template is load-bearing.
+
+- **Named change**: "we'll A/B test the button" isn't enough — which button, which page, what specifically changes.
+- **Named metric**: not "conversions go up", but the specific metric in GA4 you will measure from. If it's an event, say which event. If it's a ratio, define the numerator and denominator.
+- **Direction and size**: a range, not a point estimate. "+3 to +7 points" constrains you to a reasonable MDE. "Some improvement" doesn't.
+- **Mechanism**: the causal story. Why do you believe this change will move this metric? If you can't articulate the mechanism, you're not testing a hypothesis — you're poking at the UI and hoping.
+- **Guardrail and threshold**: the metric that can't regress, and how much movement you'll accept. Without this, you can "win" the primary metric while breaking something important and not notice.
+
+## Primary metrics vs. guardrail metrics
+
+The **primary metric** is what you're trying to move. You pick one. Not three. Not "conversion rate and revenue and engagement." One. Multiple primary metrics mean multiple-comparison problems that most teams don't correct for correctly, which inflates the false-positive rate.
+
+**Guardrail metrics** are what you watch to make sure the change didn't break something else. Common guardrails:
+
+- **Ecommerce**: refund rate, average order value, customer service contact rate.
+- **SaaS**: 30-day retention, support-ticket rate, time-to-value.
+- **Content**: bounce rate, time on page, subsequent-page views.
+- **Universal**: page load time, error rate, accessibility complaints.
+
+Guardrails are *not* primary metrics. Moving them is not a "win" — holding them flat while the primary moves is the win. If a guardrail blows past its threshold, you roll back even if the primary is up, because the long-term cost of the regression exceeds the short-term lift.
+
+## Test design checklist
+
+Before shipping a test, you should be able to answer all of these without ambiguity:
+
+<Steps>
+1. **What's the hypothesis?** Write it using the template above.
+
+2. **What's the primary metric?** Name the exact GA4 event or metric, including the computation if it's a ratio.
+
+3. **What's the MDE you can detect?** Compute the minimum detectable effect given your traffic and baseline. If your MDE is larger than your expected effect size, you're not going to detect the effect you're hoping for — rethink the test. See [Sample Size and MDE](/recipes/testing/sample-size-and-mde/).
+
+4. **How long will the test run?** Duration = sample size / daily traffic in the test segment. Run for at least one full business cycle (a week for most sites, longer for weekly-cycling traffic patterns).
+
+5. **What are the guardrails?** Name at least two, with numerical thresholds.
+
+6. **How will you analyse the results?** Specify before you launch. "We'll see what looks interesting" means you'll find something interesting regardless of whether the change did anything.
+
+7. **What's the rollback trigger?** If the primary goes negative or a guardrail crosses its threshold, at what point do you pull the plug? Define this in advance — mid-test you will be too committed to judge neutrally.
+</Steps>
+
+## Common hypothesis failures
+
+**"We'll test whatever the design team proposes."** That's a test backlog, not a programme. Every test needs a hypothesis about what will happen and why — even tests of design changes. If the designer can't articulate the mechanism, have the conversation before building the variant.
+
+**No mechanism.** "We'll test making the CTA bigger because bigger buttons convert better." That's a folk belief, not a hypothesis. The mechanism has to be specific enough to be wrong — "bigger buttons draw more attention in the viewport when scrolling past fast" is a falsifiable claim.
+
+**Metric fishing.** Running the test, then picking the metric that moved to declare a winner. This is how tests "succeed" at a 40% rate when the real success rate in a mature programme is closer to 10–20%. Commit to the primary metric in writing before the test launches.
+
+**No guardrails.** The test "wins" on conversion rate but silently tanks customer service load because the payment flow is more confusing. Nobody measured — so nobody noticed until the CS team complained three months later.
+
+**Hypothesis written after the test was designed.** The hypothesis exists to constrain the test, not to justify a test someone already decided to run. If the test comes first and the hypothesis is back-filled to match, you've skipped the step that makes hypothesis-driven testing work.
+
+**Running "directional" tests with tiny samples.** "We don't have the traffic for a statistically significant test, so we'll run it anyway and use directional signal." This almost always produces noise-driven decisions. Either wait until you have the volume, or test something with a larger expected effect size.
+
+## A note on intuition
+
+None of the above means ignoring intuition. Strong intuitions from people who have watched the site's users for years are often right, and they're often right about mechanisms that formal user research hasn't surfaced yet. But intuition-driven changes should still get written up as hypotheses, and they should still run as experiments when the stakes or uncertainty warrant it. "I'm sure this will work" is a hypothesis — it should be tested the same way.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Sample Size and MDE"
+    description="Computing the sample size your test needs before launching — and what happens when you launch without."
+    href="/recipes/testing/sample-size-and-mde/"
+  />
+  <LinkCard
+    title="Flicker and FOUC Prevention"
+    description="Once the hypothesis is solid, keep the implementation from undermining it — the anti-flicker pattern."
+    href="/recipes/testing/flicker-and-fouc-prevention/"
+  />
+  <LinkCard
+    title="A/B Test Tracking"
+    description="The tagging mechanics — getting the variant assignment into GA4 cleanly."
+    href="/recipes/testing/ab-test-tracking/"
+  />
+  <LinkCard
+    title="Forwarding Variant to Conversions"
+    description="Making the variant ride on every downstream event so revenue attribution actually works."
+    href="/recipes/testing/forwarding-variant-to-conversions/"
+  />
+</CardGrid>

@@ -1,0 +1,94 @@
+---
+title: "GTM Preview Mode Not Working"
+description: "Eight reasons GTM Preview mode won't connect or load — third-party cookies, wrong profile, container mismatch, CSP, extensions, and network blocks."
+sidebar:
+  order: 7
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+If you're seeing GTM Preview mode stuck on "Waiting for Tag Assistant to connect" or showing a blank page, here are the most common causes and how to fix them. Preview mode depends on a cross-origin connection between `tagassistant.google.com` and your site, so almost every failure mode is a third-party cookie, CSP, or network issue.
+
+<Aside type="tip">
+Try the fastest triage first: open a fresh Incognito / Private window, disable all extensions, and go through the Preview flow again. If it works there, one of the items below is the cause on your normal profile.
+</Aside>
+
+## 1. Third-party cookies blocked
+
+**Verify.** Tag Assistant uses a cross-domain cookie to pair the debugger with your site. Chrome's "Block third-party cookies" (on by default in Incognito, gradually rolling out in normal mode) breaks this pairing. Safari's ITP blocks it entirely. Firefox's Total Cookie Protection isolates cookies per site.
+
+**Fix.** In Chrome: Settings → Privacy and security → Cookies → switch to "Allow all cookies" temporarily, or add `[*.]google.com` and your site as exceptions. In Safari: Preferences → Privacy → uncheck "Prevent cross-site tracking" for this session. In Firefox: click the shield icon → disable Enhanced Tracking Protection for this site.
+
+## 2. Wrong browser profile / multiple Google accounts
+
+**Verify.** If you're signed into multiple Google accounts (personal and work), Tag Assistant may launch under the wrong identity and try to connect to a GTM container your current browser session doesn't have access to. You'll see "You don't have permission" or a blank workspace selector.
+
+**Fix.** Sign out of all Google accounts, sign back in with the correct one, then restart Preview. Or use a dedicated browser profile for GTM work with only the correct account logged in.
+
+## 3. Container ID mismatch between Preview and the page
+
+**Verify.** You launched Preview from GTM container `GTM-AAAAAAA` but the page loads `GTM-BBBBBBB`. Preview tries to hook into A but A isn't on the page. You see the Tag Assistant UI but no events appear in the timeline — it's waiting for a container that never loads.
+
+**Fix.** Confirm the container ID on the page: DevTools Console → `Object.keys(window.google_tag_manager).filter(k => k.startsWith('GTM-'))`. If the ID doesn't match, either update the snippet on the page, or switch to previewing the correct container.
+
+## 4. CSP blocking the preview iframe
+
+**Verify.** DevTools Console with Preview open. Look for `Refused to frame 'https://tagassistant.google.com/' because it violates the following Content Security Policy directive: "frame-src ..."` or similar `frame-ancestors` violations.
+
+**Fix.** Temporarily relax CSP `frame-src` to include `https://tagassistant.google.com` and `https://googletagmanager.com` during debugging. Better: have a staging environment with a looser CSP reserved for GTM debugging. Production CSP should stay strict.
+
+## 5. Ad blocker / privacy extension blocking Tag Assistant
+
+**Verify.** Extensions like uBlock Origin, Ghostery, Privacy Badger, 1Blocker have rules that specifically target `googletagmanager.com/debug` and `tagassistant.google.com`. Check the extension's activity log for blocks on those URLs.
+
+**Fix.** Whitelist your site in each extension, or use a separate browser profile with no extensions for GTM debugging. Don't disable ad blocking globally — just for this profile.
+
+## 6. Preview session expired
+
+**Verify.** Preview sessions time out after approximately 60 minutes of inactivity. A timeline that worked earlier and now shows "Disconnected" is a session timeout, not a bug.
+
+**Fix.** Go back to GTM → **Preview** → it'll generate a fresh URL / re-open Tag Assistant. Clicking the old URL doesn't re-pair; you need a new preview session.
+
+## 7. Using new Tag Assistant vs. legacy preview pane
+
+**Verify.** GTM migrated preview from an in-page debugger to the standalone Tag Assistant site. Some older documentation references the legacy embedded pane. If you're following a guide that tells you to "open Preview and see the bottom pane on your site," that guide is pre-2021.
+
+**Fix.** Use the current Tag Assistant flow: GTM → Preview → enter URL → Tag Assistant opens in a new tab at `tagassistant.google.com`. The target site loads in a second tab. Events appear in the Tag Assistant tab, not on your site itself.
+
+## 8. Network blocking `googletagmanager.com`
+
+**Verify.** Corporate networks, school networks, and some VPNs block `googletagmanager.com` and `tagassistant.google.com` as tracking infrastructure. DevTools Network → look for requests to either domain returning `(blocked)` or `net::ERR_NAME_NOT_RESOLVED`.
+
+**Fix.** Switch to a network where the domains resolve (mobile hotspot works as a quick test). Or request a networking exception for these domains on the corporate DNS / proxy. A lot of pre-production GTM environments run behind a VPN — the VPN is sometimes the culprit.
+
+## If nothing above fits
+
+<Aside type="note">
+Rare but real: Tag Assistant itself has occasional incidents. Check Google Workspace Status Dashboard and the GTM community forum. If the last known-good Preview was yesterday and nothing changed in your setup, give it an hour and retry.
+</Aside>
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Preview Mode"
+    description="Full walkthrough of using Preview mode once it's connected."
+    href="/client-side/debugging/preview-mode/"
+  />
+  <LinkCard
+    title="Tag Assistant"
+    description="Deeper guide to Tag Assistant, including the companion Chrome extension."
+    href="/client-side/debugging/tag-assistant/"
+  />
+  <LinkCard
+    title="GTM Tag Not Firing Checklist"
+    description="Once Preview is working again, diagnose tag firing issues."
+    href="/recipes/troubleshooting/gtm-tag-not-firing-checklist/"
+  />
+  <LinkCard
+    title="Common Errors"
+    description="Reference for the most frequent GTM problems across all areas."
+    href="/client-side/debugging/common-errors/"
+  />
+</CardGrid>

@@ -1,0 +1,178 @@
+---
+title: "Track Ninja Forms Submissions"
+description: "Track Ninja Forms submissions in GTM using nfFormSubmitResponse — with validation-error filtering so only real successes reach GA4."
+sidebar:
+  order: 22
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import TagConfig from '../../../../components/TagConfig.astro';
+import DataLayerExample from '../../../../components/DataLayerExample.astro';
+
+Ninja Forms is AJAX-only and built on Backbone/Marionette. Submissions fire a jQuery event that includes the full server response — including validation errors. This recipe wires the right event, filters out errors, and sends a GA4 `generate_lead`.
+
+*Valid as of April 2026, Ninja Forms 3.8.x.*
+
+## The success signal
+
+Ninja Forms is entirely AJAX — there is no non-AJAX mode. The relevant jQuery events are:
+
+- `nfFormReady` — fires when a form's JS is initialised. Useful for marking forms as ready.
+- `nfFormSubmitResponse` — fires after every submit attempt, with the full server response. **Check `response.errors` before treating as success.**
+
+The response payload shape:
+
+```javascript
+{
+  data: {
+    form_id: 3,
+    settings: { title: 'Contact', ... },
+    fields: { ... },
+    actions: { ... },
+    extra: { ... }
+  },
+  errors: { fields: {}, form: [] } // empty arrays/objects = success
+}
+```
+
+A submission succeeded if `response.errors.form` is an empty array and `response.errors.fields` is an empty object.
+
+## dataLayer push pattern
+
+<DataLayerExample event="form_submission" description="Only pushes when response.errors is empty — never on validation failures.">
+```javascript
+(function () {
+  if (!window.jQuery) return;
+
+  window.jQuery(document).on('nfFormSubmitResponse', function (event, response) {
+    var errors = response && response.errors;
+    var hasFieldErrors = errors && errors.fields && Object.keys(errors.fields).length > 0;
+    var hasFormErrors = errors && Array.isArray(errors.form) && errors.form.length > 0;
+
+    if (hasFieldErrors || hasFormErrors) {
+      return; // validation failed — do not track as success
+    }
+
+    var data = response && response.data;
+    if (!data) return;
+
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      event: 'form_submission',
+      form_vendor: 'ninja_forms',
+      form_id: String(data.form_id),
+      form_title: (data.settings && data.settings.title) || 'ninja_' + data.form_id
+    });
+  });
+})();
+```
+</DataLayerExample>
+
+## GTM setup
+
+<Steps>
+1. **Create a Custom Event trigger**
+
+   - Trigger type: **Custom Event**
+   - Event name: `form_submission`
+   - This fires: **Some Custom Events** → `DLV - form_vendor` **equals** `ninja_forms`
+
+2. **Create Data Layer Variables**
+
+   - `DLV - form_vendor` → `form_vendor`
+   - `DLV - form_id` → `form_id`
+   - `DLV - form_title` → `form_title`
+
+3. **Create a GA4 Event Tag**
+
+   - Event name: `generate_lead`
+   - Parameters:
+     - `form_vendor` → `{{DLV - form_vendor}}`
+     - `form_id` → `{{DLV - form_id}}`
+     - `form_title` → `{{DLV - form_title}}`
+   - Trigger: the Custom Event trigger above
+
+4. **Test in Preview mode**
+
+   Submit a Ninja Form successfully and confirm the event appears. Then submit with validation errors and confirm no event fires.
+</Steps>
+
+<TagConfig
+  name="GA4 - generate_lead (Ninja Forms)"
+  type="Google Analytics: GA4 Event"
+  trigger="Custom Event - form_submission (ninja_forms)"
+  variables={["DLV - form_vendor", "DLV - form_id", "DLV - form_title"]}
+/>
+
+## Alternative: Marionette Radio channel
+
+Ninja Forms exposes a Marionette Radio channel `forms` that you can subscribe to for a cleaner integration — this bypasses jQuery entirely:
+
+```javascript
+(function () {
+  function subscribe() {
+    if (!window.Marionette || !window.nfRadio) {
+      return setTimeout(subscribe, 200);
+    }
+    var channel = window.nfRadio.channel('forms');
+    channel.reply('submit:response', function (response) {
+      var errors = response && response.errors;
+      if (errors && (errors.form.length || Object.keys(errors.fields).length)) return;
+      // same dataLayer.push as above
+    });
+  }
+  subscribe();
+})();
+```
+
+Use this only if you have a reason to avoid jQuery. For most sites, the jQuery event is simpler and equivalent.
+
+## Capturing field values
+
+Field values are in `response.data.fields`, keyed by field ID:
+
+```javascript
+var fields = response.data.fields;
+// fields[12].value, fields[13].value, etc.
+```
+
+Field IDs are stable per form but not per site — field 12 on form A is not field 12 on form B. Use the Ninja Forms field key (a human-readable slug you set in the field settings) via `fields[id].key` if you need portability.
+
+<Aside type="caution">
+Do not send raw PII to GA4. Hash email/phone client-side with SHA-256, or route via server-side tagging with proper consent handling.
+</Aside>
+
+## Test it
+
+<Steps>
+1. Open GTM **Preview mode** on a page with a Ninja Form.
+2. Submit with valid data. Confirm `form_submission` appears with correct `form_id` and `form_title`.
+3. **Test failure path**: submit with a required field empty. Confirm `nfFormSubmitResponse` fires in the browser console but **no** `form_submission` event appears in the dataLayer.
+4. Verify **Tags Fired** lists the GA4 tag.
+5. In GA4 **DebugView**, confirm `generate_lead` arrives within 15 seconds.
+6. **Test conditional logic**: if your form uses Ninja Forms' conditional logic to show/hide required fields, submit with a hidden-but-required field to confirm the error filter still works.
+</Steps>
+
+## Common gotchas
+
+**Pushing on every `nfFormSubmitResponse`.** The event fires on failures too. Always check `response.errors` before pushing.
+
+**Conditional logic re-renders.** Ninja Forms re-renders fields when conditional logic triggers. The delegated `jQuery(document).on(...)` listener survives this; binding directly to `.nf-form-cont` does not.
+
+**No non-AJAX fallback.** Unlike Gravity Forms or WPForms, Ninja Forms has no non-AJAX mode. If the AJAX endpoint is blocked (ad blocker, firewall), submissions fail silently — you will see no event, but the user will see a stuck spinner.
+
+**Multi-part forms.** Ninja Forms' multi-part add-on fires `nfFormSubmitResponse` only on final submission. If you want step tracking, listen to `nfChangeSlide` (fires on each step change) — the event passes the slide index.
+
+**Form in a modal.** Modal plugins often load the form inside an iframe or re-initialise Ninja Forms' JS on modal open. The delegated listener on `document` handles in-page modals; for iframes, postMessage is required (out of scope here).
+
+**Multiple forms on one page.** `response.data.form_id` disambiguates automatically. No per-form binding needed.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard title="Track Form Submissions" href="/recipes/interaction-tracking/track-form-submissions/" description="Generic form-submission patterns across native, AJAX, and third-party forms." />
+  <LinkCard title="form_submission custom event" href="/datalayer/custom-events/form-submission/" description="The canonical dataLayer schema for form submission events." />
+  <LinkCard title="WordPress dataLayer integration" href="/datalayer/platforms/wordpress/" description="WordPress-specific dataLayer patterns and plugin gotchas." />
+  <LinkCard title="Form triggers reference" href="/client-side/triggers/form-triggers/" description="When GTM's built-in form triggers work — and when they don't." />
+</CardGrid>

@@ -77,18 +77,73 @@ ITP 2.3 closed the CNAME cloaking workaround. CNAME cloaking is a technique wher
 
 **Impact:** The CNAME workaround that some analytics vendors promoted as an ITP solution stopped working in Safari. Stape and other sGTM providers that route through a first-party domain via true server-side proxying (not CNAME) were not affected.
 
-### ITP 2.4+ and current state
+### ITP 2.4 through iOS 16 (2020-2022)
 
-Subsequent ITP updates have continued to close specific workarounds without major new restrictions. The current key behaviors are:
+ITP updates in this window closed specific workarounds without major new restrictions. The core cookie behavior set in ITP 2.1-2.3 stayed stable — 7-day cap for JavaScript-set first-party cookies, 24-hour cap for navigations from classified tracker domains with tracking parameters, CNAME cloaking detected, localStorage subject to the same caps as cookies.
+
+### iOS 17 / Safari 17 (September 2023) — Link Tracking Protection
+
+iOS 17 introduced **Link Tracking Protection (LTP)**, a new mechanism distinct from cookie caps. LTP strips known tracking parameters from URLs in specific contexts:
+
+- Safari **Private Browsing** mode (always-on)
+- **Mail** app links
+- **Messages** links
+
+Parameters stripped include `fbclid`, `mc_eid` (Mailchimp), `hsCtaTracking` (HubSpot), and dozens of other vendor-specific click IDs. Apple maintains the list internally; it is not publicly documented.
+
+**Impact on GA4 in iOS 17:** Limited initially. `gclid`, `gbraid`, `wbraid`, and `utm_*` parameters were NOT on the strip list. Meta's `fbclid` being stripped affected Facebook/Instagram ad attribution in Private Browsing, but default Safari browsing was unaffected.
+
+### iOS 17.4 (March 2024) — Advanced Tracking & Fingerprinting Protection
+
+iOS 17.4 extended **Advanced Tracking and Fingerprinting Protection** (previously limited to Private Browsing) to be toggleable for all Safari browsing. Users who enable it get fingerprinting protection across all tabs, not just private ones.
+
+**Impact on GA4:** Limited directly, but compounds the fingerprinting gap for fallback identity stitching strategies that don't rely on cookies.
+
+### iOS 18 / Safari 18 (September 2024) — LTP expansion
+
+iOS 18 made **Link Tracking Protection on by default** for Safari in Private Browsing (previously it required the advanced protection toggle) and continued expanding the strip list. Distraction Control and other UI-level privacy features landed alongside, but the key measurement change was the LTP scope expansion.
+
+**Impact on GA4:** Still limited for default (non-private) Safari. Private-browsing Safari sessions now routinely arrive with stripped click IDs.
+
+### iOS 26 / Safari 26 era (2025-2026) — GCLID and click-ID stripping expands
+
+Stape and other sGTM vendors reported in 2026 that Safari's parameter-strip list now includes **Google Ads click identifiers** (`gclid`, `gbraid`, `wbraid`) in expanded contexts — not just Private Browsing, but also Mail, Messages, and default Safari under Advanced Tracking and Fingerprinting Protection. Meta's `fbclid` and TikTok's `ttclid` are also stripped in broader contexts.
+
+**What this breaks:**
+
+- **Google Ads click-through attribution** — when a Safari user clicks a Google Ads link, the landing URL reaches your site without `gclid`. Google Ads' standard auto-tagging can't tie the resulting session back to the ad click without additional signals.
+- **Facebook/Meta Ads attribution** — same problem with `fbclid` for Conversions API matching.
+- **UTM parameters are still intact** — Apple has (so far) not stripped `utm_source`, `utm_medium`, etc., so campaign-level channel reporting survives. Click-ID-dependent attribution is what breaks.
+
+**Impact on GA4 specifically:**
+
+| Scenario | Safari (iOS 26 era) |
+|---|---|
+| `gclid` in landing URL | Stripped in Private Browsing, Mail, Messages, and default Safari with Advanced Protection |
+| `fbclid` in landing URL | Stripped in more contexts than iOS 17 |
+| `utm_*` parameters | Still preserved |
+| `_ga` cookie JS cap | Still 7 days (unchanged since ITP 2.1) |
+| Server-set cookies | Still honored with full lifetime |
+
+**Mitigations:**
+
+- **Server-side enhanced conversions**: Pass hashed email / phone to Google Ads via the Conversions API, letting Google match the conversion to the original click without relying on `gclid` in the landing URL.
+- **First-party data capture before redirects**: Capture user identity (email, CRM ID) as early as possible in the journey, then pass it server-side so attribution can be rebuilt outside the browser.
+- **sGTM first-party cookies**: Continue to mitigate the 7-day `_ga` cap — the cookie story is unchanged.
+- **Offline conversion import**: Upload matched conversions to Google Ads from your backend when you have deterministic identity linkage.
+
+### Current state summary
+
+As of 2026, Safari restrictions you need to plan around are:
 
 - **Third-party cookies:** Blocked entirely for classified domains
 - **JavaScript-set first-party cookies:** 7-day cap (24-hour cap if navigating from a classified tracker domain with tracking parameters)
-- **localStorage:** Subject to the same caps as cookies for classified origins
-- **IndexedDB:** Same restrictions
+- **localStorage / IndexedDB:** Subject to the same caps as cookies for classified origins
 - **CNAME cloaking:** Identified and restricted
-- **Link decoration tracking:** UTM parameter values written to localStorage are capped at 7 days
+- **Link Tracking Protection:** `gclid`, `fbclid`, `ttclid`, `mc_eid`, and similar click IDs stripped from URLs in Private Browsing, Mail, Messages, and default Safari under Advanced Tracking and Fingerprinting Protection
+- **Fingerprinting protection:** Canvas, WebGL, audio, screen APIs return simplified/noised values
 
-**One important exception that has not changed:** Cookies set via HTTP `Set-Cookie` response headers from the actual first-party server are NOT subject to ITP caps. A cookie set by your server in a response header can have a 2-year lifetime and Safari will honor it. This is the foundation of the server-side cookie solution.
+**The one exception that has not changed:** Cookies set via HTTP `Set-Cookie` response headers from the actual first-party server are NOT subject to ITP caps. A cookie set by your server in a response header can have a 2-year lifetime and Safari will honor it. This is still the foundation of the server-side cookie solution — and it is now joined by server-side enhanced conversions as the foundation of the server-side attribution solution.
 
 ## Specific impact on GA4 cookies
 

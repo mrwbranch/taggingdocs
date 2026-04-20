@@ -1,0 +1,101 @@
+---
+title: "BigQuery Counts Differ From GA4 UI"
+description: "Six legitimate reasons GA4 BigQuery export numbers don't match the GA4 interface — thresholding, modeled users, sampling, timezones, bot filtering, and consent modeling."
+sidebar:
+  order: 10
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+If you're seeing your BigQuery export numbers not match the GA4 interface, here are the most common causes and how to reconcile. This is expected behaviour, not a bug — the GA4 UI applies post-processing (thresholding, modeling, sampling) that the raw BigQuery export never receives. Your job is to know which effect is in play and report accordingly.
+
+<Aside type="note">
+BigQuery is the ground truth for collected events. The GA4 UI is the processed view — with privacy guards, engagement modeling, and sampling layered on top. Neither is "wrong." They're answering different questions.
+</Aside>
+
+## 1. GA4 UI applies thresholding — BigQuery doesn't
+
+**Verify.** GA4 → Reports → any report that includes demographics, user-scoped dimensions, or Google signals data. Look for the thresholding icon (shield) and hover it. "Data thresholding is applied" means some rows were suppressed to protect user privacy, typically when underlying user counts are below ~10.
+
+**Fix.** No fix — this is intentional. To get unthresholded numbers, query BigQuery directly. Your UI total will be lower than BigQuery's because rows were dropped. The effect is biggest for small segments, low-traffic demographics, and any report filtered on user identity dimensions.
+
+## 2. GA4 "users" is modeled — BigQuery has `user_pseudo_id` counts
+
+**Verify.** Compare: GA4 UI **Total users** for a date range vs. BigQuery `COUNT(DISTINCT user_pseudo_id)` for the same range and property. GA4 will typically report slightly fewer users, sometimes noticeably fewer for sites with high Consent Mode denial rates. The GA4 UI applies HyperLogLog++ approximation and adds modeled users (from Consent Mode denied sessions) that BigQuery export does not include.
+
+**Fix.** Use the right count for the question. For engineering questions ("how many distinct browsers fired events?"), `user_pseudo_id` in BigQuery is correct. For reporting questions ("how many people used our site, accounting for consent denials?"), the GA4 UI modeled figure is more representative. Don't try to reconcile them to the exact number.
+
+## 3. Sampling in GA4 Explorations above 10M events
+
+**Verify.** Open an Exploration in GA4. At the top, it says "This data is based on 100% of available data" or "50% sampled" or similar. When an Exploration query spans more than 10 million events, it samples. Standard reports don't sample, but Explorations do.
+
+**Fix.** For queries above the sample threshold, use BigQuery. BigQuery never samples — it processes every row. This is the single biggest reason to have BigQuery export enabled for large properties. As a rule, Explorations over 30-day windows on properties with >1M events/day hit the sampling ceiling regularly.
+
+## 4. Timezone differences
+
+**Verify.** GA4 UI uses the property's reporting timezone (set in Admin → Property settings). BigQuery export uses UTC — `event_date` is a UTC date string, `event_timestamp` is UTC microseconds. If your property is set to `America/Los_Angeles` (UTC-8) and you compare "April 15 in GA4 UI" to "April 15 in BigQuery", you're comparing different 24-hour windows offset by 8 hours.
+
+**Fix.** Convert explicitly in your SQL:
+
+```sql
+SELECT
+  DATE(TIMESTAMP_MICROS(event_timestamp), 'America/Los_Angeles') AS property_date,
+  COUNT(*) AS events
+FROM `your-project.analytics_XXXXXXX.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20260414' AND '20260416'
+GROUP BY property_date
+ORDER BY property_date;
+```
+
+Always pull an extra day on each side of your range (daily tables are UTC) and then filter to property-timezone dates. Dashboards rebuilt from BigQuery should apply the same timezone logic that the GA4 UI uses, or stakeholders will see drift.
+
+## 5. Bot filtering differs between UI and export
+
+**Verify.** GA4 UI filters known bot and spider traffic automatically — both via the IAB/ABC International Spiders and Bots List and GA4's internal heuristics. BigQuery export does not filter — every event that passed initial validation is exported. For high-bot-traffic sites, BigQuery will show 5-20% more events than the UI.
+
+**Fix.** Either accept the difference, or replicate the filtering in SQL. BigQuery export includes some flags (`device.category`, user agent in `user_agent`) you can use to filter the obvious bots. The exact list GA4 UI uses isn't published, so perfect reconciliation isn't possible — get close and document the gap.
+
+## 6. Consent-denied users: modeled in GA4 UI, absent in BigQuery
+
+**Verify.** On sites with Consent Mode Advanced and significant consent denial rates, GA4 UI users and sessions include *modeled* contributions from denied-consent sessions. Denied-consent pings go through GA4 collection but BigQuery export only includes the actual event rows — not modeled supplements. A site with 40% consent denial will show a meaningfully smaller BigQuery user count than GA4 UI.
+
+**Fix.** Understand which metric you need. BigQuery shows you *what was actually collected*. GA4 UI shows you *what we model the full population to look like*. For fraud investigation, compliance audits, and engineering debugging, BigQuery is correct. For marketing reporting and budget attribution, the UI's modeled view is usually what stakeholders want. Pick per use case.
+
+## Reconciliation checklist
+
+Before flagging a discrepancy as a bug:
+
+- Same timezone? (Convert BigQuery to property timezone.)
+- Same date range? (Inclusive vs. exclusive boundaries trip people up.)
+- Same data scope? (UI may have filters / segments / thresholding applied.)
+- Same user definition? (Total users vs. Active users vs. `user_pseudo_id` count.)
+- Consent Mode enabled? (If yes, expect a gap up to the denial rate.)
+- Exploration or Standard report? (Explorations sample above 10M events.)
+
+If all six check out and the numbers still diverge by more than 2-3%, then escalate — something non-obvious is happening (processing lag, export schema change, or a bug).
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="BigQuery Schema Reference"
+    description="Full schema of the GA4 BigQuery export — what each column means."
+    href="/ga4/bigquery/schema-reference/"
+  />
+  <LinkCard
+    title="Data Discrepancies"
+    description="The broader discrepancy guide — GA4 vs. server logs, vs. payment processors, vs. ad platforms."
+    href="/ga4/troubleshooting/data-discrepancies/"
+  />
+  <LinkCard
+    title="Common Queries"
+    description="Tested SQL queries for the most-asked reconciliation questions."
+    href="/ga4/bigquery/common-queries/"
+  />
+  <LinkCard
+    title="Missing Revenue in GA4"
+    description="When the discrepancy is specifically on revenue — a separate diagnostic flow."
+    href="/recipes/troubleshooting/missing-revenue-in-ga4/"
+  />
+</CardGrid>

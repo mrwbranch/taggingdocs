@@ -1,0 +1,171 @@
+---
+title: Connect Claude, ChatGPT, or Cursor to TaggingDocs
+description: Step-by-step setup for Claude.ai, Claude Desktop, Claude Code, ChatGPT, and Cursor. Includes the /mcp URL gotcha and a troubleshooting FAQ.
+sidebar:
+  label: Connect your AI client
+  order: 1
+---
+
+import { Tabs, TabItem, Steps, Aside, LinkCard, Card, CardGrid } from '@astrojs/starlight/components';
+
+Pick your AI client below. Setup is 30 seconds in every case. If it's your first time, the OAuth consent screen will ask for Google Tag Manager scopes — that's what lets the assistant read and edit your containers.
+
+<Aside type="caution" title="The trailing /mcp matters">
+Paste the URL with the `/mcp` suffix exactly as shown — `https://mcp.taggingdocs.com/mcp`. Some clients accept the bare origin and then can't find the MCP endpoint, giving you a `McpEndpointNotFound` error or a "connected but no tools" state. When in doubt, include `/mcp`.
+</Aside>
+
+<Tabs syncKey="mcp-client">
+
+<TabItem label="Claude (web + Desktop app)">
+
+Claude.ai in a browser and the native Claude Desktop app share the same native HTTP MCP flow — same steps, same screens.
+
+<Steps>
+
+1. Click **Customize** in the left sidebar, then open the **Connectors** tab. (Anthropic moved Connectors here out of Settings; older "Settings → Integrations" instructions are stale.)
+
+2. Scroll to the bottom of the Connectors list and click **Add custom connector**.
+
+3. Paste the server URL:
+
+   ```text
+   https://mcp.taggingdocs.com/mcp
+   ```
+
+4. Claude opens a browser tab for Google sign-in. Choose the account that has access to your GTM containers, review the requested Tag Manager scopes, and click **Continue**.
+
+5. When you see the "Signed in to TaggingDocs MCP" success card, you can close that tab. The connector will flip to **Connected** in Claude.
+
+6. Start a new chat and try *"List my GTM accounts."* You should get a real list back.
+
+</Steps>
+
+If the UI doesn't update after auth (more common on Claude Desktop), click the `…` menu next to the connector → **Disconnect** → then **Connect** again. Claude sometimes caches the pre-auth state until you nudge it.
+
+</TabItem>
+
+<TabItem label="Claude Code">
+
+<Steps>
+
+1. In any terminal:
+
+   ```bash
+   claude mcp add -t http gtm https://mcp.taggingdocs.com/mcp
+   ```
+
+2. Start a new Claude Code session. The first time it needs GTM, it will prompt you to authenticate in your browser.
+
+3. Verify it's wired up:
+
+   ```bash
+   claude mcp list
+   ```
+
+   You should see `gtm` listed as an HTTP connector.
+
+</Steps>
+
+</TabItem>
+
+<TabItem label="ChatGPT">
+
+<Steps>
+
+1. In ChatGPT, open **Settings → Connectors** (exact wording varies by account type — Team, Enterprise, and some Plus accounts have this).
+
+2. Click **Add custom MCP** → paste:
+
+   ```text
+   https://mcp.taggingdocs.com/mcp
+   ```
+
+3. Complete the Google sign-in flow. ChatGPT will return you to the chat with the connector active.
+
+4. Mention the connector in your first message (e.g. *"Using the TaggingDocs connector, list my GTM accounts"*) so ChatGPT knows to use it.
+
+</Steps>
+
+<Aside type="note">
+ChatGPT's MCP support is evolving quickly. If the exact menu paths don't match what you see, the URL is always `https://mcp.taggingdocs.com/mcp` — the connector installs the same way regardless of where the UI lives this month.
+</Aside>
+
+</TabItem>
+
+<TabItem label="Cursor & other stdio MCP clients">
+
+<Steps>
+
+1. In your MCP client's config (e.g. Cursor's `mcp.json`), add an entry that bridges the remote server over stdio:
+
+   ```json
+   {
+     "mcpServers": {
+       "taggingdocs": {
+         "command": "npx",
+         "args": ["mcp-remote", "https://mcp.taggingdocs.com/mcp"]
+       }
+     }
+   }
+   ```
+
+2. Reload the client. The first GTM tool invocation will open your browser for Google sign-in.
+
+3. Any MCP client that speaks the stdio transport will work with the same `mcp-remote` bridge — just point it at the URL above.
+
+</Steps>
+
+</TabItem>
+
+</Tabs>
+
+## Auth model
+
+Documentation tools (searching and reading TaggingDocs articles) work without any login — connect the server and ask away.
+
+GTM tools need a Google account that has access to the Tag Manager containers you want to work with. The server requests Google's standard Tag Manager OAuth scopes:
+
+| Scope | What it lets the AI do |
+|-------|------------------------|
+| `tagmanager.readonly` | List accounts, containers, workspaces, tags, triggers, variables |
+| `tagmanager.edit.containers` | Create and modify tags, triggers, variables, folders |
+| `tagmanager.edit.containerversions` | Create container versions for review |
+| `tagmanager.publish` | Publish versions (go live) |
+| `tagmanager.manage.accounts` / `manage.users` | Read account-level settings and user permissions |
+
+After the first authorization, Google issues a refresh token. The server stores only that refresh token server-side and uses it to mint short-lived access tokens as needed — you don't have to re-authenticate every session. Revoke any time at [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+
+## Troubleshooting
+
+### `McpEndpointNotFound` after OAuth completes
+
+The URL in your AI client is missing the `/mcp` path. The connector did OAuth fine but then looked for the MCP endpoint at the server origin (which serves a landing page, not MCP). Remove the connector and re-add it with `https://mcp.taggingdocs.com/mcp`.
+
+### "Connected" but no tools are listed
+
+Two causes, in order of likelihood:
+
+1. **Stale session after the client was restarted.** Claude Desktop in particular caches an old session ID. Fix: `…` menu → **Disconnect** → **Connect** again.
+2. **OAuth token is bad.** Visit [myaccount.google.com/permissions](https://myaccount.google.com/permissions), revoke `taggingdocs.com`, then re-run OAuth from your AI client.
+
+### The Google sign-in tab just spins / never closes
+
+The OAuth flow completes behind the scenes (you'll see the connector flip to **Connected** in your AI client) but the browser tab gets stuck on the Google consent page because the final redirect is a deep link the tab can't navigate to. After the success toast appears in your AI client, it's safe to close the tab manually.
+
+### Want to self-host your own instance?
+
+The server is open source. Run your own if you want to restrict access to a specific Google Workspace, change the stored scopes, or audit every request.
+
+<LinkCard
+  title="taggingdocs-mcp on GitHub"
+  description="Source, Dockerfile, docker-compose, and env template."
+  href="https://github.com/mrwbranch/taggingdocs-mcp"
+/>
+
+## Next: see what's exposed
+
+<LinkCard
+  title="Tools & prompts reference"
+  description="Full list of the 35 MCP tools and 6 guided prompt workflows."
+  href="/mcp/tools-and-prompts/"
+/>

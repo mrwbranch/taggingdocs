@@ -1,0 +1,248 @@
+---
+title: "SQL Primer for GA4 BigQuery"
+description: "The minimum SQL you need to read and write queries against the GA4 BigQuery export — SELECT/WHERE/GROUP BY, CTEs, UNNEST for event_params, window functions for session reconstruction, and partition pruning that keeps costs sane."
+sidebar:
+  order: 0.5
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Every page in this `/ga4/bigquery/` section assumes you can read and write SQL. Most tagging practitioners can't, or can read it but haven't written complex queries against the GA4 export specifically. This primer is the minimum you need to read the rest of the section confidently and start writing your own queries.
+
+It's not a general SQL tutorial — it's the subset that matters for GA4, with every example querying the real GA4 export schema so you're learning SQL and the schema at the same time.
+
+## The shape of the GA4 export
+
+Before any SQL, the mental model: the GA4 BigQuery export is one table per day, named `events_YYYYMMDD`, all living inside a dataset named `analytics_PROPERTY_ID`. You query them as a wildcard table and filter by date with `_TABLE_SUFFIX`:
+
+```sql
+SELECT *
+FROM `project.analytics_123456789.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20260401' AND '20260430'
+LIMIT 10;
+```
+
+Every row in these tables is one event. The table is extremely wide (~60 top-level columns) and heavily denormalized — user, session, device, geo, and custom parameters are all on every row.
+
+The full schema is covered in [Schema Reference](/ga4/bigquery/schema-reference/). The key thing to know now: most of the interesting data is in three nested fields — `event_params` (per-event parameters), `user_properties` (user-scoped attributes), and `items` (ecommerce items). These are all `ARRAY<STRUCT>`s, which you extract with `UNNEST` — covered below.
+
+## SELECT, WHERE, and the basics
+
+```sql
+-- Everything GA4 export queries look like this
+SELECT
+  event_name,
+  event_date,
+  user_pseudo_id
+FROM `project.analytics_123456789.events_*`
+WHERE _TABLE_SUFFIX = '20260415'
+  AND event_name = 'purchase'
+ORDER BY event_timestamp DESC
+LIMIT 100;
+```
+
+- `SELECT` — which columns to return. `SELECT *` returns everything (rarely useful in GA4 because rows are huge).
+- `FROM` — which table(s). The backticks allow project/dataset qualification.
+- `WHERE` — filters rows. Multiple conditions join with `AND` / `OR`.
+- `ORDER BY` — sorts results. `DESC` for descending.
+- `LIMIT` — caps the number of rows returned (applied after ORDER BY).
+
+## GROUP BY and aggregate functions
+
+Aggregate functions (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) collapse many rows into one per group:
+
+```sql
+-- Daily event counts by event name
+SELECT
+  event_date,
+  event_name,
+  COUNT(*) AS event_count,
+  COUNT(DISTINCT user_pseudo_id) AS unique_users
+FROM `project.analytics_123456789.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20260401' AND '20260430'
+GROUP BY event_date, event_name
+ORDER BY event_date, event_count DESC;
+```
+
+The rule: every column in `SELECT` that isn't inside an aggregate function must appear in `GROUP BY`. Forgetting this is the most common SQL error and BigQuery's error message will usually tell you exactly what's missing.
+
+## UNNEST — the key GA4 skill
+
+Event parameters are the most common reason to write custom SQL against GA4. They live in `event_params`, which is an array of structs. You can't reference them directly — you have to `UNNEST` and filter to the parameter you want.
+
+```sql
+-- Pull the page_location parameter off every page_view event
+SELECT
+  event_timestamp,
+  user_pseudo_id,
+  (SELECT value.string_value
+   FROM UNNEST(event_params)
+   WHERE key = 'page_location') AS page_location
+FROM `project.analytics_123456789.events_*`
+WHERE _TABLE_SUFFIX = '20260415'
+  AND event_name = 'page_view'
+LIMIT 100;
+```
+
+The pattern `(SELECT value.X FROM UNNEST(event_params) WHERE key = 'Y')` is burned into the muscle memory of every GA4 BigQuery practitioner. Memorise it.
+
+`value.X` is the typed accessor. GA4 params have four possible types:
+
+- `value.string_value` — strings (URLs, names, IDs)
+- `value.int_value` — integers (counts, categories)
+- `value.float_value` — floating point (prices, durations)
+- `value.double_value` — also float — use this for larger numbers
+
+You have to pick the right type or you get `NULL`. Most string-looking params are string; money is usually double; counts are int.
+
+**Multiple params in one query** — repeat the pattern:
+
+```sql
+SELECT
+  event_timestamp,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location') AS url,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_title') AS title,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_referrer') AS referrer,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec') AS engagement_ms
+FROM `project.analytics_123456789.events_*`
+WHERE _TABLE_SUFFIX = '20260415'
+  AND event_name = 'page_view';
+```
+
+Repetitive but explicit. Full patterns for filtering on param values and handling the `items` array are in [Unnesting Patterns](/ga4/bigquery/unnesting-patterns/).
+
+## Common Table Expressions (CTEs)
+
+A CTE is a named subquery you define with `WITH`, which you can then reference in the main query. CTEs make complex queries readable:
+
+```sql
+-- Conversion rate by traffic source over the last 30 days
+WITH sessions AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'source') AS source,
+    event_name
+  FROM `project.analytics_123456789.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20260315' AND '20260415'
+),
+sessions_with_conversion AS (
+  SELECT
+    source,
+    COUNT(DISTINCT CONCAT(user_pseudo_id, CAST(session_id AS STRING))) AS sessions,
+    COUNT(DISTINCT CASE WHEN event_name = 'purchase'
+                        THEN CONCAT(user_pseudo_id, CAST(session_id AS STRING)) END) AS purchases
+  FROM sessions
+  GROUP BY source
+)
+SELECT
+  source,
+  sessions,
+  purchases,
+  SAFE_DIVIDE(purchases, sessions) AS conversion_rate
+FROM sessions_with_conversion
+ORDER BY sessions DESC
+LIMIT 20;
+```
+
+Without CTEs this query is a nested mess. With CTEs it reads top-down: "extract sessions, compute conversion, rank sources." Every multi-step analysis you do should be CTE-shaped.
+
+`SAFE_DIVIDE` is BigQuery's divide-without-error — returns `NULL` if the denominator is zero instead of throwing. Use it whenever division could encounter a zero divisor.
+
+## Window functions for session reconstruction
+
+The GA4 export doesn't have a session ID in the way you might expect. Sessions are reconstructed from the `ga_session_id` parameter, often combined with `user_pseudo_id`. Window functions let you compute per-session aggregates without collapsing rows:
+
+```sql
+-- First and last event timestamp per session, plus event count, on every event row
+SELECT
+  user_pseudo_id,
+  event_name,
+  event_timestamp,
+  session_id,
+  MIN(event_timestamp) OVER (PARTITION BY user_pseudo_id, session_id) AS session_start,
+  MAX(event_timestamp) OVER (PARTITION BY user_pseudo_id, session_id) AS session_end,
+  COUNT(*) OVER (PARTITION BY user_pseudo_id, session_id) AS session_event_count,
+  ROW_NUMBER() OVER (PARTITION BY user_pseudo_id, session_id ORDER BY event_timestamp) AS event_seq_in_session
+FROM (
+  SELECT
+    user_pseudo_id,
+    event_name,
+    event_timestamp,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id
+  FROM `project.analytics_123456789.events_*`
+  WHERE _TABLE_SUFFIX = '20260415'
+);
+```
+
+`OVER (PARTITION BY ... ORDER BY ...)` is the window definition — "compute this aggregate within each group, optionally in this order." Window functions don't collapse rows like `GROUP BY` does; they add columns. That's what makes them useful for "first event in session" / "last event in session" / "nth event" patterns.
+
+Full session-reconstruction patterns in [Session Reconstruction](/ga4/bigquery/session-reconstruction/).
+
+## Partition pruning — the one cost rule
+
+BigQuery charges by bytes scanned. The GA4 export tables are partitioned by date, so queries that filter on `_TABLE_SUFFIX` only scan the matching partitions. Queries that *don't* filter on `_TABLE_SUFFIX` scan every single day of history — potentially terabytes per query.
+
+```sql
+-- BAD — scans every partition
+SELECT event_name, COUNT(*) FROM `project.analytics_123456789.events_*`
+GROUP BY event_name;
+
+-- GOOD — scans only April 2026
+SELECT event_name, COUNT(*) FROM `project.analytics_123456789.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20260401' AND '20260430'
+GROUP BY event_name;
+```
+
+Always filter on `_TABLE_SUFFIX`. BigQuery's query editor shows the bytes-to-be-scanned estimate before you run — check it. A query that scans 5 TB costs about $25 at on-demand pricing; a query that scans 50 GB costs about $0.25. Partition pruning is the difference.
+
+Use fixed dates (`'20260401'`) when possible. Dynamic date ranges using `FORMAT_TIMESTAMP('%Y%m%d', ...)` work but sometimes defeat the pruner — verify the byte estimate looks right before committing to a dynamic range.
+
+More cost patterns in [Cost Optimization](/ga4/bigquery/cost-optimization/).
+
+## Gotchas worth knowing in advance
+
+**NULLs break equality comparisons.** `NULL = NULL` is `NULL`, not `TRUE`. Use `IS NULL` / `IS NOT NULL` for null checks.
+
+**Timestamps are in microseconds (not milliseconds).** `event_timestamp` is a microsecond Unix timestamp. To convert: `TIMESTAMP_MICROS(event_timestamp)`.
+
+**`COUNT(*)` counts rows; `COUNT(column)` counts non-null rows; `COUNT(DISTINCT column)` counts unique non-null values.** The difference matters.
+
+**Joins on very wide tables are expensive.** Because GA4 event rows are already denormalized, you rarely need to self-join. When you do, filter both sides to `_TABLE_SUFFIX` matching date ranges to keep the scan bounded.
+
+**`ARRAY_AGG` builds arrays from groups.** Useful for collecting all events in a session into a single row for sequence analysis. Featured in [Funnel Analysis SQL](/ga4/bigquery/funnel-analysis-sql/).
+
+## Where to go next
+
+Once you can read the patterns above, the rest of the `/ga4/bigquery/` section is accessible:
+
+- [Common Queries](/ga4/bigquery/common-queries/) — ready-to-adapt queries for traffic, funnel, cohort analysis.
+- [Unnesting Patterns](/ga4/bigquery/unnesting-patterns/) — advanced `UNNEST` patterns for arrays of items, nested structs, combined param extraction.
+- [Session Reconstruction](/ga4/bigquery/session-reconstruction/) — building session-level models from event data.
+- [Funnel Analysis SQL](/ga4/bigquery/funnel-analysis-sql/) — multi-step conversion path analysis.
+- [Cost Optimization](/ga4/bigquery/cost-optimization/) — keeping the bill sane at scale.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Export Setup"
+    description="Enabling the GA4 BigQuery export — what you're wiring up in Admin and what lands in BigQuery."
+    href="/ga4/bigquery/export-setup/"
+  />
+  <LinkCard
+    title="Schema Reference"
+    description="The full column-by-column schema of the GA4 export."
+    href="/ga4/bigquery/schema-reference/"
+  />
+  <LinkCard
+    title="JavaScript for Tag Managers"
+    description="The other language primer — the JavaScript fundamentals behind Custom HTML and JS Variables."
+    href="/resources/javascript-for-tag-managers/"
+  />
+  <LinkCard
+    title="No-Code BigQuery Tools"
+    description="If SQL isn't the right fit — UI-driven query builders for the GA4 export."
+    href="/resources/no-code-bigquery-tools/"
+  />
+</CardGrid>

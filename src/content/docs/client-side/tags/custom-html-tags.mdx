@@ -10,6 +10,10 @@ import TagConfig from '../../../../components/TagConfig.astro';
 
 Custom HTML tags let you inject arbitrary HTML and JavaScript into a page through GTM. They can do anything a developer can do with a `<script>` tag: load third-party libraries, modify the DOM, make API calls, push data to the dataLayer, fire tracking pixels, and run complex business logic.
 
+<Aside type="tip">
+This page covers the GTM-specific patterns for Custom HTML (IIFE wrappers, try/catch, Debug Mode gating). If you're new to JavaScript as a language, read [JavaScript for Tag Managers](/resources/javascript-for-tag-managers/) first — it covers closures, array methods, promises, and the other language fundamentals this page assumes.
+</Aside>
+
 That unlimited scope is both the strength and the danger of Custom HTML tags. They are GTM's escape hatch — the right tool when no native tag type does what you need. But they come with real risks: security exposure, performance impact, and maintenance complexity. Use them deliberately, write them defensively, and reach for native tag types or Community Gallery templates first.
 
 ## What Custom HTML tags can do

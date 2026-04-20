@@ -1,0 +1,181 @@
+---
+title: "First-Party Mode for Google Tags"
+description: "Serve gtag.js from your own subdomain via Google-managed infrastructure — the simplified alternative to self-hosted sGTM for first-party measurement."
+sidebar:
+  order: 5
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+Safari's Intelligent Tracking Prevention clamps first-party cookies set via `document.cookie` to 7 days. It blocks third-party cookies entirely. And its classifier has grown to flag cookies that are *technically* first-party but were set by a script loaded from a known tracking origin — which means every `_ga` cookie set by `gtag.js` loaded from `googletagmanager.com` is already on borrowed time on Safari and iOS.
+
+First-Party Mode, launched by Google in July 2024, addresses this by moving the `gtag.js` loader — and its collection traffic — to a subdomain of your own domain, hosted on Google-managed infrastructure. You get most of the ITP durability benefits of self-hosted sGTM without running any infrastructure yourself.
+
+*Valid as of April 2026, First-Party Mode for Google Tags.*
+
+## What First-Party Mode is
+
+A Google-operated proxy served from a subdomain you own. The `gtag.js` loader, the GA4 `/g/collect` endpoint, the Ads conversion endpoints — all served under `https://metrics.example.com/...` (or whatever subdomain you register) instead of `googletagmanager.com` or `google-analytics.com`.
+
+The server is Google's. The hostname is yours. That is the whole trick.
+
+## Relationship to Google Tag Gateway
+
+The naming here is genuinely confusing. First-Party Mode is the user-facing branding Google used at the July 2024 launch. [Google Tag Gateway](/foundations/google-tag-gateway/) is the broader productization that followed in 2024–2025. They describe the same underlying infrastructure — a Google-managed proxy under your subdomain — approached from different angles.
+
+This page covers the consent and ITP angle. The Tag Gateway page covers the architecture and sGTM comparison. Read the other one for the broader picture.
+
+## Benefits for consent and ITP
+
+Four practical improvements, all of them measurable.
+
+**Cookie durability on Safari.** `_ga` set via `document.cookie` from a first-party subdomain survives the full 400-day cap. The same cookie set from a script loaded via `googletagmanager.com` is classified more aggressively and often clamped to 7 days. The gap is real and shows up in the "percentage of returning users tagged" metric.
+
+**`_gcl_au` survives too.** The Google Ads remarketing cookie, historically the biggest casualty of ITP, gets the same durability boost because the Ads destination auto-loaded from your Tag ID is also proxied through the same subdomain.
+
+**Fewer ad-blocker hits.** Common ad-blocker lists target `googletagmanager.com` by hostname. Your subdomain is not on those lists. Content-based blockers that scan script contents are unaffected, so this is partial mitigation, not a silver bullet.
+
+**Lower client-side payload.** Google issues a smaller bootstrap when serving through First-Party Mode because the proxy handles some of the work the client-side loader used to do.
+
+## First-Party Mode vs. full sGTM
+
+These are the two real options for first-party serving. The trade-off is control versus operational burden.
+
+<Comparison leftTitle="First-Party Mode (managed proxy)" rightTitle="Full sGTM (self-managed)" leftType="neutral" rightType="neutral">
+  <Fragment slot="left">
+    **Cookie durability**: Full 400-day first-party on Safari.
+
+    **Cost**: Included in Google's free tier for most volumes.
+
+    **Setup complexity**: DNS CNAME + subdomain verification. Hours, not weeks.
+
+    **Custom logic**: None. Google's code, Google's decisions.
+
+    **Consent enforcement**: Client-side only. Gateway honors whatever `gtag.js` sends.
+
+    **CAPI forwarding**: Google destinations only. No Meta, TikTok, etc.
+  </Fragment>
+  <Fragment slot="right">
+    **Cookie durability**: Full 400-day first-party on Safari.
+
+    **Cost**: Cloud hosting fees, typically $50–$500/month.
+
+    **Setup complexity**: Container deploy, monitoring, versioning. Days to weeks.
+
+    **Custom logic**: Full. Custom clients, transforms, PII redaction.
+
+    **Consent enforcement**: Server-side. Can block, redact, or route conditionally.
+
+    **CAPI forwarding**: Any vendor with a server-side API.
+  </Fragment>
+</Comparison>
+
+Cookie durability is roughly equivalent. Everything else is a trade-off. First-Party Mode is the right default for Google-only stacks. sGTM is the right answer as soon as you need non-Google vendors, custom logic, or server-side consent enforcement.
+
+## Setup
+
+The flow is the same as [Tag Gateway setup](/foundations/google-tag-gateway/), because it is the same infrastructure. Short version:
+
+<Steps>
+1. **Register a subdomain** — `metrics.example.com`, `analytics.example.com`, or similar. Keep it neutral.
+
+2. **Verify domain ownership** in the Google Tag admin UI via DNS TXT or HTML-file verification.
+
+3. **Enable First-Party Mode on the Tag ID** you want to route. Google provisions the gateway and returns a CNAME target.
+
+4. **Point your subdomain at the CNAME target** via your DNS provider. Wait for propagation and TLS provisioning (usually under an hour).
+
+5. **Update your `gtag.js` snippet** to load from the new subdomain. This is a code deploy — provisioning the proxy is not enough on its own.
+
+6. **Validate in Tag Assistant** that the loader, GA4 `/g/collect` requests, and Ads/Floodlight requests are all hitting your subdomain.
+</Steps>
+
+<Aside type="note">
+The admin UI path for First-Party Mode has shifted between Google Ads admin, GA4 admin, and the standalone Tag Manager UI more than once. Treat the flow above as directional and check Google's current First-Party Mode documentation for the exact clicks.
+</Aside>
+
+## How this interacts with Consent Mode v2
+
+First-Party Mode does not change consent semantics. It changes *where* the cookie is set from, which changes how long the cookie survives, but the rules for when a cookie gets set at all are still governed by Consent Mode.
+
+- `analytics_storage: denied` still sends cookieless pings. The pings just go to your subdomain instead of `google-analytics.com`.
+- `analytics_storage: granted` still sets `_ga`. The cookie is set from your subdomain and gets the full first-party durability.
+- All six Consent Mode v2 parameters behave identically.
+
+In other words: Consent Mode decides *whether* to set cookies and *whether* to send pings. First-Party Mode decides *from where*. The two are orthogonal and stack cleanly.
+
+<Aside type="tip">
+The snippet order still matters. Your Consent Mode `gtag('consent', 'default', ...)` call must execute before `gtag.js` loads — regardless of whether `gtag.js` loads from `googletagmanager.com` or your First-Party Mode subdomain. Moving to FPM does not relax the timing rules.
+</Aside>
+
+See [Consent Mode v2](/consent/consent-mode/consent-mode-v2/) for the parameter details, and [Google Consent Mode](/consent/consent-mode/google-consent-mode/) for the full GTM-side implementation guide.
+
+## Trade-offs vs. full sGTM
+
+Where First-Party Mode falls short, in order of how often it matters:
+
+- **No custom logic.** You cannot redact query parameters from `page_location`. You cannot hash identifiers server-side. You cannot drop events that fail a validation check.
+- **No non-Google vendors.** Meta Pixel, TikTok Pixel, LinkedIn Insight Tag, Reddit Pixel — all still post directly to their origins and still suffer the full ITP treatment.
+- **No server-side consent enforcement.** If a misconfigured CMP fires a `granted` event when it should not, the gateway forwards it to Google. sGTM can catch this; FPM cannot.
+- **No logs.** You cannot inspect what the gateway forwarded, dropped, or modified. Debugging relies on client-side Tag Assistant.
+
+## When to choose First-Party Mode over sGTM
+
+Simple decision tree:
+
+- Your entire tagging stack is Google → First-Party Mode.
+- You have one non-Google vendor running client-side and are fine with that → First-Party Mode.
+- You need one non-Google vendor running server-side (e.g., Meta CAPI) → sGTM.
+- You need PII redaction, custom enrichment, or consent enforcement at the server → sGTM.
+- You are regulated and need to inspect what leaves your network → sGTM.
+
+The majority of small and mid-sized sites belong in the first bucket. Enterprises and performance-marketing-heavy stacks belong in the sGTM bucket.
+
+## Common mistakes
+
+### Keeping the old snippet in place
+
+Teams sometimes provision First-Party Mode, verify it works on a test page, and then forget to roll out the snippet change to every template. Half the site routes through the gateway, half through `googletagmanager.com`. Cookies set on the "half-gatewayed" pages are the shorter-lived variety, and user sessions that span both get duplicate cookies with different durability.
+
+Audit every template. The simplest verification: `grep` for `googletagmanager.com/gtag/js` across your codebase after rollout. Any match is a bug.
+
+### Assuming FPM forwards non-Google vendors
+
+It does not. Your Meta Pixel still loads from `connect.facebook.net`. Your TikTok Pixel still loads from `analytics.tiktok.com`. First-Party Mode routes Google traffic only. If you need first-party serving for non-Google vendors, that is an sGTM job.
+
+### Breaking consent timing on the snippet change
+
+A common pattern: team updates the `gtag.js` loader URL, but in the process also reshuffles the inline scripts in the `<head>`. The `gtag('consent', 'default', ...)` call ends up executing *after* the loader. GA4 reads an undefined consent state and defaults to granted, which is the exact bug Consent Mode was supposed to prevent.
+
+When updating the snippet URL, leave every other line alone. The consent default must execute before the loader, full stop.
+
+### Forgetting the `_gcl_au` implications for Google Ads
+
+If your Tag ID has Google Ads as a linked destination, Ads traffic routes through the gateway too. This is usually what you want — longer `_gcl_au` durability means better remarketing list retention — but it is worth verifying. The Ads account needs to know about the first-party domain for Enhanced Conversions to match correctly.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Consent Mode v2"
+    description="The parameter model First-Party Mode operates under — unchanged by the move to a first-party loader."
+    href="/consent/consent-mode/consent-mode-v2/"
+  />
+  <LinkCard
+    title="Google Consent Mode"
+    description="The full GTM-side implementation guide for Consent Mode v2 — snippet order, CMP integration, behavioral modeling."
+    href="/consent/consent-mode/google-consent-mode/"
+  />
+  <LinkCard
+    title="Google Tag Gateway"
+    description="The same infrastructure from the architecture angle — how First-Party Mode fits into Google's broader gateway product."
+    href="/foundations/google-tag-gateway/"
+  />
+  <LinkCard
+    title="Hosting Comparison"
+    description="If you outgrow First-Party Mode — where to run full sGTM and how to pick a host."
+    href="/server-side/operations/hosting-comparison/"
+  />
+</CardGrid>

@@ -1,0 +1,145 @@
+---
+title: "Track QR Codes"
+description: "QR-specific UTM structure, short-URL handling, and GA4 measurement of print-versus-digital QR campaigns when no referrer is available."
+sidebar:
+  order: 19
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+A QR code is a blind referrer. The browser opens the embedded URL from a camera app or wallet — not from another web page — so `document.referrer` is empty, there is no originating domain, and GA4 treats every QR scan as `(direct) / (none)` unless the URL itself carries attribution.
+
+This recipe covers the UTM conventions, short-URL gotchas, and GTM / GA4 setup needed to tell posters from flyers from TV ads from packaging inserts.
+
+## The problem
+
+You print 100,000 menu inserts with a QR code linking to `https://example.com/menu`. Six weeks later, you see 8,000 new direct visits to `/menu`. Were they QR scans or organic typing? Which of the four restaurants drove the most? You cannot answer either question without pre-encoded attribution.
+
+## The canonical pattern
+
+<Steps>
+1. Encode a full set of UTM parameters into every QR code URL.
+2. Use a predictable `utm_source=qr-*` namespace so QR traffic is one filter away in GA4.
+3. Short-link cautiously: only services that do a **server-side 302 to the final URL with query string preserved** will keep the UTMs.
+4. Capture the first-landing UTMs into cookies (per the [Transfer UTM Parameters](/recipes/cross-domain-setup/transfer-utm-parameters/) pattern) so later events inherit campaign.
+</Steps>
+
+<Aside type="note">
+Body-line: QR tracking is a URL-engineering problem more than a tagging problem — most of this recipe is about what you bake into the printed code, not what you configure in GTM.
+</Aside>
+
+## Step 1 — Design the UTM structure
+
+Use a consistent schema across every QR you print. A working convention:
+
+| Parameter | Value pattern | Example |
+|---|---|---|
+| `utm_source` | `qr-{surface}` | `qr-poster`, `qr-menu`, `qr-packaging`, `qr-tv` |
+| `utm_medium` | `offline` | `offline` |
+| `utm_campaign` | `{campaign-slug}` | `spring-menu-2026` |
+| `utm_content` | `{location-or-variant}` | `store-stockholm-1`, `flyer-a5` |
+| `utm_term` | optional — creative A/B | `variant-a` |
+
+The `utm_medium=offline` value is unique enough that one filter in GA4 isolates all QR (and other offline) traffic. Reserve `qr-*` for QR only — do not mix in NFC or SMS short codes.
+
+Final URL baked into the QR:
+
+```
+https://example.com/menu?utm_source=qr-menu&utm_medium=offline&utm_campaign=spring-menu-2026&utm_content=store-stockholm-1
+```
+
+## Step 2 — Short URLs and redirects
+
+QR codes with 120+ character URLs produce dense, fragile codes. Short links help, but pick the right service.
+
+<Tabs>
+<TabItem label="Self-hosted redirect">
+Best option. Run `/go/:slug` on your own domain, 302 to the full URL, preserve query string.
+
+```javascript
+// Example Cloudflare Worker
+export default {
+  async fetch(request) {
+    var url = new URL(request.url);
+    var slug = url.pathname.replace('/go/', '');
+    var map = {
+      'stockholm-menu': 'https://example.com/menu?utm_source=qr-menu&utm_medium=offline&utm_campaign=spring-menu-2026&utm_content=store-stockholm-1'
+    };
+    var target = map[slug];
+    return target ? Response.redirect(target, 302) : new Response('Not found', { status: 404 });
+  }
+};
+```
+
+QR payload becomes `https://ex.ly/go/stockholm-menu` — short, brand-owned, query string added on redirect.
+</TabItem>
+<TabItem label="Third-party shorteners">
+**Safe**: Bitly (preserves query string on 301/302), Rebrandly, YOURLS.
+**Risky**: any shortener that does an **interstitial page** or scrubs the query string during preview. Test every provider with a real scan before printing.
+
+Always audit by running `curl -I https://short.link/abc` and confirming a direct `Location:` header to the full UTM-laden URL.
+</TabItem>
+<TabItem label="Dynamic QR providers">
+Services like QR Code Generator or Beaconstac offer "dynamic" codes — the QR points to their domain, they log the scan, and 302 to your URL. Fine for low-volume, but:
+
+- Adds a third-party hop (privacy, consent implications).
+- Rate-limited on free tiers.
+- The provider's analytics overlap with GA4 — pick one source of truth.
+
+If you use a dynamic QR, turn off the provider's added tracking parameters (they often append `?source=qr-generator`) so your UTMs are not overwritten.
+</TabItem>
+</Tabs>
+
+## Step 3 — GTM / GA4 measurement
+
+Nothing to add client-side beyond the standard UTM capture — GA4 parses the landing UTMs on the first page view automatically. Two enhancements make QR data actually useful:
+
+<Steps>
+1. **Mark QR sessions explicitly.** In GA4, create an audience or filter using `Session source matches regex ^qr-`. This becomes your "QR traffic" segment for every report.
+2. **Persist UTMs for multi-page journeys.** Apply [Transfer UTM Parameters](/recipes/cross-domain-setup/transfer-utm-parameters/) so a QR-scanner who later checks out still has `campaign_source=qr-menu` on the purchase event.
+3. **Register `utm_content` as a custom dimension** if you want per-location breakdowns in Explorations. In GA4 Admin → Custom definitions → Create custom dimension: `campaign_content`, scope = Event.
+4. **Tag the scan device.** Phones scanning QR codes skew heavily mobile; confirm your GA4 reports break out by device category for QR sources.
+</Steps>
+
+## Step 4 — Print-versus-digital QR
+
+Digital QR codes on web pages, emails, and Slack messages behave differently from printed ones — they usually arrive with a referrer. Distinguish them by UTM:
+
+- Printed: `utm_source=qr-poster`, `utm_medium=offline`
+- On-screen: `utm_source=qr-webinar-slide`, `utm_medium=presentation`
+- In-email: `utm_source=qr-email-footer`, `utm_medium=email`
+
+Keep `utm_medium=offline` reserved for genuinely offline surfaces (print, packaging, signage, broadcast). This keeps your "offline attribution" metric honest.
+
+## Testing
+
+<Steps>
+1. Generate the final URL with all five UTM parameters.
+2. Test the QR payload with at least three apps: native iOS camera, native Android camera, one password-manager scanner (1Password, Bitwarden).
+3. On the landed page, open DevTools and confirm `location.search` includes all five UTMs.
+4. In GA4 DebugView, verify the session shows `session_source=qr-poster`, `session_medium=offline`, `session_campaign=spring-menu-2026`.
+5. If short-linked: curl the short URL with `-I` and confirm a single redirect to the full UTM URL, query string intact.
+6. Run the full conversion path and confirm `campaign_source` appears on the downstream conversion event (via the stored-UTM cookie from Step 3).
+</Steps>
+
+## Common gotchas
+
+**Empty referrer triggers `(direct) / (none)`.** Without UTMs, every QR scan becomes direct traffic. This is the whole reason the recipe exists.
+
+**Interstitial short-URL pages break UTMs.** Some shorteners show a "You are being redirected" page that runs their own JavaScript; the page view counts against their domain, not yours. Always prefer pure HTTP redirects.
+
+**Re-printing with a new campaign keeps the old codes in circulation.** Stickers from the last campaign sit on lamp posts for months. Plan the URL slug so a stale QR still lands somewhere sensible (a generic menu page, not a 404).
+
+**Privacy in restricted jurisdictions.** In some EU contexts, encoding identifying `utm_content` (like `user-12345`) in a printed QR crosses into personal data. Keep QR UTMs at location granularity, not user granularity.
+
+**Camera apps strip fragments.** Some mobile scanners drop URL fragments (`#section`). Put all attribution in the query string, never in the fragment.
+
+**Tracking by Data Studio report.** Build a single Data Studio page filtered to `medium = offline` with a breakdown by `source` and `content` — makes per-location comparisons trivial for non-analysts.
+
+<CardGrid>
+  <LinkCard title="Transfer UTM Parameters" href="/recipes/cross-domain-setup/transfer-utm-parameters/" description="Keep the QR UTMs reachable on later events in the session." />
+  <LinkCard title="Track Affiliate Links" href="/recipes/interaction-tracking/track-affiliate-links/" description="Parallel pattern for affiliate referrers — inbound and outbound." />
+  <LinkCard title="Cross-Domain Tracking Setup" href="/recipes/cross-domain-setup/cross-domain-setup/" description="Cross-domain linker config for QRs that route through a partner domain." />
+  <LinkCard title="Offline Conversion Import" href="/recipes/ecommerce-conversions/offline-conversion-import/" description="Close the loop from QR scan to CRM-closed deal." />
+</CardGrid>

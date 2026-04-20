@@ -1,0 +1,134 @@
+---
+title: "SEO Essentials for Tagging"
+description: "The crawling / indexing / ranking model and how structured data, OpenGraph, and IndexNow fit — the SEO primer tagging teams need to make sense of the schema they're emitting."
+sidebar:
+  order: 7.5
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+SEO and tagging are treated as separate disciplines in most teams, and rightly so — they have different owners, different toolchains, and different failure modes. But the overlap is larger than people assume: structured data is tagging-adjacent markup, OpenGraph images are tags in the literal HTML sense, and IndexNow is a machine-readable event fired when content changes. Teams that own GTM often end up owning the JSON-LD that Google uses to render rich results, the meta tags that control how links preview in chat and social, and the IndexNow ping that tells search engines new content exists.
+
+This page is not a full SEO curriculum. It's the minimum mental model — crawling, indexing, ranking, and the role structured data plays — so that when you add a `HowTo` schema or an OG image to a page, you know why you're doing it and what it's supposed to accomplish.
+
+## Crawling, indexing, ranking — the three-stage pipeline
+
+Search engines don't magically know about your pages. They find them, read them, score them, and rank them. Three distinct stages, each with its own failure modes:
+
+**1. Crawling.** A search engine sends a bot (Googlebot, Bingbot, and now also AI-specific crawlers like GPTBot, ClaudeBot, Perplexitybot) to fetch your page. The bot follows links from pages it already knows about, so new pages get discovered only if something already-indexed links to them, or you explicitly submit them via a sitemap or IndexNow.
+
+Common failures at this stage: `robots.txt` disallows the URL, the server returns 5xx, the page is behind a paywall or login wall, the page is rendered entirely client-side and the bot doesn't execute the JavaScript.
+
+**2. Indexing.** Once crawled, the search engine parses the page and decides whether to include it in its index. Pages with `noindex` meta tags are excluded. Duplicate content is often excluded in favour of a canonical version. Very low-value pages (thin content, machine-generated variants) may be excluded by a quality filter.
+
+Common failures at this stage: accidental `noindex` from a CMS default, missing or wrong canonical tag, duplicate content at multiple URLs (`/pricing` vs. `/pricing?utm=...` vs. `/pricing/`).
+
+**3. Ranking.** For each search query, the engine looks at its index and decides which pages to show, in what order. Ranking is a black box that uses hundreds of signals — relevance to the query, authority of the domain, freshness, page experience (Core Web Vitals), structured data presence, and many more.
+
+Common observations at this stage: "we're indexed but don't rank for anything", "we rank on page 2 but nothing we do moves us to page 1." These are normal — ranking is competitive.
+
+## Where structured data fits
+
+Structured data (Schema.org vocabulary, typically delivered as `<script type="application/ld+json">`) is metadata that tells search engines what a page is *about* in a machine-readable way. A page with `Article` schema is explicitly declared to be an article with an author, a publish date, a headline. A page with `HowTo` schema is a how-to guide with steps. A page with `Product` schema is a product listing with a price and availability.
+
+Structured data does two things:
+
+1. **Enables rich results.** The star-rating stars on a product listing, the cook-time shown on a recipe, the step-by-step preview on a how-to — these "rich results" exist because the page emitted structured data that tells Google what to show.
+2. **Provides disambiguation signals.** Structured data doesn't directly rank a page higher, but it helps Google understand the page's topic, which indirectly helps with relevance ranking.
+
+You implement structured data by emitting JSON-LD in the HTML `<head>`. Starlight (the framework this site uses) emits a site-level `WebSite` schema from the Astro config, and per-page schemas like `HowTo` for recipe pages via [src/components/Head.astro](https://github.com/mrwbranch/taggingdocs/blob/master/src/components/Head.astro). Google's Rich Results Test (search.google.com/test/rich-results) validates your schema against Google's requirements.
+
+<Aside type="note">
+The `Schema` glossary term is **not** the same as Schema.org. "Schema" in database contexts means the structure of data in a dataset. Schema.org is a specific vocabulary for describing web content. Don't conflate them — they come up in different conversations.
+</Aside>
+
+## OpenGraph and Twitter Cards
+
+OpenGraph and Twitter Cards are the tags that control how a URL previews when pasted into Slack, iMessage, LinkedIn, X, or a Discord channel. They're not SEO in the ranking sense — search engines don't use them directly — but they are emitted by the same per-page metadata infrastructure and often owned by the same people.
+
+Minimum implementation per page:
+
+```html
+<meta property="og:title" content="Page title" />
+<meta property="og:description" content="One-sentence summary." />
+<meta property="og:image" content="https://example.com/og-image-for-this-page.png" />
+<meta property="og:url" content="https://example.com/this-page/" />
+<meta name="twitter:card" content="summary_large_image" />
+```
+
+Unique OG images per page are materially better than a single site-wide image — preview cards look tailored, which increases click-through from social and chat. This site auto-generates per-page OG images at build time, emitted via [src/components/Head.astro](https://github.com/mrwbranch/taggingdocs/blob/master/src/components/Head.astro).
+
+## IndexNow and the AI crawlers
+
+IndexNow is a protocol that lets you ping search engines when content changes, so they crawl the updated URL immediately instead of waiting for the next bot visit. Cloudflare implements it natively; Bing and Yandex are signed-up participants; Google has not signed up but does not penalise sites for emitting pings.
+
+```
+POST https://api.indexnow.org/indexnow
+{
+  "host": "example.com",
+  "key": "<your-key>",
+  "urlList": ["https://example.com/new-page/"]
+}
+```
+
+Ping on publish, on significant update, and on delete (so the URL gets re-evaluated and dropped from the index if appropriate). The ping is a courtesy — it doesn't guarantee crawling, but it often accelerates it.
+
+**AI crawlers** — the bots from OpenAI (GPTBot), Anthropic (ClaudeBot), Perplexity (Perplexitybot), and others — follow the same `robots.txt` conventions as search engines. If you want AI assistants to cite your content, allow these bots explicitly. If you don't, block them explicitly in `robots.txt`. Silent default behaviour varies by bot — be intentional. This site allows them explicitly in `public/robots.txt`.
+
+## Page experience (Core Web Vitals)
+
+Google uses three metrics — LCP (Largest Contentful Paint), INP (Interaction to Next Paint), CLS (Cumulative Layout Shift) — as page-experience signals. They don't dominate ranking but they do contribute, and they directly affect user experience regardless of their SEO impact.
+
+All three are measurable via the [Web Vitals library](/recipes/interaction-tracking/track-web-vitals/) and should be tracked as GA4 events for ongoing monitoring. Tag-heavy pages with lots of Custom HTML tags tend to score badly on INP (because synchronous JavaScript blocks the main thread) and CLS (because late-loading widgets cause layout to shift).
+
+See [Performance Optimization](/resources/performance-optimization/) for the tagging-specific levers.
+
+## Where tagging teams touch SEO
+
+Concretely, the SEO work a tagging team does on a static site or docs site:
+
+1. **Emit per-page JSON-LD** in the HTML head. Tied to page content, not to tagging — but often managed by the same templating layer.
+2. **Emit per-page OpenGraph and Twitter tags.** Same templating layer.
+3. **Generate and maintain a sitemap.xml.** Astro/Starlight does this automatically; other frameworks need a plugin.
+4. **Configure robots.txt** to allow the bots that should crawl and block the ones that shouldn't.
+5. **Ping IndexNow on publish.** Can be part of the build pipeline or a GTM-fired event on a content-change dataLayer push.
+6. **Monitor Core Web Vitals** via GA4 events. Feeds back into page-experience optimisation.
+
+None of this is traditional "SEO work" (keyword research, link building, content strategy). But it's the infrastructure that makes traditional SEO work work — and it overlaps heavily with the tagging team's skills.
+
+## Common mistakes
+
+**Emitting schema that doesn't match the page.** A product page with `Article` schema, a landing page with `FAQ` schema when the page has no FAQ. Schema must accurately describe the page — Google's Structured Data Policy penalises misleading markup.
+
+**Setting canonical tags incorrectly.** A page with `<link rel="canonical" href="https://example.com/other-page">` is explicitly telling search engines to treat the *other* page as the authoritative version. Accidentally canonicalising every page to the homepage (a common CMS misconfiguration) removes every other page from the index.
+
+**Blocking crawlers with `robots.txt` and expecting `noindex` to work.** If `robots.txt` blocks a URL, the bot never fetches it — so it never sees the `noindex` meta tag. The URL can still appear in search results as a URL-only entry (because other pages link to it). To exclude from the index, allow crawling but use `noindex`.
+
+**Ignoring INP.** LCP and CLS get most of the attention; INP is the newer metric and the one most affected by tag-heavy pages. A page with 15 Custom HTML tags firing on `gtm.load` will have bad INP whether or not LCP is optimised.
+
+**Forgetting that OG images are cached.** When you update an OG image, Slack, X, LinkedIn, and other platforms cache the old version for hours to days. Use their debuggers (Facebook Sharing Debugger, LinkedIn Post Inspector, Twitter Card Validator) to force a refresh.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Performance Optimization"
+    description="Concrete tagging-side levers that improve Core Web Vitals."
+    href="/resources/performance-optimization/"
+  />
+  <LinkCard
+    title="Track Web Vitals"
+    description="Measuring LCP, INP, CLS from real users with the Web Vitals library."
+    href="/recipes/interaction-tracking/track-web-vitals/"
+  />
+  <LinkCard
+    title="Browser APIs for Tracking"
+    description="Underlying browser primitives that tagging and SEO both rely on."
+    href="/foundations/browser-apis-for-tracking/"
+  />
+  <LinkCard
+    title="Glossary"
+    description="Quick definitions for the acronyms used above — CWV, CTR, SEO, and many more."
+    href="/foundations/glossary/"
+  />
+</CardGrid>

@@ -1,0 +1,211 @@
+---
+title: "Preflight Requests and CORS in sGTM"
+description: "How sGTM handles CORS — OPTIONS preflight, Access-Control-* headers, credentialed vs. non-credentialed requests, common failures, and when you need a dedicated preflight client."
+sidebar:
+  order: 24
+lastUpdated: 2026-04-20
+---
+
+import { Aside, Steps, Tabs, TabItem, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Comparison from '../../../../components/Comparison.astro';
+
+CORS — Cross-Origin Resource Sharing — is the browser-enforced policy that decides whether JavaScript on `www.yoursite.com` is allowed to make a request to `collect.yoursite.com` and read the response. For most sGTM deployments it is either invisible (the built-in GA4 client handles it for you) or painfully visible (custom clients, custom paths, or preflight failures that produce cryptic console errors).
+
+This article is the explicit treatment: when the browser preflights, what sGTM does by default, how to handle preflight in a custom client, and the common errors mapped to their fixes.
+
+*Valid as of April 2026, Server-side GTM container version 2.0+.*
+
+<Aside type="note">
+Same-site and same-origin are different. `www.yoursite.com` and `collect.yoursite.com` are the same *site* (same eTLD+1, `yoursite.com`) — cookies set with `Domain=.yoursite.com` are shared. But they are not the same *origin*, because origin is scheme + host + port. Browser CORS checks run on origin, not site. Do not conflate them when diagnosing a CORS error.
+</Aside>
+
+## When does the browser preflight?
+
+The browser sends an OPTIONS preflight before the actual request if any of these conditions holds:
+
+- **Method is anything other than GET, HEAD, or POST.** PUT, DELETE, PATCH all preflight.
+- **`Content-Type` is anything other than** `application/x-www-form-urlencoded`, `multipart/form-data`, or `text/plain`. `application/json` is not on the safe list — it preflights.
+- **Any request header is outside the CORS-safelisted set.** Custom headers like `X-GTM-Server-Preview`, `Authorization`, or `X-Auth-Token` trigger preflight.
+- **The request uses `ReadableStream` as a body** (rare; irrelevant for most tracking).
+
+The built-in GA4 Measurement Protocol client-side library sends `sendBeacon` with `Content-Type: text/plain` specifically to avoid preflight. This is deliberate — preflight doubles the round-trip count, and for analytics that matters. If you replace GA4's native emission with a custom `fetch` call sending `Content-Type: application/json`, you lose that optimisation and every event now costs an extra OPTIONS round-trip.
+
+## What sGTM does by default
+
+Documented behaviour is thin here; much of what follows is reverse-engineered from observation as of April 2026.
+
+- **For OPTIONS requests to paths claimed by the built-in GA4 client** (`/g/collect`, `/mp/collect`): sGTM responds with default CORS headers, typically including `Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: POST, GET, OPTIONS`, and a modest `Access-Control-Max-Age`. This is enough for the basic GA4 browser-side library to clear preflight.
+- **For OPTIONS requests to unclaimed paths**: sGTM returns 200 with no CORS headers. The browser treats the preflight as failed; the real request never fires.
+- **Custom clients do not automatically handle OPTIONS.** Unless your claiming logic explicitly matches `OPTIONS`, OPTIONS requests to your custom endpoints fall through to the default behaviour above — 200 with no CORS headers — which fails the browser's check.
+
+Implication: if you build a custom endpoint that expects browser traffic with custom headers or JSON bodies, you need to handle OPTIONS yourself or have a dedicated preflight-handler client running ahead of your endpoint clients.
+
+## Pattern: A dedicated preflight client
+
+The cleanest approach. One client at a low priority number (evaluated first) that claims every OPTIONS request, validates origin, and responds with the right CORS headers. All endpoint clients downstream assume their requests are real (non-OPTIONS) and don't need to worry about CORS.
+
+**Priority recommendation:** 5 (below the GA4 client's default of 10, so it evaluates first for OPTIONS — but only claims OPTIONS, letting everything else through to GA4 and your other clients).
+
+```javascript
+const claimRequest = require('claimRequest');
+const getRequestHeader = require('getRequestHeader');
+const getRequestMethod = require('getRequestMethod');
+const setResponseHeader = require('setResponseHeader');
+const setResponseStatus = require('setResponseStatus');
+const returnResponse = require('returnResponse');
+
+// Only handle OPTIONS. GET/POST fall through to endpoint clients.
+if (getRequestMethod() !== 'OPTIONS') return;
+
+claimRequest();
+
+const origin = getRequestHeader('origin') || '';
+const ALLOWED_ORIGINS = [
+  'https://www.yoursite.com',
+  'https://app.yoursite.com',
+  'https://checkout.yoursite.com'
+];
+
+if (ALLOWED_ORIGINS.indexOf(origin) === -1) {
+  // Origin is not on the allowlist — do not advertise CORS access.
+  setResponseStatus(403);
+  returnResponse();
+  return;
+}
+
+// Advertise the exact origin, not '*'.
+setResponseHeader('Access-Control-Allow-Origin', origin);
+setResponseHeader('Vary', 'Origin');
+
+// Methods and headers the browser is about to use.
+// 'access-control-request-headers' carries the client's intended header list.
+setResponseHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+setResponseHeader('Access-Control-Allow-Headers',
+  getRequestHeader('access-control-request-headers') || 'content-type');
+
+// Allow cookies on the actual request.
+setResponseHeader('Access-Control-Allow-Credentials', 'true');
+
+// Cache the preflight for an hour so repeat requests don't re-preflight.
+setResponseHeader('Access-Control-Max-Age', '3600');
+
+setResponseStatus(204);
+returnResponse();
+```
+
+Three design choices worth highlighting:
+
+- **Reflecting `Access-Control-Request-Headers` is pragmatic but dangerous.** It tells the browser "yes, whatever headers you were going to send, those are fine". For high-security endpoints, validate the incoming list against a hardcoded allowlist rather than reflecting blindly.
+- **`Access-Control-Max-Age: 3600`** caches the preflight on the browser for an hour. Longer values (24 h max in Chrome, 10 min in Firefox, 24 h in Safari as of recent versions) reduce preflight traffic further, at the cost of slower cache invalidation when you update the allowlist.
+- **Status 204 with no body** is the standard preflight response. Sending 200 with a body works too; 204 is tidier and saves bytes.
+
+## Credentialed vs. non-credentialed requests
+
+A browser makes a *credentialed* cross-origin request — one that includes cookies and HTTP auth — only when the caller asks for it. Concretely:
+
+- `fetch(url, { credentials: 'include' })`
+- `new XMLHttpRequest(); xhr.withCredentials = true;`
+- `sendBeacon` — **always** credentialed when cross-origin.
+- Image pixels (`new Image(); img.src = ...`) — **never** credentialed when cross-origin.
+
+For sGTM to accept the cookies on the actual request, three things must hold on the response:
+
+1. **`Access-Control-Allow-Credentials: true`** must be on both the preflight response and the actual response.
+2. **`Access-Control-Allow-Origin` must be a specific origin, not `*`.** Browsers reject credentialed responses where the allow-origin is a wildcard.
+3. **Cookies set on the response must use `SameSite=None; Secure`.** Otherwise the browser won't store or send them across sites.
+
+Miss any one of those and the cookies silently fail to read or write. The request itself often succeeds, which is the confusing part — the response arrives, the tag fires, but the identity cookie is gone.
+
+<Aside type="caution">
+`sendBeacon` is credentialed by default and does not let you opt out. If your endpoint doesn't want cookies on beacon requests, strip them server-side in the client — don't expect the caller to omit them.
+</Aside>
+
+## Common CORS errors and fixes
+
+Browser console messages for CORS failures are written for developers who already understand CORS, which is a circular problem. Here's the translation table.
+
+| Error message (approximate) | Likely cause | Fix |
+|---|---|---|
+| `No 'Access-Control-Allow-Origin' header is present on the requested resource` | Response has no CORS header at all | Add the header in a client or preflight-handler |
+| `The 'Access-Control-Allow-Origin' header contains multiple values '..., ...'` | Two layers both adding the header (e.g., CDN and sGTM) | Remove from one layer; usually strip from the CDN |
+| `Response to preflight request doesn't pass access control check` | OPTIONS returned non-2xx or missing CORS headers | Add a dedicated OPTIONS handler |
+| `The value of the 'Access-Control-Allow-Credentials' header in the response is '' which must be 'true'` | Missing `Allow-Credentials` on credentialed request | Set `Access-Control-Allow-Credentials: true` |
+| `The value of the 'Access-Control-Allow-Origin' header ... must not be the wildcard '*' when the request's credentials mode is 'include'` | `*` used with credentials | Reflect specific origin instead |
+| `Request header field x-auth-token is not allowed by Access-Control-Allow-Headers in preflight response` | Custom header used but not advertised in preflight | Add the header to `Access-Control-Allow-Headers` |
+| `CORS error` (no details) | Network-level failure (DNS, TLS, 5xx with no headers) masquerading as CORS | Test with `curl -i` to see the real response |
+| `The request client is not a secure context and the resource is in more-private address space` | CORS-RFC1918 / PNA check | Only affects intranet/localhost setups; out of scope here |
+
+The last row is worth flagging: Chrome's private-network-access restrictions sometimes produce messages that look like CORS failures but are a distinct policy. If your sGTM is on a private address range and you're being called from a public origin, the fix is deployment topology, not headers.
+
+## The `/gtm.js` serving case
+
+Serving `gtm.js` from your own sGTM endpoint (covered in full in [Custom gtm.js Loader](/server-side/advanced/custom-gtm-loader/)) interacts with CORS in a specific way that confuses people.
+
+- `<script src="https://collect.yoursite.com/gtm.js">` does *not* require CORS headers on the response to execute. Browsers load and run cross-origin scripts freely.
+- But if the script is loaded with the `crossorigin` attribute (`<script crossorigin src="...">`), the browser applies CORS checks to the response. Without `Access-Control-Allow-Origin`, the script fails to load.
+- Subresources that `gtm.js` loads — `/g/collect` tracking pings, vendor libraries — go through the normal CORS flow. Those endpoints need correct CORS if the embedding page is on a different origin.
+
+For most same-site deployments (`www.yoursite.com` loads `gtm.js` from `collect.yoursite.com`), adding `Access-Control-Allow-Origin: https://www.yoursite.com` to the `/gtm.js` response is harmless and future-proofs against `crossorigin` attribute use.
+
+## Debugging CORS
+
+<Steps>
+1. **Read the actual browser console message.** Not the summary, not the "CORS error" heading — the full text. Nine times out of ten it tells you exactly which piece is missing.
+
+2. **Reproduce with `curl -i`.** Strip CORS out of the equation. If `curl -i -X OPTIONS <url> -H 'Origin: https://www.yoursite.com' -H 'Access-Control-Request-Method: POST'` doesn't return the headers you expect, the browser can't succeed either.
+
+3. **Inspect the preflight in DevTools → Network.** Filter by method: OPTIONS. Click the request. Headers tab shows both what the browser sent and what sGTM returned. Compare to the matrix above.
+
+4. **Check Cloud Logging for unexpected OPTIONS traffic.** A sudden spike in OPTIONS requests to an endpoint that isn't handling them is a preflight loop — the browser preflights, fails, the caller retries, preflights again.
+
+5. **Build a CORS dashboard in Data Studio.** If you sink Cloud Logging to BigQuery, a simple breakdown of `requestMethod=OPTIONS` by response status and by `Origin` header reveals which origins are failing preflight and how often.
+</Steps>
+
+## When you need a custom client vs. when sGTM handles it
+
+A simple rule: if your sGTM endpoint receives requests from browsers on a different origin, and those requests are anything other than the GA4 Measurement Protocol format, you need preflight handling. For exclusively server-to-server traffic (webhooks from Stripe, HubSpot, Shopify), no CORS is involved — webhook senders are not browsers and do not preflight.
+
+More specifically:
+
+- **GA4 browser library hitting `/g/collect`**: built-in handling is adequate.
+- **Custom browser JavaScript posting JSON to `/events`**: needs your own preflight handler.
+- **Browser JavaScript posting `text/plain` to `/events`**: no preflight needed; but you still need `Access-Control-Allow-Origin` on the actual response if the call is cross-origin and reads the response.
+- **Webhooks from SaaS vendors**: no CORS needed.
+- **Mobile apps**: no CORS needed (native HTTP clients don't enforce CORS).
+
+## Common mistakes
+
+**Wildcarding `Access-Control-Allow-Origin` when sending credentials.** The browser will reject the response outright. Reflect a specific allowed origin instead.
+
+**Forgetting `Vary: Origin`.** Any cache between sGTM and the browser — Cloud CDN, Cloudflare, a corporate proxy — will store the response for the first origin it saw and serve it for every subsequent origin. Other origins' browsers will reject the mismatched response. Always `Vary: Origin`.
+
+**Not handling OPTIONS at all.** The symptom is specific: `fetch` fails, `sendBeacon` fails, but image pixels work. Image pixels never preflight; `fetch` with JSON does. If pixel-based tracking fires but `fetch`-based tracking doesn't, the cause is missing OPTIONS handling.
+
+**Returning 200 with no body and no CORS headers to OPTIONS.** Technically a successful HTTP response, but the browser treats the missing CORS headers as a failed preflight. Either return a proper preflight response or reject with 403.
+
+**Setting `Access-Control-Max-Age` too high during development.** Chrome and Safari cache preflights for up to 24 hours. If you change your allowlist and the browser has a cached preflight, the old allowlist stays in effect for up to a day. Keep `Max-Age` short (≤300 seconds) until the allowlist is stable.
+
+## Related articles
+
+<CardGrid>
+  <LinkCard
+    title="Response Header Manipulation"
+    description="The underlying APIs used throughout CORS configuration."
+    href="/server-side/advanced/response-header-manipulation/"
+  />
+  <LinkCard
+    title="Custom gtm.js Loader"
+    description="The proxied-gtm.js case and its specific CORS implications."
+    href="/server-side/advanced/custom-gtm-loader/"
+  />
+  <LinkCard
+    title="Same-Origin Proxy"
+    description="Why cross-origin is sometimes avoidable altogether."
+    href="/server-side/advanced/same-origin-proxy/"
+  />
+  <LinkCard
+    title="Debugging sGTM"
+    description="Preview Header technique and Cloud Logging filters for diagnosing CORS in production."
+    href="/server-side/operations/debugging-sgtm/"
+  />
+</CardGrid>
